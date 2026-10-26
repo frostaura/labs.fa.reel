@@ -211,6 +211,8 @@ public class TitleHydratorResilienceTests
         public DbSet<RefreshSession> RefreshSessions => throw Unexpected();
         public DbSet<Title> Titles => throw Unexpected();
         public DbSet<TitleEmbedding> TitleEmbeddings => throw Unexpected();
+
+        public DbSet<KeywordLabel> KeywordLabels => throw Unexpected();
         public DbSet<TitleAttributes> TitleAttributes => throw Unexpected();
         public DbSet<Person> Persons => throw Unexpected();
         public DbSet<TitleCredit> TitleCredits => throw Unexpected();

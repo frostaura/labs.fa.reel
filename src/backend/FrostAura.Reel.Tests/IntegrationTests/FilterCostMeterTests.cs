@@ -1,10 +1,13 @@
+using System.Data.Common;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -351,6 +354,144 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         Assert.Equal(minesReport.Eligible, theirsReport.Eligible + 1);
     }
 
+    [Fact]
+    public async Task The_cost_of_every_rule_comes_from_one_statement()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // H-6: the meter ran 1 total + 1 eligible + 1 count per rule + 1 shrunk count — 13 sequential
+        // scans for the founder's rules, 7–53 s per draft. One draft is now ONE statement, however
+        // many rules it carries.
+        var accountId = await SeedAccountAsync();
+        var rules = FilterRuleSet.Create(
+            ["comedy", "romance", "anime", "history"], null, ["zombie", "gore"], ["en"], 6.0m, 2000, 2024);
+        Assert.True(rules.Rules().Count >= 9);
+
+        var counter = new CommandCounter();
+        var context = new AccountContext();
+        context.SetAccount(accountId);
+        await using var db = new ReelDbContext(
+            new DbContextOptionsBuilder<ReelDbContext>()
+                .UseNpgsql(fixture.ConnectionString!, npgsql => npgsql.UseVector())
+                .AddInterceptors(counter)
+                .Options,
+            context);
+        var meter = new FilterCostMeter(db, new EligibilityQueryBuilder(db), context, new MemoryCache(new MemoryCacheOptions()));
+
+        var report = await meter.MeasureAsync(rules);
+
+        Assert.Equal(1, counter.Executed);
+        Assert.Equal(rules.Rules().Count, report.ByRule.Count);
+        Assert.NotNull(report.EligibleUnderShrunkFloor);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Single_pass_marginals_equal_the_subtractive_counts(bool twoAllowListedGenres)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The single pass is a second phrasing of "count, then re-count with one rule relaxed". Both
+        // are run here over the WHOLE catalogue for a rule set that touches every kind — stand-ins,
+        // aliases, the anime composite, an allow-list of one genre (relaxing it widens to everything)
+        // and of two (relaxing one can only narrow, so the gain is 0) — and must agree exactly.
+        var accountId = await SeedAccountAsync();
+        var watchedComedy = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Year = 2012; t.TmdbVoteAverage = 8.2m; });
+        await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama"]; t.Keywords = ["office romance"]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; });
+        await SeedTitleAsync(t => { t.Genres = ["animation", "drama"]; t.Language = "ja"; t.Year = 2016; t.TmdbVoteAverage = 8.0m; });
+        await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 1995; t.TmdbVoteAverage = 8.0m; });
+        await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Year = 2014; t.TmdbVoteAverage = 5.0m; t.TmdbVoteCount = 3; });
+        await SeedTitleAsync(t => { t.Genres = ["crime"]; t.Year = 2019; t.TmdbVoteAverage = 7.9m; t.Language = "ko"; });
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            db.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = watchedComedy,
+                Plays = 1,
+                LastWatchedAt = DateTime.UtcNow,
+                IsFullyWatched = true,
+                FirstSyncedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var rules = FilterRuleSet.Create(
+            ["comedy", "romance", "anime", "thriller"],
+            twoAllowListedGenres ? ["drama", "crime"] : ["drama"],
+            ["zombie"],
+            ["en"],
+            6.0m,
+            2000,
+            2023);
+
+        // One context, one REPEATABLE READ snapshot for the meter and every subtractive count: the
+        // catalogue is shared with test classes running in parallel, and a title inserted between
+        // the two readings would make two correct counts disagree.
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var check = fixture.CreateContext(scoped);
+        await using var snapshot = await check.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
+        var builder = new EligibilityQueryBuilder(check);
+        var report = await new FilterCostMeter(check, builder, scoped, new MemoryCache(new MemoryCacheOptions())).MeasureAsync(rules);
+        var eligible = await builder.EligibleTitles(accountId, rules).CountAsync();
+        Assert.Equal(await check.Titles.CountAsync(), report.Total);
+        Assert.Equal(eligible, report.Eligible);
+        Assert.Equal(await builder.EligibleTitles(accountId, rules, CrowdFloorMeasure.Shrunk).CountAsync(), report.EligibleUnderShrunkFloor);
+        foreach (var rule in rules.Rules())
+        {
+            var without = await builder.EligibleTitles(accountId, rules.Without(rule)).CountAsync();
+            Assert.Equal(
+                (rule.Kind, rule.Value, Math.Max(0, without - eligible)),
+                (rule.Kind, rule.Value, Marginal(report, rule.Kind, rule.Value)));
+        }
+    }
+
+    [Fact]
+    public async Task Excluding_anime_removes_japanese_animation_on_both_paths()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // H-7: neither TMDB taxonomy has an anime genre and 2 titles carry Trakt's slug, so "no anime"
+        // removed nothing. Anime is animation in Japanese; animation in any other language is not.
+        var accountId = await SeedAccountAsync();
+        var anime = await SeedTitleAsync(t => { t.Genres = ["animation", "action"]; t.Language = "ja"; });
+        var animeShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["animation"]; t.Language = "JA"; });
+        var cartoon = await SeedTitleAsync(t => { t.Genres = ["animation"]; t.Language = "en"; });
+        var japaneseDrama = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Language = "ja"; });
+        var mine = new[] { anime, animeShow, cartoon, japaneseDrama };
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
+        await SeedFilterAsync(accountId, FilterKind.Language, "*");
+
+        HashSet<Guid> persisted;
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db)
+                .EligibleTitles(accountId)
+                .Where(t => mine.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync()).ToHashSet();
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        Assert.Equal(new HashSet<Guid> { cartoon, japaneseDrama }, persisted);
+        Assert.Equal(persisted, (await EligibleAsync(accountId, drafted, mine)).ToHashSet());
+        Assert.True(Marginal(await MeasureAsync(accountId, drafted), FilterKind.ExcludeGenre, "anime") >= 2);
+    }
+
     private static int Marginal(FilterCostReport report, FilterKind kind, string value) =>
         report.ByRule.Single(r => r.Kind == kind.ToString() && r.Value == value).Marginal;
 
@@ -439,5 +580,27 @@ public class FilterCostMeterTests(PostgresFixture fixture)
             CreatedAt = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Counts the statements a context sends, so a test can pin "one pass" literally.</summary>
+    private sealed class CommandCounter : DbCommandInterceptor
+    {
+        private int executed;
+
+        public int Executed => executed;
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref executed);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref executed);
+            return base.ScalarExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 }

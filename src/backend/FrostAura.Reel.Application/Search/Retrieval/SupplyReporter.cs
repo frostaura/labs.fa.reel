@@ -100,6 +100,10 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
                 : CrowdVotes.AtLeast(HardConstraintFilter.Apply(source, db, hard), minVotes);
 
         var matching = ids.Count;
+        if (narrowById)
+        {
+            return await SinglePassAsync(accountId, minVotes, topical.Count, ids, shown, ct);
+        }
 
         // Seen is the part of the footprint a reply may name as "you've seen": a watch (even partial)
         // or a rating. The rest of the footprint (saved, not interested, dropped) is derived by
@@ -159,6 +163,161 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
     /// The account's For-you bar, read exactly as Ask Reel reads it: clamped to 0–10, and zero (or a
     /// malformed value) meaning no bar.
     /// </summary>
+    /// <summary>
+    /// The report for a population small enough to narrow by id, from ONE pass over it: every title
+    /// projected to its footprint, whether it is "seen", and the bitmask of standing rules it breaks
+    /// (<see cref="FilterBreaches.Masks"/> — the draft-path predicates, pinned equal to the persisted
+    /// ones). Eligible = no footprint, no breach, inside the maturity ceiling; a rule's knockout =
+    /// footprint-free titles that break that rule and no other. It replaces a dozen sequential counts
+    /// (one per rule) that cost the founder's ninja report ~0.5 s unloaded and over a second under
+    /// load; the counts are identical (SupplyReporterTests, the SQL fixture).
+    /// </summary>
+    private async Task<SupplyReport> SinglePassAsync(
+        Guid accountId,
+        int minVotes,
+        int topicalCount,
+        IReadOnlyList<Guid> ids,
+        IReadOnlySet<Guid> shown,
+        CancellationToken ct)
+    {
+        var rows = await db.ContentFilters
+            .Where(f => f.AccountId == accountId)
+            .OrderBy(f => f.CreatedAt)
+            .ThenBy(f => f.Id)
+            .ToListAsync(ct);
+        var floor = PredictedFloor(rows);
+        var rules = FilterRuleSet.FromRows(rows);
+        var all = rules.Rules();
+
+        var t = System.Linq.Expressions.Expression.Parameter(typeof(Title), "t");
+        var (m0, m1) = FilterBreaches.Masks(rules, all, t);
+        var seenBody = FilterBreaches.BodyOn(eligibility.Seen(accountId), t);
+        var footprintBody = FilterBreaches.BodyOn(eligibility.Footprint(accountId), t);
+        System.Linq.Expressions.MemberAssignment Bind(string name, System.Linq.Expressions.Expression value) =>
+            System.Linq.Expressions.Expression.Bind(typeof(SupplyRow).GetProperty(name)!, value);
+        System.Linq.Expressions.Expression Field(string name) => System.Linq.Expressions.Expression.Property(t, name);
+        var projection = System.Linq.Expressions.Expression.Lambda<Func<Title, SupplyRow>>(
+            System.Linq.Expressions.Expression.MemberInit(
+                System.Linq.Expressions.Expression.New(typeof(SupplyRow)),
+                Bind(nameof(SupplyRow.Id), Field(nameof(Title.Id))),
+                Bind(nameof(SupplyRow.Seen), seenBody),
+                Bind(nameof(SupplyRow.Footprint), footprintBody),
+                Bind(nameof(SupplyRow.M0), m0),
+                Bind(nameof(SupplyRow.M1), m1),
+                Bind(nameof(SupplyRow.Name), Field(nameof(Title.Name))),
+                Bind(nameof(SupplyRow.Year), Field(nameof(Title.Year))),
+                Bind(nameof(SupplyRow.ReleasedAt), Field(nameof(Title.ReleasedAt))),
+                Bind(nameof(SupplyRow.FirstAiredAt), Field(nameof(Title.FirstAiredAt))),
+                Bind(nameof(SupplyRow.MediaType), Field(nameof(Title.MediaType))),
+                Bind(nameof(SupplyRow.Certification), Field(nameof(Title.Certification))),
+                Bind(nameof(SupplyRow.TmdbVoteAverage), Field(nameof(Title.TmdbVoteAverage))),
+                Bind(nameof(SupplyRow.TmdbVoteCount), Field(nameof(Title.TmdbVoteCount))),
+                Bind(nameof(SupplyRow.TraktRating), Field(nameof(Title.TraktRating))),
+                Bind(nameof(SupplyRow.TraktVotes), Field(nameof(Title.TraktVotes)))),
+            t);
+        var idList = ids.ToList();
+        var population = await db.Titles.Where(x => idList.Contains(x.Id)).Select(projection).ToListAsync(ct);
+
+        var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
+        bool Mature(SupplyRow r) => EligibilityQueryBuilder.PassesMaturity(new Title { Certification = r.Certification }, ceiling);
+        var seen = population.Count(r => r.Seen);
+        var free = population.Where(r => !r.Footprint).ToList();
+        var eligibleIds = free.Where(r => r.M0 == 0 && r.M1 == 0 && Mature(r)).Select(r => r.Id).ToHashSet();
+        var (belowFloor, unscored, shownClearing) = await SplitByScoreAsync(accountId, eligibleIds, floor, shown, ct);
+
+        var knockouts = new List<(int Order, ConditionKnockout Knockout)>();
+        for (var i = 0; i < all.Count; i++)
+        {
+            var rule = all[i];
+            if (i >= FilterBreaches.MaxOwnBits || (rule.Kind == FilterKind.IncludeGenre && rules.IncludeGenres.Count > 1))
+            {
+                // Past the bit cap the rule shares a bit; one of several allow-listed genres can only
+                // narrow the pool when relaxed. Neither unlocks anything on its own.
+                continue;
+            }
+
+            var bit = FilterBreaches.BitOf(all, i);
+            var unlocked = free
+                .Where(r => FilterBreaches.Only(r.M0, r.M1, bit) && Mature(r) && !shown.Contains(r.Id))
+                .ToList();
+            if (unlocked.Count == 0)
+            {
+                continue;
+            }
+
+            var sample = unlocked
+                .Select(r => new Title
+                {
+                    Id = r.Id,
+                    Name = r.Name,
+                    Year = r.Year,
+                    ReleasedAt = r.ReleasedAt,
+                    FirstAiredAt = r.FirstAiredAt,
+                    MediaType = r.MediaType,
+                    TmdbVoteAverage = r.TmdbVoteAverage,
+                    TmdbVoteCount = r.TmdbVoteCount,
+                    TraktRating = r.TraktRating,
+                    TraktVotes = r.TraktVotes,
+                })
+                .OrderByDescending(CrowdVotes.Of)
+                .ThenBy(x => x.Name, StringComparer.Ordinal)
+                .ThenBy(x => x.Id)
+                .Take(KnockoutSampleSize)
+                .Select(x => new TitleRef(x.Id, x.Name, x.Year ?? x.ReleasedAt?.Year ?? x.FirstAiredAt?.Year, x.MediaType))
+                .ToList();
+            knockouts.Add((i, new ConditionKnockout(rule.Kind, rule.Value, RowFor(rows, rule), LabelFor(rule), unlocked.Count, sample)));
+        }
+
+        return new SupplyReport(
+            MatchingInCatalogue: ids.Count,
+            AlreadySeen: seen,
+            SavedOrDismissed: ids.Count - free.Count - seen,
+            ExcludedByConditions: free.Count - eligibleIds.Count,
+            Eligible: eligibleIds.Count,
+            BelowFloor: belowFloor,
+            Unscored: unscored,
+            Knockouts: [.. knockouts.OrderByDescending(k => k.Knockout.WouldUnlock).ThenBy(k => k.Order).Select(k => k.Knockout)],
+            LowVoteMatches: topicalCount - ids.Count,
+            MinVotes: minVotes,
+            PredictedFloor: floor,
+            KnockoutsMeasured: true,
+            AlreadyShown: shownClearing);
+    }
+
+    /// <summary>One population title, as the single pass projects it.</summary>
+    private sealed class SupplyRow
+    {
+        public Guid Id { get; init; }
+
+        public bool Seen { get; init; }
+
+        public bool Footprint { get; init; }
+
+        public long M0 { get; init; }
+
+        public long M1 { get; init; }
+
+        public string Name { get; init; } = string.Empty;
+
+        public int? Year { get; init; }
+
+        public DateTime? ReleasedAt { get; init; }
+
+        public DateTime? FirstAiredAt { get; init; }
+
+        public MediaType MediaType { get; init; }
+
+        public string? Certification { get; init; }
+
+        public decimal? TmdbVoteAverage { get; init; }
+
+        public int TmdbVoteCount { get; init; }
+
+        public decimal? TraktRating { get; init; }
+
+        public int TraktVotes { get; init; }
+    }
+
     private static decimal? PredictedFloor(IReadOnlyList<ContentFilter> rows)
     {
         var raw = rows.FirstOrDefault(f => f.Kind == FilterKind.MinPredictedRating)?.Value;

@@ -98,9 +98,10 @@ public static class HardConstraintFilter
         foreach (var concept in hard.Concepts)
         {
             var labels = LabelsOf(concept);
+            var exact = concept.ExactLabels is { } set ? set.ToHashSet(StringComparer.Ordinal) : null;
             foreach (var keyword in title.Keywords)
             {
-                if (labels.Any(l => KeywordMatches(keyword, l)))
+                if (exact is not null ? exact.Contains(keyword) : labels.Any(l => KeywordMatches(keyword, l)))
                 {
                     evidence.Add($"keyword:{keyword}");
                 }
@@ -116,7 +117,7 @@ public static class HardConstraintFilter
 
             foreach (var genre in GenresOf(concept))
             {
-                if (title.Genres.Contains(genre, StringComparer.Ordinal))
+                if (GenreStandIns.ExcludedBy(title, genre))
                 {
                     evidence.Add($"genre:{genre}");
                 }
@@ -175,8 +176,28 @@ public static class HardConstraintFilter
     private static Expression<Func<Title, bool>> ConceptPredicate(ConceptTerm concept)
     {
         var arms = new List<Expression<Func<Title, bool>>>();
+        if (concept.ExactLabels is { } exact)
+        {
+            // Resolved concept: the keyword arm is an overlap with exactly the vocabulary labels the
+            // stems reach — the GIN index on "Keywords" answers it (M2) instead of a regex over every
+            // title's labels. The holder makes the labels a parameter, which Npgsql turns into "&&".
+            if (exact.Count > 0)
+            {
+                var holder = new LabelHolder([.. exact]);
+                arms.Add(t => t.Keywords.Any(k => holder.Labels.Contains(k)));
+            }
+        }
+
         foreach (var label in LabelsOf(concept))
         {
+            if (concept.ExactLabels is not null)
+            {
+                var resolvedName = label;
+                var resolvedNamePattern = NamePattern(label);
+                arms.Add(t => t.Name.ToLower().Contains(resolvedName) && Regex.IsMatch(t.Name, resolvedNamePattern, RegexOptions.IgnoreCase));
+                continue;
+            }
+
             // Translated by Npgsql to k ~ @keywordPattern over unnest("Keywords"), and "Name" ~* @namePattern
             // (see the class remarks for why each arm is bounded where it is). Each regex sits behind a
             // plain strpos guard that implies nothing new (the label is a substring of any match) but
@@ -189,10 +210,13 @@ public static class HardConstraintFilter
             arms.Add(t => t.Name.ToLower().Contains(value) && Regex.IsMatch(t.Name, namePattern, RegexOptions.IgnoreCase));
         }
 
+        // A genre concept matches what an exclusion of that genre would remove: the tag, its alias
+        // genres, the anime composite and, on the medium whose TMDB taxonomy cannot tag the genre,
+        // its stand-in keywords — so "horror shows" reaches the TV horror that TMDB files under
+        // keywords (14 shows carry the genre; hundreds carry the labels).
         foreach (var genre in GenresOf(concept))
         {
-            var value = genre;
-            arms.Add(t => t.Genres.Contains(value));
+            arms.Add(FilterBreaches.ExcludedGenre(genre));
         }
 
         // A concept with nothing to match on matches nothing: an empty concept is a resolver defect,
@@ -252,6 +276,12 @@ public static class HardConstraintFilter
             .Where(v => v.Length > 0)
             .Distinct(StringComparer.Ordinal)
             .ToList();
+
+    /// <summary>A closure-shaped holder so EF Core sends the exact labels as one array parameter.</summary>
+    private sealed class LabelHolder(string[] labels)
+    {
+        public readonly string[] Labels = labels;
+    }
 
     /// <summary>Rebinds one lambda's parameter onto another so OR-ed arms share a single <c>t</c>.</summary>
     private sealed class ParameterSwap(ParameterExpression from, ParameterExpression to) : ExpressionVisitor

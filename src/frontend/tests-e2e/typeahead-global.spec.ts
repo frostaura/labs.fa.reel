@@ -2,10 +2,15 @@ import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
 
 /**
- * The global typeahead leg: when the LOCAL shortlist resolves sparse (<3 titles for a 3+ char
- * term), the box re-asks with `global=1` and renders raw TMDB rows under "Beyond your catalogue" —
- * lookup, not suggestion (never scored, never eligibility-filtered). Keyboard navigation must
- * reach those rows, and selecting one navigates to the title route like a local hit.
+ * The search box's lookup (WS-3 task 10):
+ * - the global leg: when the LOCAL lookup resolves with fewer than 3 STRONG matches for a 3+ char
+ *   term, the box asks `/typeahead/global` and renders TMDB rows under "Beyond your catalogue" —
+ *   lookup, never scored, judged by the conditions server-side (FD-5). Keyboard navigation reaches
+ *   them and selecting one navigates like a local hit;
+ * - Enter with nothing active opens an EXACT match and never starts an Ask Reel turn;
+ * - what the conditions hide is counted on a line;
+ * - the people group leads when it matches better than any title;
+ * - the predicted-rating badge arrives after the rows, from `/typeahead/scores`.
  */
 
 const LOCAL_TITLE = {
@@ -16,7 +21,8 @@ const LOCAL_TITLE = {
   year: 2019,
   posterPath: null,
   isFullyWatched: false,
-  predictedRating: 7.5,
+  predictedRating: null,
+  tier: "word",
 };
 
 const GLOBAL_ROWS = [
@@ -49,27 +55,63 @@ async function bootHome(page: Page) {
     rows: [], lockedRowCount: 0,
   });
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+  // The rest of the Home shell, so no call reaches the tripwire (empty answers; 204 = nothing to show).
+  await mockJson(page, "**/api/accuracy", {
+    window: "90d", from: "2026-07-27T00:00:00Z", to: "2026-10-25T00:00:00Z", source: "none",
+    headline: { withinOnePoint: 0, n: 0, meanAbsoluteError: 0, bias: 0, correlation: null, meanPredicted: 0, meanActual: 0 },
+    calibration: [], moments: [],
+    conversion: { shown: 0, saved: 0, watched: 0, rated: 0, shownToSaved: null, savedToWatched: null, shownToRated: null, medianDaysToWatch: null },
+    counterfactual: [], learnedThisWeek: null,
+  });
+  await page.route((u) => u.pathname === "/api/feed/learned", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route((u) => u.pathname === "/api/feed/cross-reference", (route) => route.fulfill({ status: 204, body: "" }));
+  await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: 1.9, items: [] });
+  await mockJson(page, "**/api/settings/filters", {
+    excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+    minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+  });
+  await mockJson(page, "**/api/feed/genres", []);
+  await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
 
-  // Same pathname, two answers: the local leg (no global=1) is sparse, the global leg carries the
-  // beyond-catalogue rows. Discriminated on the query param, which mockJson's pathname matching
-  // deliberately ignores — so these use URL-predicate routes directly.
+  // The local leg is sparse (one strong match); the global leg carries the beyond-catalogue rows.
   await page.route(
-    (u) => u.pathname === "/api/search/typeahead" && u.searchParams.get("global") !== "1",
+    (u) => u.pathname === "/api/search/typeahead",
     (route) => route.fulfill({
       status: 200, contentType: "application/json",
-      body: JSON.stringify({ titles: [LOCAL_TITLE], people: [] }),
+      body: JSON.stringify({ titles: [LOCAL_TITLE], people: [], strongMatches: 1, hiddenByConditions: 0 }),
     })
   );
   await page.route(
-    (u) => u.pathname === "/api/search/typeahead" && u.searchParams.get("global") === "1",
+    (u) => u.pathname === "/api/search/typeahead/global",
     (route) => route.fulfill({
       status: 200, contentType: "application/json",
-      body: JSON.stringify({ titles: [LOCAL_TITLE], people: [], global: GLOBAL_ROWS }),
+      body: JSON.stringify({ global: GLOBAL_ROWS, hiddenByConditions: 0 }),
+    })
+  );
+  await page.route(
+    (u) => u.pathname === "/api/search/typeahead/scores",
+    (route) => route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({ scores: { [LOCAL_TITLE.titleId]: 7.5 } }),
     })
   );
 
   await page.goto("/home");
 }
+
+/** Replaces the local leg's answer for the rest of the test. */
+async function localLeg(page: Page, payload: object) {
+  await page.unroute((u) => u.pathname === "/api/search/typeahead");
+  await page.route(
+    (u) => u.pathname === "/api/search/typeahead",
+    (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) }),
+  );
+}
+
+const INCEPTION = {
+  titleId: "00000000-0000-0000-0000-0000000000ic", mediaType: "Movie", tmdbId: 27205, name: "Inception",
+  year: 2010, posterPath: null, isFullyWatched: false, predictedRating: null, tier: "exact",
+};
 
 test.describe("global typeahead — beyond your catalogue", () => {
   test("sparse local results grow the flagged TMDB group, reachable by keyboard", async ({ page }) => {
@@ -109,5 +151,79 @@ test.describe("global typeahead — beyond your catalogue", () => {
     // Enter takes the active global option and navigates to its title route.
     await input.press("Enter");
     await expect(page).toHaveURL(/\/title\/movie\/777/);
+  });
+
+  test("the badge arrives after the rows, from the scores endpoint", async ({ page }) => {
+    await bootHome(page);
+    await page.getByTestId("search-input").fill("jeanne");
+    await expect(page.getByTestId("typeahead-result")).toHaveCount(1);
+    await expect(page.getByTestId("typeahead-result")).toContainText("7.5");
+  });
+});
+
+test.describe("tiered lookup", () => {
+  test("Enter on an exact match opens the title and starts no Ask Reel turn", async ({ page }) => {
+    await bootHome(page);
+    await localLeg(page, { titles: [INCEPTION], people: [], strongMatches: 1, hiddenByConditions: 0 });
+    await mockJson(page, "**/api/titles/movie/27205", {
+      titleId: INCEPTION.titleId, mediaType: "Movie", tmdbId: 27205, name: "Inception", year: 2010,
+      overview: null, tagline: null, runtimeMinutes: 148, certification: null, genres: ["science-fiction"],
+      network: null, status: "Released", traktRating: null, traktVotes: 0, posterPath: null, backdropPath: null,
+      trailerUrl: null, cast: [], directors: [], writers: [], prediction: null, contributionDetails: [],
+      userState: { isFullyWatched: false, plays: 0, userRating: null, savedForLater: false, notInterested: false, dropped: false },
+    });
+    await mockJson(page, "**/api/titles/movie/27205/providers", {
+      region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/27205/watch", providers: [],
+    });
+    const asks: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/search/ask") asks.push(r.url());
+    });
+
+    // Typed and entered faster than the debounce: Enter waits for the lookup of exactly this text.
+    const input = page.getByTestId("search-input");
+    await input.pressSequentially("inception", { delay: 10 });
+    await input.press("Enter");
+
+    await expect(page).toHaveURL(/\/title\/movie\/27205/);
+    expect(asks).toHaveLength(0);
+  });
+
+  test("Enter on anything less than an exact match still asks Reel", async ({ page }) => {
+    await bootHome(page);
+    await localLeg(page, { titles: [{ ...INCEPTION, name: "Inception Point", tier: "prefix" }], people: [], strongMatches: 1, hiddenByConditions: 0 });
+    const input = page.getByTestId("search-input");
+    await input.fill("inception");
+    await expect(page.getByTestId("typeahead-result")).toHaveCount(1);
+    await input.press("Enter");
+    await expect(page).toHaveURL(/\/search/);
+  });
+
+  test("what the conditions hide is counted on a line", async ({ page }) => {
+    await bootHome(page);
+    await localLeg(page, { titles: [], people: [], strongMatches: 0, hiddenByConditions: 3 });
+    await page.unroute((u) => u.pathname === "/api/search/typeahead/global");
+    await page.route(
+      (u) => u.pathname === "/api/search/typeahead/global",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ global: [], hiddenByConditions: 1 }) }),
+    );
+    await page.getByTestId("search-input").fill("the notebook");
+    await expect(page.getByTestId("typeahead-hidden")).toHaveText("4 matches hidden by your conditions");
+    await expect(page.getByTestId("typeahead-empty")).toContainText("that your conditions allow");
+  });
+
+  test("the people group leads when it matches better than any title", async ({ page }) => {
+    await bootHome(page);
+    await localLeg(page, {
+      titles: [{ ...INCEPTION, name: "Norman", tmdbId: 1, tier: "fuzzy" }],
+      people: [{ personId: "00000000-0000-0000-0000-0000000000pp", name: "Christopher Nolan", knownFor: "Directing", profilePath: null, tier: "prefix" }],
+      strongMatches: 0,
+      hiddenByConditions: 0,
+    });
+    const input = page.getByTestId("search-input");
+    await input.fill("nolan");
+    await expect(page.getByTestId("typeahead-person")).toBeVisible();
+    await input.press("ArrowDown");
+    await expect(page.getByTestId("typeahead-person")).toHaveAttribute("aria-selected", "true");
   });
 });

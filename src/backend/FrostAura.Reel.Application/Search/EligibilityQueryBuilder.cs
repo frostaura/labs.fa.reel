@@ -78,6 +78,35 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// </summary>
     private IQueryable<Title> WithoutFootprint(IQueryable<Title> query, Guid accountId)
     {
+        var (watched, rated, setAside) = FootprintLists(accountId);
+        return query.Where(t => !watched.Contains(t.Id) && !rated.Contains(t.Id) && !setAside.Contains(t.Id));
+    }
+
+    /// <summary>
+    /// True when the title carries the account's interaction footprint — the exact complement of the
+    /// footprint half of <see cref="EligibleTitles(Guid, bool, IReadOnlySet{FilterKind})"/>, built from
+    /// the same three id lists (so it runs as the same hashed subplans). For single-pass counts that
+    /// need the footprint as a column rather than a filter (<see cref="FilterCostMeter"/>).
+    /// </summary>
+    public Expression<Func<Title, bool>> Footprint(Guid accountId)
+    {
+        var (watched, rated, setAside) = FootprintLists(accountId);
+        return t => watched.Contains(t.Id) || rated.Contains(t.Id) || setAside.Contains(t.Id);
+    }
+
+    /// <summary>
+    /// True when the account has watched (even partly) or rated the title — the part of the footprint
+    /// a reply may name as "you've seen". Same id lists, and so the same hashed subplans, as
+    /// <see cref="Footprint"/>.
+    /// </summary>
+    public Expression<Func<Title, bool>> Seen(Guid accountId)
+    {
+        var (watched, rated, _) = FootprintLists(accountId);
+        return t => watched.Contains(t.Id) || rated.Contains(t.Id);
+    }
+
+    private (IQueryable<Guid> Watched, IQueryable<Guid> Rated, IQueryable<Guid> SetAside) FootprintLists(Guid accountId)
+    {
         var watched = db.WatchedTitles.Where(w => w.AccountId == accountId).Select(w => w.TitleId);
         var rated = db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId);
         var setAside = db.UserTitleReactions
@@ -87,7 +116,7 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                     || r.Kind == ReactionKind.Dropped)
                 && r.RevokedAt == null)
             .Select(r => r.TitleId);
-        return query.Where(t => !watched.Contains(t.Id) && !rated.Contains(t.Id) && !setAside.Contains(t.Id));
+        return (watched, rated, setAside);
     }
 
     /// <summary>
@@ -382,6 +411,11 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                 query = query.Where(t => !t.Genres.Contains(aliasValue));
             }
 
+            if (GenreStandIns.CompositeOf(value) is { } composite)
+            {
+                query = query.Where(Not(composite));
+            }
+
             if (GenreStandIns.Patterns.ContainsKey(value))
             {
                 query = query.Where(Not(GenreStandIns.CarriesStandIn(value)));
@@ -458,6 +492,16 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                 !(t.Genres.Any(g => aliasValues.Contains(g))
                     && db.ContentFilters.Any(f =>
                         f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && f.Value == value)));
+        }
+
+        // Composite slugs (anime = animation in Japanese): "the account excludes this slug AND the
+        // title is the combination", the same shape as the stand-ins above.
+        foreach (var slug in GenreStandIns.CompositeSlugs)
+        {
+            var value = slug;
+            Expression<Func<Title, bool>> excluded = t => db.ContentFilters.Any(f =>
+                f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && f.Value == value);
+            query = query.Where(Not(And(excluded, GenreStandIns.CompositeOf(value)!)));
         }
 
         return query;

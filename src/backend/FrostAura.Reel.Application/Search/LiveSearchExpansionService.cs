@@ -1528,7 +1528,11 @@ public sealed class LiveSearchExpansionService(
         try
         {
             return await retriever.RetrieveAsync(
-                new Retrieval.RetrievalQuery(accountId, hard, Retrieval.SoftPreferences.None, shown.Concat(references).ToList(), ReturnCount),
+                new Retrieval.RetrievalQuery(accountId, hard, Retrieval.SoftPreferences.None, shown.Concat(references).ToList(), ReturnCount)
+                {
+                    // v1 runs its own TMDB and semantic pulls; ask the hybrid retriever for the catalogue arms only (WS-3 CR-2a).
+                    Arms = Retrieval.RetrievalArms.Catalogue,
+                },
                 ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
