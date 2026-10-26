@@ -12,6 +12,9 @@ public static class RailSupply
     /// the anime composite and the TV stand-ins — what the rail's genre means everywhere else), in
     /// <paramref name="media"/>, partitioned exactly like an Ask Reel supply report. Titles the rail
     /// is already showing go in <paramref name="shown"/> so they are not offered again.
+    ///
+    /// <para>Counted as the rail serves: the rail waives the account's include-genre rules (FD-6), so
+    /// they are left out of the count and of the knockouts; an exclude-genre rule never is.</para>
     /// </summary>
     public static Task<SupplyReport> ForGenreRailAsync(
         this ISupplyReporter supply,
@@ -27,6 +30,6 @@ public static class RailSupply
         // No user words and no labels: the concept is the genre alone, never a title whose NAME
         // happens to contain the word "comedy".
         var hard = new HardConstraints([new ConceptTerm(string.Empty, [], [slug], [])], [], null, null, media);
-        return supply.ReportAsync(accountId, hard, shown, ct);
+        return supply.ReportAsync(accountId, hard, shown, IncludeGenreRules.Waived, ct);
     }
 }

@@ -52,15 +52,40 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
     /// <inheritdoc />
     public Task<SupplyReport> ReportAsync(
         Guid accountId, HardConstraints hard, IReadOnlyCollection<Guid> alreadyShown, CancellationToken ct) =>
-        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, ct);
+        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, IncludeGenreRules.Applied, ct);
+
+    /// <inheritdoc />
+    public Task<SupplyReport> ReportAsync(
+        Guid accountId,
+        HardConstraints hard,
+        IReadOnlyCollection<Guid> alreadyShown,
+        IncludeGenreRules includeGenre,
+        CancellationToken ct) =>
+        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, includeGenre, ct);
 
     /// <summary>The report counted with an explicit vote floor (<c>0</c> counts every title).</summary>
     public Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, int minVotes, CancellationToken ct) =>
-        ReportAsync(accountId, hard, minVotes, IdNarrowingLimit, [], ct);
+        ReportAsync(accountId, hard, minVotes, IdNarrowingLimit, [], IncludeGenreRules.Applied, ct);
 
     /// <summary>
     /// The report with an explicit id-narrowing limit, so tests can drive the predicate path (limit
     /// 0) on a small fixture and prove both paths count the same titles.
+    /// </summary>
+    internal Task<SupplyReport> ReportAsync(
+        Guid accountId,
+        HardConstraints hard,
+        int minVotes,
+        int idNarrowingLimit,
+        IReadOnlyCollection<Guid> alreadyShown,
+        CancellationToken ct) =>
+        ReportAsync(accountId, hard, minVotes, idNarrowingLimit, alreadyShown, IncludeGenreRules.Applied, ct);
+
+    /// <summary>
+    /// The report with every knob explicit. <paramref name="includeGenre"/> =
+    /// <see cref="IncludeGenreRules.Waived"/> counts as a genre rail serves (FD-6): the account's
+    /// include-genre rules are left out of eligibility, of the breach masks and of the knockouts, so
+    /// "your conditions hide N" counts only what the rail itself hides. An exclude-genre rule is never
+    /// waived.
     /// </summary>
     internal async Task<SupplyReport> ReportAsync(
         Guid accountId,
@@ -68,9 +93,11 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
         int minVotes,
         int idNarrowingLimit,
         IReadOnlyCollection<Guid> alreadyShown,
+        IncludeGenreRules includeGenre,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(alreadyShown);
+        var waive = includeGenre == IncludeGenreRules.Waived;
         minVotes = Math.Max(0, minVotes);
         var shown = alreadyShown.ToHashSet();
 
@@ -102,7 +129,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
         var matching = ids.Count;
         if (narrowById)
         {
-            return await SinglePassAsync(accountId, minVotes, topical.Count, ids, shown, ct);
+            return await SinglePassAsync(accountId, minVotes, topical.Count, ids, shown, waive, ct);
         }
 
         // Seen is the part of the footprint a reply may name as "you've seen": a watch (even partial)
@@ -118,18 +145,14 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             .CountAsync(ct);
 
         var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
-        var eligibleIds = (await Population(eligibility.EligibleTitles(accountId))
+        var eligibleIds = (await Population(eligibility.EligibleTitles(accountId, ignoreIncludeGenreFilters: waive))
                 .Select(t => new { t.Id, t.Certification })
                 .ToListAsync(ct))
             .Where(t => EligibilityQueryBuilder.PassesMaturity(new Title { Certification = t.Certification }, ceiling))
             .Select(t => t.Id)
             .ToHashSet();
 
-        var rows = await db.ContentFilters
-            .Where(f => f.AccountId == accountId)
-            .OrderBy(f => f.CreatedAt)
-            .ThenBy(f => f.Id)
-            .ToListAsync(ct);
+        var rows = await RulesRowsAsync(accountId, waive, ct);
         var floor = PredictedFloor(rows);
 
         var (belowFloor, unscored, shownClearing) = await SplitByScoreAsync(accountId, eligibleIds, floor, shown, ct);
@@ -178,13 +201,10 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
         int topicalCount,
         IReadOnlyList<Guid> ids,
         IReadOnlySet<Guid> shown,
+        bool waiveIncludeGenre,
         CancellationToken ct)
     {
-        var rows = await db.ContentFilters
-            .Where(f => f.AccountId == accountId)
-            .OrderBy(f => f.CreatedAt)
-            .ThenBy(f => f.Id)
-            .ToListAsync(ct);
+        var rows = await RulesRowsAsync(accountId, waiveIncludeGenre, ct);
         var floor = PredictedFloor(rows);
         var rules = FilterRuleSet.FromRows(rows);
         var all = rules.Rules();
@@ -317,6 +337,17 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
 
         public int TraktVotes { get; init; }
     }
+
+    /// <summary>
+    /// The account's condition rows in creation order — without its include-genre rows when the
+    /// surface waives them, so the masks and knockouts never count a rule the surface does not apply.
+    /// </summary>
+    private async Task<List<ContentFilter>> RulesRowsAsync(Guid accountId, bool waiveIncludeGenre, CancellationToken ct) =>
+        await db.ContentFilters
+            .Where(f => f.AccountId == accountId && !(waiveIncludeGenre && f.Kind == FilterKind.IncludeGenre))
+            .OrderBy(f => f.CreatedAt)
+            .ThenBy(f => f.Id)
+            .ToListAsync(ct);
 
     private static decimal? PredictedFloor(IReadOnlyList<ContentFilter> rows)
     {

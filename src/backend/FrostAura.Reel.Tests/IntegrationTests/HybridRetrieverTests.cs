@@ -213,6 +213,51 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal(1, after.MatchingInCatalogue - before.MatchingInCatalogue);
     }
 
+    [Fact]
+    public async Task Rail_supply_waives_an_include_genre_rule_as_the_rail_does_but_never_an_exclude()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // FD-6: a genre rail waives include-genre and never exclude-genre, so its "your conditions hide
+        // N" must count the same way. Counted with the include rule applied, the rail's own genre
+        // looked hidden by "only drama" — a rule the rail never applies.
+        var genre = $"rail-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        var plain = await SeedTitleAsync(t => t.Genres = [genre]);
+        var horror = await SeedTitleAsync(t => t.Genres = [genre, "horror"]);
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(), AccountId = accountId, Kind = Domain.Filters.FilterKind.IncludeGenre, Value = "drama", CreatedAt = DateTime.UtcNow,
+            });
+            seed.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(), AccountId = accountId, Kind = Domain.Filters.FilterKind.ExcludeGenre, Value = "horror", CreatedAt = DateTime.UtcNow.AddSeconds(1),
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var supply = new SupplyReporter(db, new EligibilityQueryBuilder(db));
+        var applied = await supply.ReportAsync(
+            accountId, new HardConstraints([new ConceptTerm(string.Empty, [], [genre], [])], [], null, null, MediaScope.Any), default);
+        var rail = await supply.ForGenreRailAsync(accountId, genre, MediaScope.Any, [], default);
+
+        Assert.Equal(2, applied.ExcludedByConditions);
+        Assert.Equal(2, rail.MatchingInCatalogue);
+        Assert.Equal(1, rail.ExcludedByConditions);
+        Assert.Equal(1, rail.Eligible);
+        Assert.DoesNotContain(rail.Knockouts, k => k.Kind == Domain.Filters.FilterKind.IncludeGenre);
+        var exclude = Assert.Single(rail.Knockouts);
+        Assert.Equal(Domain.Filters.FilterKind.ExcludeGenre, exclude.Kind);
+        Assert.Equal(horror, Assert.Single(exclude.Sample).TitleId);
+        Assert.NotEqual(plain, horror);
+    }
+
     private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
