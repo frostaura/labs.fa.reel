@@ -222,6 +222,11 @@ public class OpenRouterLensWriter(
     // ── Lens copy ──────────────────────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<LensDraft?>> WriteLensAsync(
+        IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default) =>
+        (await AttemptLensAsync(titles, persona, ct)).Select(a => a.Draft).ToArray();
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<LensAttempt>> AttemptLensAsync(
         IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default)
     {
         if (titles.Count == 0)
@@ -231,14 +236,14 @@ public class OpenRouterLensWriter(
 
         if (StubMode)
         {
-            return titles.Select(t => (LensDraft?)new LensDraft(StubLens(t, persona), ModelId, null, null)).ToArray();
+            return titles.Select(t => new LensAttempt(new LensDraft(StubLens(t, persona), ModelId, null, null))).ToArray();
         }
 
         // One title per request, bounded concurrency, results written back in index order so the
         // batch stays row-aligned for the caller — the extractor's shape, and for its reason: a
         // single object per call is what makes strict schema enforcement meaningful per title.
         var maxConcurrency = Math.Max(1, configuration.GetValue("OPENROUTER_MAX_CONCURRENCY", 4));
-        var results = new LensDraft?[titles.Count];
+        var results = new LensAttempt[titles.Count];
         using var gate = new SemaphoreSlim(maxConcurrency);
         await Task.WhenAll(titles.Select(async (title, index) =>
         {
@@ -256,7 +261,7 @@ public class OpenRouterLensWriter(
         return results;
     }
 
-    private async Task<LensDraft?> WriteOneLensAsync(LensTitleInput title, LensPersona persona, CancellationToken ct)
+    private async Task<LensAttempt> WriteOneLensAsync(LensTitleInput title, LensPersona persona, CancellationToken ct)
     {
         var user = LensPrompt(title, persona);
         var first = await ChatAsync(
@@ -264,12 +269,12 @@ public class OpenRouterLensWriter(
         var (note, problems) = ParseLens(first.Content);
         if (note is not null)
         {
-            return new LensDraft(note, ModelId, first.Usage?.PromptTokens, first.Usage?.CompletionTokens);
+            return new LensAttempt(new LensDraft(note, ModelId, first.Usage?.PromptTokens, first.Usage?.CompletionTokens));
         }
 
         if (first.Content is null)
         {
-            return null;
+            return new LensAttempt(null, first.Stopped);
         }
 
         logger.LogWarning(
@@ -291,10 +296,12 @@ public class OpenRouterLensWriter(
                 "Lens for {Title} ({TitleId}) failed after the repair pass ({Detail}). Nothing written — the "
                 + "surface falls back rather than showing invented copy.",
                 title.Name, title.TitleId, string.Join("; ", stillWrong));
-            return null;
+            // The first answer was made and was unusable, so this title failed — unless the repair
+            // itself was refused before sending, which says nothing more about the title.
+            return new LensAttempt(null, second.Content is null && second.Stopped);
         }
 
-        return new LensDraft(repaired, ModelId, second.Usage?.PromptTokens, second.Usage?.CompletionTokens);
+        return new LensAttempt(new LensDraft(repaired, ModelId, second.Usage?.PromptTokens, second.Usage?.CompletionTokens));
     }
 
     /// <summary>
@@ -499,7 +506,11 @@ public class OpenRouterLensWriter(
 
     // ── Transport ──────────────────────────────────────────────────────────────────────────
 
-    private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage);
+    /// <summary>
+    /// One call's answer. <paramref name="Stopped"/>: refused before it was sent or by the provider's
+    /// account (budget, breaker, 401/402/403) — not a verdict on the title.
+    /// </summary>
+    private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage, bool Stopped = false);
 
     private async Task<ChatOutcome> ChatAsync(
         string system, string user, string? repairHint, object schema, string purpose, CancellationToken ct)
@@ -518,7 +529,8 @@ public class OpenRouterLensWriter(
 
         return new ChatOutcome(
             result.Succeeded ? result.Content : null,
-            new OpenRouterUsage(result.PromptTokens, result.CompletionTokens, null));
+            new OpenRouterUsage(result.PromptTokens, result.CompletionTokens, null),
+            result.Failure is LlmCallFailure.BudgetSpent or LlmCallFailure.ProviderUnavailable or LlmCallFailure.ProviderRefused);
     }
 
     // ── Schemas ────────────────────────────────────────────────────────────────────────────

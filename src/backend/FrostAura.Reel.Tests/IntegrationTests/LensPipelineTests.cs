@@ -463,6 +463,249 @@ public class LensPipelineTests(PostgresFixture fixture)
         Assert.Equal(LensBudget.DefaultDailyCalls - 40, allowance.CallsRemaining);
     }
 
+    // ── Off the read path: queue, negative cache (WS-1 task 7, F-6) ─────────────────────────
+
+    /// <summary>
+    /// A writer whose every attempt ends one chosen way, counting the calls it would have paid for.
+    /// Everything else (versions, salts, the stub's narrative) is the real stub writer's.
+    /// </summary>
+    private sealed class ScriptedLensWriter(ILensWriter inner, Func<LensTitleInput, LensAttempt> attempt) : ILensWriter
+    {
+        public int Calls { get; private set; }
+
+        public bool IsAvailable => inner.IsAvailable;
+
+        public string ModelId => inner.ModelId;
+
+        public int LensPromptVersion => inner.LensPromptVersion;
+
+        public int NarrativePromptVersion => inner.NarrativePromptVersion;
+
+        public string LensCacheSalt => inner.LensCacheSalt;
+
+        public string NarrativeCacheSalt => inner.NarrativeCacheSalt;
+
+        public Task<NarrativeDraft?> WriteNarrativeAsync(TasteFacts facts, CancellationToken ct = default) =>
+            inner.WriteNarrativeAsync(facts, ct);
+
+        public async Task<IReadOnlyList<LensDraft?>> WriteLensAsync(
+            IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default) =>
+            (await AttemptLensAsync(titles, persona, ct)).Select(a => a.Draft).ToList();
+
+        public Task<LensAuditScore?> JudgeAsync(
+            LensTitleInput title, LensPersona persona, LensNote note, CancellationToken ct = default) =>
+            inner.JudgeAsync(title, persona, note, ct);
+
+        public Task<IReadOnlyList<LensAttempt>> AttemptLensAsync(
+            IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default)
+        {
+            Calls += titles.Count;
+            return Task.FromResult<IReadOnlyList<LensAttempt>>(titles.Select(attempt).ToList());
+        }
+    }
+
+    private static LensService LensWith(ReelDbContext db, Deps deps, ILensWriter writer) => new(
+        db,
+        writer,
+        new LensInputBuilder(db, new RatingCalibrationService(db, deps.Cache)),
+        new LensVerifier(db),
+        deps.Budget,
+        deps.Personalisation,
+        NullLogger<LensService>.Instance);
+
+    [Fact]
+    public async Task A_failed_generation_is_negatively_cached_for_six_hours_and_then_tried_again()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var failing = new ScriptedLensWriter(Writer(StubConfig()), _ => new LensAttempt(null));
+        var lens = LensWith(db, deps, failing);
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var hash = (await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default)).ProfileHash;
+
+        var first = await lens.GenerateForJobAsync(accountId, taste, hash, [titleId], default);
+        var again = await lens.GenerateForJobAsync(accountId, taste, hash, [titleId], default);
+
+        // One paid attempt; the second pass reads the failure and spends nothing.
+        Assert.Equal(1, first.Failed);
+        Assert.Equal(1, failing.Calls);
+        Assert.Equal("already warm", again.Reason);
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        Assert.Equal(LensStatus.Failed, row.Status);
+        // Never rendered: the ladder reads only Done rows.
+        Assert.Equal(LensSource.None, (await lens.ResolveAsync(accountId, titleId, hash, default)).Source);
+
+        // Past the window the title is tried again, in place (the unique key holds).
+        row.GeneratedAt = DateTime.UtcNow - LensService.FailureBackoff - TimeSpan.FromMinutes(1);
+        await db.SaveChangesAsync();
+        var writing = LensWith(db, deps, Writer(StubConfig()));
+        var retried = await writing.GenerateForJobAsync(accountId, taste, hash, [titleId], default);
+
+        Assert.Equal(1, retried.Written);
+        Assert.Equal(LensSource.Fresh, (await writing.ResolveAsync(accountId, titleId, hash, default)).Source);
+        Assert.Single(await db.TitleLensCopies.Where(c => c.AccountId == accountId && c.TitleId == titleId).ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_stopped_attempt_is_not_remembered_as_the_titles_failure()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // A spent allowance or an open breaker refuses the call before it is sent. That says nothing
+        // about the title, so nothing may keep it dark for six hours after the allowance resets.
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var stopped = new ScriptedLensWriter(Writer(StubConfig()), _ => new LensAttempt(null, Stopped: true));
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var hash = (await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default)).ProfileHash;
+
+        var outcome = await LensWith(db, deps, stopped).GenerateForJobAsync(accountId, taste, hash, [titleId], default);
+
+        Assert.Equal(0, outcome.Failed);
+        Assert.Empty(await db.TitleLensCopies.Where(c => c.AccountId == accountId && c.TitleId == titleId).ToListAsync());
+        Assert.Equal(
+            LensService.RequestOutcome.Queued,
+            await deps.Lens.RequestAsync(accountId, titleId, hash, new ResolvedLens(null, LensSource.None, hash, null), default));
+    }
+
+    [Fact]
+    public async Task Opening_an_uncached_title_queues_one_pass_however_often_it_is_opened()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+        var other = await SeedTitleAsync("Sicario", 2015);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+        var none = new ResolvedLens(null, LensSource.None, hash, null);
+
+        for (var open = 0; open < 3; open++)
+        {
+            Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, titleId, hash, none, default));
+        }
+
+        // A second title merges into the same pending pass rather than racing the one-per-account index.
+        Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, other, hash, none, default));
+        var job = await db.SyncJobs.SingleAsync(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles);
+        Assert.Equal([titleId, other], PersonaliseTitlesJobHandler.RequestedTitles(job.CursorJson));
+        Assert.Equal(PersonaliseTitlesJobHandler.OnOpenPriority, job.Priority);
+        Assert.Equal(PersonaliseTitlesJobHandler.OnOpenReason, job.TriggerReason);
+
+        // The pass writes the opened titles first, with the real handler and the stub writer.
+        var handler = new PersonaliseTitlesJobHandler(
+            db, deps.Features, deps.Facts, deps.Lens, NullLogger<PersonaliseTitlesJobHandler>.Instance);
+        await handler.ExecuteAsync(job, CancellationToken.None);
+        await CompleteAsync(db, job);
+
+        Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, titleId, hash, default)).Source);
+        Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, other, hash, default)).Source);
+        var fresh = await deps.Lens.ResolveAsync(accountId, titleId, hash, default);
+        Assert.Equal(LensService.RequestOutcome.Current, await deps.Lens.RequestAsync(accountId, titleId, hash, fresh, default));
+    }
+
+    [Fact]
+    public async Task A_pending_build_pass_takes_the_opened_title_first_and_keeps_its_own_fields()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+        var nightly = new SyncJob
+        {
+            Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.PersonaliseTitles, Priority = 3,
+            EnqueuedAt = DateTime.UtcNow, CursorJson = PersonaliseTitlesJobHandler.SavedCursor,
+        };
+        db.SyncJobs.Add(nightly);
+        await db.SaveChangesAsync();
+
+        Assert.Equal(
+            LensService.RequestOutcome.Queued,
+            await deps.Lens.RequestAsync(accountId, titleId, hash, new ResolvedLens(null, LensSource.None, hash, null), default));
+
+        Assert.Equal(PersonaliseTitlesJobHandler.OnOpenPriority, nightly.Priority);
+        Assert.Contains("\"Saved\":true", nightly.CursorJson, StringComparison.Ordinal);
+        Assert.Equal([titleId], PersonaliseTitlesJobHandler.RequestedTitles(nightly.CursorJson));
+        Assert.Single(await db.SyncJobs.Where(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles).ToListAsync());
+
+        // A RUNNING pass already chose its titles: the open is not promised to it.
+        nightly.Status = JobStatus.Running;
+        await db.SaveChangesAsync();
+        var later = await SeedTitleAsync("Heat", 1995);
+        Assert.Equal(
+            LensService.RequestOutcome.NotQueued,
+            await deps.Lens.RequestAsync(accountId, later, hash, new ResolvedLens(null, LensSource.None, hash, null), default));
+        await CompleteAsync(db, nightly);
+    }
+
+    [Fact]
+    public async Task A_recent_failure_or_a_refusal_on_record_queues_nothing()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var failedTitle = await SeedTitleAsync("Soldado", 2018);
+        var spoiledTitle = await SeedTitleAsync("Sicario", 2015);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+        await LensWith(db, deps, new ScriptedLensWriter(Writer(StubConfig()), _ => new LensAttempt(null)))
+            .GenerateForJobAsync(accountId, taste, hash, [failedTitle], default);
+        await deps.Lens.GenerateForJobAsync(accountId, taste, hash, [spoiledTitle], default);
+        await deps.Lens.ReportSpoiledAsync(accountId, spoiledTitle, default);
+        var none = new ResolvedLens(null, LensSource.None, hash, null);
+
+        Assert.Equal(LensService.RequestOutcome.NotQueued, await deps.Lens.RequestAsync(accountId, failedTitle, hash, none, default));
+        Assert.Equal(LensService.RequestOutcome.NotQueued, await deps.Lens.RequestAsync(accountId, spoiledTitle, hash, none, default));
+        Assert.Empty(await db.SyncJobs.Where(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles).ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_spent_lens_allowance_queues_nothing()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig((LensBudget.CallsSetting, "0")));
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+
+        Assert.Equal(
+            LensService.RequestOutcome.NotQueued,
+            await deps.Lens.RequestAsync(accountId, titleId, hash, new ResolvedLens(null, LensSource.None, hash, null), default));
+        Assert.Empty(await db.SyncJobs.Where(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles).ToListAsync());
+    }
+
     // ── The on-demand path ──────────────────────────────────────────────────────────────────
 
     [Fact]

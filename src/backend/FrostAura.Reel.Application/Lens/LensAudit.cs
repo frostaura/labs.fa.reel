@@ -99,8 +99,9 @@ public sealed class LensAudit(
         Guid accountId, FeatureVectorBuilder.TasteState taste, int sampleSize, bool score, CancellationToken ct)
     {
         var take = Math.Clamp(sampleSize, 1, 200);
+        // A Failed row is the negative cache — no note was written, so there is nothing to audit.
         var rows = await db.TitleLensCopies
-            .Where(c => c.AccountId == accountId)
+            .Where(c => c.AccountId == accountId && c.Status != LensStatus.Failed)
             .OrderByDescending(c => c.GeneratedAt)
             .Take(take)
             .ToListAsync(ct);
