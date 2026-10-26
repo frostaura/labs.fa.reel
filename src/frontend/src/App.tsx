@@ -18,6 +18,7 @@ import SignOutCleanup from "./components/SignOutCleanup";
 import Landing from "./pages/Landing";
 import { LEGAL_PAGES } from "./lib/legalPages";
 import { pageLocation } from "./lib/navigationGuard";
+import { loadTitleDetail } from "./lib/routeChunks";
 import reelMark from "./assets/brand/reel-mark.svg";
 
 // Landing stays eager — it is the signed-out entry point and must paint without a second
@@ -29,7 +30,7 @@ const Onboarding = lazy(() => import("./pages/Onboarding"));
 const Home = lazy(() => import("./pages/Home"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Lab = lazy(() => import("./pages/Lab"));
-const TitleDetail = lazy(() => import("./pages/TitleDetail"));
+const TitleDetail = lazy(loadTitleDetail);
 const Person = lazy(() => import("./pages/Person"));
 const Saved = lazy(() => import("./pages/Saved"));
 const TasteDna = lazy(() => import("./pages/TasteDna"));
