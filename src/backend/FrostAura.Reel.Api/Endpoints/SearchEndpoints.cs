@@ -964,6 +964,9 @@ public static class SearchEndpoints
     /// into it. <c>lastTurnAt</c> is beside <c>lastCardsAt</c> because a transcript-only thread has
     /// a null <c>lastCardsAt</c> by definition and would otherwise carry no date at all.</para>
     /// </summary>
+    /// <summary>How many of a thread's newest answers a resume returns cards for, per turn.</summary>
+    private const int ResumedTurnCards = 12;
+
     private static async Task<object> ResumeAsync(
         IReelDbContext db,
         EligibilityQueryBuilder eligibility,
@@ -1000,6 +1003,21 @@ public static class SearchEndpoints
 
         var lastQuery = turns.LastOrDefault(t => t.Role == "user")?.Text;
         var mediaFilter = block.Count > 0 ? block[^1].MediaFilter : null;
+
+        // Every answer's own cards (§5.2 WS-2 task 3: "resume returns turns[].cards"), so a resumed
+        // thread renders each turn's cards under its own bubble instead of only the newest block. Each
+        // answer is replayed on its own through the same projection — the same eligibility re-filter,
+        // the same tier split — so a card the account has since seen drops out of every turn alike.
+        // The newest answers only: a long thread's oldest turns render as transcript.
+        var perTurn = new Dictionary<Guid, ReplayedTurns>();
+        foreach (var answer in turns
+                     .Where(t => t.Role == "assistant"
+                                 && (t.Status == Domain.Search.SearchTurnStatus.Completed
+                                     || t.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted))
+                     .TakeLast(ResumedTurnCards))
+        {
+            perTurn[answer.Id] = await ReplayAsync(db, eligibility, scorer, accountId, [answer], ct);
+        }
 
         return new
         {
@@ -1041,6 +1059,15 @@ public static class SearchEndpoints
                 // Whether a judge batch failed, so the screen can say some cards went unchecked.
                 judgeDegraded = Domain.Search.SearchTurnDegraded.JudgeFailed(t.DegradedFlags),
                 mode = t.Role == "assistant" ? Domain.Search.SearchTurnMode.Parse(t.Mode) : null,
+                // Ask Reel v2's act (null on v1 rows and user rows).
+                act = t.Act,
+                // This answer's own cards and trays; null for a user row, a failure, or an answer
+                // older than the newest ResumedTurnCards.
+                cards = perTurn.TryGetValue(t.Id, out var own) ? own.Cards : null,
+                belowFloor = perTurn.TryGetValue(t.Id, out var ownFloor) ? ownFloor.BelowFloor : null,
+                nearMiss = perTurn.TryGetValue(t.Id, out var ownNear) ? ownNear.NearMiss ?? [] : null,
+                @unchecked = perTurn.TryGetValue(t.Id, out var ownUnchecked) ? ownUnchecked.Unchecked ?? [] : null,
+                reason = perTurn.TryGetValue(t.Id, out var ownReason) ? ownReason.Reason : null,
             }),
             cards = replay.Cards,
             // The tray, restored as a tray. It is never merged into `cards` — these cards did not

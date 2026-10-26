@@ -193,7 +193,9 @@ public class AskReelV2UnitTests
     {
         var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with
         {
-            Picks = 6, NearMissNames = ["Shinobi"], UnderBar = 2,
+            Picks = 6,
+            NearMissNames = ["Shinobi"],
+            UnderBar = 2,
         });
 
         Assert.Equal(
@@ -215,7 +217,10 @@ public class AskReelV2UnitTests
     {
         var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with
         {
-            Topic = null, Picks = 3, Person = new PersonConstraint("Christopher Nolan", null, PersonRole.Director), PersonSeen = 9,
+            Topic = null,
+            Picks = 3,
+            Person = new PersonConstraint("Christopher Nolan", null, PersonRole.Director),
+            PersonSeen = 9,
         });
         Assert.Equal("You've seen 9 movies directed by Christopher Nolan; here are 3 you haven't.", reply.Reply);
     }

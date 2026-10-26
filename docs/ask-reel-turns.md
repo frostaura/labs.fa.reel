@@ -247,7 +247,12 @@ The resume payload:
   "lastTurnAt": "2026-09-11T00:54:21.301Z",
   "turns":   [{ "id": "…", "sequence": 0, "role": "user", "text": "…",
                 "kind": "ask", "status": "Completed", "failureCode": null,
-                "degraded": false, "judgeDegraded": false, "mode": null }],
+                "degraded": false, "judgeDegraded": false, "mode": null,
+                "act": null,          // v2's act on an assistant row; null on v1 rows and user rows
+                // This answer's OWN cards and trays, replayed through the same projection as the
+                // top-level lists — null on a user row, a failure, or an answer older than the
+                // newest 12. A client renders each turn's cards under its own bubble from these.
+                "cards": null, "belowFloor": null, "nearMiss": null, "unchecked": null, "reason": null }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
   "nearMiss":    [ /* the near-miss tray */ ],
