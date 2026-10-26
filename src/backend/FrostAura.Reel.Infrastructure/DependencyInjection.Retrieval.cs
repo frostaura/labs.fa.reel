@@ -35,7 +35,11 @@ public static partial class DependencyInjection
             sp.GetRequiredService<Application.Search.Retrieval.SupplyReporter>());
         // The concept resolver and its vocabulary (M2): containment, synonyms, then nearest labels.
         services.AddScoped<Application.Search.Retrieval.Concepts.KeywordVocabulary>();
-        services.AddSingleton<Application.Search.Retrieval.Concepts.ConceptEmbeddings>();
+        // Scoped, not singleton: its provider is a typed HttpClient that takes the scoped IAccountContext
+        // (ledger attribution), and a singleton resolved it from the root — a 500 on every Ask in
+        // Development (scope validation) and an unpinned account context everywhere else. Its state is
+        // static (the in-flight calls) or the shared IMemoryCache, so scoping it loses nothing.
+        services.AddScoped<Application.Search.Retrieval.Concepts.ConceptEmbeddings>();
         services.AddScoped<Application.Search.Retrieval.Concepts.IConceptResolver, Application.Search.Retrieval.Concepts.ConceptResolver>();
         services.AddScoped<Application.Search.Retrieval.Concepts.KeywordLabelRefresher>();
         services.AddHostedService<Background.KeywordLabelRefreshService>();
