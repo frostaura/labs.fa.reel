@@ -10,6 +10,8 @@ import {
 import LoadFailed from "../ui/load-failed";
 import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 const PAGE_SIZE = 20;
 
@@ -119,17 +121,17 @@ export default function DislikePanel() {
         </p>
       </div>
 
-      <button
-        type="button"
+      <Button
+        variant="ghost"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-controls="dislike-list-region"
-        className="fa-button-ghost inline-flex items-center gap-2"
+        className={COARSE_TAP}
         data-testid="dislike-toggle"
       >
         <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
         {open ? "Hide the list" : `Show all ${data.total.toLocaleString("en-US")}`}
-      </button>
+      </Button>
 
       {open && (
         <div id="dislike-list-region" className="space-y-4">
@@ -169,15 +171,15 @@ export default function DislikePanel() {
                       {reasonLine(entry)} · {formatDate(entry.createdAt)}
                     </span>
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
                     onClick={() => void revoke(entry)}
-                    className="fa-button-ghost shrink-0"
+                    className={`shrink-0 ${COARSE_TAP}`}
                     aria-label={`Undo — ${entry.name}`}
                     data-testid="dislike-revoke"
                   >
                     <Undo2 className="h-3.5 w-3.5" /> Undo
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -185,29 +187,29 @@ export default function DislikePanel() {
 
           {(data.hasMore || offset > 0) && (
             <div className="flex items-center justify-between">
-              <button
-                type="button"
+              <Button
+                variant="ghost"
                 onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
                 disabled={offset === 0}
-                className="fa-button-ghost disabled:opacity-40"
+                className={COARSE_TAP}
                 data-testid="dislike-prev"
               >
                 Newer
-              </button>
+              </Button>
               <span className="fa-caption text-fa-frost-dim tabular-nums" data-testid="dislike-range">
                 {currentData
                   ? `${currentData.offset + 1}–${currentData.offset + currentData.items.length} of ${currentData.total}`
                   : `from ${offset + 1} of ${data.total}`}
               </span>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
                 onClick={() => setOffset(offset + PAGE_SIZE)}
                 disabled={!currentData?.hasMore}
-                className="fa-button-ghost disabled:opacity-40"
+                className={COARSE_TAP}
                 data-testid="dislike-next"
               >
                 Older
-              </button>
+              </Button>
             </div>
           )}
         </div>

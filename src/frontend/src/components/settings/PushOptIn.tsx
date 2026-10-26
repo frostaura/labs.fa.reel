@@ -6,6 +6,8 @@ import {
   useUnsubscribePushMutation,
 } from "../../store/api";
 import { base64UrlToUint8Array } from "../../lib/pushKeys";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 /**
  * "unsupported" hides the card entirely (no Push API, or no service-worker registration — which
@@ -113,12 +115,11 @@ export default function PushOptIn() {
           Notifications are blocked for this site in your browser settings — allow them there, then come back.
         </p>
       ) : (
-        <button
-          type="button"
+        <Button
           onClick={state === "on" ? disable : enable}
           disabled={state === "busy"}
-          className="fa-button disabled:opacity-40"
           data-testid="push-toggle"
+          className={COARSE_TAP}
         >
           {state === "on" ? (
             <>
@@ -129,7 +130,7 @@ export default function PushOptIn() {
               <BellRing className="h-4 w-4" /> Turn on
             </>
           )}
-        </button>
+        </Button>
       )}
       {failure && (
         <p role="alert" className="fa-caption text-fa-danger" data-testid="push-failure">

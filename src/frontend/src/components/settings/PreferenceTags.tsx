@@ -7,6 +7,8 @@ import {
 } from "../../store/api";
 import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 /**
  * "Things you're into" — positive preference tags (e.g. "magical serial killer mysteries"). The
@@ -70,14 +72,16 @@ export default function PreferenceTags() {
               className="group inline-flex items-center gap-1.5 rounded-full bg-fa-frost/15 px-3 py-1 fa-caption text-fa-frost-bright"
             >
               {tag.text}
-              <button
+              <Button
+                variant="ghost"
+                size="icon-sm"
                 onClick={() => void remove(tag.id, tag.text)}
-                className="text-fa-frost-dim hover:text-fa-frost-bright"
+                className={`h-5 w-5 rounded-full ${COARSE_TAP}`}
                 aria-label={`Remove ${tag.text}`}
                 data-testid="remove-tag"
               >
                 <X className="h-3 w-3" />
-              </button>
+              </Button>
             </span>
           ))}
         </div>
@@ -90,16 +94,18 @@ export default function PreferenceTags() {
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Add something you’re into…"
           maxLength={120}
-          className="flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
+          className={`flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-3 focus:outline-none focus:ring-1 focus:ring-fa-frost/40 ${COARSE_TAP}`}
         />
-        <button
+        <Button
           type="submit"
+          variant="primary"
+          size="icon"
           disabled={draft.trim().length < 2 || adding}
-          className="rounded-full bg-fa-frost/20 p-2.5 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
+          className={`rounded-full ${COARSE_TAP}`}
           aria-label="Add tag"
         >
           <Plus className="h-4 w-4" />
-        </button>
+        </Button>
       </form>
       <SaveStatus message={status?.message ?? null} onRetry={status?.retry ?? undefined} retrying={adding} testId="tag-save-status" />
     </section>

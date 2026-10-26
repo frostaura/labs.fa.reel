@@ -1,6 +1,8 @@
 import { X } from "lucide-react";
 import { summaryChips, type ChipTone, type FiltersLike } from "../../lib/pickConditions";
 import type { BrowseFilter } from "../../lib/browseFilter";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 const TONE: Record<ChipTone, string> = {
   include: "border-fa-success/50 bg-fa-success/15 text-fa-success",
@@ -103,18 +105,19 @@ export default function ConditionSummary({
             >
               {chip.label}
               {onBrowseChange && browse && chip.clear && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
                   // The segmented control that set this is often scrolled out of view by the time
                   // the chip is read, so the chip has to be able to clear itself.
                   onClick={() => onBrowseChange({ ...browse, ...chip.clear })}
                   aria-label={`Clear “${chip.label}” — show everything again`}
                   title={`Clear “${chip.label}”`}
                   data-testid={`clear-${chip.key}`}
-                  className="-mr-0.5 rounded-full p-0.5 opacity-70 transition hover:opacity-100 focus-visible:opacity-100"
+                  className={`-mr-0.5 h-4 w-4 rounded-full text-current opacity-70 hover:bg-transparent hover:opacity-100 focus-visible:opacity-100 ${COARSE_TAP}`}
                 >
                   <X className="h-3 w-3" />
-                </button>
+                </Button>
               )}
             </span>
           ))}
