@@ -360,8 +360,16 @@ interface State {
    * about. See {@link gridRowOf}.
    */
   gridTurn: number | null;
-  /** The planner's reading of the newest turn (§4.9 `plan`) — what the refine chips are built from. */
+  /**
+   * The planner's reading of the answer ON SCREEN (§4.9 `plan`) — what the refine chips and the
+   * near-miss heading are built from. It moves with the grid: a new turn's reading waits in
+   * `turnPlan` until that turn's answer replaces the grid, so a held answer is never described by
+   * the question that is about to replace it, and a turn with no plan frame (the v1 engine) never
+   * inherits the previous one's topic.
+   */
   plan: PlanData | null;
+  /** The turn in flight's reading, promoted to {@link State.plan} when its answer becomes the grid. */
+  turnPlan: PlanData | null;
   /**
    * What the v2 `degraded` frames of the turn in flight said. Applied to that turn's reply as soon as
    * there is one, and merged with `done.degraded` at the end — so a degraded reading is marked on
@@ -460,7 +468,7 @@ export const initialChatState: State = {
   holdingPrevious: false, arrived: 0, removed: 0, removedEarlier: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
   pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
-  pinned: 0, gridTurn: null, plan: null, turnDegraded: [],
+  pinned: 0, gridTurn: null, plan: null, turnPlan: null, turnDegraded: [],
 };
 
 /**
@@ -499,7 +507,7 @@ function released(state: State): State {
   }
   return {
     ...state, turns, holdingPrevious: false, byId: {}, order: [], arrived: 0, settled: 0, pinned: 0,
-    gridTurn: null,
+    gridTurn: null, plan: state.turnPlan,
     ...clearedAnswerDescription(),
     pageQuery: state.lastQuery,
   };
@@ -639,7 +647,7 @@ export function chatReducer(state: State, action: ChatAction): State {
             // The held grid stays under the reply that produced it while this question runs, and
             // is frozen there as an earlier answer the moment this turn has something to show.
             gridTurn: state.order.length > 0 ? gridRowOf(state) : null,
-            turnDegraded: [],
+            turnDegraded: [], turnPlan: null,
           };
     }
     case "moreTurn":
@@ -689,7 +697,7 @@ export function chatReducer(state: State, action: ChatAction): State {
         // answer it replaces is not frozen anywhere. A grid under an EARLIER row — an item question's
         // answer left it there — keeps that row, and is frozen there like any other earlier answer.
         gridTurn: state.gridTurn != null && state.gridTurn < turns.length ? state.gridTurn : null,
-        turnDegraded: [],
+        turnDegraded: [], turnPlan: null,
       };
     }
     case "phase":
@@ -882,7 +890,8 @@ export function chatReducer(state: State, action: ChatAction): State {
         turnConflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
       };
     case "plan":
-      return { ...state, plan: action.data };
+      // A page's reading is the answer's own question again; it changes nothing on screen.
+      return state.appending ? state : { ...state, turnPlan: action.data };
     case "picks": {
       // One judge batch, past the gate, in its final order. Appended after whatever this turn has
       // already shown and pinned there: a later batch never moves an earlier one (§4.8), and a phase
@@ -962,7 +971,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (!state.appending && state.holdingPrevious && state.order.length > 0 && leavesGrid(action.data.mode)) {
         return {
           ...state, status: "done", phase: null, holdingPrevious: false, pageRefusal: null,
-          turns: markTurnReply(state.turns, flags), turnDegraded: [],
+          turns: markTurnReply(state.turns, flags), turnDegraded: [], turnPlan: null,
           turnConflict: null, turnConflictTerms: [],
         };
       }
@@ -1048,6 +1057,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // its own reply, the newest row — unless it is a page, which extends the grid where it is.
         pinned: 0,
         gridTurn: state.appending ? state.gridTurn : null,
+        // The grid is this turn's answer now, so it is described by this turn's reading — or by
+        // none, when the engine sent no plan.
+        plan: state.appending ? state.plan : state.turnPlan,
+        turnPlan: null,
         // Same rule as the tray it labels: a page ADDS its cut to the running total, a fresh answer
         // replaces it. `null` rather than `0` where neither side said anything — a server that never
         // sent the field has not told us it cut nothing, and the tray falls back to counting the

@@ -211,12 +211,36 @@ describe("v2 none-found, answer, clarify, degraded and plan", () => {
     expect(s.turns[1].degraded).toBeUndefined();
   });
 
-  it("remembers the plan's concepts for the refine chips", () => {
-    const s = run([
+  it("describes the grid by its own turn's reading, never the question about to replace it", () => {
+    const ninja = run([
       { type: "userTurn", message: "ninja movies", fresh: true },
       { type: "plan", data: { act: "NewRequest", concepts: ["ninja"], references: [] } },
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "done", data: done({ results: [card(1)] }) },
     ]);
-    expect(s.plan?.concepts).toEqual(["ninja"]);
+    expect(ninja.plan?.concepts).toEqual(["ninja"]);
+    // A follow-up's reading waits until its answer is the grid…
+    const asking = run([
+      ...[{ type: "userTurn", message: "ninja movies", fresh: true } as ChatAction],
+      { type: "plan", data: { act: "NewRequest", concepts: ["ninja"], references: [] } },
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "done", data: done({ results: [card(1)] }) },
+      { type: "userTurn", message: "samurai", fresh: false },
+      { type: "plan", data: { act: "NewRequest", concepts: ["samurai"], references: [] } },
+    ]);
+    expect(asking.plan?.concepts).toEqual(["ninja"]);
+    // …and a turn that sent no plan at all (the v1 engine) inherits nothing.
+    const v1 = chatReducer(asking, { type: "done", data: done({ results: [card(2)] }) });
+    expect(v1.plan?.concepts).toEqual(["samurai"]);
+    const bare = run([
+      { type: "userTurn", message: "ninja movies", fresh: true },
+      { type: "plan", data: { act: "NewRequest", concepts: ["ninja"], references: [] } },
+      { type: "done", data: done({ results: [card(1)] }) },
+      { type: "userTurn", message: "samurai", fresh: false },
+      { type: "candidate", data: card(2) },
+      { type: "done", data: done({ results: [card(2)] }) },
+    ]);
+    expect(bare.plan).toBeNull();
   });
 });
 
