@@ -47,7 +47,7 @@ export default function CardTray({
           still measures 44 px, which is what a thumb needs. */}
       <summary
         data-testid={toggleTestId}
-        className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+        className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-3 hover:text-fa-frost-bright"
       >
         {summary}
       </summary>
@@ -59,7 +59,7 @@ export default function CardTray({
       >
         {heading}
       </h3>
-      <p className="fa-caption text-fa-frost-dim/70 mt-1">{caption}</p>
+      <p className="fa-caption text-3 mt-1">{caption}</p>
       {extra}
       {cards.length > 0 && (
         <div className="mt-3">

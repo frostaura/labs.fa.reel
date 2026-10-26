@@ -2,9 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "../ui/dialog";
 import ConditionsEditor from "../settings/ConditionsEditor";
+import PillButton from "./PillButton";
 import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
 import { EDITOR, relaxationLabel, ruleTarget } from "../../lib/askReel/relaxation";
 import type { AskKnockout } from "../../lib/askReelStream";
+
+/** What can take focus without a tab stop of its own being invented. */
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Where focus lands for a rule's control. A control that is itself focusable takes it; a container
+ * (the genre chip is a `role="group"` around its include and exclude buttons) hands it to its first
+ * focusable child — focusing the bare group did nothing, so the reader was left on the dialog's
+ * close button; anything else (the editor's root) is made focusable by script only.
+ */
+function focusTarget(el: HTMLElement): HTMLElement {
+  if (el.matches(FOCUSABLE)) return el;
+  const inner = el.querySelector<HTMLElement>(FOCUSABLE);
+  if (inner) return inner;
+  el.setAttribute("tabindex", "-1");
+  return el;
+}
 
 /** How long the dialog keeps looking for the rule's control while the editor loads its filters. */
 const FIND_BUDGET_MS = 3_000;
@@ -36,8 +54,8 @@ export default function RelaxationChip({ knockout }: { knockout: AskKnockout }) 
       const el = root?.querySelector<HTMLElement>(target) ?? (Date.now() - started >= FIND_BUDGET_MS ? root?.querySelector<HTMLElement>(EDITOR) : null);
       if (el) {
         el.scrollIntoView({ block: "center" });
-        if (el.matches(EDITOR)) el.setAttribute("tabindex", "-1");
-        el.focus({ preventScroll: true });
+        const landing = focusTarget(el);
+        landing.focus({ preventScroll: true });
         el.setAttribute("data-askreel-rule", "focused");
         return;
       }
@@ -52,14 +70,10 @@ export default function RelaxationChip({ knockout }: { knockout: AskKnockout }) 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <button
-          type="button"
-          data-testid="askreel-relax"
-          className="fa-caption inline-flex min-h-11 items-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
-        >
-          <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+        <PillButton tone="accent" data-testid="askreel-relax" className="whitespace-normal py-2 text-left">
+          <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" aria-hidden />
           {relaxationLabel(knockout)}
-        </button>
+        </PillButton>
       </DialogTrigger>
       <DialogContent ref={contentRef} className="max-w-2xl max-h-[85vh] overflow-y-auto p-0">
         <DialogHeader>

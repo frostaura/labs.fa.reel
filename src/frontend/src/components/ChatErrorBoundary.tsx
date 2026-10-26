@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, RotateCcw } from "lucide-react";
+import PillButton from "./askReel/PillButton";
 
 interface Props {
   children: ReactNode;
@@ -56,14 +57,9 @@ export default class ChatErrorBoundary extends Component<Props, State> {
         <p className="fa-caption text-fa-frost-dim">
           Something in that answer did not render. Starting the conversation again usually clears it.
         </p>
-        <button
-          type="button"
-          onClick={this.handleRetry}
-          data-testid="askreel-crash-retry"
-          className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 fa-caption text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
-        >
-          <RotateCcw className="h-3.5 w-3.5" /> Start again
-        </button>
+        <PillButton tone="strong" onClick={this.handleRetry} data-testid="askreel-crash-retry">
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden /> Start again
+        </PillButton>
       </div>
     );
   }

@@ -17,7 +17,8 @@ describe("narrate — the narration line follows the phase frames", () => {
 
 describe("relaxation chips open the editor on their rule", () => {
   it("lands a genre rule on its chip and a language rule on the allow-list", () => {
-    expect(ruleTarget({ kind: "ExcludeGenre", value: "Comedy" })).toBe('[data-testid="genre-comedy"]');
+    expect(ruleTarget({ kind: "ExcludeGenre", value: "Comedy" })).toBe('[data-testid="genre-comedy-exclude"]');
+    expect(ruleTarget({ kind: "IncludeGenre", value: "thriller" })).toBe('[data-testid="genre-thriller-include"]');
     expect(ruleTarget({ kind: "Language", value: "en" })).toBe('[data-testid="lang-all"]');
     expect(ruleTarget({ kind: "MinPredictedRating", value: "6.0" })).toBe('[data-testid="min-rating-slider"]');
   });

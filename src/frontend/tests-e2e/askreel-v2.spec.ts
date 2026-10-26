@@ -167,7 +167,9 @@ test.describe("Ask Reel — chat UI v2", () => {
     await expect(chip).toHaveText("Without “excluded genre: comedy”: +4");
     await chip.click();
     await expect(page.getByTestId("conditions-editor")).toBeVisible();
-    await expect(page.getByTestId("genre-comedy")).toBeFocused();
+    // Focus lands on the rule's own toggle — the comedy exclusion — so one press turns it off.
+    await expect(page.getByTestId("genre-comedy-exclude")).toBeFocused();
+    await expect(page.getByTestId("genre-comedy-exclude")).toHaveAttribute("aria-pressed", "true");
   });
 
   test("an item question answers beside the grid and leaves it exactly as it was", async ({ page }) => {

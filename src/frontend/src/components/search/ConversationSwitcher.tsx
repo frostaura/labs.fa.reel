@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown, Trash2, X } from "lucide-react";
 import { useDeleteConversationMutation, useListConversationsQuery } from "../../store/api";
 import { relTime } from "../../lib/format";
 import { plural } from "../../lib/askReel/copy";
 import { recentListing } from "../../lib/askReel/paging";
 import UndoToast from "./UndoToast";
+import PillButton from "../askReel/PillButton";
+import { Button } from "../ui/button";
 
 /**
  * `Recent ▾` — the way back into a thread you left.
@@ -56,6 +58,7 @@ export default function ConversationSwitcher({
   // why there are exactly two sizes and no third.
   const [showOlder, setShowOlder] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const panelId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   /** The row whose trash has been tapped and is now asking. One at a time, by construction. */
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -152,23 +155,22 @@ export default function ConversationSwitcher({
 
   return (
     <div ref={boxRef} className="relative">
-      <button
+      <PillButton
         ref={triggerRef}
-        type="button"
+        tone="quiet"
         data-testid="askreel-recent"
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-controls={open ? panelId : undefined}
         disabled={disabled}
         title={disabled ? "Wait for the current results to finish" : undefined}
         onClick={() => setOpen((v) => !v)}
-        className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 disabled:hover:text-fa-frost-dim transition-colors"
       >
-        Recent <ChevronDown className="h-3.5 w-3.5" />
-      </button>
+        Recent <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+      </PillButton>
 
       {open && (
-        <div
-          role="menu"
+        <section
+          id={panelId}
           aria-label="Recent conversations"
           data-testid="askreel-recent-menu"
           /*
@@ -191,6 +193,12 @@ export default function ConversationSwitcher({
            * It stays a DOM child of `boxRef` in both shapes, which is what keeps the
            * tap-outside-to-close handler correct: `fixed` changes where a box paints, not where it
            * sits in the tree.
+           *
+           * A labelled section of rows, not `role="menu"`: a menu may contain only menu items, and
+           * each row here is TWO controls (open, delete) with a confirm that replaces one of them —
+           * axe failed the old markup on `aria-required-children` the moment it opened. Rows are a
+           * list, every control a plain button, and the trigger's `aria-expanded` and
+           * `aria-controls` say what it opens.
            */
           className="fixed inset-x-2 bottom-2 z-50 max-h-[55vh] overflow-y-auto rounded-lg border border-fa-edge bg-fa-ink-2/95 backdrop-blur-md shadow-2xl reel-rise md:absolute md:inset-x-auto md:bottom-auto md:right-0 md:top-12 md:w-72 md:max-h-[60vh]"
         >
@@ -201,15 +209,15 @@ export default function ConversationSwitcher({
               Nothing here yet — ask something.
             </p>
           ) : (
-            rows.map((row) => (
-              <div
+            <ul>
+            {rows.map((row) => (
+              <li
                 key={row.id}
                 data-testid="askreel-recent-row"
                 className={`flex items-center gap-2 px-3 py-2 transition ${row.id === currentId ? "bg-fa-frost/10" : "hover:bg-fa-glass"}`}
               >
-                <button
-                  type="button"
-                  role="menuitem"
+                <Button
+                  variant="ghost"
                   data-testid="askreel-recent-open"
                   onClick={() => {
                     setOpen(false);
@@ -218,14 +226,14 @@ export default function ConversationSwitcher({
                   // 44 px of vertical target inside a 60 px row: the primary way into a thread was
                   // a 36 px box, eight pixels shy of the touch minimum the row's own delete control
                   // already meets. `justify-center` keeps the two lines optically where they were.
-                  className="flex min-h-11 min-w-0 flex-1 flex-col justify-center text-left"
+                  className="flex h-auto min-h-11 min-w-0 flex-1 flex-col items-stretch justify-center gap-0 whitespace-normal rounded-none p-0 text-left font-normal hover:bg-transparent"
                 >
                   {/* The title is the thread's first question, which is what a person recognises a
                       conversation by — never a generated summary they have to decode. */}
-                  <p className="fa-body text-fa-frost-bright truncate" title={row.title ?? undefined}>
+                  <span className="block fa-body text-fa-frost-bright truncate" title={row.title ?? undefined}>
                     {row.title?.trim() ? row.title : "Untitled thread"}
-                  </p>
-                  <p className="fa-caption text-fa-frost-dim">
+                  </span>
+                  <span className="block fa-caption text-fa-frost-dim">
                     {row.turnCount} {plural(row.turnCount, "turn")} · {relTime(row.lastTurnAt)}
                     {/* Said here as well as on the page, so a thread with no restorable answer is
                         recognisable BEFORE it is opened rather than after — and said as what the
@@ -235,71 +243,75 @@ export default function ConversationSwitcher({
                         field here, `lastCardsAt`, and it means "no picks were ever stored"; why
                         there are none is the page's business, not this row's. */}
                     {row.lastCardsAt == null && " · no saved picks"}
-                  </p>
-                </button>
+                  </span>
+                </Button>
                 {confirming === row.id ? (
                   // The confirm takes the trash's place rather than floating over the row: a
                   // dialog on a phone covers the very list the user is deciding about, and a
                   // second control appearing BESIDE the first is how a misfire becomes two.
                   <div className="flex shrink-0 items-center gap-1" data-testid="askreel-recent-confirm">
                     <span className="fa-caption text-fa-warning">Delete?</span>
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="icon"
                       data-testid="askreel-recent-delete-yes"
                       aria-label={`Confirm delete: ${row.title?.trim() ? row.title : "untitled"}`}
                       onClick={() => {
                         setConfirming(null);
                         setPending({ id: row.id, title: row.title?.trim() ? row.title : "Untitled thread" });
                       }}
-                      className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-fa-warning transition-colors hover:bg-fa-warning/10"
+                      className="min-h-11 min-w-11 rounded-full text-fa-warning hover:bg-fa-warning/10 hover:text-fa-warning"
                     >
-                      <Check className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
+                      <Check className="h-4 w-4" aria-hidden />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
                       data-testid="askreel-recent-delete-no"
                       aria-label="Keep this conversation"
                       onClick={() => setConfirming(null)}
-                      className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-fa-frost-dim transition-colors hover:text-fa-frost-bright hover:bg-fa-glass"
+                      className="min-h-11 min-w-11 rounded-full text-fa-frost-dim hover:text-fa-frost-bright"
                     >
-                      <X className="h-4 w-4" />
-                    </button>
+                      <X className="h-4 w-4" aria-hidden />
+                    </Button>
                   </div>
                 ) : (
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     data-testid="askreel-recent-delete"
                     aria-label={`Delete conversation: ${row.title?.trim() ? row.title : "untitled"}`}
                     onClick={() => setConfirming(row.id)}
-                    className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full text-fa-frost-dim hover:text-fa-warning hover:bg-fa-warning/10 transition-colors"
+                    className="min-h-11 min-w-11 shrink-0 rounded-full text-fa-frost-dim hover:text-fa-warning hover:bg-fa-warning/10"
                   >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                    <Trash2 className="h-4 w-4" aria-hidden />
+                  </Button>
                 )}
-              </div>
-            ))
+              </li>
+            ))}
+            </ul>
           )}
           {/* SB-05. The list is bounded on purpose, but an account with 51 threads saw 20 of them
               and no hint that the other 31 existed — a small control read as a complete list. One
               gesture asks for everything the route can return; there is no second one, because
               `/conversations` takes a `limit` and no `offset`. */}
           {canShowOlder && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               data-testid="askreel-recent-older"
               onClick={() => setShowOlder(true)}
               disabled={isFetching}
-              className="fa-caption flex min-h-11 w-full items-center border-t border-fa-edge px-3 text-left text-fa-frost-dim hover:text-fa-frost-bright hover:bg-fa-glass disabled:opacity-40 transition-colors"
+              className="flex min-h-11 w-full justify-start rounded-none border-t border-fa-edge px-3 text-xs font-normal text-fa-frost-dim hover:text-fa-frost-bright disabled:opacity-40"
             >
               Show older threads
-            </button>
+            </Button>
           )}
           {atCeiling && (
-            <p className="border-t border-fa-edge px-3 py-2 fa-caption text-fa-frost-dim/70" data-testid="askreel-recent-ceiling">
+            <p className="border-t border-fa-edge px-3 py-2 fa-caption text-3" data-testid="askreel-recent-ceiling">
               Showing your {rows.length} most recent threads.
             </p>
           )}
-        </div>
+        </section>
       )}
 
       {/* Outside the `open` guard on purpose: closing the menu must not silently cancel the window
