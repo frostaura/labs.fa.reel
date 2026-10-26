@@ -38,7 +38,9 @@ export default function TonightMoodChips({
               // Tapping the active chip clears it — the way back to the model's own order is the
               // same gesture that left it, so nothing is a one-way door.
               onClick={() => onChange(active ? null : mood.id)}
-              className={`fa-overline shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 transition ${
+              // 44 px tall on a coarse pointer (IREV3S-08 measured these at 24); a fine pointer keeps
+              // the compact chip.
+              className={`fa-overline inline-flex min-h-11 shrink-0 items-center whitespace-nowrap rounded-full border px-3 py-1.5 transition [@media(pointer:fine)]:min-h-0 ${
                 active
                   ? "border-fa-frost/60 bg-fa-glass-strong text-fa-frost-bright"
                   : "border-fa-edge bg-fa-glass text-fa-frost-dim hover:border-fa-frost/40 hover:text-fa-frost"

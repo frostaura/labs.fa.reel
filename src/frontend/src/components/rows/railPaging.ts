@@ -35,7 +35,13 @@ export type RailPagingEvent =
   | { type: "success" }
   | { type: "failure" }
   /** The user pressed Retry: one more attempt, and straight back to `failed` if it fails too. */
-  | { type: "retry" };
+  | { type: "retry" }
+  /**
+   * The request outlived the rail's time limit. Straight to `failed`, no automatic retries: a
+   * request that hung once is the slow path, and three more of them is the "shimmer that cannot
+   * end" this machine exists to stop (the title page's Similar rail, F-14).
+   */
+  | { type: "timeout" };
 
 export const INITIAL_RAIL_PAGING: RailPaging = { phase: "idle", failures: 0, retryInMs: null };
 
@@ -52,6 +58,8 @@ export function nextRailPaging(state: RailPaging, event: RailPagingEvent): RailP
         ? { phase: "failed", failures, retryInMs: null }
         : { phase: "backoff", failures, retryInMs: delay };
     }
+    case "timeout":
+      return { phase: "failed", failures: Math.max(state.failures + 1, RAIL_BACKOFF_MS.length), retryInMs: null };
     case "retry":
       // A manual retry is one request, not a fresh round of three: the user is watching the tile,
       // and a second seven-second shimmer before the same failure would be the old lie again.

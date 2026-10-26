@@ -18,19 +18,34 @@ interface Props {
   /** Automatic retries are spent: show the Retry tile instead of a placeholder. */
   failed?: boolean;
   onRetry?: () => void;
+  /**
+   * How many skeleton cards hold the rail while its FIRST page loads (default 1). A seedless rail
+   * that shows one shimmer card reads as "one result coming"; a row's worth reads as the row it is.
+   */
+  skeletonCount?: number;
 }
 
 /** A skeleton poster card trailing the rail while the next page resolves. */
 function ShimmerCard() {
   return (
-    <div className="snap-start w-44 sm:w-48 shrink-0" aria-hidden>
+    <div className="snap-start w-44 sm:w-48 shrink-0" aria-hidden data-testid="rail-skeleton">
       <div className="reel-poster reel-shimmer" />
     </div>
   );
 }
 
 /** Generic horizontal scroll-snap row of collapsed cards, with optional infinite paging. */
-export default function RecRow({ title, caption, items, variant = "default", loadMore, loading, failed, onRetry }: Props) {
+export default function RecRow({
+  title,
+  caption,
+  items,
+  variant = "default",
+  loadMore,
+  loading,
+  failed,
+  onRetry,
+  skeletonCount = 1,
+}: Props) {
   // Nothing to show and nothing coming — render nothing. While a first page is in flight (genre
   // rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
   // failed says so rather than vanishing, because an empty rail and a broken one are different news.
@@ -76,7 +91,9 @@ export default function RecRow({ title, caption, items, variant = "default", loa
             <RecCard card={card} />
           </div>
         ))}
-        {loading && !failed && <ShimmerCard />}
+        {loading &&
+          !failed &&
+          Array.from({ length: items.length === 0 ? skeletonCount : 1 }, (_, i) => <ShimmerCard key={`skeleton-${i}`} />)}
         {failed && onRetry && <RailRetryTile onRetry={onRetry} />}
       </FadeScrollRow>
     </section>

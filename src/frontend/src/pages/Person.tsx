@@ -6,6 +6,7 @@ import { profileUrl } from "../lib/tmdbImages";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import { titleFailure } from "../components/title/titleRouting";
+import { filmographyRoleLine } from "../lib/personRoles";
 
 /** Initials for the avatar fallback — first letters of the first two words of a name. */
 function initials(name: string): string {
@@ -102,7 +103,7 @@ export default function Person() {
             <button
               key={value}
               onClick={() => ratePerson({ personId, rating: value })}
-              className={`h-9 w-8 rounded-md border text-sm tabular-nums transition ${
+              className={`h-11 w-11 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-8 rounded-md border text-sm tabular-nums transition ${
                 person.userRating === value
                   ? "border-fa-frost bg-fa-frost/20 text-fa-frost-bright"
                   : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
@@ -113,7 +114,7 @@ export default function Person() {
             </button>
           ))}
           {person.userRating != null && (
-            <button onClick={() => unratePerson({ personId })} className="fa-button-ghost text-fa-frost-dim ml-2">
+            <button onClick={() => unratePerson({ personId })} className="fa-button-ghost min-h-11 text-fa-frost-dim ml-2 [@media(pointer:fine)]:min-h-0">
               Clear
             </button>
           )}
@@ -126,7 +127,9 @@ export default function Person() {
         <section className="space-y-3">
           <h2 className="fa-section-title text-base">In your library &amp; beyond</h2>
           <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-4">
-            {person.filmography.map((t) => (
+            {person.filmography.map((t) => {
+              const role = filmographyRoleLine(t);
+              return (
               <Link
                 key={t.titleId}
                 to={`/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`}
@@ -143,8 +146,15 @@ export default function Person() {
                 </div>
                 <p className="mt-2 fa-caption text-fa-frost-bright truncate" title={t.name}>{t.name}</p>
                 <p className="fa-caption text-fa-frost-dim">{t.year ?? ""}</p>
+                {/* What they did on it (F-24) — present only when the API says. */}
+                {role && (
+                  <p className="fa-caption text-fa-frost/80 truncate" title={role} data-testid="filmography-role">
+                    {role}
+                  </p>
+                )}
               </Link>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}

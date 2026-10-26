@@ -107,7 +107,9 @@ export default function Saved() {
           </button>
         </div>
       ) : isLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" aria-busy="true" data-testid="saved-loading">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4" aria-busy="true" data-testid="saved-loading">
+          {/* Same columns as the queue (G-21: 4 at md, 6 at lg), so the queue lands where its
+              placeholders stood. */}
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="reel-poster reel-shimmer" />
           ))}
@@ -162,7 +164,7 @@ export default function Saved() {
             </p>
           )}
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
             {rest.map((item) => (
               <SavedQueueCard
                 key={item.titleId}

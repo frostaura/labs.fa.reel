@@ -14,7 +14,8 @@ import {
 } from "../store/api";
 import { backdropUrl } from "../lib/tmdbImages";
 import PosterImage from "../components/rec/PosterImage";
-import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
+import { ScoreChip } from "../components/rec/ScoreBadges";
+import { CardUndoProvider } from "../components/rec/CardUndo";
 import WhereToWatch from "../components/title/WhereToWatch";
 import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
@@ -26,6 +27,7 @@ import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
 import { featureLabel } from "../lib/featureLabel";
+import { predictionWaterfall, significantContributions, signedStep } from "../lib/predictionWaterfall";
 import { canGoBack, titleFailure } from "../components/title/titleRouting";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import {
@@ -66,8 +68,11 @@ const SYNTHETIC_FEATURES = [
 ];
 
 function visibleContributions(all: { feature: string; value: number }[]) {
-  const top = all.slice(0, 5);
-  const synthetic = all.filter((c) => SYNTHETIC_FEATURES.includes(c.feature) && !top.includes(c));
+  // Bars under 0.05 are noise at one decimal and are not drawn at all (F-25) — a "+0.0" bar is a
+  // claim about nothing, and five of them crowded out the two that mattered.
+  const significant = significantContributions(all);
+  const top = significant.slice(0, 5);
+  const synthetic = significant.filter((c) => SYNTHETIC_FEATURES.includes(c.feature) && !top.includes(c));
   return [...top, ...synthetic];
 }
 
@@ -90,6 +95,9 @@ function initials(name: string): string {
     .map((word) => word[0]!.toUpperCase())
     .join("");
 }
+
+/** How long the Similar rail's first page may take before it offers a Retry instead. */
+const SIMILAR_TIMEOUT_MS = 8000;
 
 export default function TitleDetail() {
   const { mediaType = "movie", tmdbId = "0" } = useParams();
@@ -131,6 +139,10 @@ export default function TitleDetail() {
   };
 
   const trailerKey = youTubeVideoId(title?.trailerUrl);
+  const bars = title?.prediction ? visibleContributions(title.prediction.contributions) : [];
+  const waterfall = title?.prediction
+    ? predictionWaterfall(title.prediction.predictedRating, title.prediction.waterfall)
+    : null;
 
   return (
     /* This is spec §2's "Expanded (tap)" surface, so it is a real dialog, not a styled div: the
@@ -148,7 +160,10 @@ export default function TitleDetail() {
              with `-translate-x-1/2`: `reel-rise` animates `transform` with fill-mode `both`, so a
              translate-based centre is permanently overwritten by the animation's end keyframe and
              the panel lands at the viewport's midpoint by its top-left corner. */
-          className="fixed inset-x-0 top-6 z-50 mx-auto flex max-h-[calc(100vh-3rem)] w-[min(94vw,880px)] flex-col overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 shadow-2xl reel-rise"
+          /* On a phone it is a full-screen sheet (O-13): `100dvh`, so the browser's own toolbars
+             never cover its bottom, and no rounded panel floating over a sliver of page it cannot
+             use. From `sm` it is the centred 880 px panel. */
+          className="fixed inset-0 z-50 flex h-[100dvh] w-full flex-col overflow-hidden bg-fa-ink-2 reel-rise sm:inset-x-0 sm:bottom-auto sm:top-6 sm:mx-auto sm:h-auto sm:max-h-[calc(100vh-3rem)] sm:w-[min(94vw,880px)] sm:rounded-2xl sm:border sm:border-fa-edge sm:shadow-2xl"
           aria-describedby={undefined}
           onCloseAutoFocus={(event) => {
             // Take over the restore: Radix's own handler aims at a trigger that does not exist.
@@ -160,11 +175,15 @@ export default function TitleDetail() {
         >
           <DialogClose
             aria-label="Close"
-            className="absolute right-3 top-3 z-20 fa-button-ghost rounded-full p-2 bg-fa-ink/60"
+            className="absolute right-3 top-3 z-20 fa-button-ghost inline-flex min-h-11 min-w-11 items-center justify-center rounded-full p-2 bg-fa-ink/60"
+            data-testid="title-close"
           >
             <X className="h-5 w-5" />
           </DialogClose>
 
+          {/* The Similar rail's card actions raise their undo toast here (F-19) — inside the
+              dialog's content, because Radix makes everything outside a modal inert. */}
+          <CardUndoProvider>
           <div className="overflow-y-auto">
             {failure ? (
               <>
@@ -227,15 +246,6 @@ export default function TitleDetail() {
                         <img src={backdropUrl(title.backdropPath, "w1280")!} alt="" className="absolute inset-0 h-full w-full object-cover" />
                       )}
                       <div className="absolute inset-0 reel-scrim" />
-                      {trailerKey && (
-                        <button
-                          onClick={() => setTrailerOpen(true)}
-                          className="absolute inset-0 m-auto h-16 w-16 rounded-full border border-fa-frost/50 bg-fa-ink/70 backdrop-blur flex items-center justify-center transition hover:scale-110"
-                          aria-label="Play trailer"
-                        >
-                          <Play className="h-7 w-7 text-fa-frost-bright translate-x-0.5" />
-                        </button>
-                      )}
                       <div className="absolute bottom-0 inset-x-0 p-5 flex items-end gap-4">
                         <div className="w-24 shrink-0 hidden sm:block drop-shadow-xl">
                           <PosterImage path={title.posterPath} alt={title.name} size="w185" />
@@ -254,7 +264,16 @@ export default function TitleDetail() {
                                 You rated {title.userState.userRating}
                               </span>
                             ) : (
-                              title.prediction && <PredictedRatingBadge rating={title.prediction.predictedRating} size="lg" />
+                              // The same one chip the cards carry (FD-4): the banded prediction over
+                              // the crowd score.
+                              title.prediction && (
+                                <ScoreChip
+                                  predictedRating={title.prediction.predictedRating}
+                                  crowdRating={title.crowdRating ?? null}
+                                  crowdVotes={title.crowdVotes ?? null}
+                                  size="lg"
+                                />
+                              )
                             )}
                           </div>
                           {title.userState.userRating != null && title.prediction && (
@@ -282,16 +301,30 @@ export default function TitleDetail() {
                 <div className="p-5 sm:p-6 space-y-6">
                   {/* Reactions */}
                   <div className="flex items-center gap-2 flex-wrap" data-testid="reaction-bar">
+                    {/* The trailer is an action like the rest, here with them — not a disc over the
+                        art, where on a phone it sat on the title it was meant to sell (O-13). */}
+                    {trailerKey && !trailerOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setTrailerOpen(true)}
+                        className="fa-button min-h-11"
+                        data-testid="play-trailer"
+                      >
+                        <Play className="h-4 w-4" />
+                        Trailer
+                      </button>
+                    )}
                     <Popover open={ratePickerOpen} onOpenChange={setRatePickerOpen}>
                       <PopoverTrigger asChild>
-                        <button className={title.userState.userRating ? "fa-button-primary" : "fa-button"}>
+                        <button className={`${title.userState.userRating ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}>
                           <Eye className="h-4 w-4" />
                           {title.userState.userRating ? `Seen it — you rated ${title.userState.userRating}` : "Seen it + rate"}
                         </button>
                       </PopoverTrigger>
                       <PopoverContent align="start" className="w-auto">
                         <p className="fa-overline text-fa-frost-dim mb-2">one tap — seen &amp; rated</p>
-                        <div className="flex gap-1">
+                        {/* Two rows of five: ten 44 px targets in one row are wider than a phone. */}
+                        <div className="grid grid-cols-5 gap-1">
                           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
                             <button
                               key={value}
@@ -299,7 +332,7 @@ export default function TitleDetail() {
                                 rate({ ...args, titleId: title.titleId, rating: value });
                                 setRatePickerOpen(false);
                               }}
-                              className={`h-9 w-8 rounded-md border text-sm tabular-nums transition ${
+                              className={`h-11 w-11 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9 rounded-md border text-sm tabular-nums transition ${
                                 title.userState.userRating === value
                                   ? "border-fa-frost bg-fa-frost/25 text-fa-frost-bright"
                                   : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/50 hover:bg-fa-frost/15"
@@ -315,7 +348,7 @@ export default function TitleDetail() {
                                 unrate(args);
                                 setRatePickerOpen(false);
                               }}
-                              className="fa-button-ghost text-fa-frost-dim ml-2"
+                              className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-fa-frost-dim"
                               data-testid="clear-rating"
                             >
                               Clear rating
@@ -336,7 +369,7 @@ export default function TitleDetail() {
                           ? unsave({ ...args, titleId: title.titleId })
                           : save({ ...args, titleId: title.titleId })
                       }
-                      className={title.userState.savedForLater ? "fa-button-primary" : "fa-button"}
+                      className={`${title.userState.savedForLater ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}
                       data-testid="save-button"
                     >
                       {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
@@ -344,13 +377,13 @@ export default function TitleDetail() {
                     </button>
 
                     {title.userState.notInterested ? (
-                      <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button border-fa-danger/40 text-fa-danger">
+                      <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-danger/40 text-fa-danger">
                         <Undo2 className="h-4 w-4" /> Not interested — undo
                       </button>
                     ) : (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <button className="fa-button-ghost" data-testid="not-interested">
+                          <button className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="not-interested">
                             <EyeOff className="h-4 w-4" /> Not interested
                           </button>
                         </DropdownMenuTrigger>
@@ -370,20 +403,22 @@ export default function TitleDetail() {
                     {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
                     {title.mediaType === "Show" && (
                       title.userState.dropped ? (
-                        <button onClick={() => undrop({ ...args, titleId: title.titleId })} className="fa-button border-fa-frost/40 text-fa-frost" data-testid="undrop">
+                        <button onClick={() => undrop({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-frost/40 text-fa-frost" data-testid="undrop">
                           <Undo2 className="h-4 w-4" /> Dropped — undo
                         </button>
                       ) : (
-                        <button onClick={() => markDropped({ ...args, titleId: title.titleId })} className="fa-button-ghost" data-testid="drop-show">
+                        <button onClick={() => markDropped({ ...args, titleId: title.titleId })} className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="drop-show">
                           <X className="h-4 w-4" /> Drop show
                         </button>
                       )
                     )}
                   </div>
 
-                  {/* The why-line — second person, the model's own reason, above the studio's blurb.
-                      Same voice and weight the hero card gives it, so opening a card no longer
-                      REMOVES the one personalised sentence on it. */}
+                  {/* The ONE pitch line (F-14): the why-line — second person, the model's own
+                      reason, above the studio's blurb, in the voice and weight the hero card gives
+                      it, so opening a card no longer REMOVES the one personalised sentence on it.
+                      With no why-line the lens's hook stands in (LensBlock). Everything else the
+                      lens says sits behind its "More". */}
                   {title.whyThis && (
                     <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug" data-testid="why-this">
                       {title.whyThis}
@@ -395,18 +430,41 @@ export default function TitleDetail() {
                       been written, which leaves the why-line above and the synopsis below exactly
                       as they were. It sits ABOVE the synopsis and never replaces it: when the lens
                       is wrong or absent, the page still tells you what the thing is about. */}
-                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} />
+                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} hasPitch={Boolean(title.whyThis)} />
 
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}
 
-                  {/* Prediction breakdown */}
-                  {title.prediction && title.prediction.contributions.length > 0 && (
+                  {/* Prediction breakdown: a walk from the baseline when the server sends one
+                      (F-25), then the bars that pushed it. */}
+                  {title.prediction && (waterfall || bars.length > 0) && (
                     <section className="space-y-2">
                       <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
+                      {waterfall && (
+                        <ol
+                          className="fa-caption flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-fa-frost-dim max-w-2xl"
+                          aria-label={`From ${waterfall.start.label} ${waterfall.start.value.toFixed(1)} to ${waterfall.end.toFixed(1)} for you`}
+                          data-testid="prediction-waterfall"
+                        >
+                          <li>
+                            {waterfall.start.label} <span className="tabular-nums text-fa-frost">{waterfall.start.value.toFixed(1)}</span>
+                          </li>
+                          {waterfall.steps.map((step) => (
+                            <li key={step.label} data-testid="waterfall-step">
+                              <span aria-hidden>→ </span>
+                              <span className={`tabular-nums ${step.value >= 0 ? "text-fa-success" : "text-fa-danger"}`}>{signedStep(step.value)}</span>{" "}
+                              {step.label}
+                            </li>
+                          ))}
+                          <li>
+                            <span aria-hidden>→ </span>
+                            <span className="tabular-nums text-fa-frost-bright">{waterfall.end.toFixed(1)}</span> for you
+                          </li>
+                        </ol>
+                      )}
                       <div className="space-y-1.5 max-w-xl">
-                        {visibleContributions(title.prediction.contributions).map((contribution) => {
-                          const max = Math.max(...title.prediction!.contributions.map((c) => Math.abs(c.value))) || 1;
+                        {bars.map((contribution) => {
+                          const max = Math.max(...bars.map((c) => Math.abs(c.value))) || 1;
                           const positive = contribution.value >= 0;
                           const detail = detailFor(contribution.feature, title.contributionDetails);
                           const expanded = expandedFeature === contribution.feature;
@@ -480,8 +538,13 @@ export default function TitleDetail() {
                   )}
 
                   {/* Credits — director, writers and cast as labelled, clickable, rateable photos */}
-                  {(title.directors.length > 0 || title.writers.length > 0 || title.cast.length > 0) && (
+                  {((title.creators?.length ?? 0) > 0 || title.directors.length > 0 || title.writers.length > 0 || title.cast.length > 0) && (
                     <section className="space-y-4">
+                      {/* A show is made by its creators; its directors are per-episode and usually
+                          absent (F-24). Listed whenever the API sends them. */}
+                      {title.mediaType === "Show" && (
+                        <CreditRow label={(title.creators?.length ?? 0) === 1 ? "Creator" : "Creators"} people={title.creators ?? []} />
+                      )}
                       <CreditRow label={title.directors.length === 1 ? "Director" : "Directors"} people={title.directors} />
                       <CreditRow label="Writers" people={title.writers} />
                       <CreditRow label="Cast" people={title.cast} />
@@ -504,6 +567,12 @@ export default function TitleDetail() {
                         context={{ row: "similar", anchorTitleId: title.titleId, genre: null }}
                         seed={[]}
                         filter={DEFAULT_BROWSE_FILTER}
+                        // A row of skeletons while the first page is out, and a time limit on it:
+                        // a kNN plus a rerank that hangs ends in a Retry tile, not an endless
+                        // shimmer (F-14). Its cards carry the shared-evidence chips the server
+                        // admitted them on (RecCard), like every anchored row.
+                        timeoutMs={SIMILAR_TIMEOUT_MS}
+                        skeletonCount={5}
                       />
                     </section>
                   )}
@@ -511,6 +580,7 @@ export default function TitleDetail() {
               </>
             )}
           </div>
+          </CardUndoProvider>
         </DialogPrimitive.Content>
       </DialogPortal>
     </Dialog>

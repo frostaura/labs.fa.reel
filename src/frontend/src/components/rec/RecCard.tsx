@@ -6,20 +6,25 @@ import CardQuickActions from "./CardQuickActions";
 import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
 import { evidenceChips } from "../../lib/evidenceChips";
+import { cardProviders } from "../../lib/whereToWatch";
 
-/** Collapsed recommendation card: poster · meta line · why-this · predicted rating. */
+/**
+ * Collapsed recommendation card: poster · meta line · why-this · the score chip.
+ *
+ * A "stretched link" card (O+2): the title is the link, and its `::after` covers the whole card so
+ * a tap anywhere still opens the title. The quick actions are the link's SIBLINGS, stacked above
+ * that overlay, not its children — a button inside a link is two nested interactive elements, which
+ * a screen reader announces as one and a keyboard cannot reliably act on. So Tab reaches the title,
+ * then each action, and Enter or Space does what it says on every one of them.
+ */
 export default function RecCard({ card }: { card: FeedCard }) {
   const location = useLocation();
   const evidence = evidenceChips(card.evidence);
+  const providers = cardProviders(card.providers);
 
   return (
-    <Link
-      to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
-      state={{ backgroundLocation: location }}
-      className="group block w-44 sm:w-48 shrink-0 focus:outline-none"
-      data-testid="rec-card"
-    >
-      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-focus-visible:ring-2 group-focus-visible:ring-fa-frost/60">
+    <div className="group relative w-44 sm:w-48 shrink-0" data-testid="rec-card">
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-has-[a:focus-visible]:ring-2 group-has-[a:focus-visible]:ring-fa-frost/60">
         <PosterImage path={card.posterPath} alt={card.name} />
         {/* The shared stack owns the null/NaN guards, the no-overlap layout and the scrim — the
             feed DTO's non-nullability is a backend promise, not a type this file can rely on. */}
@@ -28,15 +33,9 @@ export default function RecCard({ card }: { card: FeedCard }) {
           crowdRating={card.crowdRating}
           crowdVotes={card.crowdVotes}
         />
-        <CardQuickActions
-          titleId={card.titleId}
-          mediaType={card.mediaType}
-          tmdbId={card.tmdbId}
-          name={card.name}
-        />
-        {(card.providers?.length ?? 0) > 0 && (
+        {providers.length > 0 && (
           <div className="absolute bottom-2 left-2 flex gap-1" data-testid="card-providers">
-            {card.providers!.slice(0, 3).map((p) =>
+            {providers.map((p) =>
               logoUrl(p.logoPath) ? (
                 <img key={p.name} src={logoUrl(p.logoPath)!} alt={p.name} title={p.name} className="h-5 w-5 rounded-[4px] ring-1 ring-black/30" loading="lazy" />
               ) : null,
@@ -46,7 +45,14 @@ export default function RecCard({ card }: { card: FeedCard }) {
       </div>
       <div className="mt-2 space-y-1">
         <p className="fa-body font-medium text-fa-frost-bright truncate" title={card.name}>
-          {card.name}
+          <Link
+            to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
+            state={{ backgroundLocation: location }}
+            className="after:absolute after:inset-0 after:content-[''] focus:outline-none"
+            data-testid="rec-card-link"
+          >
+            {card.name}
+          </Link>
         </p>
         <p className="fa-caption text-fa-frost-dim">
           {[card.year, formatRuntime(card.runtimeMinutes)].filter(Boolean).join(" · ")}
@@ -76,6 +82,12 @@ export default function RecCard({ card }: { card: FeedCard }) {
           </ul>
         )}
       </div>
-    </Link>
+      <CardQuickActions
+        titleId={card.titleId}
+        mediaType={card.mediaType}
+        tmdbId={card.tmdbId}
+        name={card.name}
+      />
+    </div>
   );
 }

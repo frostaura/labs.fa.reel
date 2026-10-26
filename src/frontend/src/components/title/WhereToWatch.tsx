@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import { ExternalLink, Play, Search } from "lucide-react";
 import { useGetProvidersQuery } from "../../store/api";
 import { logoUrl } from "../../lib/tmdbImages";
@@ -39,9 +40,27 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
 
   return (
     <section className="space-y-2" data-testid="where-to-watch">
-      <div className="flex items-center justify-between">
+      {/* The region is part of the answer — availability differs by country, and the account's
+          region may not be where the person watches (FD-13) — so it is stated, with the way to
+          change it one tap away (F-16, G NEW-1). */}
+      <div className="flex items-center justify-between gap-3">
         <h2 className="fa-overline text-fa-frost-dim">where to watch</h2>
-        {data && <span className="fa-caption text-fa-frost-dim/70">{data.region}</span>}
+        {data && (
+          <p className="fa-caption flex items-center gap-1 text-fa-frost-dim/70" data-testid="where-to-watch-region">
+            <span>
+              in <span className="text-fa-frost">{data.region}</span>
+            </span>
+            <span aria-hidden>·</span>
+            <Link
+              to="/settings#region"
+              className="inline-flex min-h-11 min-w-11 items-center justify-center underline-offset-2 hover:text-fa-frost-bright hover:underline [@media(pointer:fine)]:min-h-0"
+              aria-label={`Change region (now ${data.region})`}
+              data-testid="where-to-watch-region-edit"
+            >
+              Change
+            </Link>
+          </p>
+        )}
       </div>
 
       {isFetching ? (
@@ -69,19 +88,8 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
             <div className="flex flex-wrap items-center gap-2" data-testid="provider-list">
               {ladder.chips.map((p) => {
                 const kinds = p.kinds.join(" · ") || "watch";
-                return (
-                  <a
-                    key={p.provider}
-                    href={p.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={`${p.provider} · ${kinds} · ${LINK_DESCRIPTION[p.link]}`}
-                    aria-label={`${p.provider} — ${kinds} — ${LINK_DESCRIPTION[p.link]}`}
-                    className="group flex min-h-11 items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5 transition hover:border-fa-frost/40"
-                    data-testid="provider-chip"
-                    data-tier={p.tier}
-                    data-link-kind={p.link}
-                  >
+                const body = (
+                  <>
                     <div className="h-8 w-8 rounded-md overflow-hidden bg-fa-ink-3 shrink-0">
                       {logoUrl(p.logoPath) ? (
                         <img src={logoUrl(p.logoPath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
@@ -98,6 +106,40 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                         <LinkKindPill link={p.link} />
                       </p>
                     </div>
+                  </>
+                );
+                const chipClass = "group flex min-h-11 items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5";
+                // A subscription is always a chip (F-15). With no URL to open it is a statement,
+                // not a link — the pill still says where the availability came from, and nothing
+                // pretends to open the service.
+                if (!p.url) {
+                  return (
+                    <div
+                      key={p.provider}
+                      className={chipClass}
+                      data-testid="provider-chip"
+                      data-tier={p.tier}
+                      data-link-kind="none"
+                    >
+                      <span className="sr-only">{`${p.provider} — ${kinds} — listed by TMDB, no link`}</span>
+                      {body}
+                    </div>
+                  );
+                }
+                return (
+                  <a
+                    key={p.provider}
+                    href={p.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`${p.provider} · ${kinds} · ${LINK_DESCRIPTION[p.link]}`}
+                    aria-label={`${p.provider} — ${kinds} — ${LINK_DESCRIPTION[p.link]}`}
+                    className={`${chipClass} transition hover:border-fa-frost/40`}
+                    data-testid="provider-chip"
+                    data-tier={p.tier}
+                    data-link-kind={p.link}
+                  >
+                    {body}
                   </a>
                 );
               })}

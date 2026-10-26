@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockHomeChrome } from "./home-chrome";
 
 /**
  * Visible recalibration, end to end in the browser.
@@ -49,6 +50,7 @@ const SYNC_IDLE = {
 
 async function bootHome(page: Page): Promise<{ feedRequests: () => number }> {
   await stubEventSource(page);
+  await mockHomeChrome(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", SYNC_IDLE);
   await mockJson(page, "**/api/feed/continue-watching", []);
@@ -226,40 +228,36 @@ test.describe("visible recalibration", () => {
     await expect(label).toHaveText("Already up to date");
   });
 
-  test("the model-learned band renders its sentence and dismisses per retrain", async ({ page }) => {
-    await stubEventSource(page);
-    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
-    await mockJson(page, "**/api/sync/status", SYNC_IDLE);
-    await mockJson(page, "**/api/feed/continue-watching", []);
-    await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
-    await mockJson(page, "**/api/feed/genres", { genres: [] });
-    await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
-    await mockJson(page, "**/api/feed/learned", {
-      trainedAt: "2026-09-09T03:00:00Z",
-      newRatingsSinceLast: 14,
-      calibrationBias: 0.2,
-      calibrationMae: 1.1,
-      spearman: 0.31,
-      picksChanged: 3,
-    });
-    await mockJson(page, "**/api/feed", {
-      generatedAt: GENERATED_AT,
-      hero: [card(1)],
-      rows: [],
-      lockedRowCount: 0,
-    });
+  test("a fresh retrain is one segment of Home's status line, and ages out (FD-15)", async ({ page }) => {
+    const boot = async (trainedAt: string) => {
+      await stubEventSource(page);
+      await mockHomeChrome(page);
+      await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+      await mockJson(page, "**/api/sync/status", SYNC_IDLE);
+      await mockJson(page, "**/api/feed/continue-watching", []);
+      await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+      await mockJson(page, "**/api/feed/genres", { genres: [] });
+      await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
+      await mockJson(page, "**/api/feed/learned", {
+        trainedAt,
+        newRatingsSinceLast: 14,
+        calibrationBias: 0.2,
+        calibrationMae: 1.1,
+        spearman: 0.31,
+        picksChanged: 3,
+      });
+      await mockJson(page, "**/api/feed", { generatedAt: GENERATED_AT, hero: [card(1)], rows: [], lockedRowCount: 0 });
+      await page.goto("/home");
+      await expect(page.getByTestId("hero-card")).toHaveCount(1);
+    };
 
-    await page.goto("/home");
-
-    const band = page.getByTestId("model-learned-band");
-    await expect(band).toHaveText("Learned from 14 new ratings. 3 picks changed.");
-
-    await page.getByTestId("dismiss-model-learned").click();
-    await expect(band).toHaveCount(0);
-
-    // Dismissal is keyed on the retrain, so it survives a reload...
-    await page.reload();
-    await expect(page.getByTestId("hero-card")).toHaveCount(1);
+    // Three hours ago: news. Said once, on the status line — no band, no dismiss control.
+    await boot(new Date(Date.now() - 3 * 3_600_000).toISOString());
+    await expect(page.getByTestId("status-retrained")).toHaveText("Retrained 3h ago on 14 new ratings, 3 picks changed");
     await expect(page.getByTestId("model-learned-band")).toHaveCount(0);
+
+    // Three days ago: no longer news, so the segment is gone rather than waiting to be dismissed.
+    await boot(new Date(Date.now() - 3 * 86_400_000).toISOString());
+    await expect(page.getByTestId("status-retrained")).toHaveCount(0);
   });
 });

@@ -94,3 +94,16 @@ describe("RailPageRegistry (F+3)", () => {
     expect(new RailPageRegistry().pageToken()).not.toBe(token);
   });
 });
+
+describe("a rail's time limit", () => {
+  it("fails straight to the Retry tile on a timeout, with no automatic retries", () => {
+    const loading = nextRailPaging(INITIAL_RAIL_PAGING, { type: "start" });
+    const timedOut = nextRailPaging(loading, { type: "timeout" });
+    expect(timedOut).toEqual({ phase: "failed", failures: 3, retryInMs: null });
+    expect(canAutoPage(timedOut)).toBe(false);
+    // Retry is one more attempt; a success clears it.
+    const retried = nextRailPaging(timedOut, { type: "retry" });
+    expect(retried.phase).toBe("loading");
+    expect(nextRailPaging(retried, { type: "success" })).toEqual(INITIAL_RAIL_PAGING);
+  });
+});

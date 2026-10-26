@@ -36,3 +36,38 @@ export function scoreBadgesPlan({ predictedRating, crowdRating, userRating }: Sc
     showCrowd,
   };
 }
+
+/**
+ * What the one score chip says to a screen reader and in its tooltip — the evidence label the
+ * banded number carries (FD-4). The visible chip is terse ("8.4 ±1.1 for you" over "★ 7.9"); this
+ * spells out what each number is and where it comes from, so a reader never has to guess which one
+ * is the model's.
+ */
+export function scoreChipDescription({
+  predictedRating,
+  crowdRating,
+  userRating,
+  crowdVotes,
+  band,
+}: ScoreBadgesInput & { crowdVotes?: number | null; band?: number | null }): string {
+  const plan = scoreBadgesPlan({ predictedRating, crowdRating, userRating });
+  const parts: string[] = [];
+  if (plan.showUserRating) parts.push(`You rated it ${userRating}`);
+  if (plan.showPredicted) {
+    const usable = band != null && Number.isFinite(band) && band > 0 ? band : null;
+    parts.push(
+      usable === null
+        ? `Predicted ${predictedRating!.toFixed(1)} for you from your ratings`
+        : `Predicted ${predictedRating!.toFixed(1)} for you, give or take ${usable.toFixed(1)} — what predictions for you have typically been off by`
+    );
+  }
+  if (plan.showCrowd) {
+    const votes = crowdVotes != null && Number.isFinite(crowdVotes) && crowdVotes > 0 ? crowdVotes : null;
+    parts.push(
+      votes === null
+        ? `Crowd score ${crowdRating!.toFixed(1)}`
+        : `Crowd score ${crowdRating!.toFixed(1)} from ${votes.toLocaleString("en-US")} votes`
+    );
+  }
+  return parts.join(". ");
+}

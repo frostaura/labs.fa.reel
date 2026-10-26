@@ -54,9 +54,9 @@ function Segment<T extends string>({
           aria-pressed={value === key}
           // The segment is a real tap target on a phone and measured 23 px tall — the browse row is
           // the one control on /search that the 44 px sweep (`dca1ed3`) skipped as a foreign
-          // component. `min-h-11` below `md` with the padding replaced by centring; from `md` up
-          // the vertical padding comes back and the segment is the size it has always been.
-          className={`inline-flex min-h-11 items-center justify-center rounded-md px-3 md:min-h-0 md:py-1 fa-caption transition ${
+          // component — and "All" was 36 px wide. 44 × 44 on any coarse pointer, with the padding
+          // replaced by centring; only a fine pointer from `md` gets the compact segment back.
+          className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-3 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0 md:[@media(pointer:fine)]:py-1 fa-caption transition ${
             value === key ? "bg-fa-frost/20 text-fa-frost-bright" : "text-fa-frost-dim hover:text-fa-frost"
           }`}
           data-testid={`browse-${key}`}

@@ -132,7 +132,7 @@ describe("two-row container", () => {
     expect(card).not.toContain("shrink-0");
     // Everything a card needs to still BE a hero card survives.
     expect(card).toContain("snap-center");
-    expect(card).toContain("focus-visible:ring-fa-frost/60");
+    expect(card).toContain("has-[a:focus-visible]:ring-fa-frost/60");
   });
 
   it("gives the trailing shimmer no width of its own so it lands as one more grid cell", () => {

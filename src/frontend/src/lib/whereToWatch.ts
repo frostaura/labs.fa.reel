@@ -147,3 +147,21 @@ export function providerLadder(providers: ProviderEntry[], tmdbWatchPage: string
     tmdbUrl: tmdbOnly[0]?.chip.url ?? tmdbWatchPage,
   };
 }
+
+/**
+ * A card's provider logos, one per brand (F-10): "Starz" and "Starz Amazon Channel" are one
+ * subscription, and two of its logos in a three-logo strip crowd out a different service. Keeps the
+ * server's order (display priority) and the first entry of each brand, and caps the strip.
+ */
+export function cardProviders<T extends { name: string }>(providers: readonly T[] | null | undefined, max = 3): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const p of providers ?? []) {
+    const brand = providerBrand(p.name);
+    if (seen.has(brand)) continue;
+    seen.add(brand);
+    out.push(p);
+    if (out.length === max) break;
+  }
+  return out;
+}

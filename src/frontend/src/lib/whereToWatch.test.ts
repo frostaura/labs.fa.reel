@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEntry } from "../store/titleTypes";
-import { LINK_LABEL, providerBrand, providerLadder, providerLink } from "./whereToWatch";
+import { LINK_LABEL, providerBrand, providerLadder, providerLink, cardProviders } from "./whereToWatch";
 import { SEIZED_US_PROVIDERS } from "./whereToWatch.fixtures";
 
 const TMDB = "https://www.themoviedb.org/movie/1/watch?locale=US";
@@ -127,5 +127,24 @@ describe("providerLink and providerBrand", () => {
     expect(providerBrand("Starz Apple TV Channel")).toBe("Starz");
     expect(providerBrand("The Roku Channel")).toBe("The Roku Channel");
     expect(providerBrand("Plex Channel")).toBe("Plex Channel");
+  });
+});
+
+describe("cardProviders", () => {
+  it("keeps one logo per brand, in the server's order, up to three", () => {
+    const providers = [
+      { name: "Starz Amazon Channel", logoPath: "/a.png" },
+      { name: "Starz", logoPath: "/b.png" },
+      { name: "Netflix", logoPath: "/c.png" },
+      { name: "Starz Roku Premium Channel", logoPath: "/d.png" },
+      { name: "Tubi", logoPath: "/e.png" },
+      { name: "Hulu", logoPath: "/f.png" },
+    ];
+    expect(cardProviders(providers).map((p) => p.name)).toEqual(["Starz Amazon Channel", "Netflix", "Tubi"]);
+  });
+
+  it("is empty for no providers", () => {
+    expect(cardProviders(undefined)).toEqual([]);
+    expect(cardProviders(null)).toEqual([]);
   });
 });
