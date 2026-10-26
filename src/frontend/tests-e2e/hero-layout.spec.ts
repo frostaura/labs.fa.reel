@@ -77,10 +77,10 @@ const ACCURACY = {
 /** The same account before it has a track record: the status line has no accuracy segment. */
 const NO_ACCURACY = { ...ACCURACY, headline: { ...ACCURACY.headline, n: 0, withinOnePoint: 0 } };
 
-/** A retrain the account has not dismissed: the model-learned band is on the page. */
+/** A retrain that is still news: the status line carries its segment (FD-15 folded the band in). */
 const LEARNED = {
-  trainedAt: "2026-10-24T03:00:00Z", newRatingsSinceLast: 14, calibrationBias: 0.2, calibrationMae: 1.1,
-  spearman: 0.31, picksChanged: 3,
+  trainedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), newRatingsSinceLast: 14, calibrationBias: 0.2,
+  calibrationMae: 1.1, spearman: 0.31, picksChanged: 3,
 };
 
 /** The eval copy's real cross-reference band (ireview_surface defect 3): a landed pass with a coverage line. */
@@ -206,7 +206,8 @@ for (const viewport of [
       expect(geometry).toHaveLength(5);
       for (const [index, card] of geometry.entries()) {
         expect(inside(card.title, card.card), `card ${index} title ${JSON.stringify(card.title)} in ${JSON.stringify(card.card)}`).toBe(true);
-        expect(card.badges.length).toBeGreaterThanOrEqual(2);
+        // One score chip (FD-4), carrying both the banded prediction and the crowd line.
+        expect(card.badges.length).toBeGreaterThanOrEqual(1);
         for (const badge of card.badges) {
           expect(inside(badge, card.card), `card ${index} badge`).toBe(true);
         }
@@ -358,8 +359,9 @@ for (const [viewport, budget] of [
 ] as const) {
   for (const c of TOP_CASES) {
     // Both band states for every case: the real account has a retrain to report and a landed
-    // cross-reference pass, and the band above the hero is what put the first pick at 286px and
-    // 416px on real data while this test, which never answered the bands, passed (R1-17).
+    // cross-reference pass, and the bands above the hero are what put the first pick at 286px and
+    // 416px on real data while this test, which never answered them, passed (R1-17). The retrain
+    // now lengthens the status line, which is exactly what this budget has to survive.
     for (const bands of [true, false]) {
       const label = `${c.label}, ${bands ? "both bands" : "no bands"}`;
       test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height} (${label})`, async ({ page }) => {
@@ -373,18 +375,13 @@ for (const [viewport, budget] of [
         else await expect(page.getByTestId("status-track-record")).toHaveCount(0);
         if (!("confidence" in c.overrides)) await expect(page.getByTestId("hero-reaching-note")).toBeVisible();
         const heroCard = page.getByTestId("hero-card").first();
-        if (bands) {
-          // On the page, and below the first pick rather than above it.
-          for (const id of ["model-learned-band", "cross-reference-band"]) {
-            await expect(page.getByTestId(id)).toBeVisible();
-            const bandTop = await page.getByTestId(id).evaluate((el) => el.getBoundingClientRect().top);
-            const heroBottom = await heroCard.evaluate((el) => el.getBoundingClientRect().bottom);
-            expect(bandTop, `${id} sits under the hero`).toBeGreaterThanOrEqual(heroBottom);
-          }
-        } else {
-          await expect(page.getByTestId("model-learned-band")).toHaveCount(0);
-          await expect(page.getByTestId("cross-reference-band")).toHaveCount(0);
-        }
+        // FD-15: the retrain is a segment of the one status line above the picks, and the
+        // cross-reference band is not on Home at all (the pill names the pass; Track record holds
+        // the detail). Neither band survives as a card of its own.
+        if (bands) await expect(page.getByTestId("status-retrained")).toBeVisible();
+        else await expect(page.getByTestId("status-retrained")).toHaveCount(0);
+        await expect(page.getByTestId("model-learned-band")).toHaveCount(0);
+        await expect(page.getByTestId("cross-reference-band")).toHaveCount(0);
         const top = await heroCard.evaluate((el) => el.getBoundingClientRect().top);
         expect(top).toBeLessThanOrEqual(budget - HEADROOM_PX);
         // And nothing above it made the page scroll sideways. Measured against the layout width
@@ -400,3 +397,23 @@ for (const [viewport, budget] of [
     }
   }
 }
+
+/**
+ * The same 300 px budget on a real touch phone. A coarse pointer is what turns every chip, segment
+ * and mood into a 44 px target (O-15), so the fine-pointer cases above cannot speak for it: the
+ * worst case — reaching, a track record and a retrain all on the status line, the founder's own
+ * conditions — is measured here with touch on.
+ */
+test("the first hero card starts within 300px of the top on a touch phone, worst case", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  const unmocked = await bootHome(page, 5, {}, { filters: REAL_FILTERS, accuracy: ACCURACY, bands: true });
+  await expect(page.getByTestId("status-retrained")).toBeVisible();
+  await expect(page.getByTestId("hero-reaching-note")).toBeVisible();
+  const moodHeight = await page.getByTestId("mood-light").evaluate((el) => el.getBoundingClientRect().height);
+  expect(moodHeight).toBeGreaterThanOrEqual(44);
+  const top = await page.getByTestId("hero-card").first().evaluate((el) => el.getBoundingClientRect().top);
+  expect(top).toBeLessThanOrEqual(300 - HEADROOM_PX);
+  expect(unmocked).toEqual([]);
+  await context.close();
+});

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockHomeChrome } from "./home-chrome";
 
 /**
  * The cross-reference pass, as the header pill shows it.
@@ -83,6 +84,7 @@ async function bootHome(
 ): Promise<(next: unknown) => void> {
   let status = initial;
   await stubEventSource(page);
+  await mockHomeChrome(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await page.route(
     (url) => url.pathname === "/api/sync/status",
@@ -215,8 +217,8 @@ test.describe("cross-reference pass", () => {
   test("the pill names the pass from the status poll and hands back on completion", async ({ page }) => {
     // Seeded from the status poll — a reload mid-pass must show the pill. Since pill v2 (WS-9,
     // H-1/O+1) the named pass reads by name only: no percentage, no count and never the handler's
-    // free text, because nobody started it and a ten-minute bar reads as a stall. The count lives on
-    // the band below (next test). shell-status.spec.ts pins the no-number rule itself.
+    // free text, because nobody started it and a ten-minute bar reads as a stall. The counts live on
+    // Track record's band (FD-15). shell-status.spec.ts pins the no-number rule itself.
     const setStatus = await bootHome(page, SYNC_RUNNING_XREF);
 
     const pill = page.getByTestId("sync-pill");
@@ -261,37 +263,23 @@ test.describe("cross-reference pass", () => {
     await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
   });
 
-  test("the band counts through the pool while the pass runs", async ({ page }) => {
-    await bootHome(page, SYNC_RUNNING_XREF, BAND_RUNNING);
+  test("Home carries no cross-reference band — the pill names the pass, the detail is Track record's (FD-15)", async ({
+    page,
+  }) => {
+    // The band used to sit under the hero with its counts, one of five admissions stacked above
+    // and around tonight's picks. FD-15 moves the detail to Track record; Home keeps the pill.
+    // The band's sentences are pinned in lib/xrefCopy.test.ts, independent of where it renders.
+    let bandRequests = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/feed/cross-reference") bandRequests += 1;
+    });
+    await bootHome(page, SYNC_RUNNING_XREF, BAND_LANDED);
 
-    // A count, not a percentage: a pass over the whole eligible pool can legitimately take ten
-    // minutes, and a bar reads as a stall for nine of them.
-    await expect(page.getByTestId("cross-reference-sentence")).toHaveText(
-      "Deep pass running · 640 of 2,242 cross-referenced"
-    );
-  });
-
-  test("the band reports what it found and never implies a demotion", async ({ page }) => {
-    await bootHome(page, SYNC_IDLE, BAND_LANDED);
-
-    const band = page.getByTestId("cross-reference-band");
-    await expect(band).toContainText("Cross-referenced 2,242 titles against your history");
-    await expect(band).toContainText("210 kept, nudged up a little");
-    // The whole point of the band's licence to sit on the front page: it says, in words, that the
-    // 640 rule-outs did nothing — because on the founder's own history the out verdict caught 16%
-    // of the titles he went on to love.
-    await expect(band).toContainText("rule-outs change nothing yet");
-    await expect(band).not.toContainText("hidden");
-    // And the coverage it could not reach, rather than a headline that quietly implies the pool
-    // was whole.
-    await expect(page.getByTestId("cross-reference-coverage")).toContainText("402 titles had nothing to reason from");
-  });
-
-  test("the band renders nothing at all when the server has nothing honest to say", async ({ page }) => {
-    // 204 → null. A band reading "cross-referenced 0 titles" is the product padding.
-    await bootHome(page, SYNC_IDLE, null);
-
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
     await expect(page.getByTestId("cross-reference-band")).toHaveCount(0);
+    await expect(page.getByText(/Cross-referenced [\d,]+ titles/)).toHaveCount(0);
+    // Not merely hidden: Home no longer asks for the band at all.
+    expect(bandRequests).toBe(0);
   });
 
   test("the track record shows the measurement that decided what a verdict may do", async ({ page }) => {

@@ -2,10 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
-import PredictedRatingBadge from "./PredictedRatingBadge";
-import CrowdRatingBadge from "./CrowdRatingBadge";
+import { ScoreChip } from "./ScoreBadges";
 import { formatRuntime } from "../../lib/format";
-import { hasPredictedRating } from "../../lib/predictedRating";
 import CardQuickActions from "./CardQuickActions";
 import RailRetryTile from "../rows/RailRetryTile";
 import { heroReachingNote, reachingLabel } from "../../lib/heroConfidence";
@@ -106,13 +104,12 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
         {cards.map((card, index) => {
           const art = backdropUrl(card.backdropPath, "w1280") ?? posterUrl(card.posterPath, "w500");
           return (
-            <Link
-              key={card.titleId}
-              to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
-              state={{ backgroundLocation: location }}
-              className={heroCardClass(rows)}
-              data-testid="hero-card"
-            >
+            // The card is a container, not a link: its link is an overlay covering the whole card
+            // (so a tap anywhere still opens the title) and the quick actions are the overlay's
+            // siblings, stacked above it, rather than controls nested inside a link (see RecCard).
+            // An overlay rather than RecCard's `::after`, because the text block is positioned and
+            // would trap a pseudo-element inside itself.
+            <div key={card.titleId} className={heroCardClass(rows)} data-testid="hero-card">
               <div className={heroArtClass()}>
                 {art && (
                   <img
@@ -128,16 +125,15 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
               <div className={heroTextBlockClass(rows)} data-testid="hero-text">
                 <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap">
                   <h2 className={heroTitleClass(rows)}>{card.name}</h2>
-                  {/* Guarded like every other consumer — see lib/predictedRating.ts. The crowd
-                      score sits directly beside the prediction (there is room at hero scale) so the
-                      two are read as a pair; it is simply absent when the title has no community
-                      score, never a placeholder. */}
-                  {hasPredictedRating(card.predictedRating) && (
-                    <PredictedRatingBadge rating={card.predictedRating} size="lg" />
-                  )}
-                  {hasPredictedRating(card.crowdRating) && (
-                    <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} size="lg" />
-                  )}
+                  {/* The same one chip every card carries (FD-4) — the banded prediction over the
+                      crowd score — at hero scale, beside the title. Each line is absent when its
+                      number is, never a placeholder (the guards are in lib/scoreBadges.ts). */}
+                  <ScoreChip
+                    predictedRating={card.predictedRating}
+                    crowdRating={card.crowdRating}
+                    crowdVotes={card.crowdVotes}
+                    size="lg"
+                  />
                 </div>
                 <p className="fa-caption text-fa-frost">
                   {[card.year, formatRuntime(card.runtimeMinutes), card.genres.slice(0, 3).join(" / ")]
@@ -167,10 +163,18 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
                   </p>
                 )}
               </div>
+              <Link
+                to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
+                state={{ backgroundLocation: location }}
+                className="absolute inset-0 z-[1] rounded-2xl focus:outline-none"
+                data-testid="hero-card-link"
+              >
+                <span className="sr-only">{card.name}</span>
+              </Link>
               {/* The same three actions the rail cards carry, at hero scale. Below `lg` they are a
                   row of their own under the text (I-10: over the art they sat on the meta and hook
-                  lines); from `lg` they are a row in the art's top-right corner. Every button calls
-                  preventDefault, so the whole-card link still works everywhere the buttons are not. */}
+                  lines); from `lg` they are a row in the art's top-right corner, stacked above the
+                  title link's card-wide overlay so they act instead of navigating. */}
               <CardQuickActions
                 titleId={card.titleId}
                 mediaType={card.mediaType}
@@ -178,7 +182,7 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
                 name={card.name}
                 size="lg"
               />
-            </Link>
+            </div>
           );
         })}
         {loading && !failed && (

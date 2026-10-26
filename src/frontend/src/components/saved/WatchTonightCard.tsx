@@ -42,7 +42,7 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
           <button
             type="button"
             onClick={onNotTonight}
-            className="fa-button-ghost fa-overline"
+            className="fa-button-ghost fa-overline min-h-11 [@media(pointer:fine)]:min-h-0"
             title="Show the next candidate instead. This lasts for the session only — nothing is recorded against the title."
             data-testid="not-tonight"
           >
@@ -102,7 +102,7 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
               type="button"
               onClick={() => setStarted(true)}
               disabled={started}
-              className={started ? "fa-button" : "fa-button-primary"}
+              className={`${started ? "fa-button" : "fa-button-primary"} min-h-11 [@media(pointer:fine)]:min-h-0`}
               title={
                 started
                   ? "Noted on this device for this session. Reel logs the watch when Trakt reports it — that is the record of truth."

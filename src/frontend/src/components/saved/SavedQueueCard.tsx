@@ -6,6 +6,7 @@ import ScoreBadges from "../rec/ScoreBadges";
 import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
 import { listSyncLabel, predictionWithBand, savedAgo } from "../../lib/savedQueue";
+import { cardProviders } from "../../lib/whereToWatch";
 
 interface Props {
   item: SavedQueueItem;
@@ -16,30 +17,30 @@ interface Props {
 /**
  * One card in the queue below the pin. It answers the three questions the old poster grid did not:
  * is it any good for me (with its error band), how long is it, and can I actually watch it now.
+ *
+ * A stretched-link card, like the feed's RecCard: the title is the link and its `::after` covers
+ * the card, and the unsave button is a sibling above it rather than a control nested in a link.
  */
 export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }: Props) {
   const location = useLocation();
   const band = predictionWithBand(item.predictedRating, expectedAbsoluteError);
   const runtime = formatRuntime(item.runtimeMinutes);
   const syncLabel = listSyncLabel(item);
+  const providers = cardProviders(item.providers);
 
   return (
-    <Link
-      to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
-      state={{ backgroundLocation: location }}
-      className="group block focus:outline-none"
-      data-testid="saved-card"
-    >
-      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
+    <div className="group relative" data-testid="saved-card">
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-has-[a:focus-visible]:ring-2 group-has-[a:focus-visible]:ring-fa-frost/60">
         <PosterImage path={item.posterPath} alt={item.name} size="w185" />
         <ScoreBadges
           predictedRating={item.predictedRating}
           crowdRating={item.crowdRating}
           crowdVotes={item.crowdVotes}
+          band={expectedAbsoluteError}
         />
-        {item.providers.length > 0 && (
+        {providers.length > 0 && (
           <div className="absolute bottom-2 left-2 flex gap-1" data-testid="saved-card-providers">
-            {item.providers.slice(0, 3).map((p) =>
+            {providers.map((p) =>
               logoUrl(p.logoPath) ? (
                 <img
                   key={p.name}
@@ -61,27 +62,17 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
             )}
           </div>
         )}
-        {/* One-tap unsave, same overlay pattern as the feed cards' quick actions. */}
-        {item.tmdbId != null && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              onUnsave(item);
-            }}
-            aria-label={`Remove ${item.name} from Saved`}
-            title="Remove from Saved"
-            className="absolute left-1.5 top-1.5 rounded-full bg-fa-ink/70 p-1.5 text-fa-frost-dim backdrop-blur-sm transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60"
-            data-testid="saved-unsave"
-          >
-            <BookmarkX className="h-3.5 w-3.5" />
-          </button>
-        )}
       </div>
 
       <div className="mt-2 space-y-0.5">
         <p className="fa-body text-fa-frost-bright truncate" title={item.name}>
-          {item.name}
+          <Link
+            to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
+            state={{ backgroundLocation: location }}
+            className="after:absolute after:inset-0 after:content-[''] focus:outline-none"
+          >
+            {item.name}
+          </Link>
         </p>
         <p className="fa-caption text-fa-frost-dim">
           {[item.year, runtime].filter(Boolean).join(" · ") || " "}
@@ -114,6 +105,23 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
           )}
         </p>
       </div>
-    </Link>
+
+      {/* One-tap unsave, the feed cards' quick-action pattern: a 44 px target on any coarse pointer
+          around a poster-sized pill, a sibling above the card's link overlay. */}
+      {item.tmdbId != null && (
+        <button
+          type="button"
+          onClick={() => onUnsave(item)}
+          aria-label={`Remove ${item.name} from Saved`}
+          title="Remove from Saved"
+          className="absolute left-0 top-0 z-10 inline-flex min-h-11 min-w-11 items-center justify-center text-fa-frost-dim transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0"
+          data-testid="saved-unsave"
+        >
+          <span className="flex items-center justify-center rounded-full bg-fa-ink/70 p-1.5 backdrop-blur-sm">
+            <BookmarkX className="h-3.5 w-3.5" />
+          </span>
+        </button>
+      )}
+    </div>
   );
 }

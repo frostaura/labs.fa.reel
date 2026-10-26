@@ -29,7 +29,9 @@ export default function SavedSortControl({
             aria-pressed={active}
             title={SAVED_SORT_META[sort].hint}
             data-testid={`saved-sort-${sort}`}
-            className={`fa-overline rounded-md px-2.5 py-1.5 transition ${
+            // 44 px tall on any coarse pointer (IREV3S-08 measured these at 22 px on a phone); a
+            // fine pointer keeps the compact segment.
+            className={`fa-overline inline-flex min-h-11 items-center rounded-md px-2.5 py-1.5 transition [@media(pointer:fine)]:min-h-0 ${
               active
                 ? "bg-fa-frost/15 text-fa-frost-bright"
                 : "text-fa-frost-dim hover:bg-fa-glass-strong hover:text-fa-frost"

@@ -7,13 +7,12 @@ import {
   useGetDigestQuery,
   useGetFeedGenresQuery,
   useGetFeedQuery,
+  useGetFiltersQuery,
   useGetSessionQuery,
 } from "../store/api";
 import { removalsCleared, selectRemovedKeys } from "../store/removedTitlesSlice";
 import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
-import ModelLearnedBand from "../components/rec/ModelLearnedBand";
-import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import StaticRail from "../components/rows/StaticRail";
 import GenreRow from "../components/rows/GenreRow";
@@ -21,7 +20,10 @@ import RailPageProvider from "../components/rows/RailPageProvider";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
-import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
+import PickConditionsButton from "../components/rec/PickConditionsButton";
+import HomeConditionChips from "../components/rec/HomeConditionChips";
+import { CardUndoProvider } from "../components/rec/CardUndo";
+import { summaryChips } from "../lib/pickConditions";
 import { matchesBrowseFilter, matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
@@ -44,6 +46,10 @@ export default function Home() {
   const dispatch = useDispatch();
   const removed = useSelector(selectRemovedKeys);
   const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
+  const { data: filters } = useGetFiltersQuery();
+  // One dialog, opened by the Conditions button or by any condition chip (H-9).
+  const [conditionsOpen, setConditionsOpen] = useState(false);
+  const hasConditions = summaryChips(filters).length > 0;
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
 
@@ -126,178 +132,188 @@ export default function Home() {
     // Tighter rhythm on a phone, where every 12px of chrome above the first pick is 12px of pick
     // below the fold. The budget is the cold-Home acceptance: the first pick's top edge within 220px
     // at 1440×900 and 300px at 390×844, with the account's real conditions on screen.
-    <div className="space-y-5 md:space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
-        <div className="min-w-0">
-          {/* The stamp sits beside the heading where it fits (a phone included) and wraps under it
-              where it does not: a line of chrome saved is a line of the first pick above the fold. */}
-          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
-            {feed?.generatedAt && (
-              <p className="fa-caption text-fa-frost-dim">
-                ranked for you · {formatRankedAt(feed.generatedAt)}
-              </p>
+    // Card actions (save, not for me, rate) raise their undo toast through this provider (F-19).
+    <CardUndoProvider>
+      <div className="space-y-5 md:space-y-6">
+        <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
+          <div className="min-w-0">
+            {/* The stamp sits beside the heading where it fits (a phone included) and wraps under it
+                where it does not: a line of chrome saved is a line of the first pick above the fold. */}
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
+              {feed?.generatedAt && (
+                <p className="fa-caption text-fa-frost-dim">
+                  ranked for you · {formatRankedAt(feed.generatedAt)}
+                </p>
+              )}
+            </div>
+            {/* Everything actually in force, under the title: the saved conditions AND the browse
+                toggles. Without this the feed silently obeys settings made on another screen — a
+                standing "no documentary" is invisible exactly where its effect is — and the browse
+                toggles were doubly invisible, since the summary used to omit them entirely while they
+                were halving the feed. Every chip opens the editor (H-9); "+N more" expands. On a
+                phone the chips move into the control line below instead (see there). */}
+            {isMdUp && (
+              <HomeConditionChips
+                className="mt-2"
+                browse={filter}
+                onBrowseChange={setFilter}
+                onOpenEditor={() => setConditionsOpen(true)}
+                limit={6}
+              />
             )}
           </div>
-          {/* Everything actually in force, under the title: the saved conditions AND the browse
-              toggles. Without this the feed silently obeys settings made on another screen — a
-              standing "no documentary" is invisible exactly where its effect is — and the browse
-              toggles were doubly invisible, since the summary used to omit them entirely while they
-              were halving the feed. */}
-          {/* Two chips and a count on a phone, so the row stays one line; the button beside the
-              controls carries the full count and opens every chip. */}
-          <PickConditionsSummary
-            className="mt-2"
-            browse={filter}
-            onBrowseChange={setFilter}
-            limit={isMdUp ? 6 : 2}
-          />
-        </div>
-        {!building && (
-          // One scrolling line on a phone, wrapping from `md`. Wrapped on a phone the controls took
-          // two lines (the browse segments alone are 44px tall there) and put the first pick below
-          // the fold; letting them scroll keeps conditions, refresh and the media toggle on screen
-          // with the availability toggle peeking in from the edge. Nothing is ever wider than the
-          // viewport, so the page itself never scrolls sideways.
+          {/* One scrolling line on a phone, wrapping from `md`. Wrapped on a phone the controls took
+              two lines (the browse segments alone are 44px tall there) and put the first pick below
+              the fold; letting them scroll keeps conditions, refresh and the media toggle on screen
+              with the availability toggle peeking in from the edge. Nothing is ever wider than the
+              viewport, so the page itself never scrolls sideways.
+
+              On a phone the condition chips ARE the conditions control in this line — two chips and
+              "+N more", each a 44 px target that opens the editor — rather than a "Conditions" button
+              here plus a chip line above it: one row of chrome where there were two. With no
+              conditions saved the button stands in, so the editor is always one tap away. The browse
+              toggles always render (F-12), building or not, with picks or without: they are how a
+              "TV only" view that matches nothing is undone. */}
           <div className="-mx-1 flex w-full items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:mx-0 md:w-auto md:flex-wrap md:overflow-visible md:px-0">
-            <div className="shrink-0">
+            <div className={isMdUp || !hasConditions ? "shrink-0" : "contents"}>
               <PickConditionsButton
+                open={conditionsOpen}
+                onOpenChange={setConditionsOpen}
+                trigger={isMdUp || !hasConditions}
                 onSaved={() => {
                   setAdoptOnNext(true);
                   setConditionsVersion((v) => v + 1);
                 }}
               />
             </div>
+            {!isMdUp && (
+              <HomeConditionChips
+                className="shrink-0"
+                variant="strip"
+                onOpenEditor={() => setConditionsOpen(true)}
+                limit={2}
+              />
+            )}
             {hasFresherPicks && (
               <button
                 type="button"
                 onClick={() => setAdoptedKey(latestKey)}
                 data-testid="adopt-fresh-picks"
                 title="Load the newly generated picks — this resets the rows below"
-                className="fa-overline inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+                className="fa-overline inline-flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 New picks ready
               </button>
             )}
-            {/* Refresh sits second on a phone so it is never scrolled out of reach, and last from
-                `md`, at the end of the control strip where it has always been. */}
-            <div className="shrink-0 md:order-last">
-              <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
-            </div>
-            {(feed?.hero.length ?? 0) > 0 && (
-              <div className="shrink-0">
-                <BrowseFilters value={filter} onChange={setFilter} />
+            {/* Refresh sits right after the conditions on a phone so it is never scrolled out of
+                reach, and last from `md`, at the end of the control strip where it has always been.
+                Not while the first build is still running: there is nothing to refresh yet. */}
+            {!building && (
+              <div className="shrink-0 md:order-last">
+                <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
               </div>
             )}
+            <div className="shrink-0">
+              <BrowseFilters value={filter} onChange={setFilter} />
+            </div>
           </div>
+        </div>
+
+        <PostWatchStrip />
+
+        {isLoading || building ? (
+          <div className="space-y-8">
+            {/* Literally the hero's own container and card metrics, so the picks land in the space
+                already held for them. The full-bleed block this replaced was a head taller than the
+                card it stood in for, and a second row would have doubled that shove. */}
+            <div className={heroContainerClass(heroRows)} aria-hidden>
+              <div className={heroShimmerClass(heroRows)} />
+              {heroRows === 2 && <div className={heroShimmerClass(heroRows)} />}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="reel-poster reel-shimmer" />
+              ))}
+            </div>
+            {building && (
+              <p className="fa-body text-fa-frost-dim text-center">
+                Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
+              </p>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* One registry of titles on screen per page view (F+3): every rail sends what the
+                others already show, so a title never repeats across rails. Keyed like the rows it
+                wraps — a re-seed or a medium switch is a new page view. */}
+            <RailPageProvider key={`page:${filter.media}:${resetKey}`} seedTitleIds={pageSeedIds}>
+            {/* The mood chips (a question about tonight) and the status line (what is true about
+                tonight's picks) sit tight above the picks they are about. From `lg` they share one
+                line; on a phone the status line takes its own, under the chips. The product's own
+                error rate lives in that line now, not in a banner of its own (FD-15). */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
+                <TonightMoodChips className="w-full lg:w-auto" value={mood} onChange={setMood} />
+                <HomeStatusLine reachingNote={reachingNote} className="lg:ml-auto" />
+              </div>
+              <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
+            </div>
+
+            <ContinueWatchingRow entries={continueFiltered} />
+
+            {(feed?.rows ?? []).map((row) => (
+              <InfiniteRecRow
+                key={`${row.kind}:${row.anchorTitleId ?? row.title}:${filter.media}:${resetKey}`}
+                title={
+                  row.kind === "because-you-loved" ? (
+                    <>
+                      Because you loved <span className="text-fa-frost-bright">{row.anchorName}</span>
+                    </>
+                  ) : (
+                    <span className="text-fa-frost-bright">{row.title}</span>
+                  )
+                }
+                context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
+                seed={row.items}
+                filter={filter}
+                mood={mood}
+              />
+            ))}
+
+            {/* "High for you" only when the build met the bar; a relaxed build is retitled and says
+                why, in the build's own words (IR1S-03). */}
+            {digestFiltered.length > 0 && (
+              <StaticRail
+                title={<span className="text-fa-frost-bright">{digestCopy.title}</span>}
+                caption={digestCopy.caption}
+                items={digestFiltered}
+              />
+            )}
+
+            {(genres ?? []).map((g) => (
+              <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
+            ))}
+            </RailPageProvider>
+
+            {(feed?.lockedRowCount ?? 0) > 0 && (
+              <section className="fa-card p-5 flex items-center gap-4">
+                <Lock className="h-5 w-5 text-fa-frost-dim shrink-0" />
+                <div>
+                  <p className="fa-body text-fa-frost-bright">
+                    {feed!.lockedRowCount} more personalised row{feed!.lockedRowCount === 1 ? "" : "s"} on the full feed
+                  </p>
+                  <p className="fa-caption text-fa-frost-dim">
+                    The free shortlist gives you three picks a day — the paid feed unlocks every row, natural-language
+                    search and the managed Trakt queue.
+                  </p>
+                </div>
+              </section>
+            )}
+          </>
         )}
       </div>
-
-      <PostWatchStrip />
-
-      {isLoading || building ? (
-        <div className="space-y-8">
-          {/* Literally the hero's own container and card metrics, so the picks land in the space
-              already held for them. The full-bleed block this replaced was a head taller than the
-              card it stood in for, and a second row would have doubled that shove. */}
-          <div className={heroContainerClass(heroRows)} aria-hidden>
-            <div className={heroShimmerClass(heroRows)} />
-            {heroRows === 2 && <div className={heroShimmerClass(heroRows)} />}
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="reel-poster reel-shimmer" />
-            ))}
-          </div>
-          {building && (
-            <p className="fa-body text-fa-frost-dim text-center">
-              Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
-            </p>
-          )}
-        </div>
-      ) : (
-        <>
-          {/* One registry of titles on screen per page view (F+3): every rail sends what the
-              others already show, so a title never repeats across rails. Keyed like the rows it
-              wraps — a re-seed or a medium switch is a new page view. */}
-          <RailPageProvider key={`page:${filter.media}:${resetKey}`} seedTitleIds={pageSeedIds}>
-          {/* The mood chips (a question about tonight) and the status line (what is true about
-              tonight's picks) sit tight above the picks they are about. From `lg` they share one
-              line; on a phone the status line takes its own, under the chips. The product's own
-              error rate lives in that line now, not in a banner of its own (FD-15). */}
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
-              <TonightMoodChips className="w-full lg:w-auto" value={mood} onChange={setMood} />
-              <HomeStatusLine reachingNote={reachingNote} className="lg:ml-auto" />
-            </div>
-            <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
-          </div>
-
-          {/* The two bands are news about the MODEL and the deep pass, not about tonight's picks,
-              so they sit BELOW the hero (FD-15): above it they put the first pick at 286px on a
-              desktop and 416px on a phone, against budgets of 220 and 300 (R1-17). The retrain band
-              leads because a retrain is the larger event. A re-key remounts them with the rails,
-              which is harmless: both read a cached query, and a dismissal lives in storage.
-              `empty:hidden` because with nothing honest to say both render nothing, and an empty
-              wrapper would still take the page's rhythm gap. */}
-          <div className="space-y-3 empty:hidden" data-testid="home-bands">
-            <ModelLearnedBand />
-            <CrossReferenceBand />
-          </div>
-
-          <ContinueWatchingRow entries={continueFiltered} />
-
-          {(feed?.rows ?? []).map((row) => (
-            <InfiniteRecRow
-              key={`${row.kind}:${row.anchorTitleId ?? row.title}:${filter.media}:${resetKey}`}
-              title={
-                row.kind === "because-you-loved" ? (
-                  <>
-                    Because you loved <span className="text-fa-frost-bright">{row.anchorName}</span>
-                  </>
-                ) : (
-                  <span className="text-fa-frost-bright">{row.title}</span>
-                )
-              }
-              context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
-              seed={row.items}
-              filter={filter}
-              mood={mood}
-            />
-          ))}
-
-          {/* "High for you" only when the build met the bar; a relaxed build is retitled and says
-              why, in the build's own words (IR1S-03). */}
-          {digestFiltered.length > 0 && (
-            <StaticRail
-              title={<span className="text-fa-frost-bright">{digestCopy.title}</span>}
-              caption={digestCopy.caption}
-              items={digestFiltered}
-            />
-          )}
-
-          {(genres ?? []).map((g) => (
-            <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
-          ))}
-          </RailPageProvider>
-
-          {(feed?.lockedRowCount ?? 0) > 0 && (
-            <section className="fa-card p-5 flex items-center gap-4">
-              <Lock className="h-5 w-5 text-fa-frost-dim shrink-0" />
-              <div>
-                <p className="fa-body text-fa-frost-bright">
-                  {feed!.lockedRowCount} more personalised row{feed!.lockedRowCount === 1 ? "" : "s"} on the full feed
-                </p>
-                <p className="fa-caption text-fa-frost-dim">
-                  The free shortlist gives you three picks a day — the paid feed unlocks every row, natural-language
-                  search and the managed Trakt queue.
-                </p>
-              </div>
-            </section>
-          )}
-        </>
-      )}
-    </div>
+    </CardUndoProvider>
   );
 }

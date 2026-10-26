@@ -65,7 +65,10 @@ const CARD_FRAME =
 const OVERLAY_ASPECT_SINGLE = "lg:aspect-[16/8.5]";
 const OVERLAY_ASPECT_TWO = "lg:aspect-[16/10] xl:aspect-[16/8.5]";
 
-const CARD_FOCUS = "group focus:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60";
+// The card is a container, not the link (a stretched-link card: the title is the link and its
+// `::after` covers the card, so the quick actions can be siblings rather than nested controls).
+// The ring therefore follows the link's keyboard focus from inside, through `:has()`.
+const CARD_FOCUS = "group has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-fa-frost/60";
 
 const SINGLE_ROW_CARD = `${CARD_FRAME} ${SINGLE_ROW_WIDTH} ${OVERLAY_ASPECT_SINGLE} ${CARD_FOCUS}`;
 const TWO_ROW_CARD = `${CARD_FRAME} ${OVERLAY_ASPECT_TWO} ${CARD_FOCUS}`;

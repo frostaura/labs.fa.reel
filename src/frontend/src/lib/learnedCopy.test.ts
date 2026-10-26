@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LEARNED_DISMISS_PREFIX, dismissLearned, isLearnedDismissed, learnedCopy } from "./learnedCopy";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LEARNED_NEWS_MS, learnedStatusSegment } from "./learnedCopy";
 import type { ModelLearned } from "../store/api";
 
+const NOW = Date.parse("2026-10-26T12:00:00Z");
+
 const learned = (overrides: Partial<ModelLearned> = {}): ModelLearned => ({
-  trainedAt: "2026-09-09T03:00:00Z",
+  trainedAt: "2026-10-26T09:00:00Z",
   newRatingsSinceLast: 14,
   calibrationBias: 0.2,
   calibrationMae: 1.1,
@@ -12,86 +14,46 @@ const learned = (overrides: Partial<ModelLearned> = {}): ModelLearned => ({
   ...overrides,
 });
 
-describe("learnedCopy", () => {
-  it("says what the retrain learned from and what moved", () => {
-    expect(learnedCopy(learned())).toBe("Learned from 14 new ratings. 3 picks changed.");
+describe("learnedStatusSegment", () => {
+  // `relTime` reads the clock itself, so the clock is pinned rather than only the `now` argument.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("says when it retrained, what it learned from and what moved", () => {
+    expect(learnedStatusSegment(learned(), NOW)).toBe("Retrained 3h ago on 14 new ratings, 3 picks changed");
   });
 
   it("makes no closeness claim, whatever an older server still sends", () => {
     // WS-5 retired the number; a stale payload carrying it must not bring the claim back.
     const stale = { ...learned(), maeImprovement: 0.4 } as ModelLearned;
-    expect(learnedCopy(stale)).not.toMatch(/closer/);
+    expect(learnedStatusSegment(stale, NOW)).not.toMatch(/closer/);
   });
 
   it("says nothing about picks when none changed", () => {
-    expect(learnedCopy(learned({ picksChanged: 0 }))).toBe("Learned from 14 new ratings.");
+    expect(learnedStatusSegment(learned({ picksChanged: 0 }), NOW)).toBe("Retrained 3h ago on 14 new ratings");
   });
 
-  it("is singular where it should be", () => {
-    expect(learnedCopy(learned({ newRatingsSinceLast: 1, picksChanged: 1 }))).toBe(
-      "Learned from 1 new rating. 1 pick changed."
+  it("is singular where it should be, and formats large counts with separators", () => {
+    expect(learnedStatusSegment(learned({ newRatingsSinceLast: 1, picksChanged: 1 }), NOW)).toBe(
+      "Retrained 3h ago on 1 new rating, 1 pick changed"
+    );
+    expect(learnedStatusSegment(learned({ newRatingsSinceLast: 1204, picksChanged: 0 }), NOW)).toBe(
+      "Retrained 3h ago on 1,204 new ratings"
     );
   });
 
-  it("formats large counts with separators", () => {
-    expect(learnedCopy(learned({ newRatingsSinceLast: 1204, picksChanged: 0 }))).toBe("Learned from 1,204 new ratings.");
-  });
-});
-
-/**
- * A minimal in-memory Storage, matching browseFilter.test.ts: the suite runs in node with no DOM
- * (no jsdom or happy-dom is installed, deliberately), so a stub is what lets these exercise the
- * real read/write/catch paths without pulling a DOM implementation into the project.
- */
-function installStorage(options: { throwOnRead?: boolean; throwOnWrite?: boolean } = {}) {
-  const map = new Map<string, string>();
-  (globalThis as { localStorage?: unknown }).localStorage = {
-    getItem(key: string) {
-      if (options.throwOnRead) throw new Error("SecurityError");
-      return map.get(key) ?? null;
-    },
-    setItem(key: string, value: string) {
-      if (options.throwOnWrite) throw new Error("QuotaExceededError");
-      map.set(key, value);
-    },
-    removeItem: (key: string) => void map.delete(key),
-    clear: () => map.clear(),
-    key: (i: number) => [...map.keys()][i] ?? null,
-    get length() {
-      return map.size;
-    },
-  };
-  return map;
-}
-
-describe("learned band dismissal", () => {
-  beforeEach(() => {
-    installStorage();
+  it("ages out: a retrain older than two days is no longer news", () => {
+    const old = learned({ trainedAt: new Date(NOW - LEARNED_NEWS_MS - 60_000).toISOString() });
+    expect(learnedStatusSegment(old, NOW)).toBeNull();
   });
 
-  afterEach(() => {
-    delete (globalThis as { localStorage?: unknown }).localStorage;
-  });
-
-  it("is scoped to the retrain, so the next one is still news", () => {
-    dismissLearned("2026-09-09T03:00:00Z");
-
-    expect(isLearnedDismissed("2026-09-09T03:00:00Z")).toBe(true);
-    expect(isLearnedDismissed("2026-09-10T03:00:00Z")).toBe(false);
-    expect(localStorage.getItem(`${LEARNED_DISMISS_PREFIX}2026-09-09T03:00:00Z`)).toBe("1");
-  });
-
-  it("shows the band when storage throws on read", () => {
-    // A private window or a browser blocking site data throws on the accessor itself. Showing the
-    // band is the harmless direction; crashing Home is not.
-    installStorage({ throwOnRead: true });
-
-    expect(isLearnedDismissed("2026-09-09T03:00:00Z")).toBe(false);
-  });
-
-  it("swallows a throwing write", () => {
-    installStorage({ throwOnWrite: true });
-
-    expect(() => dismissLearned("2026-09-09T03:00:00Z")).not.toThrow();
+  it("says nothing without a retrain or with a timestamp it cannot read", () => {
+    expect(learnedStatusSegment(null, NOW)).toBeNull();
+    expect(learnedStatusSegment(learned({ trainedAt: "not a date" }), NOW)).toBeNull();
   });
 });

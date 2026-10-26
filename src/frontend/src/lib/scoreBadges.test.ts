@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scoreBadgesPlan } from "./scoreBadges";
+import { scoreBadgesPlan, scoreChipDescription } from "./scoreBadges";
 
 describe("scoreBadgesPlan", () => {
   it("renders both pills when prediction and crowd score are present", () => {
@@ -46,5 +46,23 @@ describe("scoreBadgesPlan", () => {
     const plan = scoreBadgesPlan({ predictedRating: 7.2, userRating: null });
     expect(plan.showUserRating).toBe(false);
     expect(plan.showPredicted).toBe(true);
+  });
+});
+
+describe("scoreChipDescription", () => {
+  it("names each number and the band behind the prediction", () => {
+    expect(scoreChipDescription({ predictedRating: 8.4, crowdRating: 7.9, crowdVotes: 40210, band: 1.14 })).toBe(
+      "Predicted 8.4 for you, give or take 1.1 — what predictions for you have typically been off by. Crowd score 7.9 from 40,210 votes"
+    );
+  });
+
+  it("says nothing about a band it does not have, or votes it does not know", () => {
+    expect(scoreChipDescription({ predictedRating: 8.4, crowdRating: 7.9, band: null })).toBe(
+      "Predicted 8.4 for you from your ratings. Crowd score 7.9"
+    );
+  });
+
+  it("leads with the user's own rating where it replaces the prediction", () => {
+    expect(scoreChipDescription({ predictedRating: 8.4, userRating: 9, band: 1.1 })).toBe("You rated it 9");
   });
 });

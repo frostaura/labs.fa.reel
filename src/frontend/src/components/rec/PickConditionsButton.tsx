@@ -2,11 +2,9 @@ import { useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "../ui/dialog";
 import ConditionsEditor from "../settings/ConditionsEditor";
-import ConditionSummary from "../settings/ConditionSummary";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
 import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
-import type { BrowseFilter } from "../../lib/browseFilter";
 
 /**
  * The conditions editor, reachable from the feed itself.
@@ -18,39 +16,57 @@ import type { BrowseFilter } from "../../lib/browseFilter";
  *
  * Composes the shared `ui/dialog` primitives rather than modifying them, and mounts the same
  * `ConditionsEditor` that Settings renders — there is one implementation of these rules.
+ *
+ * Optionally controlled (`open` / `onOpenChange`), so Home's condition chips open the same dialog,
+ * and optionally trigger-less (`trigger={false}`) for a phone header where the chips themselves are
+ * the control. Uncontrolled with its own button, as Ask Reel mounts it, is the default.
  */
-export default function PickConditionsButton({ onSaved }: { onSaved?: () => void }) {
-  const [open, setOpen] = useState(false);
+export default function PickConditionsButton({
+  onSaved,
+  open: controlledOpen,
+  onOpenChange,
+  trigger = true,
+}: {
+  onSaved?: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  trigger?: boolean;
+}) {
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = controlledOpen ?? ownOpen;
+  const setOpen = onOpenChange ?? setOwnOpen;
   const { data: filters } = useGetFiltersQuery();
   const activeCount = summaryChips(filters).length;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <button
-          type="button"
-          title="Set the conditions for tonight's picks — genres, ratings, years, languages"
-          data-testid="open-conditions"
-          className="fa-overline inline-flex items-center gap-1.5 rounded-lg border border-fa-edge bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
-        >
-          <SlidersHorizontal className="h-3.5 w-3.5" />
-          Conditions
-          {/* Counts SAVED conditions only — the browse toggles are a per-device view filter this
-              dialog cannot edit, so counting them here would send the user in to look for a control
-              that is not there. The chip row therefore legitimately carries more chips than this
-              badge counts; the label spells out which ones it means. */}
-          {activeCount > 0 && (
-            <span
-              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fa-frost/20 px-1 text-fa-frost-bright tabular-nums"
-              data-testid="conditions-count"
-              aria-label={`${activeCount} saved condition${activeCount === 1 ? "" : "s"}`}
-              title={`${activeCount} saved condition${activeCount === 1 ? "" : "s"} — browse toggles are counted separately`}
-            >
-              {activeCount}
-            </span>
-          )}
-        </button>
-      </DialogTrigger>
+      {trigger && (
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            title="Set the conditions for tonight's picks — genres, ratings, years, languages"
+            data-testid="open-conditions"
+            className="fa-overline inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-fa-edge bg-fa-glass px-2.5 py-2 text-fa-frost transition [@media(pointer:fine)]:min-h-0 hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            Conditions
+            {/* Counts SAVED conditions only — the browse toggles are a per-device view filter this
+                dialog cannot edit, so counting them here would send the user in to look for a control
+                that is not there. The chip row therefore legitimately carries more chips than this
+                badge counts; the label spells out which ones it means. */}
+            {activeCount > 0 && (
+              <span
+                className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fa-frost/20 px-1 text-fa-frost-bright tabular-nums"
+                data-testid="conditions-count"
+                aria-label={`${activeCount} saved condition${activeCount === 1 ? "" : "s"}`}
+                title={`${activeCount} saved condition${activeCount === 1 ? "" : "s"} — browse toggles are counted separately`}
+              >
+                {activeCount}
+              </span>
+            )}
+          </button>
+        </DialogTrigger>
+      )}
       {/* Taller and wider than the default dialog: this is a form, not a confirmation, and the
           genre grid alone is 24 chips. The body scrolls so the phone case still reaches Save. */}
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto p-0">
@@ -73,42 +89,5 @@ export default function PickConditionsButton({ onSaved }: { onSaved?: () => void
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/**
- * The one-line "this is why your feed looks like this", for the feed header. Separate from the
- * button so the summary can sit under the page title at full width instead of being squeezed into
- * a control strip.
- *
- * Takes the browse filter as well as the saved conditions, because the header claims to summarise
- * everything shaping the feed and a "Movies only" toggle shapes it every bit as visibly as a genre
- * exclusion. Passing the setter through makes those chips dismissible from here.
- */
-export function PickConditionsSummary({
-  className,
-  browse,
-  onBrowseChange,
-  limit = 6,
-}: {
-  className?: string;
-  browse?: BrowseFilter | null;
-  onBrowseChange?: (next: BrowseFilter) => void;
-  /** Condition chips shown before "+N more" — fewer on a phone, where the row must stay one line. */
-  limit?: number;
-}) {
-  const { data: filters } = useGetFiltersQuery();
-  // Waits for the real payload rather than rendering against the defaults: `normalizeFilters`
-  // fills an absent payload out to `languages: ["en"]`, so an in-flight query would briefly assert
-  // an "English only" condition the account may not actually have.
-  if (!filters || summaryChips(filters, browse).length === 0) return null;
-  return (
-    <ConditionSummary
-      filters={filters}
-      browse={browse}
-      onBrowseChange={onBrowseChange}
-      limit={limit}
-      className={className}
-    />
   );
 }
