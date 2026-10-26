@@ -333,3 +333,18 @@ export async function waitForStream(page: Page): Promise<void> {
     () => (window as unknown as { __sse?: { count: () => number } }).__sse?.count() ?? 0 > 0
   );
 }
+
+/**
+ * Asserts that something STAYS true for `ms`: `check` runs every 50 ms across the window and once at
+ * its end, so a state that flips and flips back fails here, where a sleep followed by one check would
+ * pass. Use it only for "nothing happens" assertions; a wait for something to happen is
+ * `expect.poll` or a web-first assertion.
+ */
+export async function expectHolds(check: () => Promise<unknown> | unknown, ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  do {
+    await check();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < end);
+  await check();
+}
