@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
@@ -11,6 +12,7 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Notifications;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Providers;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
@@ -53,7 +55,7 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         //   staleMovie   — released 30 days ago, 9.9        → out: outside the window
         //   lowScore     — released 2 days ago, 6.9         → out: under the 7.0 floor
         //   watched      — released 1 day ago, 9.9, watched → out: interaction footprint
-        //   onProvider   — old title, fresh flatrate, 8.0   → in, "new-on-provider"
+        //   onProvider   — old title, flatrate ARRIVED yesterday, 8.0 → in, "new-on-provider"
         var freshShow = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddDays(-2));
         var freshMovie = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
         var freshMovie2 = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
@@ -64,7 +66,7 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         var onProvider = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-2));
 
         await SeedWatchedAsync(accountId, watched);
-        await SeedAvailabilityAsync(onProvider, "US", now.AddDays(-1));
+        var arrivedOn = await SeedAvailabilityAsync(onProvider, "US", now.AddDays(-1), firstSeenAt: now.AddDays(-1));
         await SeedActiveArtifactAndScoresAsync(accountId, new()
         {
             [freshShow] = 9.0m,
@@ -86,6 +88,8 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         Assert.Equal(DigestReasons.NewRelease, items[0].Reason);
         Assert.Equal(DigestReasons.NewRelease, items[1].Reason);
         Assert.Equal(DigestReasons.NewOnProvider, items[3].Reason);
+        Assert.Equal(arrivedOn, items[3].Provider);
+        Assert.Null(items[0].Provider);
         Assert.Equal(9.0m, items[0].PredictedRating);
         // An honest digest says nothing about degradation.
         Assert.All(items, i => Assert.Null(i.DegradedReason));
@@ -107,12 +111,12 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         var now = DateTime.UtcNow;
         var accountId = await SeedAccountAsync();
 
-        // Both titles are old catalogue with a freshly fetched flatrate row; only the one absent
-        // from LAST week's digest may ship — re-fetched availability must not recycle items.
+        // Both titles are old catalogue that arrived on a flatrate provider this week; only the one
+        // absent from LAST week's digest may ship — an arrival is announced once.
         var shownLastWeek = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-3));
         var genuinelyNew = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-3));
-        await SeedAvailabilityAsync(shownLastWeek, "US", now.AddDays(-2));
-        await SeedAvailabilityAsync(genuinelyNew, "US", now.AddDays(-2));
+        await SeedAvailabilityAsync(shownLastWeek, "US", now.AddDays(-2), firstSeenAt: now.AddDays(-2));
+        var arrivedOn = await SeedAvailabilityAsync(genuinelyNew, "US", now.AddDays(-2), firstSeenAt: now.AddDays(-2));
         await SeedActiveArtifactAndScoresAsync(accountId, new()
         {
             [shownLastWeek] = 9.5m,
@@ -143,7 +147,7 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         Assert.Equal(3, sender.Sent.Count);
         var push = await ReadPushAsync(sender.Sent[0].PayloadJson, genuinelyNew);
         Assert.Equal($"{push.Name} \u2014 8.0 for you", push.Title);
-        Assert.Equal("Just landed on your services", push.Body);
+        Assert.Equal($"Streaming on {arrivedOn}", push.Body);
         Assert.Equal($"/title/movie/{push.TmdbId}", push.Url);
 
         await using var db = fixture.CreateContext(Pinned(accountId));
@@ -253,6 +257,123 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
 
         Assert.Empty(await ReadDigestItemsAsync(accountId));
         Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task Only_an_arrival_counts_as_new_on_provider_never_a_cache_refresh()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // IR2S-02, the live shape: the availability job had just re-fetched NCIS (2003), Southland
+        // (2009) and Reign Over Me (2007), and the digest sold all of them as "Just landed on your
+        // services". Every title here is old catalogue scored well above the floor, so the ONLY
+        // thing deciding membership is whether the provider set changed inside the window.
+        //   refreshed      — flatrate fetched yesterday, never observed arriving       → out
+        //   arrivedLongAgo — flatrate arrival observed 20 days ago, re-fetched today  → out
+        //   arrivedToRent  — a rental that arrived 2 days ago: not streaming now      → out
+        //   otherRegion    — a flatrate arrival 2 days ago, but in GB, not US         → out
+        //   arrivedFree    — a free offer that arrived 2 days ago                     → in
+        //   arrivedTwice   — arrived on two subscriptions 3 days ago                  → in, the more prominent named
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var refreshed = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddYears(-23));
+        var arrivedLongAgo = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-19));
+        var arrivedToRent = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-15));
+        var otherRegion = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-6));
+        var arrivedFree = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddYears(-4));
+        var arrivedTwice = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddYears(-17));
+
+        await SeedAvailabilityAsync(refreshed, "US", now.AddDays(-1), firstSeenAt: null);
+        await SeedAvailabilityAsync(arrivedLongAgo, "US", now.AddHours(-2), firstSeenAt: now.AddDays(-20));
+        await SeedAvailabilityAsync(arrivedToRent, "US", now.AddDays(-2), firstSeenAt: now.AddDays(-2), kind: AvailabilityKind.Rent);
+        await SeedAvailabilityAsync(otherRegion, "GB", now.AddDays(-2), firstSeenAt: now.AddDays(-2));
+        var freeOn = await SeedAvailabilityAsync(arrivedFree, "US", now.AddDays(-2), firstSeenAt: now.AddDays(-2), kind: AvailabilityKind.Free);
+        await SeedAvailabilityAsync(arrivedTwice, "US", now.AddDays(-3), firstSeenAt: now.AddDays(-3), displayPriority: 9);
+        var prominent = await SeedAvailabilityAsync(arrivedTwice, "US", now.AddDays(-3), firstSeenAt: now.AddDays(-3), displayPriority: 1);
+
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [refreshed] = 9.4m,
+            [arrivedLongAgo] = 9.3m,
+            [arrivedToRent] = 9.2m,
+            [otherRegion] = 9.1m,
+            [arrivedFree] = 8.6m,
+            [arrivedTwice] = 8.4m,
+        });
+
+        var sender = new FakePushSender();
+        await SeedSubscriptionAsync(accountId, "https://push.example/arrivals");
+        await RunDigestAsync(accountId, sender);
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { arrivedFree, arrivedTwice }, items.Select(i => i.TitleId).ToArray());
+        Assert.All(items, i => Assert.Equal(DigestReasons.NewOnProvider, i.Reason));
+        Assert.Equal(freeOn, items[0].Provider);
+        Assert.Equal(prominent, items[1].Provider);
+
+        // The push names the provider and makes no claim about "your services".
+        var push = await ReadPushAsync(Assert.Single(sender.Sent).PayloadJson, arrivedFree);
+        Assert.Equal($"Streaming on {freeOn}", push.Body);
+    }
+
+    [Fact]
+    public async Task Through_the_real_writer_a_refetch_is_not_an_arrival_and_a_new_offer_is()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // End to end through the one snapshot writer both refetch paths use, so the test cannot pass
+        // on hand-placed FirstSeenAt values that the writer would never produce.
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var longRunning = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddYears(-23));
+        var movedToStreaming = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddMonths(-8));
+        var tmdbProvider = Random.Shared.Next(100_000, int.MaxValue);
+        var providerName = $"Netflix-fixture-{Guid.NewGuid():N}";
+        TmdbWatchProvider Offer(AvailabilityKind kind) => new(tmdbProvider, providerName, "/n.png", 1, kind);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            // First look, then the availability job's refresh a day later: the same flatrate offer.
+            await AvailabilitySnapshot.ReplaceAsync(db, longRunning, "US", [Offer(AvailabilityKind.Flatrate)], now.AddDays(-1), CancellationToken.None);
+            await AvailabilitySnapshot.ReplaceAsync(db, longRunning, "US", [Offer(AvailabilityKind.Flatrate)], now, CancellationToken.None);
+
+            // Rent-only on first look; the next fetch finds it on the subscription too.
+            await AvailabilitySnapshot.ReplaceAsync(db, movedToStreaming, "US", [Offer(AvailabilityKind.Rent)], now.AddDays(-2), CancellationToken.None);
+            await AvailabilitySnapshot.ReplaceAsync(db, movedToStreaming, "US", [Offer(AvailabilityKind.Rent), Offer(AvailabilityKind.Flatrate)], now.AddDays(-1), CancellationToken.None);
+            // And a further refresh must not restamp the arrival to "now".
+            await AvailabilitySnapshot.ReplaceAsync(db, movedToStreaming, "US", [Offer(AvailabilityKind.Rent), Offer(AvailabilityKind.Flatrate)], now, CancellationToken.None);
+        }
+
+        await using (var verify = fixture.CreateContext(new AccountContext()))
+        {
+            var rows = await verify.TitleAvailabilities
+                .Where(a => a.TitleId == longRunning || a.TitleId == movedToStreaming)
+                .ToListAsync();
+            Assert.Null(rows.Single(r => r.TitleId == longRunning).FirstSeenAt);
+            Assert.Null(rows.Single(r => r.TitleId == movedToStreaming && r.Kind == AvailabilityKind.Rent).FirstSeenAt);
+            var arrival = rows.Single(r => r.TitleId == movedToStreaming && r.Kind == AvailabilityKind.Flatrate);
+            Assert.NotNull(arrival.FirstSeenAt);
+            Assert.True(arrival.FirstSeenAt < now.AddHours(-12), "a refetch restamped the arrival");
+            Assert.All(rows, r => Assert.True(r.FetchedAt > now.AddMinutes(-1)));
+        }
+
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [longRunning] = 9.5m,
+            [movedToStreaming] = 8.0m,
+        });
+        await RunDigestAsync(accountId, new FakePushSender());
+        var item = Assert.Single(await ReadDigestItemsAsync(accountId));
+
+        Assert.Equal(movedToStreaming, item.TitleId);
+        Assert.Equal(DigestReasons.NewOnProvider, item.Reason);
+        Assert.Equal(providerName, item.Provider);
     }
 
     // ── Harness ─────────────────────────────────────────────────────────────────────────────
@@ -387,19 +508,32 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedAvailabilityAsync(Guid titleId, string region, DateTime fetchedAt)
+    /// <summary>One offer on a provider of its own; returns that provider's (unique) name.</summary>
+    private async Task<string> SeedAvailabilityAsync(
+        Guid titleId, string region, DateTime fetchedAt, DateTime? firstSeenAt,
+        AvailabilityKind kind = AvailabilityKind.Flatrate, int displayPriority = 5)
     {
         await using var db = fixture.CreateContext(new AccountContext());
+        var provider = new StreamingProvider
+        {
+            Id = Guid.NewGuid(),
+            TmdbProviderId = Random.Shared.Next(100_000, int.MaxValue),
+            Name = $"provider-fixture-{Guid.NewGuid():N}",
+            DisplayPriority = displayPriority,
+        };
+        db.StreamingProviders.Add(provider);
         db.TitleAvailabilities.Add(new TitleAvailability
         {
             Id = Guid.NewGuid(),
             TitleId = titleId,
             Region = region,
-            ProviderId = Guid.NewGuid(),
-            Kind = AvailabilityKind.Flatrate,
+            ProviderId = provider.Id,
+            Kind = kind,
             FetchedAt = fetchedAt,
+            FirstSeenAt = firstSeenAt,
         });
         await db.SaveChangesAsync();
+        return provider.Name;
     }
 
     /// <summary>
@@ -526,7 +660,8 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
     /// <summary>
     /// End to end through <c>GET /api/digest/current</c>, both branches in one digest: the card with
     /// a cached lens hook renders the hook and is logged <c>Cache</c>; the card without one renders
-    /// the reason copy and is logged <c>Digest</c>.
+    /// the reason copy — an arrival naming the provider its strip shows — and is logged
+    /// <c>Digest</c>. Arrivals the card cannot back (IR2S-02) are neither rendered nor logged.
     /// </summary>
     [Fact]
     public async Task Reading_the_digest_logs_each_card_with_the_source_of_its_rendered_line()
@@ -539,9 +674,14 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
         var (accountId, client) = await api.CreateSignedInAccountAsync($"digest-exposure-{Guid.NewGuid():N}");
         var now = DateTime.UtcNow;
         var titleIds = new List<Guid>();
+        var providerName = $"Netflix-fixture-{Guid.NewGuid():N}";
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
-            for (var i = 0; i < 2; i++)
+            // 0: a release with a cached hook. 1: an arrival on a provider the card shows.
+            // 2: a pre-IR2S-02 arrival — no provider recorded, picked off a cache refresh — that
+            //    is streaming right now; it must still not render. 3: an arrival whose offer has
+            //    lapsed, so the card would name nothing.
+            for (var i = 0; i < 4; i++)
             {
                 var title = new Title
                 {
@@ -579,9 +719,33 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
                 ItemsJson = JsonSerializer.Serialize(new[]
                 {
                     new DigestItem(titleIds[0], 8.1m, DigestReasons.NewRelease),
-                    new DigestItem(titleIds[1], 7.6m, DigestReasons.NewOnProvider),
+                    new DigestItem(titleIds[1], 7.6m, DigestReasons.NewOnProvider, Provider: providerName),
+                    new DigestItem(titleIds[2], 7.5m, DigestReasons.NewOnProvider),
+                    new DigestItem(titleIds[3], 7.4m, DigestReasons.NewOnProvider, Provider: providerName),
                 }),
             });
+            var provider = new StreamingProvider
+            {
+                Id = Guid.NewGuid(),
+                TmdbProviderId = Random.Shared.Next(100_000, int.MaxValue),
+                Name = providerName,
+                DisplayPriority = 1,
+            };
+            db.StreamingProviders.Add(provider);
+            foreach (var (titleId, fetchedAt) in new[] { (titleIds[1], now.AddHours(-3)), (titleIds[2], now.AddHours(-3)), (titleIds[3], now.AddDays(-9)) })
+            {
+                db.TitleAvailabilities.Add(new TitleAvailability
+                {
+                    Id = Guid.NewGuid(),
+                    TitleId = titleId,
+                    Region = "ZA", // ReelApiFactory seeds every account in ZA
+                    ProviderId = provider.Id,
+                    Kind = AvailabilityKind.Flatrate,
+                    FetchedAt = fetchedAt,
+                    FirstSeenAt = titleId == titleIds[2] ? null : fetchedAt.AddDays(-1),
+                });
+            }
+
             // A cached lens note for the first title only — any profile hash serves, because the
             // digest reads a stale note as readily as a fresh one.
             db.TitleLensCopies.Add(new TitleLensCopy
@@ -607,15 +771,21 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
 
         using var response = await client.GetAsync("/api/digest/current");
         response.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var cards = body.RootElement.GetProperty("items").EnumerateArray().ToList();
+        Assert.Equal(new[] { titleIds[0], titleIds[1] }, cards.Select(c => c.GetProperty("titleId").GetGuid()).ToArray());
+        Assert.Equal($"Streaming on {providerName}", cards[1].GetProperty("whyThis").GetString());
+        Assert.DoesNotContain(cards, c => c.GetProperty("whyThis").GetString()!.Contains("your services", StringComparison.OrdinalIgnoreCase));
 
+        // Only what was rendered is logged: the two unbacked arrivals were never shown.
         await using var verify = fixture.CreateContext(new AccountContext());
         var exposures = await verify.ExposureEvents
             .Where(e => e.AccountId == accountId && e.Surface == ExposureSurface.Digest)
             .ToDictionaryAsync(e => e.TitleId);
-        Assert.Equal(titleIds.OrderBy(id => id), exposures.Keys.OrderBy(id => id));
+        Assert.Equal(new[] { titleIds[0], titleIds[1] }.OrderBy(id => id), exposures.Keys.OrderBy(id => id));
         Assert.Equal("Cache", exposures[titleIds[0]].WhySource);
         Assert.Equal(Hook, exposures[titleIds[0]].WhySentence);
         Assert.Equal("Digest", exposures[titleIds[1]].WhySource);
-        Assert.Equal(DigestReasons.CopyFor(DigestReasons.NewOnProvider), exposures[titleIds[1]].WhySentence);
+        Assert.Equal($"Streaming on {providerName}", exposures[titleIds[1]].WhySentence);
     }
 }

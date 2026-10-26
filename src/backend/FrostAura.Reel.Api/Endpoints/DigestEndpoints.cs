@@ -64,6 +64,14 @@ public static class DigestEndpoints
                     continue;
                 }
 
+                var shown = providers.GetValueOrDefault(title.Id, []);
+                if (ReasonCopy(item, shown) is not { } reasonCopy)
+                {
+                    // An arrival the card cannot back: picked off a cache refresh before IR2S-02, or
+                    // its offer has since lapsed. Rendering it would repeat the lie, so it is not shown.
+                    continue;
+                }
+
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = CrowdRating.Resolve(title);
@@ -71,13 +79,13 @@ public static class DigestEndpoints
                 // The lens's hook where one exists, and the reason copy where it does not. Both are
                 // true statements about why the card is here; the hook is simply the one written
                 // for this reader.
-                var (whyThis, whySource) = DigestWhyLine(note?.Hook, DigestReasons.CopyFor(item.Reason));
+                var (whyThis, whySource) = DigestWhyLine(note?.Hook, reasonCopy);
                 whySources.Add(whySource);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
                     Math.Round(item.PredictedRating, 1), crowd, crowdVotes, whyThis, isReleased,
-                    providers.GetValueOrDefault(title.Id, []),
+                    shown,
                     Confidence: null, FloorUsed: null,
                     Hook: note?.Hook, LensClause: note?.FirstClause(), Mood: note?.Mood));
             }
@@ -113,6 +121,38 @@ public static class DigestEndpoints
                 items = cards,
             });
         });
+    }
+
+    /// <summary>
+    /// The reason line a digest card may carry, or null when the card must not be shown at all.
+    /// <para>
+    /// A release is "New this week". An arrival names a provider, and only one the card's own
+    /// streaming strip (<paramref name="shown"/>) displays: the provider it arrived on when the
+    /// strip still holds it, otherwise the strip's first — "Streaming on X" stays true either way,
+    /// and never names something the reader cannot see.
+    /// </para>
+    /// <para>
+    /// Null for an arrival with nothing behind it: no recorded provider means it was built before
+    /// IR2S-02, when "arrived" meant "the availability cache was refreshed" (NCIS, 2003, "Just
+    /// landed on your services"); an empty strip means the offer is no longer streaming now. In
+    /// both the card's only reason for being in a "new this week" rail is gone.
+    /// </para>
+    /// </summary>
+    public static string? ReasonCopy(DigestItem item, IReadOnlyList<FeedEndpoints.CardProvider> shown)
+    {
+        if (item.Reason != DigestReasons.NewOnProvider)
+        {
+            return DigestReasons.CopyFor(item.Reason);
+        }
+
+        if (string.IsNullOrWhiteSpace(item.Provider) || shown.Count == 0)
+        {
+            return null;
+        }
+
+        var named = shown.FirstOrDefault(p => string.Equals(p.Name, item.Provider.Trim(), StringComparison.OrdinalIgnoreCase))
+            ?? shown[0];
+        return DigestReasons.CopyFor(item.Reason, named.Name);
     }
 
     /// <summary>

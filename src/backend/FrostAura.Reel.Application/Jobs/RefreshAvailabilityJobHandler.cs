@@ -1,8 +1,8 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Ports;
-using FrostAura.Reel.Domain.Providers;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -65,43 +65,10 @@ public sealed class RefreshAvailabilityJobHandler(
             }
 
             var providers = await tmdb.GetWatchProvidersAsync(title.TmdbId!.Value, title.MediaType == MediaType.Movie, region, ct);
-            var providerIds = providers.Select(p => p.ProviderId).Distinct().ToList();
-            var known = await db.StreamingProviders
-                .Where(p => providerIds.Contains(p.TmdbProviderId))
-                .ToDictionaryAsync(p => p.TmdbProviderId, ct);
 
-            await db.TitleAvailabilities
-                .Where(a => a.TitleId == title.Id && a.Region == region)
-                .ExecuteDeleteAsync(ct);
-
-            foreach (var item in providers)
-            {
-                if (!known.TryGetValue(item.ProviderId, out var provider))
-                {
-                    provider = new StreamingProvider
-                    {
-                        Id = Guid.NewGuid(),
-                        TmdbProviderId = item.ProviderId,
-                        Name = item.Name,
-                        LogoPath = item.LogoPath,
-                        DisplayPriority = item.DisplayPriority,
-                    };
-                    known[item.ProviderId] = provider;
-                    db.StreamingProviders.Add(provider);
-                }
-
-                db.TitleAvailabilities.Add(new TitleAvailability
-                {
-                    Id = Guid.NewGuid(),
-                    TitleId = title.Id,
-                    Region = region,
-                    ProviderId = provider.Id,
-                    Kind = item.Kind,
-                    FetchedAt = DateTime.UtcNow,
-                });
-            }
-
-            await db.SaveChangesAsync(ct);
+            // Through the one snapshot writer, so a refetch carries each offer's FirstSeenAt rather
+            // than making every offer look like it arrived today.
+            await AvailabilitySnapshot.ReplaceAsync(db, title.Id, region, providers, DateTime.UtcNow, ct);
             refreshed++;
         }
 

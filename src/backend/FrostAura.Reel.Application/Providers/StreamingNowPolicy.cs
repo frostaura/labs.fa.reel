@@ -15,9 +15,9 @@ namespace FrostAura.Reel.Application.Providers;
 /// <para><b>How fresh.</b> An offer is believed for <see cref="FreshFor"/> after it was fetched. Past
 /// that the row says what was true a week ago, which is not "now".</para>
 ///
-/// <para>Every surface that says "streaming now" reads it from here — Saved and Watch tonight today;
-/// the feed's provider read and the digest are change requests to their owners — so the shelf, the
-/// card and the reason line can never disagree about the same title.</para>
+/// <para>Every surface that says "streaming now" reads it from here — Saved, Watch tonight, the feed's
+/// provider strip and the digest's arrivals (<see cref="Arrivals"/>) — so the shelf, the card and the
+/// reason line can never disagree about the same title.</para>
 /// </summary>
 public static class StreamingNowPolicy
 {
@@ -46,6 +46,24 @@ public static class StreamingNowPolicy
         var cutoff = nowUtc - FreshFor;
         return rows.Where(a => titleIds.Contains(a.TitleId)
             && a.Region == region
+            && a.FetchedAt > cutoff
+            && (a.Kind == AvailabilityKind.Flatrate || a.Kind == AvailabilityKind.Free || a.Kind == AvailabilityKind.Ads));
+    }
+
+    /// <summary>
+    /// Streaming-now offers in <paramref name="region"/> that ARRIVED at or after
+    /// <paramref name="sinceUtc"/>: the provider set changed to include them
+    /// (<see cref="TitleAvailability.FirstSeenAt"/>), not merely that their row was re-fetched.
+    /// <see cref="TitleAvailability.FetchedAt"/> is a cache timestamp and must never be read as an
+    /// arrival — that is how a refresh became "Just landed on your services" (IR2S-02).
+    /// </summary>
+    public static IQueryable<TitleAvailability> Arrivals(
+        IQueryable<TitleAvailability> rows, string region, DateTime sinceUtc, DateTime nowUtc)
+    {
+        var cutoff = nowUtc - FreshFor;
+        return rows.Where(a => a.Region == region
+            && a.FirstSeenAt != null
+            && a.FirstSeenAt >= sinceUtc
             && a.FetchedAt > cutoff
             && (a.Kind == AvailabilityKind.Flatrate || a.Kind == AvailabilityKind.Free || a.Kind == AvailabilityKind.Ads));
     }
