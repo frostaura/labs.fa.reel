@@ -391,10 +391,13 @@ test.describe("lazy rails", () => {
             .filter((el) => el.getBoundingClientRect().top <= window.innerHeight + 200)
             .map((el) => el.dataset.genre!)
         );
-        // With no rows the first genre rail is on screen and must have filled; with one row none is
-        // within reach, and none asked.
+        // With no rows the first genre rail is on screen and must have filled. With one row whether
+        // the first genre rail is within reach is a fact about the header's height, not about the
+        // rule — it was out of reach until the phone header lost a line of chrome (the conditions
+        // moved into the control line) and is inside it now — so the rule is asserted, not the
+        // layout: every rail that asked was in range when it asked (above), every rail in range now
+        // has asked (below), and the rails further down still wait.
         if (rowCount === 0) expect(nearNow.length).toBeGreaterThanOrEqual(1);
-        else expect(fetched.size).toBe(0);
         for (const genre of nearNow) expect(fetched.has(genre), `genre:${genre} is on screen but never asked`).toBe(true);
         // Never the whole page: the rails further down wait for the user.
         expect(fetched.size).toBeLessThan(GENRES.length);
