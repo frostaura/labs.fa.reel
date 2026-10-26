@@ -38,11 +38,31 @@ public static class PushEndpoints
                 return Results.BadRequest(new { error = "endpoint and keys are required" });
             }
 
+            // Only a known push service, over HTTPS (J-9): anything else is an SSRF primitive the
+            // digest would fire into the stack's own network.
+            if (!PushEndpointPolicy.IsAllowed(request.Endpoint))
+            {
+                return Results.BadRequest(new { error = "endpoint is not a supported push service", code = "push_endpoint_not_allowed" });
+            }
+
             var accountId = accountContext.AccountId!.Value;
             var subscription = await db.PushSubscriptions
                 .FirstOrDefaultAsync(s => s.AccountId == accountId && s.Endpoint == request.Endpoint, ct);
             if (subscription is null)
             {
+                // At most MaxSubscriptionsPerAccount: a new browser retires the one heard from least
+                // recently, so replacing devices never locks an account out of notifications.
+                var existing = await db.PushSubscriptions
+                    .Where(s => s.AccountId == accountId)
+                    .OrderByDescending(s => s.LastSuccessAt ?? s.CreatedAt)
+                    .Select(s => s.Id)
+                    .ToListAsync(ct);
+                var surplus = existing.Skip(PushEndpointPolicy.MaxSubscriptionsPerAccount - 1).ToList();
+                if (surplus.Count > 0)
+                {
+                    await db.PushSubscriptions.Where(s => surplus.Contains(s.Id)).ExecuteDeleteAsync(ct);
+                }
+
                 subscription = new PushSubscription
                 {
                     Id = Guid.NewGuid(),

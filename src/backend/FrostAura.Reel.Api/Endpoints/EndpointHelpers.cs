@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
@@ -35,35 +36,38 @@ public static class EndpointHelpers
     internal static IResult Forbidden(string code = "forbidden") =>
         Results.Json(new { error = code }, statusCode: StatusCodes.Status403Forbidden);
 
-    /// <summary>401 guard for protected endpoint groups — the account scope must be pinned.</summary>
-    public static RouteGroupBuilder RequireAccount(this RouteGroupBuilder group)
+    /// <summary>401 guard for protected endpoints and groups — the account scope must be pinned.</summary>
+    public static TBuilder RequireAccount<TBuilder>(this TBuilder builder)
+        where TBuilder : IEndpointConventionBuilder
     {
-        group.AddEndpointFilter(async (context, next) =>
+        builder.AddEndpointFilter(async (context, next) =>
         {
             var accountContext = context.HttpContext.RequestServices.GetRequiredService<IAccountContext>();
             return accountContext.AccountId is null
                 ? Results.Unauthorized()
                 : await next(context);
         });
-        return group;
+        return builder;
     }
 
     /// <summary>
-    /// 403 guard for endpoint groups that only some tiers may reach. Composes AFTER
+    /// 403 guard for endpoints or groups that only some tiers may reach. Composes AFTER
     /// <see cref="RequireAccount"/> — it answers 401 for an unpinned scope rather than 403, because
     /// "you are not signed in" and "your tier is not enough" are different facts and a client that
     /// cannot tell them apart will retry the wrong one forever.
     ///
     /// <para>It resolves the account the same way <see cref="GetCurrentAccountAsync"/> does rather
     /// than trusting a claim, because tier lives on the row and is changed by billing without the
-    /// session cookie being reissued.</para>
+    /// session cookie being reissued. The row it loaded is kept on the request, so a handler behind
+    /// the gate reads it with <see cref="GatedAccount"/> instead of loading and re-checking it.</para>
     ///
     /// <para>The deny answer comes from <see cref="Forbidden"/>, not <c>Results.Forbid()</c> —
     /// which threw here rather than answering 403. The reasoning is on that helper.</para>
     /// </summary>
-    public static RouteGroupBuilder RequireTier(this RouteGroupBuilder group, params AccountTier[] tiers)
+    public static TBuilder RequireTier<TBuilder>(this TBuilder builder, params AccountTier[] tiers)
+        where TBuilder : IEndpointConventionBuilder
     {
-        group.AddEndpointFilter(async (context, next) =>
+        builder.AddEndpointFilter(async (context, next) =>
         {
             var db = context.HttpContext.RequestServices.GetRequiredService<IReelDbContext>();
             var account = await context.HttpContext.GetCurrentAccountAsync(db, context.HttpContext.RequestAborted);
@@ -72,20 +76,40 @@ public static class EndpointHelpers
                 return Results.Unauthorized();
             }
 
-            return tiers.Contains(account.Tier)
-                ? await next(context)
-                : Forbidden("tier not permitted");
+            if (!tiers.Contains(account.Tier))
+            {
+                return Forbidden("tier not permitted");
+            }
+
+            context.HttpContext.Items[GatedAccountKey] = account;
+            return await next(context);
         });
-        return group;
+        return builder;
     }
 
     /// <summary>
     /// The founder-only case of <see cref="RequireTier"/>, named rather than spelled out at every
     /// call site — the diagnostic surfaces are gated on exactly this and a typo'd tier list on one
-    /// of them would open a founder surface to every paying account.
+    /// of them would open a founder surface to every paying account. Applies to a single route as
+    /// well as a group: a founder-only route inside an every-account group takes it on the route,
+    /// never as an inline tier comparison in its handler (J-11 — seven such comparisons existed,
+    /// each one a place the rule could be mistyped, and none visible to the authorisation matrix).
     /// </summary>
-    public static RouteGroupBuilder RequireFounder(this RouteGroupBuilder group) =>
-        group.RequireTier(AccountTier.Founder);
+    public static TBuilder RequireFounder<TBuilder>(this TBuilder builder)
+        where TBuilder : IEndpointConventionBuilder =>
+        builder.RequireTier(AccountTier.Founder);
+
+    /// <summary>The <c>HttpContext.Items</c> key under which <see cref="RequireTier"/> keeps the account it admitted.</summary>
+    private static readonly object GatedAccountKey = new();
+
+    /// <summary>
+    /// The account a <see cref="RequireTier"/> / <see cref="RequireFounder"/> gate admitted on this
+    /// request. Throws when no gate ran: a handler that calls this without the gate is a wiring bug,
+    /// and failing loudly is what keeps it from becoming an open route.
+    /// </summary>
+    public static Account GatedAccount(this HttpContext httpContext) =>
+        httpContext.Items[GatedAccountKey] as Account
+        ?? throw new InvalidOperationException("GatedAccount() was called on a route with no RequireTier/RequireFounder gate.");
 
     /// <summary>
     /// Whether a request may see founder-only diagnostics on an endpoint that is NOT itself
@@ -115,16 +139,32 @@ public static class EndpointHelpers
         return await db.Accounts.FirstOrDefaultAsync(a => a.Id == accountContext.AccountId.Value, ct);
     }
 
-    public static object ToSessionPayload(this Account account) => new
+    /// <summary>
+    /// The session payload auth/callback, auth/me and dev/link return. <c>pipelineStage</c> is the
+    /// RESOLVED stage — the one <c>/api/sync/status</c> reports — not the stored column: a stored
+    /// Degraded on a healthy link below the ratings floor reads NotEnoughRatings in both, so the
+    /// shell and the status pill can never disagree about where the account is (WS-6 CR-4).
+    /// </summary>
+    public static async Task<object> ToSessionPayloadAsync(this Account account, HttpContext http, CancellationToken ct)
     {
-        accountId = account.Id,
-        displayName = account.DisplayName,
-        traktSlug = account.TraktUserSlug,
-        avatarUrl = account.AvatarUrl,
-        region = account.Region,
-        tier = account.Tier.ToString(),
-        pipelineStage = account.PipelineStage.ToString(),
-        onboarded = account.Settings.OnboardingCompleted,
-        pinConfigured = account.Settings.SettingsPinHash is not null,
-    };
+        var db = http.RequestServices.GetRequiredService<IReelDbContext>();
+        var connectionStatus = await db.TraktConnections.AsNoTracking()
+            .Where(c => c.AccountId == account.Id)
+            .Select(c => (Domain.Sync.ConnectionStatus?)c.Status)
+            .FirstOrDefaultAsync(ct) ?? Domain.Sync.ConnectionStatus.Revoked;
+        var (stage, _) = await http.RequestServices.GetRequiredService<SyncStatusQuery>()
+            .ResolveStageAsync(account.Id, account.PipelineStage, connectionStatus, ct);
+        return new
+        {
+            accountId = account.Id,
+            displayName = account.DisplayName,
+            traktSlug = account.TraktUserSlug,
+            avatarUrl = account.AvatarUrl,
+            region = account.Region,
+            tier = account.Tier.ToString(),
+            pipelineStage = stage.ToString(),
+            onboarded = account.Settings.OnboardingCompleted,
+            pinConfigured = account.Settings.SettingsPinHash is not null,
+        };
+    }
 }

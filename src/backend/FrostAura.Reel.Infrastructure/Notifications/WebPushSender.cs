@@ -1,4 +1,5 @@
 using System.Net;
+using FrostAura.Reel.Domain.Notifications;
 using FrostAura.Reel.Domain.Ports;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -20,6 +21,14 @@ public sealed class WebPushSender(
     public async Task<WebPushResult> SendAsync(
         string endpoint, string p256dh, string auth, string payloadJson, CancellationToken ct)
     {
+        // Checked again at send time, not only at subscribe: rows stored before the allow-list
+        // existed are retired (Gone) instead of POSTed to (J-9).
+        if (!PushEndpointPolicy.IsAllowed(endpoint))
+        {
+            logger.LogWarning("Web push subscription refused at send: its endpoint is not a known push service; retiring it.");
+            return new WebPushResult(WebPushOutcome.Gone, "endpoint is not a known push service");
+        }
+
         try
         {
             var (publicKey, privateKey) = await vapidKeys.GetKeysAsync(ct);

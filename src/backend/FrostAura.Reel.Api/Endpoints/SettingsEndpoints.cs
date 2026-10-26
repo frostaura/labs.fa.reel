@@ -1,5 +1,7 @@
+using System.Net.Mail;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Saved;
+using FrostAura.Reel.Domain.Tenancy;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
@@ -33,9 +35,34 @@ public static class SettingsEndpoints
                 return Results.Unauthorized();
             }
 
-            if (request.Region is { Length: 2 } region)
+            // Validate everything before writing anything: a PUT carrying one bad field changes
+            // nothing, and says which field (H-4, H-11). Previously a malformed email was silently
+            // dropped (the old address kept, 200 returned) and any two letters became the region.
+            string? region = null;
+            if (request.Region is not null)
             {
-                account.Region = region.ToUpperInvariant();
+                region = RegionCodes.Normalise(request.Region);
+                if (region is null)
+                {
+                    return Results.BadRequest(new { error = "region must be an ISO 3166-1 alpha-2 country code", code = "region_invalid" });
+                }
+            }
+
+            string? email = null;
+            var clearEmail = false;
+            if (request.Email is not null)
+            {
+                email = request.Email.Trim();
+                clearEmail = email.Length == 0;
+                if (!clearEmail && !IsPlausibleEmail(email))
+                {
+                    return Results.BadRequest(new { error = "email is not a valid address", code = "email_invalid" });
+                }
+            }
+
+            if (region is not null)
+            {
+                account.Region = region;
             }
 
             if (request.Onboarded is true)
@@ -45,11 +72,8 @@ public static class SettingsEndpoints
 
             if (request.Email is not null)
             {
-                var email = request.Email.Trim();
-                // Light validation — capture for M5 billing; null/empty clears it.
-                account.Settings.EmailForBilling = email.Length == 0 ? null
-                    : email is { Length: <= 254 } && email.Contains('@') && email.Contains('.') ? email
-                    : account.Settings.EmailForBilling;
+                // Captured for M5 billing; an empty string clears it.
+                account.Settings.EmailForBilling = clearEmail ? null : email;
             }
 
             if (request.EveningBudgetMinutes is not null)
@@ -61,6 +85,19 @@ public static class SettingsEndpoints
             return Results.Ok(Payload(account));
         });
     }
+
+    /// <summary>
+    /// A single address a mail server would accept the shape of: what <see cref="MailAddress"/>
+    /// parses back to itself (no display name, no comments, no list), at most 254 characters, with a
+    /// dotted domain. Deliverability is billing's problem; shape is this endpoint's.
+    /// </summary>
+    internal static bool IsPlausibleEmail(string email) =>
+        email.Length <= 254
+        && MailAddress.TryCreate(email, out var parsed)
+        && string.Equals(parsed.Address, email, StringComparison.Ordinal)
+        && parsed.Host.Contains('.', StringComparison.Ordinal)
+        && !parsed.Host.StartsWith('.')
+        && !parsed.Host.EndsWith('.');
 
     /// <summary>
     /// The one settings projection, so GET and PUT can never disagree about what was saved.

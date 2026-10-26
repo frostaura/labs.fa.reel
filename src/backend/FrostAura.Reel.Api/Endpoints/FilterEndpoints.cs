@@ -182,7 +182,7 @@ public static class FilterEndpoints
             return Results.Ok(await meter.MeasureAsync(rules, ct));
         });
 
-        group.MapPost("/pin", async (PinRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapPost("/pin", async (PinRequest request, IReelDbContext db, PinAttemptLimiter attempts, HttpContext http, CancellationToken ct) =>
         {
             if (request.Pin is not { Length: >= 4 and <= 8 } || !request.Pin.All(char.IsDigit))
             {
@@ -195,10 +195,21 @@ public static class FilterEndpoints
                 return Results.Unauthorized();
             }
 
-            if (account.Settings.SettingsPinHash is not null
-                && !VerifyPin(account.Settings.SettingsPinHash, request.CurrentPin ?? string.Empty))
+            if (account.Settings.SettingsPinHash is { } current)
             {
-                return Results.StatusCode(StatusCodes.Status423Locked);
+                // Changing a PIN proves the current one, so it is a PIN check like any other (K-4).
+                if (attempts.LockedFor(account.Id) is { } locked)
+                {
+                    return PinLocked(http, locked);
+                }
+
+                if (!VerifyPin(current, request.CurrentPin ?? string.Empty))
+                {
+                    attempts.RecordFailure(account.Id);
+                    return Results.StatusCode(StatusCodes.Status423Locked);
+                }
+
+                attempts.RecordSuccess(account.Id);
             }
 
             account.Settings.SettingsPinHash = HashPin(request.Pin);
@@ -207,13 +218,28 @@ public static class FilterEndpoints
         });
 
         group.MapPost("/pin/verify", async (
-            PinVerifyRequest request, IReelDbContext db, SettingsUnlockTokenService tokens, HttpContext http, CancellationToken ct) =>
+            PinVerifyRequest request, IReelDbContext db, SettingsUnlockTokenService tokens, PinAttemptLimiter attempts,
+            HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account?.Settings.SettingsPinHash is not { } hash || !VerifyPin(hash, request.Pin))
+            if (account?.Settings.SettingsPinHash is not { } hash)
             {
                 return Results.StatusCode(StatusCodes.Status423Locked);
             }
+
+            // Five wrong PINs in fifteen minutes and the sixth attempt is refused unread (K-4).
+            if (attempts.LockedFor(account.Id) is { } locked)
+            {
+                return PinLocked(http, locked);
+            }
+
+            if (!VerifyPin(hash, request.Pin ?? string.Empty))
+            {
+                attempts.RecordFailure(account.Id);
+                return Results.StatusCode(StatusCodes.Status423Locked);
+            }
+
+            attempts.RecordSuccess(account.Id);
 
             // Success hands back a short-lived unlock token INSTEAD of the client re-sending the
             // raw PIN per call — the PIN itself must never be cached on the client.
@@ -221,7 +247,7 @@ public static class FilterEndpoints
             return Results.Ok(new { valid = true, unlockToken = token, expiresAt });
         });
 
-        group.MapDelete("/pin", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapDelete("/pin", async (IReelDbContext db, PinAttemptLimiter attempts, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -229,14 +255,26 @@ public static class FilterEndpoints
                 return Results.Unauthorized();
             }
 
+            if (account.Settings.SettingsPinHash is null)
+            {
+                return Results.Ok(new { pinConfigured = false });
+            }
+
+            if (attempts.LockedFor(account.Id) is { } locked)
+            {
+                return PinLocked(http, locked);
+            }
+
             // Deliberately raw-PIN-only — an unlock token is NOT accepted here. Removing the PIN
             // is destructive (it opens content conditions to everyone on the device), so it always
             // re-prompts; a token minted 14 minutes ago on a shared screen must not be enough.
             if (!await VerifyPinHeaderAsync(account.Settings.SettingsPinHash, http))
             {
+                attempts.RecordFailure(account.Id);
                 return Results.StatusCode(StatusCodes.Status423Locked);
             }
 
+            attempts.RecordSuccess(account.Id);
             account.Settings.SettingsPinHash = null;
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { pinConfigured = false });
@@ -244,27 +282,42 @@ public static class FilterEndpoints
     }
 
     /// <summary>
-    /// The gate for non-destructive PIN-locked writes. No PIN configured — open. Otherwise a
-    /// valid <c>X-Settings-Unlock</c> token (minted by <c>/pin/verify</c>) unlocks, with the raw
-    /// <c>X-Settings-Pin</c> header kept as a legacy fallback for clients that predate the token.
-    /// Destructive actions (PIN removal) must NOT route through here — they re-verify the raw PIN
-    /// every time via <see cref="VerifyPinHeaderAsync"/>.
+    /// The lockout answer: 429 with <c>Retry-After</c> and the stable code <c>pin_locked</c>. Distinct
+    /// from a wrong PIN's 423 so a client can say "try again in N minutes" instead of "wrong PIN".
+    /// </summary>
+    private static IResult PinLocked(HttpContext http, TimeSpan retryAfter)
+    {
+        var seconds = (int)Math.Ceiling(retryAfter.TotalSeconds);
+        http.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return Results.Json(
+            new
+            {
+                error = "Too many wrong PINs. PIN entry is paused for this account.",
+                code = "pin_locked",
+                retryAfterSeconds = seconds,
+            },
+            statusCode: StatusCodes.Status429TooManyRequests);
+    }
+
+    /// <summary>
+    /// The gate for non-destructive PIN-locked writes. No PIN configured — open. Otherwise only a
+    /// valid <c>X-Settings-Unlock</c> token (minted by <c>/pin/verify</c>) unlocks.
+    ///
+    /// <para>The raw <c>X-Settings-Pin</c> header used to be accepted here too, as a fallback for
+    /// clients that predated the token. No client sends it to this gate any more, and it was a
+    /// second PIN oracle outside the attempt limiter: every PUT with a guessed PIN was a free try
+    /// (J-19). Destructive actions (PIN removal) must NOT route through here — they re-verify the
+    /// raw PIN every time via <see cref="VerifyPinHeaderAsync"/>, under the limiter.</para>
     /// </summary>
     internal static Task<bool> VerifyUnlockAsync(Account account, HttpContext http, SettingsUnlockTokenService tokens)
     {
-        if (account.Settings.SettingsPinHash is not { } pinHash)
+        if (account.Settings.SettingsPinHash is null)
         {
             return Task.FromResult(true); // no PIN configured — open
         }
 
         var unlockToken = http.Request.Headers["X-Settings-Unlock"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(unlockToken) && tokens.Validate(unlockToken, account.Id))
-        {
-            return Task.FromResult(true);
-        }
-
-        var supplied = http.Request.Headers["X-Settings-Pin"].FirstOrDefault() ?? string.Empty;
-        return Task.FromResult(VerifyPin(pinHash, supplied));
+        return Task.FromResult(!string.IsNullOrEmpty(unlockToken) && tokens.Validate(unlockToken, account.Id));
     }
 
     internal static Task<bool> VerifyPinHeaderAsync(string? pinHash, HttpContext http)
