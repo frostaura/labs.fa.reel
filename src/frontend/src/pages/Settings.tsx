@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useLocation } from "react-router";
 import { RefreshCw } from "lucide-react";
 import PreferencesSection from "../components/settings/PreferencesSection";
 import PreferenceTags from "../components/settings/PreferenceTags";
@@ -20,6 +20,8 @@ import {
 } from "../components/ui/save-outcome";
 import {
   useGetBillingStatusQuery,
+  useGetFilterChipsQuery,
+  useGetFiltersQuery,
   useGetSessionQuery,
   useGetSettingsQuery,
   useGetSyncStatusQuery,
@@ -28,6 +30,8 @@ import {
   useUpdateSettingsMutation,
   type SyncStatus,
 } from "../store/api";
+import { Button } from "../components/ui/button";
+import { COARSE_TAP } from "../lib/tapTarget";
 
 /**
  * Reconnect Trakt (H-2): the same sign-in the landing page starts, from the one screen a user with a
@@ -61,15 +65,15 @@ function ReconnectTrakt({ sync }: { sync: SyncStatus | undefined }) {
           rated is lost.
         </p>
       )}
-      <button
-        type="button"
+      <Button
+        variant={broken ? "primary" : "ghost"}
         onClick={reconnect}
         disabled={isLoading}
-        className={broken ? "fa-button-primary" : "fa-button-ghost"}
+        className={COARSE_TAP}
         data-testid="trakt-reconnect-button"
       >
         {isLoading ? "Opening Trakt…" : "Reconnect Trakt"}
-      </button>
+      </Button>
       {isError && (
         <p role="alert" className="fa-caption text-fa-danger" data-testid="trakt-reconnect-error">
           Couldn&apos;t reach Trakt&apos;s sign-in. Nothing changed — try again in a moment.
@@ -158,12 +162,12 @@ function EmailCapture({ billingConfigured }: { billingConfigured: boolean }) {
           value={email}
           onChange={(e) => setEdit(e.target.value)}
           placeholder="you@example.com"
-          className="flex-1 min-w-0 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
+          className={`flex-1 min-w-0 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-3 focus:outline-none focus:ring-1 focus:ring-fa-frost/40 ${COARSE_TAP}`}
           data-testid="email-input"
         />
-        <button type="submit" disabled={!changed || !valid || saving} className="fa-button-primary disabled:opacity-40" data-testid="email-save">
+        <Button type="submit" variant="primary" disabled={!changed || !valid || saving} className={COARSE_TAP} data-testid="email-save">
           {saving ? "Saving…" : trimmed.length === 0 && stored.length > 0 ? "Remove" : "Save"}
-        </button>
+        </Button>
       </form>
       <SaveStatus message={status} onRetry={() => void save()} retrying={saving} testId="email-save-status" />
     </section>
@@ -178,6 +182,25 @@ export default function Settings() {
   const [updateSettings, { isLoading: savingRegion }] = useUpdateSettingsMutation();
   const [regionStatus, setRegionStatus] = useState<SaveMessage | null>(null);
   const [lastRegion, setLastRegion] = useState<string | null>(null);
+
+  // `/settings#region` — where-to-watch's "edit region" link (FD-13's default shows the region with
+  // an edit link) — lands on the region card, scrolled clear of the header and focused, so the next
+  // Tab is the picker. The card is not data-dependent, so it exists on the first commit; the
+  // picker's own input is not focused, because focusing it opens its list. The conditions editor
+  // above it grows from a skeleton when its rules and chips land, which pushes the card down, so it
+  // is scrolled to again once both have settled (the same cached queries — no extra request).
+  const { hash } = useLocation();
+  const regionRef = useRef<HTMLElement>(null);
+  const filters = useGetFiltersQuery();
+  const chips = useGetFilterChipsQuery();
+  const conditionsSettled = !filters.isLoading && !chips.isLoading;
+  useEffect(() => {
+    if (hash !== "#region") return;
+    const card = regionRef.current;
+    if (!card) return;
+    card.scrollIntoView({ block: "start" });
+    card.focus({ preventScroll: true });
+  }, [hash, conditionsSettled]);
 
   useEffect(() => {
     if (!regionStatus || regionStatus.persistent) return;
@@ -227,7 +250,7 @@ export default function Settings() {
               href={`https://trakt.tv/users/${session?.traktSlug}`}
               target="_blank"
               rel="noreferrer"
-              className="fa-caption fa-link break-all"
+              className={`fa-caption fa-link break-all inline-flex items-center ${COARSE_TAP}`}
             >
               trakt.tv/users/{session?.traktSlug}
             </a>
@@ -243,16 +266,25 @@ export default function Settings() {
               {sync?.lastDeltaSyncAt ? `Last synced with Trakt ${relTime(sync.lastDeltaSyncAt)}.` : "Not synced with Trakt yet."}
             </p>
           </div>
-          <button onClick={() => triggerSync()} disabled={syncing} className="fa-button">
+          <Button onClick={() => triggerSync()} disabled={syncing} className={COARSE_TAP}>
             <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
             Sync now
-          </button>
+          </Button>
         </div>
         <ReconnectTrakt sync={sync} />
       </section>
 
-      <section className="fa-card p-5 space-y-3" data-testid="settings-region">
-        <h2 className="fa-section-title">Region</h2>
+      <section
+        ref={regionRef}
+        id="region"
+        tabIndex={-1}
+        aria-labelledby="settings-region-title"
+        className="fa-card p-5 space-y-3 scroll-mt-20 focus:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
+        data-testid="settings-region"
+      >
+        <h2 id="settings-region-title" className="fa-section-title">
+          Region
+        </h2>
         <p className="fa-caption text-fa-frost-dim">
           Where you watch. It decides which streaming, rental and purchase options Reel shows for each title.
         </p>

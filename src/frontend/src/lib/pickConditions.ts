@@ -388,3 +388,44 @@ export function summaryChips(raw: FiltersLike, browse?: BrowseFilter | null): Co
 
   return chips;
 }
+
+/** A standing rule the editor can be opened on: the server's `FilterKind` name and its value. */
+export interface RuleFocus {
+  kind: string;
+  value: string;
+}
+
+/**
+ * The `data-testid` of the control a rule lives in, for opening the editor ON that rule (WS-2B CR-1:
+ * a none-found relaxation chip — "Without “English only”: +4" — lands on the language allow-list,
+ * not on the top of a long form; FD-2c's default). Null when the rule has no control of its own, or
+ * names a genre without a value; the editor then focuses itself, which is still the right place.
+ *
+ * A genre lands on the mark that is lit for that rule — the ✕ for an exclusion, the ✓ for a
+ * requirement — so one tap clears it, which is what the chip offered.
+ */
+export function ruleControlTestId(rule: RuleFocus): string | null {
+  const value = rule.value.trim().toLowerCase();
+  switch (rule.kind) {
+    case "ExcludeGenre":
+      return value ? `genre-${value}-exclude` : null;
+    case "IncludeGenre":
+      return value ? `genre-${value}-include` : null;
+    case "MinPredictedRating":
+      return "min-rating-slider";
+    case "MinCrowdRating":
+      return "crowd-rating-slider";
+    case "MinYear":
+      return "min-year";
+    case "MaxYear":
+      return "max-year";
+    case "Language":
+      return "lang-all";
+    case "MaxMaturity":
+      return "maturity-ceiling";
+    case "ExcludeKeyword":
+      return value ? `keyword-${value}-remove` : "keyword-input";
+    default:
+      return null;
+  }
+}

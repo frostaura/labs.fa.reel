@@ -9,6 +9,7 @@ import {
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
+  ruleControlTestId,
   sameConditions,
   setGenreState,
   summaryChips,
@@ -448,5 +449,31 @@ describe("sameConditions — what marks the editor's draft unsaved", () => {
 
   it("an absent payload (still loading) equals the defaults rather than throwing", () => {
     expect(sameConditions(null, DEFAULT_FILTERS)).toBe(true);
+  });
+});
+
+describe("ruleControlTestId", () => {
+  it("lands a genre rule on the mark that is lit for it", () => {
+    expect(ruleControlTestId({ kind: "ExcludeGenre", value: "Horror" })).toBe("genre-horror-exclude");
+    expect(ruleControlTestId({ kind: "IncludeGenre", value: " drama " })).toBe("genre-drama-include");
+  });
+
+  it("lands each single-control rule on its control", () => {
+    expect(ruleControlTestId({ kind: "MinPredictedRating", value: "6.5" })).toBe("min-rating-slider");
+    expect(ruleControlTestId({ kind: "MinCrowdRating", value: "6" })).toBe("crowd-rating-slider");
+    expect(ruleControlTestId({ kind: "MinYear", value: "1990" })).toBe("min-year");
+    expect(ruleControlTestId({ kind: "MaxYear", value: "2020" })).toBe("max-year");
+    expect(ruleControlTestId({ kind: "Language", value: "en" })).toBe("lang-all");
+    expect(ruleControlTestId({ kind: "MaxMaturity", value: "PG-13" })).toBe("maturity-ceiling");
+  });
+
+  it("lands a keyword on its remove button, or the add box when none is named", () => {
+    expect(ruleControlTestId({ kind: "ExcludeKeyword", value: "Gore" })).toBe("keyword-gore-remove");
+    expect(ruleControlTestId({ kind: "ExcludeKeyword", value: "" })).toBe("keyword-input");
+  });
+
+  it("has no control for an unknown kind or a genre without a value", () => {
+    expect(ruleControlTestId({ kind: "SomethingNew", value: "x" })).toBeNull();
+    expect(ruleControlTestId({ kind: "ExcludeGenre", value: "  " })).toBeNull();
   });
 });
