@@ -162,6 +162,57 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal(["science-fiction", "fantasy"], scifi.Genres);
     }
 
+    [Fact]
+    public async Task Keyword_neighbours_share_specific_evidence_and_say_which()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The Similar rail's seeding API: eligible titles sharing the anchor's SPECIFIC labels, the
+        // most specific shared evidence first; nothing generic, nothing seen, never the anchor.
+        var rare = $"safecracker{Guid.NewGuid():N}"[..24];
+        var rarer = $"vaultcode{Guid.NewGuid():N}"[..22];
+        var accountId = await SeedAccountAsync();
+        var anchor = await SeedTitleAsync(t => t.Keywords = [rare, rarer]);
+        var both = await SeedTitleAsync(t => t.Keywords = [rare, rarer]);
+        var one = await SeedTitleAsync(t => t.Keywords = [rare]);
+        var seen = await SeedTitleAsync(t => t.Keywords = [rare, rarer]);
+        var unrelated = await SeedTitleAsync(t => t.Keywords = ["office"]);
+        await SeedWatchAsync(accountId, seen);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var neighbours = await new KeywordNeighbours(db, new EligibilityQueryBuilder(db), new KeywordVocabulary(db, new MemoryCache(new MemoryCacheOptions())))
+            .ForAsync(accountId, anchor, 10, [], default);
+
+        Assert.Equal([both, one], neighbours.Select(n => n.TitleId));
+        Assert.Contains($"keyword:{rare}", neighbours[1].Evidence);
+        Assert.DoesNotContain(neighbours, n => n.TitleId == unrelated || n.TitleId == seen || n.TitleId == anchor);
+    }
+
+    [Fact]
+    public async Task Rail_supply_counts_a_genre_rail_with_its_stand_ins()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // D-16: a genre rail's supply is the genre as exclusions read it — a TV romance carried only
+        // by a stand-in keyword counts — and a title merely NAMED for the genre does not.
+        var accountId = await SeedAccountAsync();
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var supply = new SupplyReporter(db, new EligibilityQueryBuilder(db));
+        var before = await supply.ForGenreRailAsync(accountId, "romance", MediaScope.Shows, [], default);
+
+        await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama"]; t.Keywords = ["office romance"]; });
+        await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama"]; t.Name = $"Romance Street {Guid.NewGuid():N}"; });
+
+        var after = await supply.ForGenreRailAsync(accountId, "romance", MediaScope.Shows, [], default);
+        Assert.Equal(1, after.MatchingInCatalogue - before.MatchingInCatalogue);
+    }
+
     private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
