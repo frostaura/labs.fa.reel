@@ -68,6 +68,15 @@ public sealed class OfflineTraktClient(ILogger<OfflineTraktClient> logger) : ITr
     public Task PostListItemsAsync(string accessToken, long listId, object payload, bool remove, RatePriority priority, CancellationToken ct = default) =>
         Task.FromException(Refuse(remove ? "users/me/lists/items/remove" : "users/me/lists/items"));
 
+    public Task<IReadOnlyList<TraktWatchlistItem>> GetWatchlistAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktWatchlistItem>>(Refuse("sync/watchlist"));
+
+    public Task<IReadOnlyList<TraktHiddenItem>> GetHiddenItemsAsync(string accessToken, string section, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktHiddenItem>>(Refuse($"users/hidden/{section}"));
+
+    public Task<TraktCatalogRating?> GetCatalogRatingAsync(long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<TraktCatalogRating?>(Refuse("search/tmdb (catalogue rating)"));
+
     private HttpRequestException Refuse(string call)
     {
         var count = Interlocked.Increment(ref _refused);

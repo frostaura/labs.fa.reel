@@ -158,6 +158,14 @@ services:
       # blank follows Background__NightlyReconcile; set false on any host started on a copied database.
       Background__DataRepairs: ${Background__DataRepairs:-true}
       Background__TrustPurge: ${Background__TrustPurge:-}
+      # WS-3 keyword vocabulary label embeddings (about 20 embedding calls on a fresh catalogue); off on slots and eval.
+      Background__KeywordVocabulary: ${Background__KeywordVocabulary:-true}
+      # WS-4 Trakt community ratings for the catalogue; tokenless, rate-gated; off on slots and eval.
+      Background__TraktRatingsBackfill: ${Background__TraktRatingsBackfill:-true}
+      # WS-6 daily retention purge (terminal jobs > 30 d, superseded scores > 14 d, expired sessions).
+      Background__Retention: ${Background__Retention:-true}
+      # WS-6 tenancy: Allow | Warn | Throw for a scoped query with no account pinned; blank is Warn.
+      Tenancy__UnscopedReads: ${Tenancy__UnscopedReads:-}
       Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
       # The dump before any pending migration (K-1): the API asks the backup service over the shared
       # backup_requests volume and refuses to migrate without an answer. docs/deployment.md#backups-and-restore.

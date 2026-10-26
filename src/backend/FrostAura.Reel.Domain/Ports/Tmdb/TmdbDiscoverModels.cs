@@ -139,6 +139,7 @@ public static class TmdbGenres
         [53] = "thriller",
         [10752] = "war",
         [37] = "western",
+        [10770] = "tv-movie", // TMDB "TV Movie"; the slug WS-4 stores on hydration (TvMovieGenre.Slug)
     };
 
     /// <summary>

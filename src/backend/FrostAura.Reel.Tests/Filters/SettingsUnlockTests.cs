@@ -140,12 +140,12 @@ public class SettingsUnlockTests
     }
 
     [Fact]
-    public async Task Filters_gate_still_accepts_the_legacy_raw_pin_header()
+    public async Task Filters_gate_refuses_the_legacy_raw_pin_header()
     {
         var service = CreateService(out _);
         var http = HttpWithHeaders(("X-Settings-Pin", "2468"));
 
-        Assert.True(await FilterEndpoints.VerifyUnlockAsync(PinnedAccount(), http, service));
+        Assert.False(await FilterEndpoints.VerifyUnlockAsync(PinnedAccount(), http, service));
     }
 
     [Fact]

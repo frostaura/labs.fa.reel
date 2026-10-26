@@ -192,6 +192,8 @@ public sealed class OpenRouterChatClient(
         // counted (Record ignores zero attempts); a sent call that did not answer usably is a
         // fallback for its caller.
         metrics?.Record(request.Purpose, lengthFinishes.Value, result.HttpAttempts, fallback: !result.Succeeded);
+        // WS-6 metrics sink (K-7): one settled call, by closed outcome code, for /api/observability/metrics.
+        Telemetry.LlmCallMetrics.Record(request.Purpose, result);
         return result;
     }
 

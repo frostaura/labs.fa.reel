@@ -135,7 +135,8 @@ public class TmdbTvGenreMapTests
     {
         // The movie taxonomy does not fuse anything, so it stays a plain 1:1 map. Pinned because the
         // TV change reworked the shared reverse-map builder that both sides run through.
-        Assert.Equal(18, TmdbGenres.MovieIdToSlug.Count);
+        Assert.Equal(19, TmdbGenres.MovieIdToSlug.Count);
+        Assert.Equal(["tv-movie"], TmdbGenres.MapToSlugs(isMovie: true, [10770]));
         Assert.Equal(["action"], TmdbGenres.MapToSlugs(isMovie: true, [28]));
         Assert.Equal(["adventure"], TmdbGenres.MapToSlugs(isMovie: true, [12]));
         Assert.Equal([], TmdbGenres.MapToSlugs(isMovie: true, [10759]));

@@ -111,11 +111,27 @@ services:
       # pre-migration dump handshake off (the eval database is a disposable copy).
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8090}
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      # WS-8 inbound limits, raised on THIS stack only (section 7 lets the eval account have more; FD-8's
+      # defaults would block a golden run). Trusted proxies and the key-ring certificate as on the dev stack.
+      ASK_TURNS_CONCURRENT: ${ASK_TURNS_CONCURRENT:-2}
+      ASK_TURNS_PER_MINUTE: ${ASK_TURNS_PER_MINUTE:-120}
+      ASK_TURNS_PER_HOUR: ${ASK_TURNS_PER_HOUR:-2000}
+      ASK_TURNS_PER_DAY: ${ASK_TURNS_PER_DAY:-5000}
+      ASK_TURNS_PER_DAY_FOUNDER: ${ASK_TURNS_PER_DAY_FOUNDER:-5000}
+      ASK_TURNS_PER_DAY_FREE: ${ASK_TURNS_PER_DAY_FREE:-5000}
+      TRUSTED_PROXY_NETWORKS: "${TRUSTED_PROXY_NETWORKS:-127.0.0.0/8,::1/128,172.16.0.0/12}"
+      DATAPROTECTION_CERT_PATH: ${DATAPROTECTION_CERT_PATH:-}
+      DATAPROTECTION_CERT_PASSWORD: ${DATAPROTECTION_CERT_PASSWORD:-}
+      DATAPROTECTION_OLD_CERT_PATHS: ${DATAPROTECTION_OLD_CERT_PATHS:-}
       BACKUP_PRE_MIGRATION_REQUIRED: ${BACKUP_PRE_MIGRATION_REQUIRED:-true}
       BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-1800}
       BACKUP_REQUEST_DIR: ""
       Background__DataRepairs: "false"
       Background__TrustPurge: "false"
+      Background__KeywordVocabulary: "false"
+      Background__TraktRatingsBackfill: "false"
+      Background__Retention: "false"
+      Tenancy__UnscopedReads: "Warn"
       CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8090,http://localhost:5173}
       EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
