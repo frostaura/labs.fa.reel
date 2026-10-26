@@ -333,13 +333,12 @@ public class LensGuardTests
     }
 
     [Fact]
-    public void A_single_long_sentence_is_trimmed_on_a_word_boundary()
+    public void A_single_long_sentence_with_nowhere_complete_to_cut_gives_no_clause()
     {
+        // Was: trimmed on a word boundary with "…". A severed caption is the R1-25 defect; null
+        // lets the card fall back to its own line.
         var note = Note(lens: string.Join(" ", Enumerable.Repeat("word", 80)));
-        var clause = note.FirstClause(60)!;
 
-        Assert.True(clause.Length <= 61, clause);
-        Assert.EndsWith("…", clause, StringComparison.Ordinal);
-        Assert.DoesNotContain("wor…", clause, StringComparison.Ordinal);
+        Assert.Null(note.FirstClause(60));
     }
 }
