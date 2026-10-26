@@ -91,11 +91,19 @@ async function expectNoFailure(page: Page) {
   await expect(page.getByText(/\bDegraded\b/)).toHaveCount(0);
 }
 
+/** GET /api/metrics/cross-reference with nothing measured yet (WS-5 task 11). */
+const XREF_EMPTY = {
+  window: "90d",
+  population: { name: "Titles served under a cross-reference standing that you have since rated", selectionNote: "" },
+  crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
+};
+
 test.describe("track record with no model yet", () => {
   for (const [label, status] of [["today's payload", AWAITING_TODAY], ["the CR-6 reason", AWAITING_CR6]] as const) {
     test(`says the model comes tonight and stops asking for scored titles (${label})`, async ({ page }) => {
       await shell(page, status);
       await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+      await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
       await page.goto("/track-record");
 
       await expect(page.getByTestId("track-record-no-model")).toHaveText(WAIT_SENTENCE);
@@ -111,6 +119,7 @@ test.describe("track record with no model yet", () => {
   test("a failed first Train is a stop, not a wait with a promised time", async ({ page }) => {
     await shell(page, TRAIN_FAILED);
     await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("track-record-no-model")).toHaveText(
@@ -126,6 +135,7 @@ test.describe("track record with no model yet", () => {
       source: "exposures",
       headline: { ...ACCURACY_EMPTY.headline, n: 65, withinOnePoint: 0.3, meanAbsoluteError: 1.8, bias: 0.4, correlation: 0.05 },
     });
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("source-note")).toHaveText("From 65 cards Reel actually put in front of you and you later rated.");
@@ -135,6 +145,7 @@ test.describe("track record with no model yet", () => {
   test("an account with a model keeps the usual empty-state line", async ({ page }) => {
     await shell(page, syncStatus());
     await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("source-note")).toContainText("Rate a few titles it has already put a number on");
