@@ -42,6 +42,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     // Global catalog
     public DbSet<Title> Titles => Set<Title>();
     public DbSet<TitleEmbedding> TitleEmbeddings => Set<TitleEmbedding>();
+
+    public DbSet<KeywordLabel> KeywordLabels => Set<KeywordLabel>();
     public DbSet<TitleAttributes> TitleAttributes => Set<TitleAttributes>();
     public DbSet<Person> Persons => Set<Person>();
     public DbSet<TitleCredit> TitleCredits => Set<TitleCredit>();
@@ -196,6 +198,15 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(x => x.Embedding).HasColumnType("vector(1536)");
             // HNSW over ivfflat: the catalog grows incrementally from zero rows, and HNSW
             // needs no representative data at index-build time.
+            e.HasIndex(x => x.Embedding).HasMethod("hnsw").HasOperators("vector_cosine_ops");
+        });
+
+        // WS-3 (M2): the keyword vocabulary's precomputed label embeddings, for the concept
+        // resolver's nearest-label fallback. Global catalogue data, like TitleEmbeddings.
+        modelBuilder.Entity<KeywordLabel>(e =>
+        {
+            e.HasKey(x => x.Label);
+            e.Property(x => x.Embedding).HasColumnType("vector(1536)");
             e.HasIndex(x => x.Embedding).HasMethod("hnsw").HasOperators("vector_cosine_ops");
         });
 

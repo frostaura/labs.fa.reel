@@ -47,9 +47,23 @@ public static class MediaScopes
 /// are the catalogue's slugs ("science-fiction", not "Sci-Fi").
 /// </summary>
 /// <param name="UserWords">What the user said ("ninja movies" → "ninja"). Never a standing filter's value.</param>
-/// <param name="CatalogueLabels">Keyword labels from the vocabulary. Empty means "use <paramref name="UserWords"/> as the label".</param>
+/// <param name="CatalogueLabels">
+/// The label STEMS the concept matches by containment from a word start ("ninja", "shinobi"). Empty
+/// means "use <paramref name="UserWords"/> as the label".
+/// </param>
 /// <param name="Genres">Genre slugs that also satisfy the concept.</param>
-public sealed record ConceptTerm(string UserWords, IReadOnlyList<string> CatalogueLabels, IReadOnlyList<string> Genres);
+/// <param name="ExactLabels">
+/// Set by <see cref="Concepts.ConceptResolver"/>: every vocabulary label the stems expand to
+/// ("ninja", "female ninja", "ninja warrior", "shinobi", "kunoichi"). When present, the keyword arm is
+/// an indexed array overlap on exactly these labels instead of a regex over every title's labels —
+/// the same titles as long as the vocabulary is current (it is re-read every few minutes). Null for
+/// an unresolved concept, which keeps the containment regex.
+/// </param>
+public sealed record ConceptTerm(
+    string UserWords,
+    IReadOnlyList<string> CatalogueLabels,
+    IReadOnlyList<string> Genres,
+    IReadOnlyList<string>? ExactLabels = null);
 
 /// <summary>A person the request is about, resolved to a catalogue person when possible.</summary>
 /// <param name="Name">The name as the user said it; matched case-insensitively when <paramref name="PersonId"/> is null.</param>
@@ -108,7 +122,63 @@ public sealed record RetrievalQuery(
     HardConstraints Hard,
     SoftPreferences Soft,
     IReadOnlyCollection<Guid> Exclude,
-    int Want);
+    int Want)
+{
+    /// <summary>
+    /// Genres the user rejected THIS turn, in their own words ("no fantasy"); applied as extra
+    /// ExcludeGenre rules on top of the standing conditions, inside every arm. Never a standing rule.
+    /// </summary>
+    public IReadOnlyList<string> ExcludeGenres { get; init; } = [];
+
+    /// <summary>Keywords the user rejected this turn ("no zombies"); applied as extra ExcludeKeyword rules inside every arm.</summary>
+    public IReadOnlyList<string> ExcludeKeywords { get; init; } = [];
+
+    /// <summary>
+    /// Which arms run. Default: all four. A caller that already runs its own semantic and TMDB arms
+    /// (v1's pipeline) asks for <see cref="RetrievalArms.Catalogue"/> so nothing is fetched twice.
+    /// </summary>
+    public RetrievalArms Arms { get; init; } = RetrievalArms.All;
+
+    /// <summary>The user's message, searched on TMDB as a title only when it is shaped like one (<see cref="TitleShape"/>).</summary>
+    public string? Message { get; init; }
+
+    /// <summary>Release region for TMDB movie discovery, or null.</summary>
+    public string? Region { get; init; }
+}
+
+/// <summary>The retrieval arms (program §4.7). Persisted nowhere; flags so a caller can pick a subset.</summary>
+[Flags]
+public enum RetrievalArms
+{
+    /// <summary>No arm: supply only.</summary>
+    None = 0,
+
+    /// <summary>Facet SQL over keyword labels, names and genres.</summary>
+    Facet = 1,
+
+    /// <summary>Full text over the <c>SearchDocument</c> tsvector and the themes document.</summary>
+    FullText = 2,
+
+    /// <summary>Semantic kNN on the positive concept text, with a 1.0 s embedding budget.</summary>
+    Semantic = 4,
+
+    /// <summary>TMDB discovery with the standing conditions in the request, 1.5 s deadline.</summary>
+    Tmdb = 8,
+
+    /// <summary>The two arms that read only the catalogue and need no network.</summary>
+    Catalogue = Facet | FullText,
+
+    /// <summary>Every arm.</summary>
+    All = Facet | FullText | Semantic | Tmdb,
+}
+
+/// <summary>
+/// A title TMDB discovery found that is not in the catalogue yet. It passed every condition a TMDB
+/// list row carries data for, but NOT the stand-in keywords, keyword-label exclusions or maturity
+/// ceiling: the caller hydrates it and re-judges it through <see cref="EligibilityQueryBuilder"/>
+/// before it may be shown.
+/// </summary>
+public sealed record ProvisionalTitle(long TmdbId, MediaType Media, string Name, int? Year);
 
 /// <summary>
 /// One retrieved title. Every candidate is eligible for the account at the moment it was retrieved.
@@ -131,7 +201,17 @@ public sealed record StageTimings(IReadOnlyDictionary<string, long> ElapsedMs)
 }
 
 /// <summary>The candidates for one query, the supply behind them, and where the time went.</summary>
-public sealed record RetrievalResult(IReadOnlyList<Candidate> Candidates, SupplyReport Supply, StageTimings Timings);
+public sealed record RetrievalResult(IReadOnlyList<Candidate> Candidates, SupplyReport Supply, StageTimings Timings)
+{
+    /// <summary>New titles TMDB discovery found that must be hydrated and re-judged before they are shown.</summary>
+    public IReadOnlyList<ProvisionalTitle> Provisional { get; init; } = [];
+
+    /// <summary>
+    /// Arms that were asked for but contributed nothing because they timed out or failed
+    /// (<c>semantic</c>, <c>tmdb</c>, <c>fulltext</c>); the turn fused without them (§4.10).
+    /// </summary>
+    public IReadOnlyList<string> SkippedArms { get; init; } = [];
+}
 
 /// <summary>A title named in a reply or a sample, with just enough to print it.</summary>
 public sealed record TitleRef(Guid TitleId, string Name, int? Year, MediaType Media);

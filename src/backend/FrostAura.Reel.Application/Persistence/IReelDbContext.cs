@@ -24,6 +24,8 @@ public interface IReelDbContext
 
     DbSet<Title> Titles { get; }
     DbSet<TitleEmbedding> TitleEmbeddings { get; }
+
+    DbSet<KeywordLabel> KeywordLabels { get; }
     DbSet<TitleAttributes> TitleAttributes { get; }
     DbSet<Person> Persons { get; }
     DbSet<TitleCredit> TitleCredits { get; }

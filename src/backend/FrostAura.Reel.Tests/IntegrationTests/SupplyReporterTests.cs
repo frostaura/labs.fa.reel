@@ -38,7 +38,7 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         }
 
         using var scope = api.Services.CreateScope();
-        Assert.IsType<FacetRetriever>(scope.ServiceProvider.GetRequiredService<IAskReelRetriever>());
+        Assert.IsType<HybridRetriever>(scope.ServiceProvider.GetRequiredService<IAskReelRetriever>());
         Assert.Same(
             scope.ServiceProvider.GetRequiredService<SupplyReporter>(),
             scope.ServiceProvider.GetRequiredService<ISupplyReporter>());

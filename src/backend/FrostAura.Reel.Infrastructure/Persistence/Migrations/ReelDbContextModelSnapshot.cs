@@ -63,6 +63,36 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("RefreshSessions");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Catalog.KeywordLabel", b =>
+                {
+                    b.Property<string>("Label")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CountedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EmbeddedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Vector>("Embedding")
+                        .HasColumnType("vector(1536)");
+
+                    b.Property<string>("EmbeddingModel")
+                        .HasColumnType("text");
+
+                    b.Property<int>("TitleCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Label");
+
+                    b.HasIndex("Embedding");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Embedding"), "hnsw");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("Embedding"), new[] { "vector_cosine_ops" });
+
+                    b.ToTable("KeywordLabels");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Catalog.Person", b =>
                 {
                     b.Property<Guid>("Id")

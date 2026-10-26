@@ -42,6 +42,7 @@ public class TenancyModelTests
         {
             typeof(Domain.Catalog.Title),
             typeof(Domain.Catalog.TitleEmbedding),
+            typeof(Domain.Catalog.KeywordLabel),
             typeof(Domain.Catalog.TitleAttributes),
             typeof(Domain.Catalog.Person),
             typeof(Domain.Catalog.TitleCredit),
@@ -81,7 +82,7 @@ public class TenancyModelTests
         // does this product have" and "how many derived views does it read" are different questions
         // and a single number that answers both hides a table being swapped for a view.
         var tableCount = db.Model.GetEntityTypes().Count(t => !t.IsOwned() && t.FindPrimaryKey() is not null);
-        Assert.Equal(45, tableCount); // +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17); +OnlineModelState (2026-07-05); +AccountDigest, +PushSubscription, +AppSecret (2026-08-07); +FeedBuildStat (2026-09-09); −Episode, −ProviderLinkPattern, −AccountTasteProfile, +ExposureEvent, +UserRatingEvent (2026-09-10); +AccountTasteNarrative, +TitleLensCopy (2026-09-10, Phase3ProfileLens); +TasteCluster (2026-09-10, Phase5TasteClusters); +TitleCrossReferenceVerdict, +CrossReferenceEvaluation (2026-09-10, Phase5CrossReference); +CrossReferenceEvaluationItem (2026-09-10, Phase5CrossReferenceItems); +SearchTurnCard (AskReelTurnModel)
+        Assert.Equal(46, tableCount); // +KeywordLabel (2026-10-26, WS-3 M2); +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17); +OnlineModelState (2026-07-05); +AccountDigest, +PushSubscription, +AppSecret (2026-08-07); +FeedBuildStat (2026-09-09); −Episode, −ProviderLinkPattern, −AccountTasteProfile, +ExposureEvent, +UserRatingEvent (2026-09-10); +AccountTasteNarrative, +TitleLensCopy (2026-09-10, Phase3ProfileLens); +TasteCluster (2026-09-10, Phase5TasteClusters); +TitleCrossReferenceVerdict, +CrossReferenceEvaluation (2026-09-10, Phase5CrossReference); +CrossReferenceEvaluationItem (2026-09-10, Phase5CrossReferenceItems); +SearchTurnCard (AskReelTurnModel)
     }
 
     [Fact]
