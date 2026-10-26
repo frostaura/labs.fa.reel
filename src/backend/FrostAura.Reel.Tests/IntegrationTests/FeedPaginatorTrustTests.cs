@@ -1,11 +1,13 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
+using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Lens;
+using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
@@ -14,6 +16,7 @@ using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -328,11 +331,83 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.DoesNotContain(items, i => without.Contains(i.Title.Id));
     }
 
+    [Fact]
+    public async Task A_cold_page_serves_model_order_now_and_its_curation_lands_for_the_next_view()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"cold-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitlesAsync(50, genre);
+        await SeedActiveArtifactAsync(accountId);
+        var agent = new SlowCuratingAgent(TimeSpan.FromMilliseconds(400));
+        var cache = new MemoryCache(new MemoryCacheOptions());
+
+        // The first view does not wait on the model: model order, templated (or no) lines, and
+        // nothing the request did not ask the model for is labelled as if it had.
+        var first = await MoreAsync(accountId, Genre(genre), agent, cache, offRequestCuration: true);
+        Assert.NotEmpty(first);
+        Assert.All(first, i => Assert.NotEqual(ExposureWhySource.Llm, i.WhySource));
+        Assert.All(first, i => Assert.NotEqual(ExposureWhySource.Fallback, i.WhySource));
+
+        // The pass ran off the request and filled the fit cache: a later view is curated.
+        IReadOnlyList<ScoredFeedItem> later = [];
+        for (var attempt = 0; attempt < 50 && !later.Any(i => i.WhySource == ExposureWhySource.Llm); attempt++)
+        {
+            await Task.Delay(100);
+            later = await MoreAsync(accountId, Genre(genre), agent, cache, offRequestCuration: true);
+        }
+
+        Assert.True(agent.Calls > 0);
+        Assert.Contains(later, i => i.WhySource == ExposureWhySource.Llm);
+    }
+
+    [Fact]
+    public async Task A_title_rated_after_its_lane_was_scored_is_not_served_from_the_cached_window()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"cached-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitlesAsync(50, genre);
+        await SeedActiveArtifactAsync(accountId);
+        var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = await MoreAsync(accountId, Genre(genre), new UnavailableSearchAgent(), cache);
+        var rated = first[0].Title.Id;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = rated,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = 8,
+                RatedAt = DateTime.UtcNow,
+                FirstRatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // The lane's scored window is reused for a minute; the claim-time re-check is what keeps a
+        // title the account just rated off the page.
+        var second = await MoreAsync(accountId, Genre(genre), new UnavailableSearchAgent(), cache);
+        Assert.NotEmpty(second);
+        Assert.DoesNotContain(second, i => i.Title.Id == rated);
+    }
+
     private static MoreFeedRequest Genre(string genre) =>
         new(FeedRowContext.Genre, AnchorTitleId: null, Genre: genre, ExcludeTitleIds: [], Limit: 10);
 
     private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(
-        Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null)
+        Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null, bool offRequestCuration = false)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId);
@@ -349,8 +424,43 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new FrostAura.Reel.Application.CrossReference.RerankBudget(
                 db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
-            cache, NullLogger<FeedPaginator>.Instance);
+            cache, NullLogger<FeedPaginator>.Instance, offRequestCuration ? ScopesFor(agent, cache) : null);
         return await paginator.MoreAsync(account, request, CancellationToken.None);
+    }
+
+    /// <summary>The DI scope the off-request curation pass resolves its agent and context from.</summary>
+    private IServiceScopeFactory ScopesFor(ISearchAgent agent, IMemoryCache cache)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped<AccountContext>();
+        services.AddScoped<IAccountContext>(sp => sp.GetRequiredService<AccountContext>());
+        services.AddScoped<IReelDbContext>(sp => Fixture.CreateContext(sp.GetRequiredService<AccountContext>()));
+        services.AddSingleton(agent);
+        services.AddScoped(sp => new PersonalisationContext(
+            sp.GetRequiredService<IReelDbContext>(), new DislikeSignal(sp.GetRequiredService<IReelDbContext>(), cache)));
+        return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+    }
+
+    /// <summary>A model pass that answers well, but slowly — what a cold rail waits on today.</summary>
+    private sealed class SlowCuratingAgent(TimeSpan delay) : ISearchAgent
+    {
+        public int Calls;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "slow-curating-agent";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
+            throw new NotSupportedException();
+
+        public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref Calls);
+            await Task.Delay(delay, ct);
+            return [.. titles.Select(t => new RerankResult(
+                t.TitleId, 0.8d, ResultSource.Llm, "You keep coming back to slow-burn crime like this.", ResultSource.Llm))];
+        }
     }
 
     private async Task<Guid> SeedAccountAsync()

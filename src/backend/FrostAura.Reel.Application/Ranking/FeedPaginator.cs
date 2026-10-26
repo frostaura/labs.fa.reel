@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ml;
@@ -12,6 +13,7 @@ using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Ranking;
@@ -108,8 +110,15 @@ public sealed class FeedPaginator(
     PersonalisationContext personalisation,
     CrossReference.RerankBudget rerankBudget,
     IMemoryCache cache,
-    ILogger<FeedPaginator> logger)
+    ILogger<FeedPaginator> logger,
+    IServiceScopeFactory? scopeFactory = null)
 {
+    /// <summary>
+    /// Pages whose cold curation pass is running off the request right now, keyed by account and
+    /// row, so a burst of loads of one rail starts the pass once.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> CurationInFlight = new();
+
     // The window is a hybrid union (~160 after dedup): a popularity coverage slice plus a
     // personalized pgvector ANN slice, so paging no longer re-ranks only the popular head.
     private const int WindowPopCount = 100;
@@ -146,6 +155,12 @@ public sealed class FeedPaginator(
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
 
+    /// <summary>How long a TMDB walk of one lane page is remembered before it may be repeated.</summary>
+    private static readonly TimeSpan DeepenMemo = TimeSpan.FromMinutes(30);
+
+    /// <summary>How long one lane's scored, unexcluded window is reused across requests.</summary>
+    private static readonly TimeSpan WindowTtl = TimeSpan.FromMinutes(1);
+
     /// <summary>The most a Similar (or because-you-loved) window may spend retrieving before it serves what it has.</summary>
     private static readonly TimeSpan SimilarWindowBudget = TimeSpan.FromSeconds(2);
 
@@ -167,18 +182,32 @@ public sealed class FeedPaginator(
 
     public async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(Account account, MoreFeedRequest req, CancellationToken ct)
     {
-        var artifact = await db.ModelArtifacts
+        // Phase timings for the one log line at the end: /feed/more's p95 is an acceptance number,
+        // and "which phase was slow" is the first question every miss raises.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var activeArtifactId = await db.ModelArtifacts
             .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
             // Newest-first rather than an unordered FirstOrDefault: a filtered unique
             // index makes two Active artifacts unrepresentable today, but an unordered
             // read would silently start flipping predictions between models the moment
             // that index changed. Deterministic by construction costs nothing here.
             .OrderByDescending(a => a.Version)
+            .Select(a => (Guid?)a.Id)
             .FirstOrDefaultAsync(ct);
-        if (artifact is null)
+        if (activeArtifactId is not { } artifactId)
         {
             return [];
         }
+
+        // The artifact row carries the model's bytes (megabytes); a Home load fired every rail at
+        // once and each read them, which put the setup phase's p95 at 1.4 s. An artifact never
+        // changes once trained, so the row is read once per process and the id above — a tiny read
+        // — is what decides which one is Active.
+        var artifact = await cache.GetOrCreateAsync($"feedartifact:{artifactId:N}", async entry =>
+        {
+            entry.SlidingExpiration = TimeSpan.FromMinutes(30);
+            return await db.ModelArtifacts.AsNoTracking().FirstAsync(a => a.Id == artifactId, ct);
+        }) ?? await db.ModelArtifacts.AsNoTracking().FirstAsync(a => a.Id == artifactId, ct);
 
         var now = DateTime.UtcNow;
         // A home load fires every genre rail's first page at once — they'd each rebuild the same
@@ -201,8 +230,37 @@ public sealed class FeedPaginator(
         var windowExclude = req.PageExcludeTitleIds is { Count: > 0 } pageExclude
             ? exclude.Concat(pageExclude).Distinct().ToList()
             : exclude;
-        var pool = await FetchWindowAsync(account, req, windowExclude, taste, ct);
-        var all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
+        var setupMs = clock.ElapsedMilliseconds;
+
+        // The scored window, reused for a minute (WS-5, the /feed/more p95). A Home load fires every
+        // rail at once and each paid 0.7–1.9 s retrieving and scoring the same unexcluded lane the
+        // previous load had just scored; the window does not depend on the page's exclusions, so
+        // the lane is scored once per minute and each request removes its own exclusions in memory.
+        // A minute keeps the numbers as fresh as the two-minute taste cache already allows; the
+        // claim-time eligibility re-check covers a title rated inside it. A deep page whose
+        // exclusions leave the cached window thin reads the lane live, exactly as before.
+        var windowKey = $"feedwindow:{account.Id:N}:{artifact.Id:N}:{RowKey(req)}:{req.MediaType}";
+        List<Scored> all;
+        if (cache.TryGetValue(windowKey, out List<Scored>? cachedWindow) && cachedWindow is not null
+            && WithoutExcluded(cachedWindow, windowExclude) is { Count: >= DeepenThreshold } fromCache)
+        {
+            all = fromCache;
+        }
+        else
+        {
+            var unexcluded = await ScoreWindowAsync(
+                artifact, taste, await FetchWindowAsync(account, req, [], taste, ct), residual, calibrator, now, ct);
+            cache.Set(windowKey, unexcluded, WindowTtl);
+            all = WithoutExcluded(unexcluded, windowExclude);
+            if (all.Count < DeepenThreshold && windowExclude.Count > 0)
+            {
+                // Deep in the lane: the exclusions ate the unexcluded window, so read past them.
+                all = await ScoreWindowAsync(
+                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
+            }
+        }
+
+        var windowMs = clock.ElapsedMilliseconds;
         var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
@@ -240,8 +298,9 @@ public sealed class FeedPaginator(
 
             if (grew > 0)
             {
-                pool = await FetchWindowAsync(account, req, windowExclude, taste, ct);
-                all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
+                cache.Remove(windowKey);
+                all = await ScoreWindowAsync(
+                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
                 scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
         }
@@ -263,6 +322,7 @@ public sealed class FeedPaginator(
             return [];
         }
 
+        var deepenMs = clock.ElapsedMilliseconds;
         var boosts = await LoadPreferenceBoostsAsync(account.Id, scored, ct);
         // The same account-level taste prior the snapshot build ranks by. Page 2 of a row is the
         // same feed as page 1: a rule that keeps a no-history genre out of the hero and then lets it
@@ -338,7 +398,9 @@ public sealed class FeedPaginator(
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
+        var rankMs = clock.ElapsedMilliseconds;
         var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, evidence, ct);
+        var curationMs = clock.ElapsedMilliseconds;
 
         // Claimed against the page, not just taken: a title another rail claimed between the read
         // above and now is skipped for the next best — the curated slice first, then the rest of
@@ -453,6 +515,11 @@ public sealed class FeedPaginator(
                 Evidence: evidence.GetValueOrDefault(c.Scored.Title.Id)));
         }
 
+        logger.LogInformation(
+            "Feed page {Row}: {TotalMs} ms — setup {SetupMs}, window+score {WindowMs}, deepen {DeepenMs}, rank+gate {RankMs}, "
+            + "curation {CurationMs}, claim+why {ClaimMs}; {Count} card(s).",
+            rowKey, clock.ElapsedMilliseconds, setupMs, windowMs - setupMs, deepenMs - windowMs, rankMs - deepenMs,
+            curationMs - rankMs, clock.ElapsedMilliseconds - curationMs, items.Count);
         return items;
     }
 
@@ -511,6 +578,20 @@ public sealed class FeedPaginator(
                     rowKey, allowance.Describe());
                 uncached.Clear();
             }
+        }
+
+        // OFF the request when it can be (WS-5, the /feed/more p95): a cold page serves the model's
+        // order now, with templated lines, and its curation pass runs in the background and fills
+        // the fit cache, so the next view of the rail is curated. Measured on the founder's copy,
+        // 20 cold Home loads put /feed/more at p50 1.7 s and p95 19.5 s, and the curation phase was
+        // the whole of the tail (p95 16.2 s, up to the 20 s ceiling, eleven rails queuing on a
+        // four-slot gate); the warm window itself was 0.5–1.6 s. Curation only SHARPENS an order the
+        // model already personalised, so the first view loses a little order and none of its
+        // honesty: the exposure row says Templater (never asked in this request), not Llm.
+        if (uncached.Count > 0 && scopeFactory is not null)
+        {
+            StartCurationOffRequest(account.Id, rowKey, query, anchorName, taste, [.. uncached]);
+            uncached.Clear();
         }
 
         if (uncached.Count > 0)
@@ -598,6 +679,79 @@ public sealed class FeedPaginator(
             .OrderByDescending(x => x.Blend)
             .Select(x => new Curated(x.Scored, x.Fit, attempted.Contains(x.Scored.Title.Id)))
             .ToList();
+    }
+
+    /// <summary>
+    /// Runs one rail's curation pass in its own scope, off the request, caching every model fit it
+    /// returns exactly as the inline pass does. One pass per (account, row) at a time; any failure is
+    /// logged and dropped — the rail already served model order, and the next view tries again.
+    /// </summary>
+    private void StartCurationOffRequest(
+        Guid accountId, string rowKey, string query, string? anchorName, FeatureVectorBuilder.TasteState taste,
+        IReadOnlyList<RerankInput> inputs)
+    {
+        var key = $"{accountId:N}:{rowKey}";
+        if (scopeFactory is null || !CurationInFlight.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = scopeFactory.CreateScope();
+                var provider = scope.ServiceProvider;
+                provider.GetRequiredService<IAccountContext>().SetAccount(accountId);
+                var scopedAgent = provider.GetRequiredService<ISearchAgent>();
+                var narrative = await provider.GetRequiredService<PersonalisationContext>()
+                    .ContextForAsync(accountId, taste, CancellationToken.None);
+
+                // The same batches, gate and ceiling as the inline pass; no soft budget, because
+                // nobody is waiting on this one.
+                using var loop = new LlmBudgetLoop(
+                    new LlmBudgetOptions(CurationCeiling, CurationCeiling, RerankBatch, CurationGate), CancellationToken.None);
+                if (!await loop.TryAcquireGateAsync())
+                {
+                    return;
+                }
+
+                var cached = 0;
+                await loop.RunAsync(inputs, async (batch, batchCt) =>
+                {
+                    var results = await scopedAgent.RerankBatchAsync(
+                        batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
+                    foreach (var r in results.Where(r => r.FitSource == ResultSource.Llm))
+                    {
+                        cache.Set(FitKey(accountId, r.TitleId, rowKey), r, FitTtl);
+                        cached++;
+                    }
+                });
+
+                logger.LogInformation(
+                    "Feed curation for {Row} ran off the request: {Cached} of {Total} titles curated for the next view.",
+                    rowKey, cached, inputs.Count);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Off-request feed curation for {Row} failed; the rail keeps model order.", rowKey);
+            }
+            finally
+            {
+                CurationInFlight.TryRemove(key, out _);
+            }
+        });
+    }
+
+    private static List<Scored> WithoutExcluded(IReadOnlyList<Scored> window, IReadOnlyCollection<Guid> excluded)
+    {
+        if (excluded.Count == 0)
+        {
+            return [.. window];
+        }
+
+        var set = excluded as IReadOnlySet<Guid> ?? excluded.ToHashSet();
+        return [.. window.Where(s => !set.Contains(s.Title.Id))];
     }
 
     /// <summary>Rows whose every card must be admitted by <see cref="AnchorRowGate"/>.</summary>
@@ -894,6 +1048,16 @@ public sealed class FeedPaginator(
         // arithmetic lives in DiscoveryPaging, which the feed BUILD now reads from too — it used to
         // exist only here, which is why the build read page 1 for ever.
         var page = DiscoveryPaging.DeepenPage(seenCount, MaxDeepenPage);
+
+        // One walk per lane page per half hour (WS-5, the /feed/more p95): a lane whose candidates
+        // all sit under the floor (New for you, measured) asked TMDB for the same page on EVERY
+        // request — 1.2–2.4 s each — and got back titles the catalogue already held. TMDB's discover
+        // page does not change on that timescale, so a recent walk of it is remembered and skipped.
+        var walkKey = $"feeddeepen:{RowKey(req)}:{req.MediaType}:{region}:{page}";
+        if (cache.TryGetValue(walkKey, out _))
+        {
+            return 0;
+        }
         // Media-aware deepen: a "Movies" lane pulls ONLY movies from TMDB (and vice versa), so a thin
         // movies lane grows with movies instead of half its deepen budget landing shows the media
         // window would then drop. Null medium keeps the original both-media behaviour.
@@ -986,7 +1150,12 @@ public sealed class FeedPaginator(
         var added = await candidateGenerator.UpsertCandidatesAsync(items, ct);
         logger.LogInformation("Feed deepen: {Items} TMDB items ({Added} new) for {Context} page {Page}.",
             items.Count, added, req.Context, page);
-        return items.Count;
+
+        // Remembered only once the walk completed: a walk the time box cut short is retried by the
+        // next request. The caller re-reads the window only when this grew it — titles the
+        // catalogue already held were already in the window it scored.
+        cache.Set(walkKey, true, DeepenMemo);
+        return added;
     }
 
     private async Task<List<Scored>> RankAsync(

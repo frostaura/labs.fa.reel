@@ -1481,9 +1481,15 @@ public class BuildFeedJobHandler(
         if (interleaver is null && mode == FeedBuildMode.Fresh && heroTarget.Count > 0 && hero.Count > 0)
         {
             var seated = hero.Select(h => h.Title.Id).ToHashSet();
+            // Spares in the same preference order the backfill uses — model-confident, then
+            // crowd-backed, then HeroKey — so a media swap never trades a crowd-backed seat for a
+            // title the crowd floor would have kept out (measured: two sub-floor films entered the
+            // hero this way on the first build with the floor).
             var heroSparePool = candidates
                 .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(HeroKey)
+                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .ThenByDescending(CrowdBacked)
+                .ThenByDescending(HeroKey)
                 .ToList();
             var (balanced, met) = MediaMix.Balance(
                 hero,
