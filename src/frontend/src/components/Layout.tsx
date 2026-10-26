@@ -12,6 +12,7 @@ import ErrorBoundary from "./ErrorBoundary";
 import OfflineBanner from "./OfflineBanner";
 import UpdatePrompt from "./UpdatePrompt";
 import { markSignOutPending } from "../lib/signOut";
+import { LEAVE_CONFIRMED, pendingLeaveQuestion } from "../lib/navigationGuard";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -63,13 +64,17 @@ export default function Layout() {
   }, [location.pathname, location.search]);
 
   const handleSignOut = async () => {
+    // Ask about unsaved drafts BEFORE the session ends: asking after logout, a Cancel would leave
+    // the page signed out underneath its own draft (IREV3S-04).
+    const question = pendingLeaveQuestion();
+    if (question !== null && !window.confirm(question)) return;
     await logout().unwrap().catch(() => undefined);
     // The cleanup runs on the landing page, once this shell and its pages have unmounted
     // (components/SignOutCleanup.tsx): clearing here would reset the cache under live subscribers,
     // and every one of them would refetch. Everything this browser holds for the account goes, not
     // just the RTK cache: the slices, the reel.* keys and the worker's offline API cache (I-11).
     markSignOutPending();
-    navigate("/");
+    navigate("/", { state: LEAVE_CONFIRMED });
   };
 
   return (
