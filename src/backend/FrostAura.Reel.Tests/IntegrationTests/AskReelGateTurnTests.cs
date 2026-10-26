@@ -562,6 +562,45 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     /// <summary>
+    /// IREV2-SYS-02 wired through the turn (WS-1 CR-1): a degraded reading replies with the copy for
+    /// ITS cause — a spent allowance names the midnight-UTC reset, a 402 names the empty account, a 401
+    /// the rejected key — never "try again in a moment", and the cause rides as its own
+    /// <c>plan-cause:</c> token beside <c>plan</c>, so history still reads the turn as plan-failed.
+    /// </summary>
+    [Theory]
+    [InlineData(AgentFailureKind.BudgetSpent, "budget_spent", AgentReply.BudgetSpentReply)]
+    [InlineData(AgentFailureKind.ProviderRefused, "payment_required", AgentReply.OutOfCreditReply)]
+    [InlineData(AgentFailureKind.ProviderRefused, "unauthorized", AgentReply.KeyRejectedReply)]
+    public async Task A_degraded_reading_replies_with_its_cause_and_records_it_beside_the_plan_flag(
+        AgentFailureKind failure, string code, string expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 500, ("Yes", 3)));
+        var agent = new VerdictAgent(degradedReading: true, degradedFailure: failure, degradedCode: code);
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit, new MemoryCache(new MemoryCacheOptions()));
+
+        var outcome = await service.StreamAsync(
+            "no superheroes please", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var text = events.First(e => e.Event == "assistant-message").Data.GetProperty("text").GetString()!;
+        Assert.StartsWith(expected, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(AgentReply.DegradedReply, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("no superheroes please", text, StringComparison.Ordinal);
+        Assert.Equal(outcome.AssistantText, text);
+        Assert.True(SearchTurnDegraded.PlanFailed(outcome.DegradedFlags));
+        Assert.Contains($"{SearchTurnDegraded.PlanCausePrefix}{code}", outcome.DegradedFlags!.Split(','));
+        var done = events.First(e => e.Event == "done").Data.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()).ToList();
+        Assert.Contains(SearchTurnDegraded.Plan, done);
+        Assert.Contains($"{SearchTurnDegraded.PlanCausePrefix}{code}", done);
+    }
+
+    /// <summary>
     /// "No superheroes please" (A-9): the user typed the plural, the catalogue labels the singular —
     /// as a keyword on some titles and as a GENRE on others. Neither may reach the picks; the
     /// contradicting titles are at most the flagged outside channel, captioned with the user's word.
@@ -1522,7 +1561,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     /// </summary>
     private sealed class VerdictAgent(
         TimeSpan? delay = null, bool failEverything = false, IReadOnlyList<string>? keywords = null,
-        bool degradedReading = false, IReadOnlyList<string>? requestedExclusions = null) : ISearchAgent
+        bool degradedReading = false, IReadOnlyList<string>? requestedExclusions = null,
+        AgentFailureKind degradedFailure = AgentFailureKind.Truncated, string? degradedCode = null) : ISearchAgent
     {
         public const string Reply = "Brooding and futuristic, coming right up.";
 
@@ -1556,7 +1596,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             // The user's own reading carries the negation — the only source a negation may come from.
             var requested = intent with { ExcludeKeywords = requestedExclusions };
             return Task.FromResult(degradedReading
-                ? new AgentReply(AgentReply.DegradedReply, intent, requested, Degraded: true, AgentFailureKind.Truncated)
+                ? new AgentReply(AgentReply.DegradedReply, intent, requested, Degraded: true, degradedFailure, degradedCode)
                 : new AgentReply(Reply, intent, requested));
         }
 
