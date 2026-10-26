@@ -173,9 +173,11 @@ public class JobRunnerPolicyTests
     /// A Retry deadline below one of these turns a slow success into three restarts and a failure.
     /// DeltaSync is the exception on purpose: its two runs past 90 minutes (the longest 22 hours)
     /// are the wedges the deadline exists to end, against 6,066 runs that finished inside it.
+    /// BuildFeed is measured on its WORK (F+1): its jobs' 141-minute wall time was a post-build stall,
+    /// and the build's own stopwatch (<c>FeedBuildStats.DurationMs</c>, 288 builds) never passed 117 s.
     /// </summary>
     [Theory]
-    [InlineData(JobKind.BuildFeed, 141.2)]
+    [InlineData(JobKind.BuildFeed, 1.95)]
     [InlineData(JobKind.Train, 131.5)]
     [InlineData(JobKind.BuildTasteNarrative, 3.8)]
     [InlineData(JobKind.Evaluate, 0.1)]
@@ -186,6 +188,43 @@ public class JobRunnerPolicyTests
         var policy = Options.PolicyFor(kind);
         Assert.Equal(DeadlineAction.Retry, policy.OnDeadline);
         Assert.True(policy.Deadline.TotalMinutes > longestMinutes * 1.05, $"{kind}: {policy.Deadline} against {longestMinutes} min on record");
+    }
+
+    [Fact]
+    public void A_stalled_build_warns_well_inside_its_deadline_and_is_ended_within_half_an_hour()
+    {
+        // F+1: 18 of 53 BuildFeed jobs since 10-14 held the pill 13 to 237 minutes past a build that
+        // took at most 117 s. The warning must come while the stall can still be looked at.
+        var policy = Options.PolicyFor(JobKind.BuildFeed);
+        Assert.Equal(TimeSpan.FromMinutes(30), policy.Deadline);
+        Assert.NotNull(policy.SlowAfter);
+        Assert.InRange(policy.SlowAfter.Value, TimeSpan.FromMinutes(2), policy.Deadline / 2);
+    }
+
+    [Fact]
+    public void The_slow_run_watch_warns_once_with_how_long_progress_has_not_moved()
+    {
+        var watch = new JobRunnerService.SlowRunWatch(TimeSpan.FromMinutes(10));
+        var job = new SyncJob { ProgressPct = 70, ProgressMessage = "Final ranking" };
+
+        Assert.Null(watch.Observe(job, TimeSpan.FromMinutes(1)));
+        job.ProgressPct = 85;
+        job.ProgressMessage = "Assembling tonight's picks";
+        Assert.Null(watch.Observe(job, TimeSpan.FromMinutes(2)));
+        Assert.Null(watch.Observe(job, TimeSpan.FromMinutes(9)));
+
+        var slow = watch.Observe(job, TimeSpan.FromMinutes(12));
+        Assert.NotNull(slow);
+        Assert.Equal(85, slow.Pct);
+        Assert.Equal("Assembling tonight's picks", slow.Message);
+        Assert.Equal(TimeSpan.FromMinutes(10), slow.Unchanged);
+        Assert.Null(watch.Observe(job, TimeSpan.FromMinutes(40)));
+
+        // A kind with no SlowAfter never warns, and a run whose job row was never read reports no progress.
+        Assert.Null(new JobRunnerService.SlowRunWatch(null).Observe(job, TimeSpan.FromHours(5)));
+        var unread = new JobRunnerService.SlowRunWatch(TimeSpan.FromMinutes(1)).Observe(null, TimeSpan.FromMinutes(2));
+        Assert.NotNull(unread);
+        Assert.Null(unread.Message);
     }
 
     [Theory]

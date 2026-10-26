@@ -19,8 +19,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence;
 /// <summary>
 /// Single DbContext for catalog (global) + account-scoped data. Multi-tenancy is enforced
 /// here, once: every <see cref="IAccountScoped"/> entity carries a global query filter bound
-/// to the scoped <see cref="IAccountContext"/>. Unscoped contexts (background/global work)
-/// see everything; HTTP requests are always pinned to the session's account.
+/// to the scoped <see cref="IAccountContext"/>. HTTP requests and account jobs are pinned to their
+/// account; deliberate cross-account work (startup, global jobs, sweeps) runs inside
+/// <see cref="IAccountContext.EnterSystemScope"/> and sees every account. A query with neither is
+/// what <see cref="UnscopedReadPolicy"/> decides: logged once per call site, or refused (J-11).
 /// </summary>
 public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountContext accountContext)
     : DbContext(options), IDataProtectionKeyContext, IReelDbContext
@@ -33,6 +35,18 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public const string FeatureSchemaVersionProperty = "FeatureSchemaVersion";
 
     private readonly IAccountContext _accountContext = accountContext;
+
+    /// <summary>
+    /// The tenancy filters' "may read every account" term. EF evaluates it as a query parameter on
+    /// every execution of a filtered query, so it is where an unpinned query is caught: pinned is
+    /// false without asking anything, system scope is true, and anything else is the
+    /// <see cref="UnscopedReadPolicy"/>'s call — which under <c>Throw</c> throws out of the query.
+    /// A query that ignores the filters never evaluates it.
+    /// </summary>
+    /// <summary>The account this context is pinned to, if any — for diagnostics that name whose work a statement was.</summary>
+    internal Guid? PinnedAccountId => _accountContext.AccountId;
+
+    private bool UnscopedReadPermitted => _accountContext.AccountId is null && _accountContext.PermitUnscopedRead();
 
     // Tenancy & auth
     public DbSet<Account> Accounts => Set<Account>();
@@ -368,7 +382,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // treats "no Active artifact" as "no model yet", which is the correct degradation;
             // NightlyReconcileService logs the mismatch loudly and forces a retrain.
             e.HasQueryFilter(a =>
-                (_accountContext.AccountId == null || a.AccountId == _accountContext.AccountId)
+                (UnscopedReadPermitted || a.AccountId == _accountContext.AccountId)
                 && (a.Status != ArtifactStatus.Active
                     || EF.Property<int?>(a, FeatureSchemaVersionProperty) == FeatureSchema.Version));
         });
@@ -462,14 +476,15 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // One missed predicate is a cross-tenant leak that no structural test would catch, so
             // the filter is declared explicitly here instead.
             //
-            // It mirrors the generic filter's null-context behaviour (unpinned sees everything —
-            // JobRunnerService reads the job BEFORE pinning, and the background schedulers run in
-            // unscoped scopes) and additionally always admits global rows, which is the difference
+            // It mirrors the generic filter's unpinned behaviour (system scope sees everything —
+            // JobRunnerService reads the job BEFORE pinning, inside system scope — and an unpinned
+            // query outside it is the UnscopedReadPolicy's call) and additionally always admits
+            // global rows to a pinned reader, which is the difference
             // from the generic predicate and the reason SyncJob cannot simply implement the
             // interface. The explicit AccountId filters in SyncEndpoints/MetricsEndpoints stay:
             // they narrow further, to this account's own jobs, excluding global ones.
             e.HasQueryFilter(j =>
-                _accountContext.AccountId == null
+                UnscopedReadPermitted
                 || j.AccountId == null
                 || j.AccountId == _accountContext.AccountId);
         });
@@ -735,6 +750,6 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         where TEntity : class, IAccountScoped
     {
         modelBuilder.Entity<TEntity>()
-            .HasQueryFilter(e => _accountContext.AccountId == null || e.AccountId == _accountContext.AccountId);
+            .HasQueryFilter(e => UnscopedReadPermitted || e.AccountId == _accountContext.AccountId);
     }
 }

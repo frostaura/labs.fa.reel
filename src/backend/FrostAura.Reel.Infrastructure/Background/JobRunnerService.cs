@@ -228,7 +228,7 @@ public sealed class JobRunnerService(
     /// <param name="ct">Cancellation.</param>
     internal async Task<ClaimedJob?> ClaimNextAsync(IReadOnlyCollection<string> kinds, CancellationToken ct, Guid? onlyId = null)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -377,6 +377,9 @@ public sealed class JobRunnerService(
     {
         public Guid? AccountId { get; set; }
 
+        /// <summary>The handler's tracked row, once read: the slow-run watch reads its progress fields.</summary>
+        public SyncJob? Job { get; set; }
+
         /// <summary>The handler returned as finished and its unsaved changes were flushed through the fence.</summary>
         public bool Finished { get; set; }
 
@@ -384,6 +387,40 @@ public sealed class JobRunnerService(
 
         /// <summary>The failure is deterministic (typed by the handler): fail now, keep the remaining attempts unspent.</summary>
         public bool NonRetryable { get; set; }
+    }
+
+    /// <summary>
+    /// Tracks when a running job's progress last moved and says, once, when the run has gone past its
+    /// kind's <see cref="JobKindPolicy.SlowAfter"/>. Reads the handler's in-memory progress fields —
+    /// a progress report is not saved until the handler next saves, and the point is to see the gap.
+    /// </summary>
+    internal sealed class SlowRunWatch(TimeSpan? slowAfter)
+    {
+        private (decimal? Pct, string? Message) _last;
+        private TimeSpan _movedAt;
+        private bool _seen;
+        private bool _warned;
+
+        public sealed record Slow(TimeSpan SlowAfter, decimal? Pct, string? Message, TimeSpan Unchanged);
+
+        public Slow? Observe(SyncJob? job, TimeSpan elapsed)
+        {
+            var progress = (job?.ProgressPct, job?.ProgressMessage);
+            if (!_seen || progress != _last)
+            {
+                _last = progress;
+                _movedAt = elapsed;
+                _seen = true;
+            }
+
+            if (_warned || slowAfter is not { } threshold || elapsed < threshold)
+            {
+                return null;
+            }
+
+            _warned = true;
+            return new Slow(threshold, _last.Pct, _last.Message, elapsed - _movedAt);
+        }
     }
 
     /// <summary>
@@ -414,8 +451,10 @@ public sealed class JobRunnerService(
             ["JobAttempt"] = claim.Attempt,
         });
 
+        // Names the job on anything slow the database does for it (SlowCommandDiagnostics).
+        using var jobContext = JobRunContext.Enter(claim.Id, claim.Kind, claim.Attempt);
         var state = new Execution();
-        var heartbeat = HeartbeatLoopAsync(claim, lease, beatStop.Token);
+        var heartbeat = HeartbeatLoopAsync(claim, lease, beatStop.Token, policy, state, clock);
         var execution = ExecuteHandlerAsync(claim, policy, state, handlerToken.Token, lease.Token);
         bool returned;
         try
@@ -449,17 +488,26 @@ public sealed class JobRunnerService(
         {
             scope = scopeFactory.CreateScope();
             db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var tenancy = scope.ServiceProvider.GetRequiredService<IAccountContext>();
 
             // Read through the fence: a row reclaimed before the handler even started is not this
             // execution's to run. Tracked, so the row's AttemptCount and Status concurrency tokens
-            // fence every save the handler makes of it.
+            // fence every save the handler makes of it. Read in system scope: whose job it is is
+            // what this read finds out.
+            var reading = tenancy.EnterSystemScope();
             job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
                 ?? throw new InvalidOperationException("The job no longer belongs to this execution.");
             state.AccountId = job.AccountId;
+            state.Job = job;
             if (job.AccountId is { } owner)
             {
-                scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(owner);
+                // An account job runs pinned to its account and nothing else (J-11).
+                reading.Dispose();
+                tenancy.SetAccount(owner);
             }
+
+            // A global job (no account) keeps the system scope for the whole run: reading across
+            // accounts is what a global job is. It ends with the execution's DI scope.
 
             var handler = scope.ServiceProvider.GetServices<IJobHandler>().FirstOrDefault(h => h.Kind == job.Kind)
                 ?? throw new NonRetryableJobException($"No handler registered for job kind {job.Kind}.");
@@ -813,18 +861,32 @@ public sealed class JobRunnerService(
         db.SyncJobs.Where(j => j.Id == claim.Id && j.AttemptCount == claim.Attempt && j.Status == JobStatus.Running);
 
     /// <summary>
-    /// Runs a write on a fresh, unpinned context. Never the handler's token: a terminal write must
+    /// A DI scope for the runner's own bookkeeping — claims, fences, sweeps, terminal writes. Those
+    /// read and write the queue across every account by design, so they say so (J-11); the scope's
+    /// system-scope handle ends with the scope.
+    /// </summary>
+    private IServiceScope CreateSystemScope()
+    {
+        var scope = scopeFactory.CreateScope();
+        scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
+        return scope;
+    }
+
+    /// <summary>
+    /// Runs a write on a fresh context in system scope. Never the handler's token: a terminal write must
     /// land even when the handler was cancelled.
     /// </summary>
     private async Task<int> WithContextAsync(Func<ReelDbContext, Task<int>> write)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         return await write(scope.ServiceProvider.GetRequiredService<ReelDbContext>());
     }
 
-    private async Task HeartbeatLoopAsync(ClaimedJob claim, CancellationTokenSource lease, CancellationToken stop)
+    private async Task HeartbeatLoopAsync(
+        ClaimedJob claim, CancellationTokenSource lease, CancellationToken stop, JobKindPolicy policy, Execution state, Stopwatch clock)
     {
         using var timer = new PeriodicTimer(options.HeartbeatInterval);
+        var watch = new SlowRunWatch(policy.SlowAfter);
         while (true)
         {
             try
@@ -835,6 +897,15 @@ public sealed class JobRunnerService(
                 }
 
                 var now = DateTime.UtcNow;
+                if (watch.Observe(state.Job, clock.Elapsed) is { } slow)
+                {
+                    logger.LogWarning(
+                        "Job {JobId} ({Kind}) attempt {Attempt} has run {Minutes} min, past the {SlowAfter} min its work normally ends well inside; "
+                        + "last progress {Pct}% \"{Message}\", unchanged for {Unchanged} min.",
+                        claim.Id, claim.Kind, claim.Attempt, Minutes(clock.Elapsed), Minutes(slow.SlowAfter),
+                        slow.Pct?.ToString(CultureInfo.InvariantCulture) ?? "-", slow.Message ?? "-", Minutes(slow.Unchanged));
+                }
+
                 var rows = await WithContextAsync(db => Fenced(db, claim)
                     .ExecuteUpdateAsync(s => s.SetProperty(j => j.HeartbeatAt, (DateTime?)now), stop));
                 if (rows == 0)
@@ -900,7 +971,7 @@ public sealed class JobRunnerService(
     /// </summary>
     internal async Task SweepAsync(CancellationToken ct)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var now = DateTime.UtcNow;
         var cutoff = now - options.StaleAfter;
@@ -977,7 +1048,7 @@ public sealed class JobRunnerService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             var broken = "Stalled with no heartbeat after @p1 attempts.";
             var fixedMessage = StalledMessage(options.MaxAttempts);

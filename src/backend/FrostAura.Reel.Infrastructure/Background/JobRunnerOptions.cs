@@ -43,7 +43,13 @@ public enum DeadlineAction
 /// a run that finished a moment after its deadline (and re-running it, re-spending on an LLM kind)
 /// helps nobody. <c>JobRunnerPolicyTests</c> keeps this flag equal to what the handler sources do.
 /// </param>
-public sealed record JobKindPolicy(TimeSpan Deadline, DeadlineAction OnDeadline, bool StopsEarlyOnCancellation = false);
+/// <param name="SlowAfter">
+/// When set, an attempt still running past this logs one warning naming its last progress report
+/// and how long ago it moved — the F+1 signal (a build whose work ended long before its job did).
+/// Well inside the deadline, so the warning arrives while the stall can still be looked at.
+/// </param>
+public sealed record JobKindPolicy(
+    TimeSpan Deadline, DeadlineAction OnDeadline, bool StopsEarlyOnCancellation = false, TimeSpan? SlowAfter = null);
 
 /// <summary>
 /// The job runner's tunables. Production runs on <see cref="Default"/>; the runner tests shrink the
@@ -139,9 +145,15 @@ public sealed record JobRunnerOptions
     /// Refresh-availability skips titles fetched inside its TTL and the lens pass skips titles
     /// already written at the same profile hash, so both resume rather than restart.</item>
     /// <item>Kinds that restart from nothing get a box above the longest healthy run on record, so
-    /// the deadline catches a wedge and never a slow success: BuildFeed's longest was 141 minutes,
-    /// Train's 132, the taste narrative's 4. DeltaSync's box is 90 minutes: two runs on record took
-    /// longer (the longest 22 hours), and those are the wedges the deadline exists to end.</item>
+    /// the deadline catches a wedge and never a slow success: Train's longest was 132 minutes, the
+    /// taste narrative's 4. DeltaSync's box is 90 minutes: two runs on record took longer (the
+    /// longest 22 hours), and those are the wedges the deadline exists to end.</item>
+    /// <item>BuildFeed is boxed on its WORK, not its job wall time (F+1). The jobs' 141-minute
+    /// "longest run" was the stall itself: across the 288 builds on the 2026-10-23 snapshot the
+    /// build's own stopwatch (<c>FeedBuildStats.DurationMs</c>) never passed 117 s (p95 93 s), while
+    /// 18 of 53 jobs since 10-14 stayed Running 13 to 237 minutes after it stopped. 30 minutes is 15×
+    /// the longest build; a stalled one is cancelled and retried instead of holding the pill and every
+    /// coalesced rebuild for hours, and warns at 10 minutes with its last progress.</item>
     /// <item>The cross-reference pass boxes itself at 8 minutes soft / 10 hard, so its runner
     /// deadline sits just above that and is never the thing that ends a healthy run.</item>
     /// </list>
@@ -155,7 +167,7 @@ public sealed record JobRunnerOptions
         [JobKind.EnrichCatalog] = new(TimeSpan.FromMinutes(10), DeadlineAction.Yield, StopsEarlyOnCancellation: true),
         [JobKind.Train] = new(TimeSpan.FromMinutes(180), DeadlineAction.Retry),
         [JobKind.Evaluate] = new(TimeSpan.FromMinutes(30), DeadlineAction.Retry),
-        [JobKind.BuildFeed] = new(TimeSpan.FromMinutes(150), DeadlineAction.Retry),
+        [JobKind.BuildFeed] = new(TimeSpan.FromMinutes(30), DeadlineAction.Retry, SlowAfter: TimeSpan.FromMinutes(10)),
         [JobKind.RefreshAvailability] = new(TimeSpan.FromMinutes(20), DeadlineAction.Yield, StopsEarlyOnCancellation: true),
         [JobKind.BuildDigest] = new(TimeSpan.FromMinutes(10), DeadlineAction.Retry),
         [JobKind.BuildTasteNarrative] = new(TimeSpan.FromMinutes(10), DeadlineAction.Retry),

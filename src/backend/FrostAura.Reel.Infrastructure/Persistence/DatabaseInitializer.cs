@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,6 +25,8 @@ public static class DatabaseInitializer
             return;
         }
 
+        // Boot work belongs to no account (J-11).
+        using var system = scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var pending = await WaitForPendingMigrationsAsync(db, logger, ct);
         if (pending.Count == 0)

@@ -1113,6 +1113,43 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         Assert.Equal(queuedLater, next.Id);
     }
 
+    // ── Tenancy (J-11) ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Under_the_fail_closed_policy_a_global_job_reads_every_account_and_an_account_job_only_its_own()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var mine = await SeedAccountAsync();
+        var theirs = await SeedAccountAsync();
+        await AddJobAsync(JobKind.Train, theirs.Id, status: JobStatus.Succeeded);
+        var seen = new Dictionary<JobKind, int>();
+        var configure = (IServiceCollection services) =>
+        {
+            services.AddSingleton(new UnscopedReadPolicy(UnscopedReadMode.Throw));
+            foreach (var kind in new[] { JobKind.SeedCatalog, JobKind.BuildFeed })
+            {
+                ContextHandler.For(kind, async (_, db, ct) =>
+                    seen[kind] = await db.SyncJobs.CountAsync(j => j.AccountId == mine.Id || j.AccountId == theirs.Id, ct))(services);
+            }
+        };
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), [], configure);
+        var global = await AddJobAsync(JobKind.SeedCatalog);
+        var owned = await AddJobAsync(JobKind.BuildFeed, mine.Id);
+
+        // The runner's own claim, fence and terminal writes run unpinned too, and must not be refused.
+        Assert.Equal(JobRunOutcome.Succeeded, await RunOnceAsync(harness, global, JobKind.SeedCatalog).WaitAsync(Patience));
+        Assert.Equal(JobRunOutcome.Succeeded, await RunOnceAsync(harness, owned, JobKind.BuildFeed).WaitAsync(Patience));
+
+        // Global: both accounts' rows (its own row is global, so not counted). Account: only its own.
+        Assert.Equal(2, seen[JobKind.SeedCatalog]);
+        Assert.Equal(1, seen[JobKind.BuildFeed]);
+        await harness.Runner.SweepAsync(CancellationToken.None);
+    }
+
     // ── Plumbing ───────────────────────────────────────────────────────────────────────────────
 
     private JobRunnerHarness Harness(JobRunnerOptions options, params ScriptedHandler[] handlers) =>

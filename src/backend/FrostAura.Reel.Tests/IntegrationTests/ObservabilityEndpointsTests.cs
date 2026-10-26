@@ -1,8 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using FrostAura.Reel.Domain.Search;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -153,12 +156,100 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
         }
     }
 
+    [Fact]
+    public async Task The_metrics_report_ask_latency_and_fallbacks_from_the_callers_own_turns_and_model_calls_per_purpose()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"ask-metrics-{Guid.NewGuid():N}");
+        var stranger = await api.SeedAccountAsync($"ask-metrics-stranger-{Guid.NewGuid():N}");
+        var now = DateTime.UtcNow;
+
+        await AddTurnAsync(accountId, now.AddMinutes(-50), 1000, """{"interpret":200,"rerank":700}""", flags: null);
+        await AddTurnAsync(accountId, now.AddMinutes(-40), 3000, """{"interpret":400,"discover":100,"rerank":2500}""", flags: "plan");
+        await AddTurnAsync(accountId, now.AddMinutes(-30), 9000, """{"interpret":800}""", flags: "judge:3/9", status: SearchTurnStatus.Failed);
+        // A timing row this build cannot read still counts as a turn but adds no stage samples.
+        await AddTurnAsync(accountId, now.AddMinutes(-20), null, """{"interpret":"n/a","rerank":-5}""", flags: "judge:0/9");
+        // Excluded: still pending, a user row, another account's, and outside the window.
+        await AddTurnAsync(accountId, now.AddMinutes(-10), 99_000, """{"interpret":99000}""", flags: "plan", status: SearchTurnStatus.Pending);
+        await AddTurnAsync(accountId, now.AddMinutes(-10), 99_000, """{"interpret":99000}""", flags: "plan", role: "user");
+        await AddTurnAsync(stranger, now.AddMinutes(-10), 99_000, """{"interpret":99000}""", flags: "plan");
+        await AddTurnAsync(accountId, now.AddDays(-3), 99_000, """{"interpret":99000}""", flags: "plan");
+
+        // Model calls are counted per purpose across the process; a purpose of this test's own.
+        var purpose = $"probe-metrics-{Guid.NewGuid():N}";
+        LlmCallMetrics.Record(purpose, LlmResult(LlmCallFailure.Truncated));
+        LlmCallMetrics.Record(purpose, LlmResult(LlmCallFailure.TimedOut));
+        LlmCallMetrics.Record(purpose, LlmResult(failure: null));
+
+        using (client)
+        {
+            var report = await GetMetricsAsync(client, hours: 24);
+            var ask = report.GetProperty("ask");
+            Assert.Equal(4, ask.GetProperty("turns").GetInt32());
+            Assert.Equal(1, ask.GetProperty("failed").GetInt32());
+            Assert.Equal(1, ask.GetProperty("planFallbacks").GetInt32());
+            Assert.Equal(1, ask.GetProperty("judgeFallbacks").GetInt32());
+
+            var latency = ask.GetProperty("latency");
+            Assert.Equal(3, latency.GetProperty("samples").GetInt32());
+            Assert.Equal(3000, latency.GetProperty("p50").GetInt64());
+            Assert.Equal(9000, latency.GetProperty("p95").GetInt64());
+
+            // Pipeline order, not alphabetical; each stage over the turns that ran it.
+            var stages = ask.GetProperty("stages").EnumerateArray().ToList();
+            Assert.Equal(["interpret", "discover", "rerank"], stages.Select(s => s.GetProperty("stage").GetString() ?? string.Empty).ToArray());
+            Assert.Equal(400, stages[0].GetProperty("latency").GetProperty("p50").GetInt64());
+            Assert.Equal(800, stages[0].GetProperty("latency").GetProperty("p95").GetInt64());
+            Assert.Equal(2, stages[2].GetProperty("latency").GetProperty("samples").GetInt32());
+
+            var llm = report.GetProperty("llm").EnumerateArray().Single(p => p.GetProperty("purpose").GetString() == purpose);
+            Assert.Equal(3, llm.GetProperty("calls").GetInt64());
+            Assert.Equal(1, llm.GetProperty("answered").GetInt64());
+            Assert.Equal(1, llm.GetProperty("truncated").GetInt64());
+            Assert.Equal(2, llm.GetProperty("fallbacks").GetInt64());
+            Assert.Equal(1, llm.GetProperty("outcomes").GetProperty("timed_out").GetInt64());
+
+            // Operator alerts are the Founder tier's; this caller is Free.
+            Assert.Equal(0, report.GetProperty("alerts").GetArrayLength());
+        }
+    }
+
     private static async Task<JsonElement> GetMetricsAsync(HttpClient client, int? hours = null)
     {
         using var response = await client.GetAsync(hours is null ? "/api/observability/metrics" : $"/api/observability/metrics?hours={hours}");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return await response.Content.ReadFromJsonAsync<JsonElement>();
     }
+
+    private async Task AddTurnAsync(
+        Guid accountId, DateTime completedAt, int? latencyMs, string timings, string? flags,
+        string status = SearchTurnStatus.Completed, string role = "assistant")
+    {
+        using var scope = api.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+        db.SearchTurns.Add(new SearchTurn
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            ConversationId = Guid.NewGuid(),
+            Role = role,
+            Text = "metrics probe",
+            CreatedAt = completedAt.AddSeconds(-10),
+            CompletedAt = status == SearchTurnStatus.Pending ? null : completedAt,
+            Status = status,
+            LatencyMs = latencyMs,
+            StageTimingsJson = timings,
+            DegradedFlags = flags,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static LlmChatResult LlmResult(LlmCallFailure? failure) =>
+        new(null, failure, 200, failure == LlmCallFailure.Truncated ? "length" : "stop", 1, 100, 10, 10, null, "probe/model", null, null, TimeSpan.Zero);
 
     private async Task AddAsync(
         Guid accountId,

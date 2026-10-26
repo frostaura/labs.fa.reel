@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Application.Pipeline;
 /// <para>Expects a context pinned to <paramref name="account"/>'s tenancy scope, as every request
 /// behind <c>RequireAccount</c> is; every query also filters by account explicitly.</para>
 /// </summary>
-public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader providerHealth)
+public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader providerHealth, IOperatorAlertReader? alerts = null)
 {
     /// <summary>How far back an unrecovered failure is still reported.</summary>
     public static readonly TimeSpan FailureWindow = TimeSpan.FromDays(7);
@@ -102,8 +102,13 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             LastFailures: failures,
             ProviderHealth: health,
             DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health, unrecognised),
-            NotEnoughRatings: floor);
+            NotEnoughRatings: floor,
+            Alerts: OperatorAlertsFor(account));
     }
+
+    /// <summary>Operator alerts are the operator's: Founder tier sees them, every other tier an empty list.</summary>
+    private IReadOnlyList<OperatorAlert> OperatorAlertsFor(Account account) =>
+        account.Tier == AccountTier.Founder && alerts is not null ? alerts.Current() : [];
 
     /// <summary>
     /// The stage the account is really in. A stored <see cref="PipelineStage.Degraded"/> on a

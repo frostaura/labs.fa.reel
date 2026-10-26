@@ -1,12 +1,17 @@
 using System.Globalization;
+using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
 /// <summary>
-/// The observability surface (WS-6 task 6): the browser's client-error sink, and the metrics report
-/// fed by the runner's M5 columns.
+/// The observability surface (WS-6 task 6): the browser's client-error sink, and the metrics report —
+/// job failures from the runner's M5 columns, Ask stage latency and fallbacks from the turn record,
+/// model truncation and fallback per purpose, and (for the operator) the active alerts.
 /// </summary>
 public static class ObservabilityEndpoints
 {
@@ -45,20 +50,26 @@ public static class ObservabilityEndpoints
         var group = app.MapGroup("/api/observability").RequireAccount();
 
         group.MapGet("/metrics", async (
-            int? hours, IAccountContext accountContext, JobMetricsQuery jobs, ClientErrorSink sink, CancellationToken ct) =>
+            int? hours, IAccountContext accountContext, IReelDbContext db, JobMetricsQuery jobs, AskMetricsQuery ask,
+            ClientErrorSink sink, IOperatorAlertReader alerts, CancellationToken ct) =>
         {
             var windowHours = Math.Clamp(hours ?? 24, 1, MaxWindowHours);
             var accountId = accountContext.AccountId!.Value;
             var now = DateTime.UtcNow;
             var since = now.AddHours(-windowHours);
             var totals = sink.TotalsFor(accountId);
+            var founder = await db.Accounts.AnyAsync(a => a.Id == accountId && a.Tier == AccountTier.Founder, ct);
 
             return Results.Ok(new MetricsReport(
                 now,
                 since,
                 windowHours,
                 await jobs.GetAsync(accountId, since, ct),
-                new ClientErrorMetrics(totals.Accepted, totals.RateLimited, ProcessStartedAt)));
+                new ClientErrorMetrics(totals.Accepted, totals.RateLimited, ProcessStartedAt),
+                await ask.GetAsync(accountId, since, ct),
+                LlmCallMetrics.Snapshot(),
+                ProcessStartedAt,
+                founder ? alerts.Current() : []));
         })
         .Produces<MetricsReport>()
         .Produces(StatusCodes.Status401Unauthorized);
