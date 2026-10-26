@@ -20,6 +20,8 @@ public static partial class DependencyInjection
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();
         services.AddScoped<Application.Search.FilterCostMeter>();
+        // Catalogue counts behind the conditions editor's genre chips (H-7), cached catalogue-wide.
+        services.AddScoped<Application.Search.Retrieval.FilterChipCounts>();
         services.AddScoped<Application.Search.LexicalSearchService>();
         // Feed-starvation diagnostic: injected by BuildFeedJobHandler on the serving path, and read by /api/dev.
         services.AddScoped<Application.Ranking.FeedStarvationDiagnostic>();

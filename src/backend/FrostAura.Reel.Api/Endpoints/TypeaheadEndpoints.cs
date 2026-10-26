@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -131,6 +132,13 @@ public static class TypeaheadEndpoints
 
             return Results.Ok(new { titles, people, global = globalRows });
         });
+
+        // The conditions editor's genre chips, derived from the catalogue (H-7): every genre the
+        // catalogue tags plus the composite and stand-in slugs, each with the films and shows an
+        // exclusion of it would remove, and whether it reaches the bar to be offered. Read-only and
+        // catalogue-wide, so not behind the settings PIN.
+        group.MapGet("/filter-chips", async (FilterChipCounts chips, CancellationToken ct) =>
+            Results.Ok(await chips.CountAsync(ct)));
     }
 
     /// <summary>
