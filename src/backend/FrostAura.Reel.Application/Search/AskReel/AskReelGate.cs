@@ -23,11 +23,12 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// model's "here are some ninja films" is exactly the failure this gate exists for (B-1).</item>
 /// </list>
 ///
-/// <para><b>An unjudged card is never placed under the bar</b> (R1-01). The floor tray is read, by the
-/// reply and by the reason line, as "matches your bar held back", and an unjudged card is not a match
-/// anybody found: the samurai turn put two unchecked non-samurai films there and told the user "2 held
-/// back by your 6.0 bar". The tray is for judged matches only; the unchecked tray says what is true of
-/// the rest.</para>
+/// <para><b>An unjudged card is never named as a match under the bar</b> (R1-01): the samurai turn
+/// put two unchecked non-samurai films in the floor tray and told the user they were samurai films
+/// the bar held back. But the bar is the user's own rule and binds every card (XM-06), so an
+/// unjudged card the bar holds back goes to the floor tray all the same (<see cref="UncheckedTier"/>),
+/// carrying no verdict; only the unjudged cards that clear the bar go to the unchecked tray, and a
+/// NoneFound reply names under the bar only the cards the judge said <c>yes</c> to.</para>
 ///
 /// <para><b>The floor never relaxes</b> (C-7, N+2). A judged match under the account's For-you bar
 /// goes to the tray in every case, whatever is left in the grid —
@@ -81,11 +82,25 @@ public static class AskReelGate
     /// <summary>
     /// The stored tier of an <see cref="Placement.Unjudged"/> card, decided once the whole turn is
     /// judged: the grid (below the judged picks) when at least one card was judged a match AND the card
-    /// clears the account's bar, the unchecked tray otherwise. The bar binds an unjudged card exactly as
-    /// it binds a judged one — it just never sends it to the floor tray, which holds matches.
+    /// clears the account's bar, the unchecked tray otherwise — or, when the bar holds it back, the floor
+    /// tray (<see cref="UncheckedTier"/>, which callers apply to the non-pick case).
     /// </summary>
     public static string UnjudgedTier(int judgedPicks, bool clearsFloor = true) =>
         judgedPicks > 0 && clearsFloor ? SearchTurnCardTier.Pick : SearchTurnCardTier.Unchecked;
+
+    /// <summary>
+    /// The tray an unjudged card goes to when it is not a pick: the floor tray when the account's bar
+    /// holds it back (under it, or unscored while one is set), the unchecked tray otherwise.
+    ///
+    /// <para><b>The bar binds first (XM-06).</b> The unchecked tray used to take every unjudged card,
+    /// under the bar or not, so a card the user's own rule rejects reached the screen outside the one
+    /// tray labelled with that rule. The floor tray now holds every card the bar held back; its cards
+    /// carry <c>satisfies: null</c> where nobody judged them, and the reply's "N held back by your bar"
+    /// stays true of all of them. What R1-01 forbade is still forbidden: a NoneFound reply names
+    /// as matches under the bar only cards the judge said <c>yes</c> to.</para>
+    /// </summary>
+    public static string UncheckedTier(decimal? predicted, decimal floor) =>
+        Clears(predicted, floor) ? SearchTurnCardTier.Unchecked : SearchTurnCardTier.BelowFloor;
 
     /// <summary>The stored tier for a placement; null for <see cref="Placement.Dropped"/>.</summary>
     public static string? TierOf(Placement placement) => placement switch

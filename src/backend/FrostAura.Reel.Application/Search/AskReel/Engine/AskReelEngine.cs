@@ -5,6 +5,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search.Retrieval;
+using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
@@ -12,6 +13,7 @@ using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Search;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TurnCard = FrostAura.Reel.Application.Search.LiveSearchExpansionService.TurnCard;
 using TurnOutcome = FrostAura.Reel.Application.Search.LiveSearchExpansionService.TurnOutcome;
@@ -47,10 +49,23 @@ public sealed class AskReelEngine(
     FeatureVectorBuilder featureBuilder,
     PersonalisationContext personalisation,
     ITurnComposer composer,
+    IConceptResolver resolver,
+    FilterCostMeter costMeter,
+    IServiceScopeFactory scopes,
     ILogger<AskReelEngine> logger)
 {
     /// <summary>How many candidates the executor asks retrieval for.</summary>
     public const int RetrievalWant = 40;
+
+    /// <summary>The most TMDB-only titles one turn hydrates and admits (each is a TMDB round trip).</summary>
+    public const int MaxProvisional = 6;
+
+    /// <summary>
+    /// How long the provisional titles' hydration may take. It runs beside the first judge pass, so
+    /// it costs the turn nothing up to about that pass's length; a title still hydrating at the
+    /// deadline sits this turn out (its summary row is kept, and later turns find it in the catalogue).
+    /// </summary>
+    public static readonly TimeSpan ProvisionalBudget = TimeSpan.FromSeconds(2.5);
 
     /// <summary>The heartbeat cadence the endpoint keeps (§4.9: at least every 5 s).</summary>
     public static readonly TimeSpan PhaseHeartbeat = TimeSpan.FromSeconds(5);
@@ -101,6 +116,13 @@ public sealed class AskReelEngine(
         /// <summary>The viewer's persona line, built once for the planner and reused by the judge.</summary>
         public string? Persona { get; set; }
 
+        /// <summary>
+        /// Stored-only flags (<see cref="SearchTurnDegraded.ArmPrefix"/>): written to the turn's
+        /// <c>DegradedFlags</c> so a thin retrieval is a query, never sent to the client — the reply
+        /// and the cards are what they are, and a skipped arm is not a degraded answer (§4.10).
+        /// </summary>
+        public List<string> Notes { get; } = [];
+
         public void Degrade(string flag)
         {
             if (!Degraded.Contains(flag, StringComparer.Ordinal))
@@ -110,6 +132,19 @@ public sealed class AskReelEngine(
 
             Input.Progress?.Degrade(flag);
         }
+
+        public void Note(string flag)
+        {
+            if (!Notes.Contains(flag, StringComparer.Ordinal))
+            {
+                Notes.Add(flag);
+            }
+
+            Input.Progress?.Degrade(flag);
+        }
+
+        /// <summary>Everything the turn record stores: the client-facing flags, then the stored-only notes.</summary>
+        public string? StoredFlags => Degraded.Count + Notes.Count == 0 ? null : string.Join(',', Degraded.Concat(Notes));
     }
 
     public async Task<TurnOutcome> StreamAsync(
@@ -243,8 +278,11 @@ public sealed class AskReelEngine(
     {
         _ = ct;
         var composed = composer.Compose(Context(turn, plan, FinalMode.Clarify) with { ClarifyQuestion = question });
+        await DegradedFrameAsync(turn);
+        // The `clarify` frame IS the reply on this turn: no `assistant-message` follows it, or a
+        // client that renders both shows the question twice (docs/ask-reel-turns.md, "Frames").
+        turn.Input.Progress?.Replied(composed.Reply, degraded: false);
         await turn.Emit("clarify", new { question = composed.Reply, options });
-        await ReplyAsync(turn, composed.Reply, degraded: false);
         var clarify = new { question = composed.Reply, options };
         await DoneAsync(turn, plan, SearchTurnMode.Clarify, [], [], null, null, null, clarify);
         return Outcome(turn, plan, next with { Version = turn.Input.AnswerNumber }, composed.Reply, null, SearchTurnMode.Clarify);
@@ -258,8 +296,11 @@ public sealed class AskReelEngine(
             ? null
             : next.LastPresented.FirstOrDefault(p => p.TitleId == about.TitleId)?.Handle.ToString();
         var composed = composer.Compose(Context(turn, plan, FinalMode.Answer) with { Answer = text, AnswerTitle = about?.Name });
+        // Flags first, so the reply they describe is marked as it lands; then the `answer` frame,
+        // which IS the reply on this turn — no `assistant-message` follows it (see ClarifyAsync).
+        await DegradedFrameAsync(turn);
+        turn.Input.Progress?.Replied(composed.Reply, SearchTurnDegraded.PlanFailed(string.Join(',', turn.Degraded)));
         await turn.Emit("answer", new { text = composed.Reply, handle, titleId = about?.TitleId });
-        await ReplyAsync(turn, composed.Reply, degraded: turn.Degraded.Count > 0);
         await DoneAsync(turn, plan, SearchTurnMode.Answer, [], [], null, null, composed.Reply, null);
         return Outcome(turn, plan, next with { Version = turn.Input.AnswerNumber }, composed.Reply, null, SearchTurnMode.Answer);
     }
@@ -283,14 +324,25 @@ public sealed class AskReelEngine(
             return await AnswerAsync(turn, plan, next, SupplyAnswer(report, hard), null, ct);
         }
 
-        // "What are my conditions?" — read-only.
+        // "What are my conditions?" — read-only, with what each one is costing (§4.4 conditions(),
+        // WS-3 CR-2b: the single-pass FilterCostMeter, the same numbers the Conditions editor shows).
         if (tools.Contains(AskTool.Conditions) && plan.References.Count == 0)
         {
-            var described = AskReelStandingFilters.Describe(turn.Standing);
-            return await AnswerAsync(
-                turn, plan, next,
-                described is { Length: > 0 } d ? $"Your standing conditions: {d}." : "You have no standing conditions set.",
-                null, ct);
+            await PhaseAsync(turn, "searching", "Counting what your conditions leave");
+            FilterCostReport? cost = null;
+            if (turn.Standing.Rules().Count > 0)
+            {
+                try
+                {
+                    cost = await costMeter.MeasureAsync(turn.AccountId, turn.Standing, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Ask Reel v2: the conditions cost could not be measured; answering with the rules alone.");
+                }
+            }
+
+            return await AnswerAsync(turn, plan, next, ConditionsAnswer(turn.Standing, cost), null, ct);
         }
 
         var titleId = ConversationStateReducer.ResolveHandles(plan.References, state.LastPresented).FirstOrDefault();
@@ -374,6 +426,42 @@ public sealed class AskReelEngine(
     }
 
     /// <summary>
+    /// "What are my conditions?" (§4.4 <c>conditions()</c>): the rules, the pool they leave, and the
+    /// rules costing the most, each with how many titles relaxing it ALONE would open — marginals,
+    /// which do not sum, so they are never added up. With no measurement, the rules alone.
+    /// </summary>
+    internal static string ConditionsAnswer(FilterRuleSet standing, FilterCostReport? cost)
+    {
+        var described = AskReelStandingFilters.Describe(standing);
+        if (described is not { Length: > 0 })
+        {
+            return "You have no standing conditions set, so every unseen title in the catalogue is open to you.";
+        }
+
+        var text = $"Your standing conditions: {described}.";
+        if (cost is not { } report)
+        {
+            return text;
+        }
+
+        text += FormattableString.Invariant(
+            $" They leave {report.Eligible:N0} unseen {(report.Eligible == 1 ? "title" : "titles")} open to you, out of {report.Total:N0} in the catalogue.");
+        var costly = report.ByRule
+            .Where(r => r.Marginal > 0)
+            .OrderByDescending(r => r.Marginal)
+            .Take(FilterCostMeter.SuggestionCount)
+            .Select(r => FormattableString.Invariant(
+                $"{Retrieval.SupplyReporter.LabelFor(new FilterRule(Enum.TryParse<FilterKind>(r.Kind, out var kind) ? kind : default, r.Value))} (+{r.Marginal:N0})"))
+            .ToList();
+        if (costly.Count > 0)
+        {
+            text += $" Relaxing one alone would open the most for: {string.Join(", ", costly)}.";
+        }
+
+        return text;
+    }
+
+    /// <summary>
     /// "How many X are left?" from the supply alone (§4.4 <c>supply</c>). With a bar set, "left" is
     /// what clears it and has not been shown here; titles with no score yet are counted separately,
     /// because a set bar holds them back. With no bar, every eligible unshown title is left.
@@ -437,10 +525,28 @@ public sealed class AskReelEngine(
         var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
 
+        // The user's own rejections ride INTO retrieval as this turn's extra exclusions (WS-3 CR-2b), so
+        // every arm — TMDB's included — fills its depth with titles that can survive the filter below,
+        // and the message and region reach the TMDB arm's title search and release window.
+        var (negatedGenres, negatedKeywords) = NegationRules(next.UserNegations);
+        var query = new RetrievalQuery(accountId, hard, soft, exclude, RetrievalWant)
+        {
+            ExcludeGenres = negatedGenres,
+            ExcludeKeywords = negatedKeywords,
+            Message = turn.Input.Message,
+            Region = turn.Input.Region,
+        };
         RetrievalResult retrieval;
         using (turn.Timings.Stage(AskStageTimings.Retrieve))
         {
-            retrieval = await retriever.RetrieveAsync(new RetrievalQuery(accountId, hard, soft, exclude, RetrievalWant), ct);
+            retrieval = await retriever.RetrieveAsync(query, ct);
+        }
+
+        // An arm that contributed nothing is a thin retrieval, recorded on the row (WS-3 CR-2c), not a
+        // degraded answer: the cards were fused without it and are still exactly what they claim (§4.10).
+        foreach (var arm in retrieval.SkippedArms)
+        {
+            turn.Note(SearchTurnDegraded.ArmPrefix + arm);
         }
 
         var titles = await db.Titles.AsNoTracking()
@@ -457,6 +563,17 @@ public sealed class AskReelEngine(
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
+
+        // TMDB found titles the catalogue does not hold yet (WS-3 CR-2b). They are admitted only where
+        // the catalogue left the judged slice short, and only after they are hydrated and pass the
+        // account's eligibility and the request's hard constraints exactly as a catalogue title would.
+        // The hydration runs on scopes of its own WHILE the catalogue slice is judged, so the first
+        // card never waits for it; whatever it admits is judged after, as one more round trip.
+        var room = Math.Min(MaxProvisional, RequestJudge.MaxJudged - judgedSlice.Count);
+        var provisional = !personOnly && judgeModel.IsAvailable && room > 0 && retrieval.Provisional.Count > 0
+            ? HydrateProvisionalAsync(turn, retrieval.Provisional.Take(room).ToList(), ct)
+            : null;
+        var judgedCount = personOnly ? 0 : judgedSlice.Count;
         int? personSeen = null;
         if (personOnly)
         {
@@ -475,14 +592,30 @@ public sealed class AskReelEngine(
 
             foreach (var c in judgedSlice)
             {
+                decimal? predicted = predictions.TryGetValue(c.TitleId, out var p) && p > 0m ? p : null;
                 turn.Shown.Add(new Placed(
-                    titles[c.TitleId], c, JudgeVerdict.Unjudged(c.TitleId), predictions.GetValueOrDefault(c.TitleId),
-                    0d, SearchTurnCardTier.Unchecked));
+                    titles[c.TitleId], c, JudgeVerdict.Unjudged(c.TitleId), predicted,
+                    0d, AskReelGate.UncheckedTier(predicted, turn.Floor)));
             }
         }
         else
         {
             await JudgeAsync(turn, next, judgedSlice, titles, ct);
+            if (provisional is not null)
+            {
+                var admitted = await AdmitProvisionalAsync(turn, hard, query, await provisional, legacy, next, ct);
+                foreach (var (_, title) in admitted)
+                {
+                    titles[title.Id] = title;
+                }
+
+                if (admitted.Count > 0)
+                {
+                    var extra = admitted.Select(a => a.Candidate).ToList();
+                    await JudgeAsync(turn, next, extra, titles, ct);
+                    judgedCount += extra.Count;
+                }
+            }
         }
 
         // Trays, in the order the screen renders them: the floor tray, the near misses, the unchecked.
@@ -536,9 +669,11 @@ public sealed class AskReelEngine(
                 UnjudgedPicks = picks.Count(p => !p.Verdict.Judged && p.Verdict.FitSource != ResultSource.Facet),
                 NearMissNames = nearMiss.Select(p => p.Title.Name).ToList(),
                 UnderBar = underBar.Count,
-                UnderBarNames = underBar.Select(p => p.Title.Name).ToList(),
+                // Named under the bar only where something said it matches (R1-01): the judge, or the credits.
+                UnderBarNames = underBar.Where(p => Matched(p.Verdict)).Select(p => p.Title.Name).ToList(),
+                HeldUnchecked = underBar.Count(p => !Matched(p.Verdict)),
                 Unchecked = uncheckedTray.Count,
-                Judged = personOnly ? 0 : judgedSlice.Count,
+                Judged = judgedCount,
                 Supply = supply,
                 JudgeFailed = judgeFailed,
                 Person = personOnly ? hard.People[0] : null,
@@ -552,11 +687,7 @@ public sealed class AskReelEngine(
             composed = composed with { Reply = NoneFoundCopy.Again(composed.Reply, PreviousReply(turn.Input.History)) };
         }
 
-        if (turn.Degraded.Count > 0)
-        {
-            await turn.Emit("degraded", new { what = turn.Degraded.ToArray() });
-        }
-
+        await DegradedFrameAsync(turn);
         await ReplyAsync(turn, composed.Reply, degraded: SearchTurnDegraded.PlanFailed(string.Join(',', turn.Degraded)));
         await DoneAsync(
             turn, plan, mode, picks, placedTrays, supply, composed.Reason, null, null);
@@ -573,6 +704,130 @@ public sealed class AskReelEngine(
         var saved = ConversationStateReducer.Presented(next, presented) with { Version = turn.Input.AnswerNumber };
         var all = picks.Concat(placedTrays.SelectMany(t => t.Cards)).ToList();
         return Outcome(turn, plan, saved, composed.Reply, composed.Reason, mode, all, IntentJsonOf(hard, next));
+    }
+
+    /// <summary>
+    /// The user's negations as retrieval rules: a word that names a genre ("no horror") excludes the
+    /// genre; any other word ("no superheroes") excludes the keyword in every spelling
+    /// <see cref="NegationTerms.Forms"/> gives it, because the catalogue's labels are singular as
+    /// often as plural. Never a standing rule — these ride on one query only.
+    /// </summary>
+    internal static (IReadOnlyList<string> Genres, IReadOnlyList<string> Keywords) NegationRules(IReadOnlyList<string> negations)
+    {
+        var genres = new List<string>();
+        var keywords = new List<string>();
+        foreach (var negation in negations)
+        {
+            var asGenres = SearchVocabulary.ResolveGenres(negation);
+            if (asGenres.Count > 0)
+            {
+                genres.AddRange(asGenres);
+            }
+            else
+            {
+                keywords.AddRange(NegationTerms.Forms(negation));
+            }
+        }
+
+        return (
+            genres.Distinct(StringComparer.Ordinal).ToList(),
+            keywords.Distinct(StringComparer.Ordinal).ToList());
+    }
+
+    /// <summary>
+    /// Upserts and hydrates the TMDB-only titles, each on a scope of its own (pinned to the account,
+    /// so nothing here reads unscoped) and all at once, within <see cref="ProvisionalBudget"/>.
+    /// Returns the catalogue ids of the ones that are now hydrated; never throws — a provisional
+    /// title is a bonus, and a failure to fetch one costs only that title.
+    /// </summary>
+    private async Task<IReadOnlyList<Guid>> HydrateProvisionalAsync(
+        Turn turn, IReadOnlyList<ProvisionalTitle> provisional, CancellationToken ct)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(ProvisionalBudget);
+        var clock = Stopwatch.StartNew();
+        var accountId = turn.AccountId;
+        var region = turn.Input.Region;
+        var results = await Task.WhenAll(provisional.Select(OneAsync));
+        var hydrated = results.OfType<Guid>().ToList();
+        if (hydrated.Count < provisional.Count)
+        {
+            turn.Note(FormattableString.Invariant($"{SearchTurnDegraded.ArmPrefix}provisional-{provisional.Count - hydrated.Count}/{provisional.Count}"));
+        }
+
+        logger.LogDebug(
+            "Ask Reel v2: hydrated {Hydrated} of {Provisional} TMDB-only titles in {Elapsed} ms.",
+            hydrated.Count, provisional.Count, clock.ElapsedMilliseconds);
+        return hydrated;
+
+        async Task<Guid?> OneAsync(ProvisionalTitle p)
+        {
+            try
+            {
+                using var scope = scopes.CreateScope();
+                scope.ServiceProvider.GetRequiredService<Tenancy.IAccountContext>().SetAccount(accountId);
+                var scoped = scope.ServiceProvider.GetRequiredService<IReelDbContext>();
+                var media = p.Media;
+                var item = new Domain.Ports.Tmdb.TmdbListItem(
+                    p.TmdbId, media == MediaType.Movie, p.Name, null, null, null, 0m, 0m, 0,
+                    p.Year is { } year ? new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null, []);
+                await scope.ServiceProvider.GetRequiredService<Ranking.CandidateGenerator>().UpsertCandidatesAsync([item], bounded.Token);
+                var title = await scoped.Titles.FirstOrDefaultAsync(t => t.TmdbId == p.TmdbId && t.MediaType == media, bounded.Token);
+                if (title is null)
+                {
+                    return null;
+                }
+
+                if (title.LastMetadataRefreshAt is null)
+                {
+                    await scope.ServiceProvider.GetRequiredService<Ingestion.TitleHydrator>().HydrateBatchAsync([title], bounded.Token, region);
+                    await scoped.SaveChangesAsync(bounded.Token);
+                }
+
+                return title.LastMetadataRefreshAt is null ? null : title.Id;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                logger.LogDebug(ex, "Ask Reel v2: TMDB title {TmdbId} could not be hydrated this turn.", p.TmdbId);
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The hydrated TMDB-only titles that may be judged: the ones inside the account's eligibility,
+    /// this turn's rejections and the request's resolved hard constraints — the same gates a
+    /// catalogue candidate passed in retrieval — with the evidence those constraints give them.
+    /// </summary>
+    private async Task<List<(Candidate Candidate, Title Title)>> AdmitProvisionalAsync(
+        Turn turn,
+        HardConstraints hard,
+        RetrievalQuery query,
+        IReadOnlyList<Guid> hydrated,
+        IReadOnlySet<long> legacy,
+        ConversationState next,
+        CancellationToken ct)
+    {
+        if (hydrated.Count == 0)
+        {
+            return [];
+        }
+
+        var resolved = await resolver.ResolveAsync(hard, ct);
+        var rules = turn.Standing.WithExclusions(query.ExcludeGenres, query.ExcludeKeywords);
+        var exclude = query.Exclude.ToHashSet();
+        var ids = hydrated.Where(id => !exclude.Contains(id)).ToList();
+        var rows = await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId, rules), db, resolved)
+            .Where(t => ids.Contains(t.Id))
+            .AsNoTracking()
+            .ToListAsync(ct);
+        var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
+        return EligibilityQueryBuilder.WithinMaturity(rows, ceiling)
+            .Where(t => t.TmdbId is not { } tmdb || !legacy.Contains(tmdb))
+            .Where(t => !next.UserNegations.Any(n => Trips(t, n)))
+            .OrderBy(t => ids.IndexOf(t.Id))
+            .Select(t => (new Candidate(t.Id, 0d, null, HardConstraintFilter.EvidenceFor(t, resolved).Append("tmdb:discover").ToList()), t))
+            .ToList();
     }
 
     /// <summary>The account's predictions for <paramref name="slice"/>, scored on demand where missing (§4.7).</summary>
@@ -731,7 +986,9 @@ public sealed class AskReelEngine(
             }
             else
             {
-                turn.Shown.Add(card with { Tier = SearchTurnCardTier.Unchecked });
+                // The bar binds first (XM-06): unchecked AND under it is the floor tray's, never a
+                // tray the matrix — or the user — reads as cards that cleared their bar.
+                turn.Shown.Add(card with { Tier = AskReelGate.UncheckedTier(card.Predicted, turn.Floor) });
             }
         }
 
@@ -860,6 +1117,9 @@ public sealed class AskReelEngine(
         FitSource: c.Verdict.Fit is null ? null : c.Verdict.FitSource.ToString(),
         SatisfiesEvidence: c.Verdict.Evidence is { Length: > 0 } e ? (e.Length > 280 ? e[..280] : e) : null);
 
+    /// <summary>Whether something established the card matches: a judge verdict, or a person's credits.</summary>
+    private static bool Matched(JudgeVerdict v) => v.Judged || v.FitSource == ResultSource.Facet;
+
     /// <summary>A why-line is shown only where a model wrote it or the credits state it — never a fallback.</summary>
     private static bool ShowsWhy(JudgeVerdict v) =>
         v.WhySource is ResultSource.Llm or ResultSource.Facet && v.Why is { Length: > 0 };
@@ -979,6 +1239,15 @@ public sealed class AskReelEngine(
         await turn.Emit("phase", payload);
     }
 
+    /// <summary>The <c>degraded</c> frame, when anything the client is told about did not run as designed.</summary>
+    private static async Task DegradedFrameAsync(Turn turn)
+    {
+        if (turn.Degraded.Count > 0)
+        {
+            await turn.Emit("degraded", new { what = turn.Degraded.ToArray() });
+        }
+    }
+
     private static async Task ReplyAsync(Turn turn, string text, bool degraded)
     {
         turn.Input.Progress?.Replied(text, degraded);
@@ -1050,7 +1319,7 @@ public sealed class AskReelEngine(
             rows,
             turn.ConflictJson,
             mode,
-            turn.Degraded.Count == 0 ? null : string.Join(',', turn.Degraded),
+            turn.StoredFlags,
             JsonSerializer.Serialize(turn.Timings.Snapshot()),
             JsonSerializer.Serialize(turn.Models),
             effort,

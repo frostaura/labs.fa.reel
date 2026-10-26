@@ -487,4 +487,41 @@ public class AskReelV2UnitTests
             }
         }
     }
+    // ── Wave B: negations into retrieval, conditions() ────────────────────────────────────────
+
+    [Fact]
+    public void Negations_ride_into_retrieval_as_genres_where_they_name_one_and_keywords_in_every_spelling()
+    {
+        var (genres, keywords) = AskReelEngine.NegationRules(["horror", "superheroes"]);
+
+        Assert.Equal(["horror"], genres);
+        Assert.Contains("superheroes", keywords);
+        Assert.Contains("superhero", keywords);
+        Assert.DoesNotContain("horror", keywords);
+        Assert.Equal((Array.Empty<string>(), Array.Empty<string>()), (AskReelEngine.NegationRules([]).Genres.ToArray(), AskReelEngine.NegationRules([]).Keywords.ToArray()));
+    }
+
+    [Fact]
+    public void The_conditions_answer_names_the_rules_the_pool_they_leave_and_what_each_alone_is_costing()
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.ExcludeGenre, Value = "comedy" },
+            new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.MinYear, Value = "2000" },
+        ]);
+        var cost = new FilterCostReport(
+            5319, 421,
+            [new FilterCostRule("ExcludeGenre", "comedy", 812), new FilterCostRule("MinYear", "2000", 1300)],
+            []);
+
+        Assert.Equal(
+            "Your standing conditions: excludes: comedy; min year 2000. They leave 421 unseen titles open to you, out of 5,319 in the "
+            + "catalogue. Relaxing one alone would open the most for: released 2000 or later (+1,300), excluded genre: comedy (+812).",
+            AskReelEngine.ConditionsAnswer(standing, cost));
+        // Unmeasured: the rules alone, no number invented.
+        Assert.Equal("Your standing conditions: excludes: comedy; min year 2000.", AskReelEngine.ConditionsAnswer(standing, null));
+        Assert.Equal(
+            "You have no standing conditions set, so every unseen title in the catalogue is open to you.",
+            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null));
+    }
 }

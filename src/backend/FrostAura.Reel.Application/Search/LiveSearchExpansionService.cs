@@ -973,13 +973,18 @@ public sealed class LiveSearchExpansionService(
                     .Where(p => p.Value.Placement != AskReelGate.Placement.Unjudged)
                     .Select(p => p.Key)
                     .ToList();
+                // The bar binds every card (XM-06): an unjudged card it holds back joins the floor
+                // tray with no verdict — never the unchecked tray, which reads as cards that cleared it.
+                // It is not a held MATCH, so it is never named as one (R1-01: heldMatches above).
+                var (heldUnjudged, uncheckedNone) = SplitByBar(unjudged, floor);
+                belowFloor.AddRange(heldUnjudged);
                 // The scoring stage above ran (and stored what it scored), so the supply the facet arm
                 // counted at discovery is re-counted where it still had unscored titles.
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded ? modelSentence : null, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
-                    judgedIds, scoredThisTurn: true);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, uncheckedNone, unscoredHeld,
+                    judgedIds, scoredThisTurn: true, heldUnchecked: heldUnjudged.Count);
             }
 
             await ReplyAsync(pickReply);
@@ -992,6 +997,11 @@ public sealed class LiveSearchExpansionService(
                     picks.Add(card);
                     await EmitCardAsync(card, progress, emit);
                 }
+                else if (AskReelGate.UncheckedTier(card.Predicted, floor) == SearchTurnCardTier.BelowFloor)
+                {
+                    // The bar binds first (XM-06): under it is the floor tray, verdict or not.
+                    belowFloor.Add(card);
+                }
                 else
                 {
                     uncheckedTray.Add(card);
@@ -1000,9 +1010,8 @@ public sealed class LiveSearchExpansionService(
 
             // Outside cards trail every pick, each captioned with the exclusion it trips. They are
             // shown only beside real picks — never as an answer of their own — and the bar binds
-            // them like any other card. Nobody judged them against the request either, so one under
-            // the bar joins the unchecked tray rather than vanishing (1e) — never the floor tray,
-            // which is read as "matches your bar held back" (R1-01).
+            // them like any other card: one under the bar joins the floor tray rather than vanishing
+            // (1e), carrying no verdict (XM-06; R1-01 is about naming such a card as a match).
             var outsideAll = outside
                 .Select(x => Gate(x.Title, x.Sim, PredictedOf(x.Title.Id), verdict: null, TagBoost(x.Title.Id),
                     AskReelGate.Placement.Unjudged) with
@@ -1012,7 +1021,7 @@ public sealed class LiveSearchExpansionService(
                 })
                 .ToList();
             var outsideCards = outsideAll.Where(c => AskReelGate.Clears(c.Predicted, floor)).ToList();
-            uncheckedTray.AddRange(outsideAll.Where(c => !AskReelGate.Clears(c.Predicted, floor)));
+            belowFloor.AddRange(outsideAll.Where(c => !AskReelGate.Clears(c.Predicted, floor)));
             foreach (var card in outsideCards)
             {
                 await EmitCardAsync(card, progress, emit);
@@ -1028,7 +1037,8 @@ public sealed class LiveSearchExpansionService(
                     Tray: belowFloor.Count,
                     NearMiss: nearMiss.Count,
                     Unchecked: picks.Count - judgedPicks,
-                    UncheckedTray: uncheckedTray.Count),
+                    UncheckedTray: uncheckedTray.Count,
+                    HeldUnchecked: belowFloor.Count(c => c.Placement != AskReelGate.Placement.BelowFloor)),
                 floor);
 
             await emit("done", new
@@ -1195,6 +1205,22 @@ public sealed class LiveSearchExpansionService(
             satisfies: c.SatisfiesWire);
 
     /// <summary>Emits one card and records it as shown, so an abort persists it.</summary>
+    /// <summary>
+    /// Unjudged cards split by the account's bar (XM-06): the ones it holds back (under it, or unscored
+    /// while it is set) for the floor tray, the rest for the unchecked tray — each half in its order.
+    /// </summary>
+    private static (List<GatedCard> Held, List<GatedCard> Clearing) SplitByBar(IEnumerable<GatedCard> cards, decimal floor)
+    {
+        var held = new List<GatedCard>();
+        var clearing = new List<GatedCard>();
+        foreach (var card in cards)
+        {
+            (AskReelGate.Clears(card.Predicted, floor) ? clearing : held).Add(card);
+        }
+
+        return (held, clearing);
+    }
+
     private static async Task EmitCardAsync(GatedCard card, AskTurnProgress progress, Emit emit)
     {
         progress.Shown(Row(card, rank: 0, SearchTurnCardTier.Pick));
@@ -1280,7 +1306,8 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<GatedCard>? uncheckedTray = null,
         IReadOnlyList<string>? unscoredHeld = null,
         IReadOnlyCollection<Guid>? judgedIds = null,
-        bool scoredThisTurn = false)
+        bool scoredThisTurn = false,
+        int heldUnchecked = 0)
     {
         uncheckedTray ??= [];
         judgedIds ??= [];
@@ -1325,7 +1352,9 @@ public sealed class LiveSearchExpansionService(
             : 0;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             supply, concept, hard.Media, underBar, nearMiss.Count, floor,
-            Unchecked: uncheckedTray.Count,
+            // Every card nobody judged, in either tray: the bar holds some of them back (XM-06), and
+            // they are still cards the reply owes the "couldn't check" sentence for.
+            Unchecked: uncheckedTray.Count + heldUnchecked,
             JudgedAny: judge?.JudgedAny ?? true,
             ShownHere: shownHere,
             UnscoredHeld: unscoredHeld,
@@ -1352,7 +1381,9 @@ public sealed class LiveSearchExpansionService(
 
         await replyAsync(text);
         var reason = AskReelReason.Build(
-            new TurnCounts(Picks: 0, Outside: 0, Tray: belowFloor.Count, NearMiss: nearMiss.Count, UncheckedTray: uncheckedTray.Count),
+            new TurnCounts(
+                Picks: 0, Outside: 0, Tray: belowFloor.Count, NearMiss: nearMiss.Count, UncheckedTray: uncheckedTray.Count,
+                HeldUnchecked: heldUnchecked),
             floor);
         await emit("done", new
         {
@@ -2740,16 +2771,19 @@ public sealed class LiveSearchExpansionService(
             : KeylessUnsearchedCopy(nothingToSearch, pointer);
         string[] flags = [SearchTurnDegraded.NoModel];
         await reply(text, true);
-        var reason = AskReelReason.Build(new TurnCounts(Picks: 0, Outside: 0, Tray: 0, UncheckedTray: cards.Count), floor);
+        // The bar binds a keyword match like any other card (XM-06): under it is the floor tray.
+        var (held, clearing) = SplitByBar(cards, floor);
+        var reason = AskReelReason.Build(
+            new TurnCounts(Picks: 0, Outside: 0, Tray: held.Count, UncheckedTray: clearing.Count, HeldUnchecked: held.Count), floor);
         await emit("done", new
         {
             results = Array.Empty<object>(),
-            streamed = 0,
+            streamed = held.Count,
             kept = 0,
-            droppedByFloor = 0,
-            belowFloor = Array.Empty<object>(),
+            droppedByFloor = held.Count,
+            belowFloor = held.Select(CardOf).ToList(),
             nearMiss = Array.Empty<object>(),
-            @unchecked = cards.Select(CardOf).ToList(),
+            @unchecked = clearing.Select(CardOf).ToList(),
             mode = SearchTurnMode.NoneFound,
             supply = (object?)null,
             degraded = flags,
@@ -2769,7 +2803,7 @@ public sealed class LiveSearchExpansionService(
             IntentJson: null,
             ModelArtifactId: await ActiveArtifactAsync(accountId, ct),
             ModelId: null,
-            Stored([], [], [], cards),
+            Stored([], [], held, clearing),
             ConflictJson: null,
             SearchTurnMode.NoneFound,
             DegradedFlagsOf(flags),
@@ -3148,8 +3182,8 @@ public sealed class LiveSearchExpansionService(
     /// model, and serving a six-hour-old verdict from the previous prompt is how a prompt fix looks
     /// like it did nothing.
     /// </summary>
-    internal static string FitKey(Guid accountId, Guid titleId, string qnorm, string modelId) =>
-        AskReelJudge.FitKey(accountId, titleId, qnorm, modelId);
+    internal static string FitKey(string salt, Guid accountId, Guid titleId, string qnorm, IEnumerable<Guid> batch) =>
+        AskReelJudge.FitKey(salt, accountId, titleId, qnorm, batch);
 
     /// <summary>
     /// The semantic arm's concept-embedding key: the account and the exact text the provider would

@@ -22,8 +22,12 @@ namespace FrostAura.Reel.Application.Search;
 /// counted as matching — "N picks match what you asked" about cards nobody checked was the overclaim.
 /// </param>
 /// <param name="UncheckedTray">Unjudged cards in the "not checked" tray, on a turn with no judged pick.</param>
+/// <param name="HeldUnchecked">
+/// Of <paramref name="Tray"/>, the cards nobody judged: the bar holds an unchecked card back too
+/// (XM-06), and the clause says so rather than letting "held back" read as "held-back matches".
+/// </param>
 public readonly record struct TurnCounts(
-    int Picks, int Outside, int Tray, int NearMiss = 0, int Unchecked = 0, int UncheckedTray = 0)
+    int Picks, int Outside, int Tray, int NearMiss = 0, int Unchecked = 0, int UncheckedTray = 0, int HeldUnchecked = 0)
 {
     /// <summary>Everything the turn put in the grid — every channel, never a tray.</summary>
     public int Shown => Picks + Unchecked + Outside;
@@ -60,7 +64,7 @@ public static class AskReelReason
         {
             // With cards nobody could check, "no picks matched" would be a verdict the judge never
             // reached; the unchecked clause below says what actually happened.
-            if (counts.UncheckedTray == 0)
+            if (counts.UncheckedTray == 0 && counts.HeldUnchecked == 0)
             {
                 clauses.Add(Empty);
             }
@@ -88,7 +92,13 @@ public static class AskReelReason
 
         if (counts.Tray > 0)
         {
-            clauses.Add(FormattableString.Invariant($"{counts.Tray} held back by your {FormatFloor(floor)} bar — shown below"));
+            var bar = FormatFloor(floor);
+            clauses.Add(counts.HeldUnchecked <= 0
+                ? FormattableString.Invariant($"{counts.Tray} held back by your {bar} bar — shown below")
+                : counts.HeldUnchecked >= counts.Tray
+                    ? FormattableString.Invariant($"{counts.Tray} not checked against what you asked and held back by your {bar} bar — shown below")
+                    : FormattableString.Invariant(
+                        $"{counts.Tray} held back by your {bar} bar, {counts.HeldUnchecked} of them not checked against what you asked — shown below"));
         }
 
         if (counts.NearMiss > 0)

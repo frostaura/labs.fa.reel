@@ -204,6 +204,16 @@ public static class SearchTurnDegraded
     /// </summary>
     public const string NoModel = "no-model";
 
+    /// <summary>
+    /// The prefix of a retrieval-arm note, written as <c>arm:{name}</c> (<c>arm:semantic</c>,
+    /// <c>arm:tmdb-late</c>, <c>arm:provisional</c> …) — an arm the turn asked for that contributed
+    /// nothing, so the cards were fused without it (§4.10). Stored on the row only, so a thin
+    /// retrieval is a query; it is never sent in <c>done.degraded</c> and neither <see cref="PlanFailed"/>
+    /// nor <see cref="JudgeFailed"/> reads it, because the reply and every card on screen are still
+    /// exactly what they claim to be.
+    /// </summary>
+    public const string ArmPrefix = "arm:";
+
     /// <summary>The value of <see cref="SearchTurn.ReasoningEffort"/> when no effort parameter was sent.</summary>
     public const string ProviderDefaultEffort = "provider-default";
 

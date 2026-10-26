@@ -32,10 +32,6 @@ public static class MatrixLedger
         "XM-05 (WS-4, BuildDigestJobHandler): the digest ranks against its own 7.0 floor, relaxed to 6.0, and never reads " +
         "the account's For-you bar, so it carries cards under the bar the user set (and keeps them after the bar is raised).";
 
-    private const string AskBar =
-        "XM-06 (WS-2, Ask v1): the turn's unchecked cards are shown without the For-you check, so cards under the bar reach " +
-        "the grid outside the labelled below-floor tray. v2 must hold this cell; the matrix reads its picks and trays the same way.";
-
     private const string FeedBar =
         "XM-07 (WS-5, BuildFeedJobHandler / FeedEndpoints): when fewer than 20 titles clear the For-you bar the build relaxes " +
         "it to the shortlist's 80th percentile and says so in degradedReason, while FD-4's default is that cards below the " +
@@ -57,7 +53,6 @@ public static class MatrixLedger
         .. Rules.Select(r => ($"{r}|digest|late", LateDigest)),
         .. Footprint.Select(f => ($"{f}|*|digest|late", LateDigest)),
         ("bar|*|digest|*", DigestBar),
-        ("bar|*|ask|*", AskBar),
         ("bar|Show|feed-hero|standing", FeedBar),
         ("bar|*|feed-hero|late", FeedBar),
         ("bar|*|feed-row|late", FeedBar),
