@@ -22,6 +22,8 @@ public class TypeaheadRelevanceTests
     [InlineData("Cheaters", "heat", MatchTier.Fuzzy)]
     [InlineData("Theater Camp", "heat", MatchTier.Fuzzy)]
     [InlineData("", "heat", MatchTier.Fuzzy)]
+    [InlineData("Amélie", "amelie", MatchTier.Exact)]
+    [InlineData("Whitstable Pearl", "nolan", MatchTier.Fuzzy)]
     public void Tiers_order_exact_prefix_word_start_then_fuzzy(string name, string term, MatchTier expected) =>
         Assert.Equal(expected, TypeaheadSearch.TierOf(name, term));
 

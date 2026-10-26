@@ -109,14 +109,18 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
                 Item(excludedTmdbId, $"{token} Catalogue Comedy", "en", popularity: 90m),
                 Item(Random.Shared.NextInt64(1, long.MaxValue), $"{token} en français", "fr", popularity: 80m),
                 Item(77, $"{token} Kept", "en", popularity: 10m),
+                // TMDB's loose search: the name does not carry the term, so neither shown nor counted.
+                Item(78, "Whitstable Pearl", "fr", popularity: 50m),
             ],
         };
 
         await using var db = fixture.CreateContext(new AccountContext());
         var global = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).GlobalAsync(accountId, tmdb, token, default);
 
+        // Hidden: the catalogue comedy (not counted here — the local leg counts catalogue titles) and
+        // the French title beyond the catalogue (counted).
         Assert.Equal([77L], global.Rows.Select(r => r.TmdbId));
-        Assert.Equal(2, global.HiddenByConditions);
+        Assert.Equal(1, global.HiddenByConditions);
 
         var down = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db))
             .GlobalAsync(accountId, new SearchOnlyTmdbClient { Throw = true }, token, default);

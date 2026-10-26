@@ -223,7 +223,8 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
 
     /// <summary>
     /// The global leg: one TMDB movie search and one show search, unioned, poster-less rows dropped,
-    /// popularity-ordered — and judged by the account's conditions like the local leg (FD-5): a row
+    /// popularity-ordered, kept only where the row's own name carries the term at a word start or
+    /// better (accents folded) — and judged by the account's conditions like the local leg (FD-5): a row
     /// for a catalogue title passes only if the catalogue title does; any other row by
     /// <see cref="StandingDiscoverPlan.Admits"/>. TMDB being down yields an empty list, never an error.
     /// </summary>
@@ -273,12 +274,26 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         var hidden = 0;
         foreach (var hit in hits)
         {
-            var passes = catalogue.TryGetValue((hit.IsMovie, hit.Id), out var titleId)
-                ? allowedKnown.Contains(titleId)
-                : StandingDiscoverPlan.Admits(rules, hit);
+            // TMDB's search is loose (it matches alternative titles and cast); a row whose own name
+            // does not carry the term at a word start is not what the user is looking up, and is
+            // neither shown nor counted as hidden.
+            if (TierOf(hit.Name, trimmed) > MatchTier.WordStart)
+            {
+                continue;
+            }
+
+            var inCatalogue = catalogue.TryGetValue((hit.IsMovie, hit.Id), out var titleId);
+            var passes = inCatalogue ? allowedKnown.Contains(titleId) : StandingDiscoverPlan.Admits(rules, hit);
             if (!passes)
             {
-                hidden++;
+                // A catalogue title the conditions hide was already counted by the local leg (its
+                // name carries the term at a word start, the same bar); only titles beyond the
+                // catalogue add to the count, so one title is never counted twice.
+                if (!inCatalogue)
+                {
+                    hidden++;
+                }
+
                 continue;
             }
 
@@ -314,8 +329,9 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
     /// <summary>The in-memory twin of the SQL tier, for tests and for re-ranking.</summary>
     public static MatchTier TierOf(string? name, string term)
     {
-        var lower = term.Trim().ToLowerInvariant();
-        var n = (name ?? string.Empty).ToLowerInvariant();
+        // Accents folded on both sides: "amelie" looks up Amélie.
+        var lower = Fold(term.Trim().ToLowerInvariant());
+        var n = Fold((name ?? string.Empty).ToLowerInvariant());
         var stripped = Article().Replace(n, string.Empty);
         if (n == lower || stripped == lower)
         {
@@ -330,6 +346,22 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         return Regex.IsMatch(n, $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(lower)}", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100))
             ? MatchTier.WordStart
             : MatchTier.Fuzzy;
+    }
+
+    /// <summary>The text with combining marks removed ("amélie" → "amelie").</summary>
+    private static string Fold(string text)
+    {
+        var decomposed = text.Normalize(NormalizationForm.FormD);
+        var folded = new StringBuilder(decomposed.Length);
+        foreach (var c in decomposed)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                folded.Append(c);
+            }
+        }
+
+        return folded.ToString().Normalize(NormalizationForm.FormC);
     }
 
     /// <summary>
