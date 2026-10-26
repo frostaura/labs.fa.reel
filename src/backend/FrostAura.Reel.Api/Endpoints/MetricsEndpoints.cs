@@ -157,6 +157,33 @@ public static class MetricsEndpoints
         // The interleaving instrument. Founder-only, like the training trigger: it is the readout of
         // a live experiment on this account's own feed, and the honest cadence attached to it
         // (months, not days) is a founder conversation rather than a product surface.
+        // The cross-reference stats, moved here from the track record (WS-5 task 11): what the
+        // offline backtest measured per prompt generation, and how titles served under each standing
+        // were later rated. Same projection as /api/accuracy served it; same window keys.
+        group.MapGet("/cross-reference", async (string? window, AccuracyQuery accuracy, CancellationToken ct) =>
+        {
+            var requested = string.IsNullOrWhiteSpace(window) ? "90d" : window;
+            if (!AccuracyQuery.Windows.ContainsKey(requested))
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"window must be one of: {string.Join(", ", AccuracyQuery.Windows.Keys)}",
+                });
+            }
+
+            var crossReference = await accuracy.CrossReferenceForWindowAsync(requested, DateTime.UtcNow, ct);
+            return Results.Ok(new
+            {
+                window = requested,
+                population = new
+                {
+                    name = AccuracyQuery.PopulationsFor(AccuracySource.Exposures).CrossReference.Name,
+                    selectionNote = AccuracyQuery.PopulationsFor(AccuracySource.Exposures).CrossReference.SelectionNote,
+                },
+                crossReference = AccuracyEndpoints.CrossReferencePayload(crossReference),
+            });
+        });
+
         group.MapGet("/interleave", async (
             IReelDbContext db,
             HttpContext http,
