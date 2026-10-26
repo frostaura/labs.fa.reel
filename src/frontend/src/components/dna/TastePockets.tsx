@@ -1,6 +1,6 @@
 import { posterUrl } from "../../lib/tmdbImages";
 import type { TasteCluster } from "../../store/api";
-import { pocketSummary, visiblePockets } from "../../lib/tastePockets";
+import { POCKET_WEIGHT_CAPTION, pocketSummary, visiblePockets } from "../../lib/tastePockets";
 
 /**
  * "What you keep coming back to" — the taste clusters the retrieval side splits its budget across,
@@ -17,9 +17,12 @@ export default function TastePockets({ clusters }: { clusters: TasteCluster[] | 
   return (
     <section className="fa-card p-5" data-testid="taste-pockets">
       <h2 className="fa-section-title mb-1">What you keep coming back to</h2>
-      <p className="fa-caption text-fa-frost-dim mb-4">
+      <p className="fa-caption text-fa-frost-dim mb-1">
         {pockets.length} pockets of taste, found from every title you rated 7 or higher or watched twice.
         Tonight&apos;s picks are pulled from each one, not from one average of them all.
+      </p>
+      <p className="fa-caption text-fa-frost-dim mb-4" data-testid="pocket-weight-caption">
+        {POCKET_WEIGHT_CAPTION}
       </p>
       <ol className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {pockets.map((pocket) => (
