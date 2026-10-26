@@ -514,6 +514,54 @@ public class LensPipelineTests(PostgresFixture fixture)
         NullLogger<LensService>.Instance);
 
     [Fact]
+    public async Task A_name_the_overview_or_a_credited_character_gives_the_writer_is_not_an_invented_person()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Slot run, 2026-10-26: a lens on Glass named the overview's David Dunn, the catalogue also
+        // holds a real person called David Dunn, and the note was refused as an invented credit.
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Glass", 2019);
+        // A capitalised nonce word, so each run's names are unique and still read as one proper noun.
+        var suffix = "Q" + new string(Guid.NewGuid().ToString("N")[..6].Select(c => (char)('a' + (c % 26))).ToArray());
+        string Name(string person) => $"{person} {suffix}";
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            var title = await seed.Titles.SingleAsync(t => t.Id == titleId);
+            title.Overview = $"{Name("David Dunn")} pursues Kevin Crumb, a man with twenty-four personalities.";
+            Person PersonNamed(string name) => new() { Id = Guid.NewGuid(), TmdbId = Random.Shared.Next(1, int.MaxValue), Name = name };
+            var actor = PersonNamed(Name("Samuel Jackson"));
+            seed.Persons.AddRange(PersonNamed(Name("David Dunn")), PersonNamed(Name("Elijah Price")), PersonNamed(Name("Denis Villeneuve")), actor);
+            seed.TitleCredits.Add(new TitleCredit
+            {
+                Id = Guid.NewGuid(), TitleId = titleId, PersonId = actor.Id, Role = CreditRole.Actor, CastOrder = 0,
+                CharacterName = Name("Elijah Price"),
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var built = await new LensInputBuilder(db, new RatingCalibrationService(db, deps.Cache)).BuildAsync(accountId, [titleId], default);
+        var credited = built.CreditedNames[titleId];
+        var verifier = new LensVerifier(db);
+
+        var given = new LensNote(
+            $"You get a tense clash: {Name("David Dunn")} hunts a volatile target while {Name("Elijah Price")} pulls the strings.",
+            "Give this an evening if you want a slow-burn superhero puzzle.", null, [], "tense", "tonight-alone");
+        Assert.Null((await verifier.VerifyAsync(accountId, "Glass", given, credited, default)).Reason);
+
+        // A real person the writer was never given is still an invented credit.
+        var invented = given with { Lens = $"You get the patience of {Name("Denis Villeneuve")} in a comic-book frame." };
+        Assert.StartsWith(
+            LensRejectionReasons.InventedPerson,
+            (await verifier.VerifyAsync(accountId, "Glass", invented, credited, default)).Reason);
+    }
+
+    [Fact]
     public async Task A_failed_generation_is_negatively_cached_for_six_hours_and_then_tried_again()
     {
         if (!fixture.Available)

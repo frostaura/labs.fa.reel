@@ -139,12 +139,32 @@ public class LensGuardTests
 
     // ── Voice ───────────────────────────────────────────────────────────────────────────────
 
-    [Fact]
-    public void A_third_person_leak_is_refused()
+    [Theory]
+    [InlineData("This matches their taste for slow procedurals.")]
+    [InlineData("It sits close to their favourites: grounded, procedural, patient.")]
+    [InlineData("The user favours slow procedurals, and this is one.")]
+    [InlineData("For the viewer's taste in heists this is a natural next step.")]
+    [InlineData("They usually rate heist films highly, so this should land.")]
+    [InlineData("They tend to like a crew picture; this is one.")]
+    [InlineData("They rated the first one well, and this keeps its register.")]
+    public void A_third_person_leak_about_the_viewer_is_refused(string lens)
     {
-        Assert.Equal(
-            LensRejectionReasons.ThirdPerson,
-            LensGuards.Inspect(Note(lens: "This matches their taste for slow procedurals."), "Some Film"));
+        Assert.Equal(LensRejectionReasons.ThirdPerson, LensGuards.Inspect(Note(lens: lens), "Some Film"));
+    }
+
+    /// <summary>
+    /// A lens describes a story, and its characters are "they" (slot run, 2026-10-26: 4 of 10 notes
+    /// refused for exactly this, every one addressed to the viewer). The rule is about who the note
+    /// talks ABOUT the viewer as, not about every pronoun in a premise.
+    /// </summary>
+    [Theory]
+    [InlineData("You get a dark legal power struggle: Patty Hewes takes on Ellen Parsons as her protégée, and the series sets up their complicated mentor-protégé bond.")]
+    [InlineData("You usually lean toward brisk action, so this is a quieter change: two old friends go camping, and the road gives them room to face what life has done to their friendship.")]
+    [InlineData("A former hit man, his wife and daughter flee their compound for a rumoured sanctuary; as they drive north he teaches her to survive.")]
+    [InlineData("Siblings find a box of toys and begin developing special talents, drawing their parents into a strange new world with them.")]
+    public void Characters_in_the_third_person_are_not_a_voice_leak(string lens)
+    {
+        Assert.Null(LensGuards.Inspect(Note(lens: lens), "Some Film"));
     }
 
     [Fact]

@@ -19,6 +19,25 @@ public static partial class SecondPersonVoice
     public static bool LeaksThirdPerson(string? why) =>
         !string.IsNullOrWhiteSpace(why) && ThirdPersonRegex().IsMatch(why);
 
+    [GeneratedRegex(
+        @"\b(?:the (?:user|viewer|watcher)(?:'s|s'|’s)?|this (?:user|viewer)"
+        + @"|their (?:own )?(?:tastes?|favou?rites?|history|ratings?|watchlist|watch history|preferences?|usual (?:picks?|fare|lane)|library|profile|picks?)"
+        + @"|they(?:'ve| have)? (?:usually|often|tend to|typically|generally|reliably|clearly|already) \w+"
+        + @"|they(?:'ve| have)? (?:rate|rated|prefer|preferred|favou?r|favou?red|gravitate|rewatch|rewatched)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ViewerInThirdPersonRegex();
+
+    /// <summary>
+    /// The lens's form of the voice rule (WS-1, 2026-10-26). A lens describes a story, so its
+    /// characters are legitimately "they" and "their"; <see cref="LeaksThirdPerson"/> refused four
+    /// of ten sound notes on the slot for exactly that. This catches only the viewer spoken of in
+    /// the third person — "the user", "their taste", "they usually rate …" — which is the leak the
+    /// prompt's third-person taste summary actually produces. Why-lines keep the strict rule: they
+    /// are one sentence about the viewer and never about a plot.
+    /// </summary>
+    public static bool SpeaksOfTheViewerInThirdPerson(string? text) =>
+        !string.IsNullOrWhiteSpace(text) && ViewerInThirdPersonRegex().IsMatch(text);
+
     /// <summary>
     /// True when the line opens with the banned "Because you loved …" template — the exact vague
     /// sentence shape the founder called out repeating verbatim down a rail. An anchored why must

@@ -314,7 +314,8 @@ public static partial class LensGuards
 
         foreach (var field in ProseFields(note))
         {
-            if (SecondPersonVoice.LeaksThirdPerson(field))
+            // The viewer in the third person, not every pronoun: a lens's characters are "they".
+            if (SecondPersonVoice.SpeaksOfTheViewerInThirdPerson(field))
             {
                 return LensRejectionReasons.ThirdPerson;
             }
@@ -459,6 +460,24 @@ public static partial class LensGuards
     /// Every proper noun the note mentions — the candidate set the provenance lookup resolves
     /// against the catalogue's own people.
     /// </summary>
+    /// <summary>
+    /// The candidate proper nouns in one piece of text — the same extraction the provenance check
+    /// runs on a note, for the text the prompt gave the writer (a title's overview).
+    /// </summary>
+    public static IReadOnlyCollection<string> CandidateNames(string? text)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            foreach (Match match in ProperNounRegex().Matches(text))
+            {
+                names.Add(match.Value.Trim());
+            }
+        }
+
+        return names;
+    }
+
     public static IReadOnlyCollection<string> CandidateNames(LensNote note)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
