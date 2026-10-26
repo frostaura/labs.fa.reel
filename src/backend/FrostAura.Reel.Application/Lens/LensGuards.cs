@@ -325,7 +325,7 @@ public static partial class LensGuards
                 return LensRejectionReasons.BannedOpener;
             }
 
-            if (NumberRegex().IsMatch(MaskTitles(field, titles)))
+            if (NumberRegex().IsMatch(MaskEras(MaskTitles(field, titles))))
             {
                 return LensRejectionReasons.RestatedNumber;
             }
@@ -518,6 +518,15 @@ public static partial class LensGuards
     /// it. Longest titles first, so masking "Blade Runner 2049" cannot be pre-empted by an anchor
     /// called "Blade Runner".
     /// </summary>
+    /// <summary>
+    /// A decade ("1920s", "'90s", "80s") or a calendar year (1500–2099) masked out before the number
+    /// check: the premise's era is overview fact, and neither can be read as a 1–10 prediction.
+    /// </summary>
+    internal static string MaskEras(string field) => EraRegex().Replace(field, " ");
+
+    [GeneratedRegex(@"(?:\b(?:1[5-9]|20)\d0s\b|['’]\d0s\b|\b\d0s\b|\b(?:1[5-9]|20)\d{2}\b(?![.,]\d))")]
+    private static partial Regex EraRegex();
+
     internal static string MaskTitles(string field, IEnumerable<string> titles)
     {
         var masked = field;

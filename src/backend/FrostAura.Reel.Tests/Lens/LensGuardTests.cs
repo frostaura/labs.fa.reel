@@ -191,6 +191,31 @@ public class LensGuardTests
             LensGuards.Inspect(Note(hook: "A near-perfect ten out of ten for your taste."), "Some Film"));
     }
 
+    /// <summary>
+    /// Slot run, 2026-10-26: two of ten notes were refused for "a 1920s Los Angeles hospital" and
+    /// "in the 1940s" — the premise's era, which the overview gives the writer. A decade or a year
+    /// cannot be mistaken for a 1–10 prediction; a score still can.
+    /// </summary>
+    [Theory]
+    [InlineData("You get a fantasy journey nested inside a 1920s Los Angeles hospital.")]
+    [InlineData("In the 1940s, a boy finds he can move between two centuries in one mansion.")]
+    [InlineData("Set in 1944, it keeps the pressure on a single night.")]
+    [InlineData("It wears its '90s thriller influences openly.")]
+    [InlineData("A sun-bleached 80s crime story, told without nostalgia.")]
+    public void An_era_or_a_year_is_not_a_restated_number(string lens)
+    {
+        Assert.Null(LensGuards.Inspect(Note(lens: lens), "Some Film"));
+    }
+
+    [Theory]
+    [InlineData("Reel has this at 8 for you, in the 1990s register you like.")]
+    [InlineData("Expect a 7.6 kind of night.")]
+    [InlineData("It lands within 0.9 of what you usually give a heist.")]
+    public void A_score_beside_an_era_is_still_refused(string lens)
+    {
+        Assert.Equal(LensRejectionReasons.RestatedNumber, LensGuards.Inspect(Note(lens: lens), "Some Film"));
+    }
+
     [Fact]
     public void A_title_with_a_year_in_its_name_is_not_read_as_a_score()
     {
