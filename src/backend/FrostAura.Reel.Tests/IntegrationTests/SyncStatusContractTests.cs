@@ -34,7 +34,7 @@ public class SyncStatusContractTests(PostgresFixture fixture, ReelApiFactory api
     ];
 
     private static readonly string[] V2Fields =
-        ["contractVersion", "lastFailures", "providerHealth", "degradedReason", "notEnoughRatings"];
+        ["contractVersion", "lastFailures", "providerHealth", "degradedReason", "notEnoughRatings", "alerts", "llmHealth"];
 
     private static readonly string[] JobSummaryFields =
     [

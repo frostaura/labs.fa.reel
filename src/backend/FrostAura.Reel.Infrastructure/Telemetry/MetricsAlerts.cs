@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
@@ -68,7 +69,14 @@ public sealed class LogOperatorAlertSink(ILoggerFactory loggers) : IOperatorAler
             _ => "resolved",
         };
         var level = kind == OperatorAlertEvent.Resolved ? LogLevel.Warning : LogLevel.Error;
-        if (alert.Code == OperatorAlertCodes.ProviderRefused)
+        if (alert.Code == OperatorAlertCodes.LlmAlarm)
+        {
+            _logger.Log(
+                level,
+                "ALERT {Event} {Code}: model purpose {Purpose} is above the {Reason} alarm line over its last {Calls} calls. Since {Since:o}.",
+                verb, alert.Code, alert.Purpose, alert.ReasonCode, alert.Count, alert.Since);
+        }
+        else if (alert.Code == OperatorAlertCodes.ProviderRefused)
         {
             _logger.Log(
                 level,
@@ -100,6 +108,10 @@ public sealed class LogOperatorAlertSink(ILoggerFactory loggers) : IOperatorAler
 /// <item><b>Job failures</b> — failed attempts in the last hour, per kind, at or above the threshold
 /// in total. Per kind, the larger of this process's attempt memory (which sees retried attempts)
 /// and the database's terminal failures (which survive a restart).</item>
+/// <item><b>LLM alarm</b> — a model purpose WS-1's call counters (<see cref="ILlmCallHealthReader"/>)
+/// mark as alarming: length-finish or fallback rate above 2% over its last 50 sent calls. One alert
+/// per purpose; it resolves when the window falls back under the line. The counters are in process,
+/// so a restart starts the window again.</item>
 /// </list>
 ///
 /// <para>The current set is what the status API and the metrics sink show. State is in memory and
@@ -151,6 +163,7 @@ public sealed class OperatorAlertMonitor(
         using (var scope = scopeFactory.CreateScope())
         {
             observed.AddRange(ProviderRefusals(scope.ServiceProvider.GetService<IProviderHealthReader>()?.Current(), now));
+            observed.AddRange(LlmAlarms(scope.ServiceProvider.GetService<ILlmCallHealthReader>()?.Snapshot(), now));
             if (await JobFailuresAsync(scope, now, ct) is { } failures)
             {
                 observed.Add(failures);
@@ -232,6 +245,18 @@ public sealed class OperatorAlertMonitor(
         }
     }
 
+    private static IEnumerable<OperatorAlert> LlmAlarms(IReadOnlyList<LlmPurposeHealth>? purposes, DateTime now) =>
+        (purposes ?? [])
+            .Where(p => p.Alarming)
+            .Select(p => new OperatorAlert(
+                OperatorAlertCodes.LlmAlarm, now, now,
+                ReasonCode: p.WindowLengthRate > LlmPurposeHealth.AlarmRate ? "length" : "fallback",
+                Provider: ApiProvider.OpenRouter,
+                Count: p.WindowCalls,
+                Threshold: null,
+                Kinds: null)
+            { Purpose = p.Purpose });
+
     private static bool IsRefusal(string reasonCode) =>
         reasonCode is JobFailureReason.PaymentRequired or JobFailureReason.Unauthorized or JobFailureReason.Forbidden;
 
@@ -263,8 +288,13 @@ public sealed class OperatorAlertMonitor(
                 total, _options.JobFailuresPerHour, kinds);
     }
 
-    private static string Key(OperatorAlert alert) =>
-        alert.Code == OperatorAlertCodes.ProviderRefused ? $"{alert.Code}:{alert.Provider}:{alert.ReasonCode}" : alert.Code;
+    private static string Key(OperatorAlert alert) => alert.Code switch
+    {
+        OperatorAlertCodes.ProviderRefused => $"{alert.Code}:{alert.Provider}:{alert.ReasonCode}",
+        // One per purpose: a purpose that goes from the length line to the fallback line is the same alarm.
+        OperatorAlertCodes.LlmAlarm => $"{alert.Code}:{alert.Purpose}",
+        _ => alert.Code,
+    };
 
     private static DateTime Earlier(DateTime a, DateTime b) => a <= b ? a : b;
 }

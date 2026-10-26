@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
@@ -17,7 +18,11 @@ namespace FrostAura.Reel.Application.Pipeline;
 /// <para>Expects a context pinned to <paramref name="account"/>'s tenancy scope, as every request
 /// behind <c>RequireAccount</c> is; every query also filters by account explicitly.</para>
 /// </summary>
-public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader providerHealth, IOperatorAlertReader? alerts = null)
+public sealed class SyncStatusQuery(
+    IReelDbContext db,
+    IProviderHealthReader providerHealth,
+    IOperatorAlertReader? alerts = null,
+    ILlmCallHealthReader? llmHealth = null)
 {
     /// <summary>How far back an unrecovered failure is still reported.</summary>
     public static readonly TimeSpan FailureWindow = TimeSpan.FromDays(7);
@@ -100,8 +105,16 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             ProviderHealth: health,
             DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health, unrecognised),
             NotEnoughRatings: floor,
-            Alerts: OperatorAlertsFor(account));
+            Alerts: OperatorAlertsFor(account),
+            LlmHealth: LlmHealthFor(account));
     }
+
+    /// <summary>
+    /// WS-1's per-purpose model-call counters (the same tally the metrics report reads), for the
+    /// operator: Founder tier only, like the alerts; every other tier an empty list.
+    /// </summary>
+    private IReadOnlyList<LlmPurposeHealth> LlmHealthFor(Account account) =>
+        account.Tier == AccountTier.Founder && llmHealth is not null ? llmHealth.Snapshot() : [];
 
     /// <summary>
     /// The stage <c>/api/sync/status</c> reports for <paramref name="account"/> — the one every other

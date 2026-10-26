@@ -1,4 +1,5 @@
 using System.Globalization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
@@ -51,7 +52,7 @@ public static class ObservabilityEndpoints
 
         group.MapGet("/metrics", async (
             int? hours, IAccountContext accountContext, IReelDbContext db, JobMetricsQuery jobs, AskMetricsQuery ask,
-            ClientErrorSink sink, IOperatorAlertReader alerts, CancellationToken ct) =>
+            ClientErrorSink sink, IOperatorAlertReader alerts, ILlmCallHealthReader llm, CancellationToken ct) =>
         {
             var windowHours = Math.Clamp(hours ?? 24, 1, MaxWindowHours);
             var accountId = accountContext.AccountId!.Value;
@@ -67,7 +68,7 @@ public static class ObservabilityEndpoints
                 await jobs.GetAsync(accountId, since, ct),
                 new ClientErrorMetrics(totals.Accepted, totals.RateLimited, ProcessStartedAt),
                 await ask.GetAsync(accountId, since, ct),
-                LlmCallMetrics.Snapshot(),
+                llm.Snapshot(),
                 ProcessStartedAt,
                 founder ? alerts.Current() : []));
         })

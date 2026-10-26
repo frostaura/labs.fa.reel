@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Domain.Sync;
@@ -35,7 +36,12 @@ public sealed record ClientErrorMetrics(long Accepted, long RateLimited, DateTim
 /// <param name="Jobs">Per job kind, from the database (the caller's jobs and global ones).</param>
 /// <param name="ClientErrors">The caller's browser error reports since process start.</param>
 /// <param name="Ask">The caller's Ask Reel turns in the window: stage latency and fallbacks, from the turn record.</param>
-/// <param name="Llm">Model calls per purpose since <see cref="LlmSince"/>, every account's: truncation and fallback.</param>
+/// <param name="Llm">
+/// Model calls per purpose since <see cref="LlmSince"/>, every account's: WS-1's call counters
+/// (<see cref="ILlmCallHealthReader"/>) — sent calls, length finishes, fallbacks, retries, and the
+/// rolling 50-call window the alarm reads. One tally: the metrics report, the status API and the
+/// <c>reel.llm.*</c> instruments all read it.
+/// </param>
 /// <param name="LlmSince">When this process started counting model calls.</param>
 /// <param name="Alerts">Active operator alerts; Founder-tier callers only, otherwise empty.</param>
 public sealed record MetricsReport(
@@ -45,7 +51,7 @@ public sealed record MetricsReport(
     IReadOnlyList<JobKindMetrics> Jobs,
     ClientErrorMetrics ClientErrors,
     AskMetrics Ask,
-    IReadOnlyList<LlmPurposeMetrics> Llm,
+    IReadOnlyList<LlmPurposeHealth> Llm,
     DateTime LlmSince,
     IReadOnlyList<OperatorAlert> Alerts);
 
