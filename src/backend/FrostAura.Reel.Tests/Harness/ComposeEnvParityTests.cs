@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using FrostAura.Reel.Application.Llm;
+using Microsoft.Extensions.Configuration;
 
 namespace FrostAura.Reel.Tests.Harness;
 
@@ -99,6 +101,38 @@ public partial class ComposeEnvParityTests
         ["ASK_ANSWER"] = "infix of LLM_ASK_ANSWER_DAILY_CALLS/TOKENS (AskBudget)",
     };
 
+    /// <summary>
+    /// The composed field suffixes <see cref="LlmPurposeCatalog"/> reads per purpose
+    /// (<c>LLM_&lt;PURPOSE&gt;_&lt;FIELD&gt;</c>), each with the value the family probe sets to see
+    /// whether the catalog actually reads it. A value is chosen to differ from every default.
+    /// </summary>
+    private static readonly Dictionary<string, string> PurposeFields = new(StringComparer.Ordinal)
+    {
+        ["MODEL"] = "probe/composed-key-family",
+        ["EFFORT"] = ReasoningEfforts.High,
+        ["MAX_TOKENS"] = "7777",
+        ["MAX_RETRIES"] = "3",
+        ["ATTEMPT_TIMEOUT_SECONDS"] = "777",
+        ["TOTAL_TIMEOUT_SECONDS"] = "778",
+        ["TOKENS_PER_CANDIDATE"] = "777",
+    };
+
+    /// <summary>The composed suffixes <see cref="AskBudget"/> reads per purpose.</summary>
+    private static readonly string[] BudgetFields = ["DAILY_CALLS", "DAILY_TOKENS"];
+
+    /// <summary>
+    /// Composed keys that are carried into every descriptor and <c>.env.example</c> like a scanned
+    /// key. The scan cannot see a composed key, so without this list the founder's setting for one
+    /// is exactly the K-5 failure: set in <c>.env</c>, never in the container. The rest of each
+    /// family are optional overrides whose code defaults are the documented behaviour, and a
+    /// descriptor may carry any of them (the dead-key check resolves the family).
+    /// </summary>
+    private static readonly Dictionary<string, string> PlumbedComposedKeys = new(StringComparer.Ordinal)
+    {
+        ["LLM_LENS_EFFORT"] = "lens currency is (hash, prompt, model|effort): the founder's effort knob re-keys the lens cache (WS-1 CR-6 addendum)",
+        ["LLM_TASTE_NARRATIVE_EFFORT"] = "narrative currency is (hash, prompt, model|effort), as for the lens (WS-1 CR-6 addendum)",
+    };
+
     /// <summary>Section prefixes of literals that look like config keys but are EF/Npgsql annotations.</summary>
     private static readonly string[] NotConfigurationPrefixes = ["Npgsql", "Relational"];
 
@@ -144,7 +178,7 @@ public partial class ComposeEnvParityTests
         var environment = ApiEnvironment(descriptor);
         var production = ProdDescriptors.Contains(descriptor);
 
-        var missing = CodeReadKeys()
+        var missing = RequiredKeys()
             .Where(key => !NeverPlumbed.ContainsKey(key))
             .Where(key => !(production && DevelopmentOnly.Contains(key)))
             .Where(key => !environment.ContainsKey(key))
@@ -165,8 +199,9 @@ public partial class ComposeEnvParityTests
     {
         // The other direction: a key nothing reads is a setting the founder can change to no effect.
         var codeKeys = CodeReadKeys();
+        var composed = ComposedKeys();
         var dead = ApiEnvironment(descriptor).Keys
-            .Where(key => !codeKeys.Contains(key) && !FrameworkKeys.Contains(key))
+            .Where(key => !codeKeys.Contains(key) && !composed.Contains(key) && !FrameworkKeys.Contains(key))
             .Order(StringComparer.Ordinal)
             .ToList();
 
@@ -213,7 +248,7 @@ public partial class ComposeEnvParityTests
         var example = File.ReadAllText(Path.Combine(ComposeDescriptor.RepositoryRoot(), ".env.example"));
         var documented = EnvExampleKey().Matches(example).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
 
-        var missing = CodeReadKeys()
+        var missing = RequiredKeys()
             .Where(key => !NeverPlumbed.ContainsKey(key) && !documented.Contains(key))
             .Order(StringComparer.Ordinal)
             .ToList();
@@ -278,6 +313,111 @@ public partial class ComposeEnvParityTests
         // And the real scan sees the real read in DependencyInjection.Security.cs.
         Assert.Contains("TRAKT_RATE_BUDGET_PER_5MIN", TypedReadKeys());
     }
+
+    [Fact]
+    public void The_composed_families_resolve_from_what_the_code_reads()
+    {
+        // R1-35. Non-vacuous in both directions: the keys this guard exists for resolve, and a key the
+        // catalog ignores does not — extraction takes no effort or model override (FD-1), and a typo
+        // is not a member of any family.
+        var composed = ComposedKeys();
+
+        Assert.Contains("LLM_LENS_EFFORT", composed);
+        Assert.Contains("LLM_TASTE_NARRATIVE_EFFORT", composed);
+        Assert.Contains("LLM_ASK_PLAN_MAX_TOKENS", composed);
+        Assert.Contains("LLM_CROSS_REFERENCE_TOKENS_PER_CANDIDATE", composed);
+        Assert.Contains("LLM_ASK_JUDGE_DAILY_TOKENS", composed);
+        Assert.Contains("LLM_EXTRACT_ATTRIBUTES_MAX_TOKENS", composed);
+        Assert.DoesNotContain("LLM_EXTRACT_ATTRIBUTES_EFFORT", composed);
+        Assert.DoesNotContain("LLM_EXTRACT_ATTRIBUTES_MODEL", composed);
+        Assert.DoesNotContain("LLM_LENS_DAILY_TOKENS_EXTRA", composed);
+        Assert.DoesNotContain("LLM_LENS_EFORT", composed);
+        Assert.DoesNotContain("LLM_LENS_DAILY_CALLS", composed); // a literal key, not an Ask budget
+    }
+
+    [Fact]
+    public void Every_plumbed_composed_key_is_a_key_the_code_composes()
+    {
+        // A renamed purpose or a typo here would otherwise demand a key nothing reads, everywhere.
+        var composed = ComposedKeys();
+        Assert.All(PlumbedComposedKeys.Keys, key => Assert.Contains(key, composed));
+    }
+
+    [Fact]
+    public void Every_composed_field_still_resolves_somewhere()
+    {
+        // A field the catalog stopped reading would leave a stale entry that resolves nothing.
+        var composed = ComposedKeys();
+        Assert.All(PurposeFields.Keys.Concat(BudgetFields), field => Assert.Contains(composed, key => key.EndsWith("_" + field, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void The_parity_check_fails_when_a_plumbed_composed_key_is_removed()
+    {
+        var environment = new Dictionary<string, string>(ApiEnvironment("docker-compose.prod.yml"), StringComparer.Ordinal);
+        Assert.True(environment.Remove("LLM_TASTE_NARRATIVE_EFFORT"));
+
+        var missing = RequiredKeys()
+            .Where(key => !NeverPlumbed.ContainsKey(key) && !DevelopmentOnly.Contains(key) && !environment.ContainsKey(key))
+            .ToList();
+
+        Assert.Equal(["LLM_TASTE_NARRATIVE_EFFORT"], missing);
+    }
+
+    [Fact]
+    public void A_descriptor_key_outside_every_family_is_still_dead()
+    {
+        // Resolving families must not wave through a near-miss: carried, but read by nothing.
+        var codeKeys = CodeReadKeys();
+        var composed = ComposedKeys();
+        string[] carried = ["LLM_LENS_EFFORT", "LLM_LENS_EFORT", "LLM_EXTRACT_ATTRIBUTES_EFFORT"];
+
+        var dead = carried.Where(key => !codeKeys.Contains(key) && !composed.Contains(key) && !FrameworkKeys.Contains(key));
+
+        Assert.Equal(["LLM_LENS_EFORT", "LLM_EXTRACT_ATTRIBUTES_EFFORT"], dead);
+    }
+
+    /// <summary>Every key that must reach the backend: the scanned keys plus the plumbed composed keys.</summary>
+    private static IReadOnlySet<string> RequiredKeys() =>
+        new HashSet<string>(CodeReadKeys().Concat(PlumbedComposedKeys.Keys), StringComparer.Ordinal);
+
+    /// <summary>
+    /// Every composed key the code reads, resolved by asking the code rather than by restating its
+    /// naming rule: each candidate <c>LLM_&lt;PURPOSE&gt;_&lt;FIELD&gt;</c> is set alone, and it is a
+    /// key only if <see cref="LlmPurposeCatalog"/> or <see cref="AskBudget"/> then answers differently.
+    /// </summary>
+    internal static IReadOnlySet<string> ComposedKeys()
+    {
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        var empty = new ConfigurationBuilder().Build();
+
+        foreach (var purpose in LlmPurposeCatalog.KnownPurposes)
+        {
+            var prefix = "LLM_" + purpose.ToUpperInvariant().Replace('-', '_') + "_";
+            var baseline = new LlmPurposeCatalog(empty).For(purpose);
+            foreach (var (field, value) in PurposeFields)
+            {
+                if (new LlmPurposeCatalog(With(prefix + field, value)).For(purpose) != baseline)
+                {
+                    keys.Add(prefix + field);
+                }
+            }
+
+            var budget = AskBudget.For(empty, purpose);
+            foreach (var field in BudgetFields)
+            {
+                if (budget is not null && AskBudget.For(With(prefix + field, "7"), purpose) != budget)
+                {
+                    keys.Add(prefix + field);
+                }
+            }
+        }
+
+        return keys;
+    }
+
+    private static IConfiguration With(string key, string value) =>
+        new ConfigurationBuilder().AddInMemoryCollection([new KeyValuePair<string, string?>(key, value)]).Build();
 
     // ── the scan ────────────────────────────────────────────────────────────────────────────
 

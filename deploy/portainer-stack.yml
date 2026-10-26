@@ -17,11 +17,13 @@
 
 # Every service logs through Docker's `local` driver with rotation (J*2). The json-file default kept
 # about 30 minutes of the backend's log on the live host, which made every after-the-fact diagnosis
-# a guess. 10 x 50 MB per container; the parity test pins this block in every descriptor.
+# a guess. Sized for at least 72 h per container (R1-37): 10 x 100 MB uncompressed holds 85 h at the
+# 200 KB/min idle-volume ceiling (72 h needs 844 MB); the `local` driver also compresses rotated files.
+# ComposeHardeningTests asserts the arithmetic, not the literal.
 x-logging: &default-logging
   driver: local
   options:
-    max-size: "50m"
+    max-size: "100m"
     max-file: "10"
 
 services:
@@ -88,6 +90,10 @@ services:
       LLM_RERANK_DAILY_TOKENS: ${LLM_RERANK_DAILY_TOKENS:-}
       LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
       LLM_LENS_DAILY_TOKENS: ${LLM_LENS_DAILY_TOKENS:-}
+      # Reasoning effort for the lens and the taste narrative (none|minimal|low|medium|high|omit). Both
+      # notes are cached on model|effort, so a change re-writes them; blank = the code default, none.
+      LLM_LENS_EFFORT: ${LLM_LENS_EFFORT:-}
+      LLM_TASTE_NARRATIVE_EFFORT: ${LLM_TASTE_NARRATIVE_EFFORT:-}
       # Model and experiment switches (blank = code default; see CLAUDE.md "Runtime flags").
       CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
       RESIDUAL_HEAD_ENABLED: ${RESIDUAL_HEAD_ENABLED:-}
@@ -395,6 +401,11 @@ configs:
       events {}
       http {
         client_max_body_size 10m;
+        # rid= is the X-Request-Id the API logs as RequestId and returns to the caller (R1-36).
+        log_format main '$$remote_addr - $$remote_user [$$time_local] "$$request" '
+                        '$$status $$body_bytes_sent "$$http_referer" '
+                        '"$$http_user_agent" "$$http_x_forwarded_for" rid=$$request_id';
+        access_log /var/log/nginx/access.log main;
         server {
           listen 80;
           location /api/ {
@@ -406,6 +417,9 @@ configs:
             proxy_set_header Host $$host;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
+            # One id from the gateway's access log to every API log line and the X-Request-Id response
+            # header (R1-36). Always the gateway's own: an id from the internet is not forwarded.
+            proxy_set_header X-Request-Id $$request_id;
             # Ask Reel streams on this prefix (`/api/search/ask`), not on /sse/. Buffered here, a
             # token-by-token turn arrives as one lump and reads as a slow model. Bounded at an
             # hour: a chat turn's deadline is the request's.
@@ -423,6 +437,9 @@ configs:
             proxy_set_header Host $$host;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
+            # One id from the gateway's access log to every API log line and the X-Request-Id response
+            # header (R1-36). Always the gateway's own: an id from the internet is not forwarded.
+            proxy_set_header X-Request-Id $$request_id;
             proxy_set_header Connection '';
             proxy_http_version 1.1;
             chunked_transfer_encoding off;

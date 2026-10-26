@@ -202,23 +202,10 @@ jobs:
       - name: Dependency advisories (npm + NuGet)
         run: make ci-audit
 
-      # A pinned release binary, verified against the release's checksum file — not a floating
-      # action tag, which can be repointed under a workflow that trusts it.
-      - name: Install Trivy (pinned)
-        env:
-          TRIVY_VERSION: "0.58.1"
-        run: |
-          set -euo pipefail
-          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
-          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
-          curl -fsSLO "${base}/${tarball}"
-          curl -fsSLO "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
-          grep " ${tarball}\$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -
-          tar -xzf "${tarball}" trivy
-          sudo install -m 0755 trivy /usr/local/bin/trivy
-          rm -f trivy "${tarball}" "trivy_${TRIVY_VERSION}_checksums.txt"
-
-      - name: Trivy
+      # The Makefile pins Trivy by image digest and runs it on the runner's Docker, exactly as it does
+      # on a laptop (R1-33) — not a floating action tag, which can be repointed under a workflow that
+      # trusts it, and not a second version pin here that could drift from the Makefile's.
+      - name: Trivy (pinned image, same as make ci)
         run: make ci-trivy
 
   # ============================================================================

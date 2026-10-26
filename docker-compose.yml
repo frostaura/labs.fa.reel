@@ -6,11 +6,13 @@
 # `unless-stopped` remains correct, because there an operator's stop should stick.
 # Every service logs through Docker's `local` driver with rotation (J*2). The json-file default kept
 # about 30 minutes of the backend's log on the live host, which made every after-the-fact diagnosis
-# a guess. 10 x 50 MB per container; the parity test pins this block in every descriptor.
+# a guess. Sized for at least 72 h per container (R1-37): 10 x 100 MB uncompressed holds 85 h at the
+# 200 KB/min idle-volume ceiling (72 h needs 844 MB); the `local` driver also compresses rotated files.
+# ComposeHardeningTests asserts the arithmetic, not the literal.
 x-logging: &default-logging
   driver: local
   options:
-    max-size: "50m"
+    max-size: "100m"
     max-file: "10"
 
 services:
@@ -108,6 +110,10 @@ services:
       LLM_RERANK_DAILY_TOKENS: ${LLM_RERANK_DAILY_TOKENS:-}
       LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
       LLM_LENS_DAILY_TOKENS: ${LLM_LENS_DAILY_TOKENS:-}
+      # Reasoning effort for the lens and the taste narrative (none|minimal|low|medium|high|omit). Both
+      # notes are cached on model|effort, so a change re-writes them; blank = the code default, none.
+      LLM_LENS_EFFORT: ${LLM_LENS_EFFORT:-}
+      LLM_TASTE_NARRATIVE_EFFORT: ${LLM_TASTE_NARRATIVE_EFFORT:-}
       # Model and experiment switches (blank = code default; see CLAUDE.md "Runtime flags").
       CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
       RESIDUAL_HEAD_ENABLED: ${RESIDUAL_HEAD_ENABLED:-}
