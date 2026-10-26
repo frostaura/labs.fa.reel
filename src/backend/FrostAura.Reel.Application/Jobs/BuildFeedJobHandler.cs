@@ -190,6 +190,14 @@ public class BuildFeedJobHandler(
 
     public JobKind Kind => JobKind.BuildFeed;
 
+    private string? _feedFitSalt;
+
+    /// <summary>
+    /// The salt every feed fit this build caches or reads is keyed with (<see cref="FeedPaginator.FitKey"/>):
+    /// the agent's <c>RerankFeed</c> salt, computed once per build because it fingerprints the prompt.
+    /// </summary>
+    private string FeedFitSalt => _feedFitSalt ??= agent.CacheSalt(ApiUsagePurpose.RerankFeed);
+
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildFeed requires an account.");
@@ -2179,7 +2187,7 @@ public class BuildFeedJobHandler(
             // Only a MODEL fit is ever cached (see below), but the source is read rather than assumed:
             // a cached stub fit is the predicted rating divided by ten, and ranking on it would
             // count the prediction twice under a label that says the model judged the title.
-            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, candidate.Title.Id, rowKey), out var hit)
+            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(FeedFitSalt, accountId, candidate.Title.Id, rowKey), out var hit)
                 && hit is { FitSource: ResultSource.Llm })
             {
                 fits[candidate.Title.Id] = hit.Fit;
@@ -2238,7 +2246,7 @@ public class BuildFeedJobHandler(
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
                     fits[result.TitleId] = result.Fit;
                 }
             });
@@ -2323,7 +2331,7 @@ public class BuildFeedJobHandler(
         {
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
             var cachedHit = cache.TryGetValue<RerankResult>(
-                FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
+                FeedPaginator.FitKey(FeedFitSalt, accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
             var cachedFit = cachedHit && hit!.FitSource == ResultSource.Llm;
             if (cachedFit && item.Row == FeedRowKind.Hero)
             {
@@ -2572,7 +2580,7 @@ public class BuildFeedJobHandler(
             item.Replace(replacement, heroContext(replacement));
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
-                cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
+                cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
                 item.LlmFit = (decimal)verdict.Fit;
                 if (ModelWhy(verdict) is { } why)
                 {
@@ -2661,7 +2669,7 @@ public class BuildFeedJobHandler(
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
                     if (isHeroRail)
                     {
                         heroFits[result.TitleId] = result.Fit;

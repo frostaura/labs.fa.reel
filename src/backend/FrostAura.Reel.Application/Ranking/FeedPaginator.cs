@@ -548,9 +548,10 @@ public sealed class FeedPaginator(
         // row says Fallback (attempted, failed) rather than Templater (never asked) for those.
         var attempted = new HashSet<Guid>();
         var uncached = new List<RerankInput>();
+        var fitSalt = agent.CacheSalt(ApiUsagePurpose.RerankPage);
         foreach (var s in pool)
         {
-            if (cache.TryGetValue<RerankResult>(FitKey(account.Id, s.Title.Id, rowKey), out var hit)
+            if (cache.TryGetValue<RerankResult>(FitKey(fitSalt, account.Id, s.Title.Id, rowKey), out var hit)
                 && hit is { FitSource: ResultSource.Llm })
             {
                 fitById[s.Title.Id] = hit;
@@ -643,7 +644,7 @@ public sealed class FeedPaginator(
                         }
 
                         fitById[r.TitleId] = r;
-                        cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
+                        cache.Set(FitKey(fitSalt, account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
                 });
 
@@ -717,13 +718,14 @@ public sealed class FeedPaginator(
                 }
 
                 var cached = 0;
+                var fitSalt = scopedAgent.CacheSalt(ApiUsagePurpose.RerankPage);
                 await loop.RunAsync(inputs, async (batch, batchCt) =>
                 {
                     var results = await scopedAgent.RerankBatchAsync(
                         batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
                     foreach (var r in results.Where(r => r.FitSource == ResultSource.Llm))
                     {
-                        cache.Set(FitKey(accountId, r.TitleId, rowKey), r, FitTtl);
+                        cache.Set(FitKey(fitSalt, accountId, r.TitleId, rowKey), r, FitTtl);
                         cached++;
                     }
                 });
@@ -806,7 +808,23 @@ public sealed class FeedPaginator(
         _ => "titles personalised to your taste",
     };
 
-    internal static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
+    /// <summary>
+    /// The key one feed fit verdict is cached under, built by <see cref="RerankCacheKey.For"/> like
+    /// every other re-rank cache (WS-1 CR-3): <paramref name="salt"/> is the agent's
+    /// <see cref="ISearchAgent.CacheSalt"/> for the purpose that wrote the verdict, so a verdict from
+    /// another model, effort, prompt or result format misses instead of serving. The build
+    /// (<c>RerankFeed</c>) and this paginator (<c>RerankPage</c>) still share an entry exactly when
+    /// their salts agree, which they do while both purposes run the same model, effort and prompt.
+    /// <para>The candidate set is <see cref="PooledVerdict"/> on purpose: a feed verdict is one per
+    /// (row, title), pooled across the batches it was judged in (the build caches the position-debiased
+    /// mean), and the lookup happens before any batch exists. Keying it on one batch would make every
+    /// later page a miss and re-spend the family ceiling for the same judgement.</para>
+    /// </summary>
+    internal static string FitKey(string salt, Guid accountId, Guid titleId, string rowKey) =>
+        RerankCacheKey.For("feedfit", salt, accountId, titleId, rowKey, PooledVerdict);
+
+    /// <summary>The candidate set a pooled feed verdict is keyed on: none, because it is not one batch's.</summary>
+    private static readonly Guid[] PooledVerdict = [];
 
     /// <summary>The active browse-filter medium as an enum, or null for "all". Anything unrecognised
     /// (including "all") maps to null so the window and deepen stay both-media.</summary>

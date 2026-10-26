@@ -58,12 +58,14 @@ public static partial class ExplanationTemplater
         decimal? AccountContrarianOffset = null);
 
     /// <summary>
-    /// The contrarian score below which an account is harsher than the crowd. The same −0.3 Taste
-    /// DNA uses for "harsher than the crowd" (<c>TasteDna.tsx</c>), so a card can never call the
-    /// reader tougher than the crowd while their own DNA page says "with the crowd" — the founder,
-    /// at −0.2, read exactly that contradiction on 19 of 21 Home cards (2026-10-25).
+    /// The contrarian score below which an account is harsher than the crowd: the lower edge of
+    /// <see cref="Domain.Lens.ContrarianFact.Band"/>, the one band Taste DNA (<c>TasteDna.tsx</c>)
+    /// and the taste narrative also read, so a card can never call the reader tougher than the
+    /// crowd while their own DNA page says "with the crowd" — the founder, at −0.2, read exactly
+    /// that contradiction on 19 of 21 Home cards (2026-10-25). Read from the band, not restated,
+    /// so the three surfaces cannot drift apart (WS-1 CR-3).
     /// </summary>
-    public const decimal HarsherThanCrowdBelow = -0.3m;
+    public const decimal HarsherThanCrowdBelow = -Domain.Lens.ContrarianFact.Band;
 
     /// <summary>
     /// The fewest crowd votes behind a number a why-line may quote — the supply reports' vote

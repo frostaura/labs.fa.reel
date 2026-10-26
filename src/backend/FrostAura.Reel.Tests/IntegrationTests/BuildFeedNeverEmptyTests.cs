@@ -664,7 +664,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         // Nothing was cached: a fallback replayed for six hours is how one truncated batch became
         // 281 Cache-sourced stub exposures.
         Assert.All(items, i => Assert.False(fitCache.TryGetValue(
-            FeedPaginator.FitKey(accountId, i.TitleId, FeedPaginator.RowKeyFor(i.Row, i.AnchorTitleId)), out _)));
+            FeedPaginator.FitKey(((ISearchAgent)agent).CacheSalt(ApiUsagePurpose.RerankFeed), accountId, i.TitleId, FeedPaginator.RowKeyFor(i.Row, i.AnchorTitleId)), out _)));
 
         var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
         Assert.NotEmpty(exposures);
