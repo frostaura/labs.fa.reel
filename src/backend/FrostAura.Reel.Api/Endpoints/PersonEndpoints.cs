@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -78,7 +79,8 @@ public static class PersonEndpoints
         // Actor page: who they are, the user's explicit rating, the derived affinity, and the
         // user's filmography with their title ratings + predicted scores.
         group.MapGet("/", async (
-            Guid personId, IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            Guid personId, IReelDbContext db, IAccountContext accountContext, EligibilityQueryBuilder eligibility,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var person = await db.Persons
@@ -96,12 +98,35 @@ public static class PersonEndpoints
                 .FirstOrDefaultAsync(ct);
 
             // Titles this person is credited in (global), decorated with the user's title rating,
-            // predicted score (active artifact), and watched flag.
-            var creditedTitleIds = await db.TitleCredits
+            // predicted score (active artifact), and watched flag. Every credit row is kept, so the
+            // filmography can say what the person did on each title (F-24): a director's page used
+            // to list everything they appear in with nothing to tell the two apart.
+            var credits = await db.TitleCredits
                 .Where(c => c.PersonId == personId)
-                .Select(c => c.TitleId)
-                .Distinct()
+                .Select(c => new { c.TitleId, c.Role, c.CharacterName, c.CastOrder })
                 .ToListAsync(ct);
+            var creditedTitleIds = credits.Select(c => c.TitleId).Distinct().ToList();
+            var creditsByTitle = credits.GroupBy(c => c.TitleId).ToDictionary(
+                g => g.Key,
+                g => (
+                    // Director, Writer, Actor — in that order, the order a filmography line reads.
+                    Roles: g.Select(c => c.Role).Distinct().OrderBy(r => RoleOrder(r)).Select(r => r.ToString()).ToList(),
+                    Character: g.Where(c => c.Role == CreditRole.Actor && !string.IsNullOrWhiteSpace(c.CharacterName))
+                        .OrderBy(c => c.CastOrder ?? int.MaxValue)
+                        .Select(c => c.CharacterName!.Trim())
+                        .FirstOrDefault()));
+
+            // A lookup may show what you have seen, never what you ruled out (XM-01; the airtight
+            // lock, and FD-5's default for the other lookup, typeahead): the listing holds out every
+            // content rule and the maturity ceiling, and says how many it held out. The derived
+            // affinity below still reads every title you rated — it describes the person, and
+            // hiding a rated title from a list does not unrate it.
+            var visibleIds = (await eligibility.ContentFilteredTitles(accountId)
+                    .Where(t => creditedTitleIds.Contains(t.Id))
+                    .Select(t => t.Id)
+                    .ToListAsync(ct))
+                .ToHashSet();
+            var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
 
             // The title entity comes back whole and the card shape is built in memory, so the crowd
             // rating is resolved by the one shared resolver rather than a second copy of its fallback
@@ -127,6 +152,12 @@ public static class PersonEndpoints
                 })
                 .ToListAsync(ct);
 
+            var shown = credited
+                .Where(x => visibleIds.Contains(x.Title.Id)
+                    && EligibilityQueryBuilder.PassesMaturity(x.Title, maturityCeiling))
+                .Select(x => x.Title.Id)
+                .ToHashSet();
+
             var filmography = credited.Select(x => new
             {
                 titleId = x.Title.Id,
@@ -141,6 +172,9 @@ public static class PersonEndpoints
                 x.userRating,
                 // 1dp at the response edge, matching the feed and title detail.
                 predictedRating = x.predictedRating is { } predicted ? Math.Round(predicted, 1) : (decimal?)null,
+                // What they did on it, from the credits only — never guessed from the department.
+                roles = creditsByTitle.TryGetValue(x.Title.Id, out var c) ? c.Roles : [],
+                character = creditsByTitle.TryGetValue(x.Title.Id, out var a) ? a.Character : null,
             }).ToList();
 
             // Derived affinity = shrunken mean of the user's ratings of this person's titles.
@@ -163,11 +197,23 @@ public static class PersonEndpoints
                 userRating,
                 derivedAffinity,
                 ratedTitleCount = ratedInFilmography.Count,
+                // Credited titles your conditions (content rules, maturity) hold out of the list.
+                hiddenByConditions = filmography.Count(f => !shown.Contains(f.titleId)),
                 filmography = filmography
+                    .Where(f => shown.Contains(f.titleId))
                     .OrderByDescending(f => f.userRating ?? 0)
                     .ThenByDescending(f => f.tmdbPopularity ?? 0)
                     .Take(40),
             });
         });
     }
+
+    /// <summary>Director first, then writer, then cast; an unknown role last.</summary>
+    private static int RoleOrder(CreditRole role) => role switch
+    {
+        CreditRole.Director => 0,
+        CreditRole.Writer => 1,
+        CreditRole.Actor => 2,
+        _ => 3,
+    };
 }
