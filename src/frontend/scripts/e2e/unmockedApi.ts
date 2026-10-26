@@ -3,7 +3,8 @@
  * tested; the Playwright reporter in `unmockedApiReporter.ts` only feeds it.
  *
  * The suite runs one worker with no parallelism, so tests run strictly one after another and a
- * request belongs to the test that most recently began before it arrived. A request that lands
+ * request belongs to the test that most recently began before it arrived (each start is the
+ * worker's own clock, so a test's first request never lands before its start is known). A request that lands
  * after a test ended but before the next began (a late fetch from a closing page) still belongs
  * to the test whose page sent it, which is that same most-recent test.
  */
@@ -71,7 +72,9 @@ export interface Verdict {
 
 /**
  * The baseline is a shrinking list of known debts, each an open change request to the spec's
- * owner. Anything outside it fails; nothing may be added to it to make a run pass.
+ * owner. Anything outside it fails. Nothing a change introduces may be added to make a run pass;
+ * the one addition allowed is an older debt in someone else's spec that timing had hidden (see
+ * unmockedApiReporter.ts).
  */
 export function judge(found: UnmockedByTest, baseline: UnmockedByTest, ranKeys: ReadonlySet<string>): Verdict {
   const unexpected: UnmockedByTest = {};

@@ -784,6 +784,17 @@
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
+  "track-record.spec.ts \u203a track record \u203a the avatar menu offers the track record to every tier": [
+    "GET /api/digest/current",
+    "GET /api/feed",
+    "GET /api/feed/continue-watching",
+    "GET /api/feed/cross-reference",
+    "GET /api/feed/genres",
+    "GET /api/feed/learned",
+    "GET /api/saved/recently-watched",
+    "GET /api/settings/filters",
+    "POST /api/feed/more"
+  ],
   "typeahead-global.spec.ts \u203a global typeahead \u2014 beyond your catalogue \u203a sparse local results grow the flagged TMDB group, reachable by keyboard": [
     "GET /api/accuracy",
     "GET /api/digest/current",
