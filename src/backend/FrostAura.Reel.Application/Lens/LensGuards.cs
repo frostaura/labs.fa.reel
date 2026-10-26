@@ -371,6 +371,59 @@ public static partial class LensGuards
     public static bool IsServable(LensNote note) => !SecondPersonVoice.SoundsHedged(note.Hook);
 
     /// <summary>
+    /// A STORED note as a surface may render it, or null when it may not be rendered at all
+    /// (<see cref="IsServable"/>). A note whose hook was cut off comes back with an EMPTY hook and
+    /// everything else intact (IR2S-03).
+    ///
+    /// <para><b>Why the hook goes and the note stays.</b> The hero renders the hook first and the
+    /// digest makes it the card's why-line, so a hook ending "…bring strangers into one…" was the
+    /// first sentence of the product's most prominent card. Every reader already treats an empty
+    /// hook as no hook — the hero and the digest fall back to the why-line, the title page omits
+    /// the line — while the lens beside it is complete prose the guards passed. Refusing the whole
+    /// note instead would cost that lens on every surface, and a read path that refuses a Done row
+    /// makes the generation pass rewrite it at the same key: a paid call per title that can be cut
+    /// off again, with nothing stopping it repeating.</para>
+    ///
+    /// <para>Applied at read time, so the rows already stored with a cut hook (24 of 216 Done in
+    /// the eval database) are fixed by this rather than by a purge, and the row keeps the evidence
+    /// the audit reads.</para>
+    /// </summary>
+    public static LensNote? ForServing(LensNote note) =>
+        !IsServable(note) ? null
+        : IsCutOff(note.Hook) ? note with { Hook = string.Empty }
+        : note;
+
+    /// <summary>
+    /// The hook a surface may show for a stored note, or null: no note, a note that is not servable,
+    /// and a hook that was cut off all read as no hook. For readers that take the hook alone.
+    /// </summary>
+    public static string? ServableHook(LensNote? note) =>
+        note is not null && ForServing(note)?.Hook is { } hook && !string.IsNullOrWhiteSpace(hook) ? hook : null;
+
+    /// <summary>
+    /// Whether a hook was cut off rather than finished: it ends on an ellipsis — which is what
+    /// <see cref="TidyField"/> leaves on a field the schema's <c>maxLength</c> cut, and what a
+    /// model writes when it abandons the sentence against a cap it can feel coming — or it sits on
+    /// its cap without closing a sentence, which is a row stored before the repair existed.
+    ///
+    /// <para><b>An ellipsis is not a style a hook may have.</b> In a lens body a trailing "..." can
+    /// be a deliberate beat and <see cref="TidyField"/> leaves it alone; a hook is one line said to
+    /// make the viewer press play, and one that trails off reads as broken on the card it heads.</para>
+    /// </summary>
+    public static bool IsCutOff(string? hook)
+    {
+        if (string.IsNullOrWhiteSpace(hook))
+        {
+            return false;
+        }
+
+        var value = hook.Trim();
+        return value.EndsWith('…')
+            || value.EndsWith("...", StringComparison.Ordinal)
+            || (value.Length >= LensNote.RequestHookChars - CapSlack && !EndsOnATerminal(value));
+    }
+
+    /// <summary>
     /// The first banned marketing phrase in a field, normalised for the rejection token — collapsed
     /// whitespace, lowercased — or null. Normalising matters because the token is what the audit
     /// GROUPS by: "Must-See" and "must see" are one prompt defect and must count as one.

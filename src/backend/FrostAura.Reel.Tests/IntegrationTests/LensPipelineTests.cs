@@ -660,6 +660,52 @@ public class LensPipelineTests(PostgresFixture fixture)
         Assert.Equal(0, again.Written);
     }
 
+    // ── A cut-off hook is never served, and costs no rewrite (IR2S-03) ──────────────────────
+
+    [Theory]
+    [InlineData("You get a heavy family drama where grief and pregnancy bring strangers into one…")]
+    [InlineData("Give this a quiet evening if you want friendship and emotional weight over...")]
+    public async Task A_stored_note_with_a_cut_off_hook_is_served_without_it_and_is_not_rewritten(string cutHook)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Strangers", 2021);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+
+        // The shape 24 of 216 Done rows in the eval database carry: a hook that stops mid-phrase.
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        var clean = JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions)!;
+        row.LensJson = JsonSerializer.Serialize(clean with { Hook = cutHook }, JsonOptions);
+        await db.SaveChangesAsync();
+
+        // Every read path — the title page, and the feed, digest and saved readers — gets the note
+        // with no hook, so the hero and the digest fall back to their why-line; the lens stays.
+        var resolved = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        var many = await deps.Lens.ResolveManyAsync(accountId, [titleId], built.ProfileHash, default);
+        Assert.Equal(LensSource.Fresh, resolved.Source);
+        Assert.Equal(string.Empty, resolved.Note!.Hook);
+        Assert.Equal(clean.Lens, resolved.Note.Lens);
+        Assert.Equal(string.Empty, many[titleId].Note!.Hook);
+        Assert.Equal(clean.Lens, many[titleId].Note!.Lens);
+        Assert.Null(FrostAura.Reel.Api.Endpoints.LensEndpoints.ToResponse(resolved).Hook);
+        Assert.Equal(clean.Lens, FrostAura.Reel.Api.Endpoints.LensEndpoints.ToResponse(resolved).Lens);
+
+        // The row is evidence, not damage to repair with money: no pass rewrites it.
+        var outcome = await deps.Lens.GenerateForJobAsync(accountId, taste, built.ProfileHash, [titleId], default);
+        Assert.Equal(0, outcome.Written);
+        var after = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        Assert.Equal(cutHook, JsonSerializer.Deserialize<LensNote>(after.LensJson, JsonOptions)!.Hook);
+    }
+
     [Fact]
     public async Task A_spoiler_report_stands_whatever_model_asks_again()
     {

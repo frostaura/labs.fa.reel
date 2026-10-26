@@ -32,7 +32,7 @@ public static class LensEndpoints
     public static LensResponse ToResponse(ResolvedLens resolved) =>
         resolved.Note is { } note
             ? new LensResponse(
-                resolved.Source, note.Lens, note.Hook, note.Caution, note.Anchors,
+                resolved.Source, note.Lens, LensGuards.ServableHook(note), note.Caution, note.Anchors,
                 note.Mood, note.WhenToWatch, resolved.GeneratedAt)
             : new LensResponse(LensSource.None, null, null, null, [], null, null, null);
 
