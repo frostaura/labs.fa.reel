@@ -43,6 +43,15 @@ public static partial class DependencyInjection
         services.TryAddSingleton<ReelMetrics>();
         services.TryAddSingleton<ClientErrorSink>();
         services.AddScoped<JobMetricsQuery>();
+        services.AddScoped<AskMetricsQuery>();
+
+        // ── Alerts: evaluated once a minute, delivered to every sink, read by the status API ─────────
+        // FD-20 default: the host-local log is the destination until a push or email sink is named.
+        services.TryAddSingleton(OperatorAlertOptions.Default);
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperatorAlertSink, LogOperatorAlertSink>());
+        services.AddSingleton<OperatorAlertMonitor>();
+        services.AddSingleton<IOperatorAlertReader>(sp => sp.GetRequiredService<OperatorAlertMonitor>());
+        services.AddHostedService(sp => sp.GetRequiredService<OperatorAlertMonitor>());
 
         return services;
     }

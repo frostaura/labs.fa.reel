@@ -112,7 +112,11 @@ public sealed record RetrainProgress(
 /// <param name="Required">The trainer's floor.</param>
 public sealed record RatingsFloor(int UsableRatings, int Required);
 
-/// <summary>The v2 status payload.</summary>
+/// <summary>
+/// The v2 status payload. <c>alerts</c> (additive) carries the active operator alerts — job failures
+/// over the hourly threshold, a provider refusing calls — for Founder-tier accounts, and is empty
+/// for everyone else: they are about the system, not about the caller's own pipeline.
+/// </summary>
 public sealed record SyncStatusResponse(
     int ContractVersion,
     [property: JsonConverter(typeof(JsonStringEnumConverter<PipelineStage>))] PipelineStage PipelineStage,
@@ -129,7 +133,8 @@ public sealed record SyncStatusResponse(
     IReadOnlyList<JobFailure> LastFailures,
     ProviderHealthSnapshot ProviderHealth,
     DegradedReason? DegradedReason,
-    RatingsFloor? NotEnoughRatings)
+    RatingsFloor? NotEnoughRatings,
+    IReadOnlyList<OperatorAlert> Alerts)
 {
     public const int CurrentContractVersion = 2;
 }

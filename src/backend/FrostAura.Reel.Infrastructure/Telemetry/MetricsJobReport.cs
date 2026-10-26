@@ -29,12 +29,25 @@ public sealed record JobKindMetrics(
 public sealed record ClientErrorMetrics(long Accepted, long RateLimited, DateTime Since);
 
 /// <summary><c>GET /api/observability/metrics</c>.</summary>
+/// <param name="GeneratedAt">When the report was built.</param>
+/// <param name="WindowStart">The start of the report window.</param>
+/// <param name="WindowHours">The window's length.</param>
+/// <param name="Jobs">Per job kind, from the database (the caller's jobs and global ones).</param>
+/// <param name="ClientErrors">The caller's browser error reports since process start.</param>
+/// <param name="Ask">The caller's Ask Reel turns in the window: stage latency and fallbacks, from the turn record.</param>
+/// <param name="Llm">Model calls per purpose since <see cref="LlmSince"/>, every account's: truncation and fallback.</param>
+/// <param name="LlmSince">When this process started counting model calls.</param>
+/// <param name="Alerts">Active operator alerts; Founder-tier callers only, otherwise empty.</param>
 public sealed record MetricsReport(
     DateTime GeneratedAt,
     DateTime WindowStart,
     int WindowHours,
     IReadOnlyList<JobKindMetrics> Jobs,
-    ClientErrorMetrics ClientErrors);
+    ClientErrorMetrics ClientErrors,
+    AskMetrics Ask,
+    IReadOnlyList<LlmPurposeMetrics> Llm,
+    DateTime LlmSince,
+    IReadOnlyList<OperatorAlert> Alerts);
 
 /// <summary>
 /// The job half of the metrics sink, read from the database rather than from counters: the M5

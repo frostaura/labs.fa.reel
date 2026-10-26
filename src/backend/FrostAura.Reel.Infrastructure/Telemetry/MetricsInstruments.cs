@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using FrostAura.Reel.Domain.Sync;
 
@@ -24,6 +25,20 @@ public sealed class ReelMetrics : IDisposable
     private readonly Counter<long> _interruptions;
     private readonly Counter<long> _clientErrorsAccepted;
     private readonly Counter<long> _clientErrorsRejected;
+    private readonly Counter<long> _alertsRaised;
+
+    /// <summary>
+    /// Failed attempts — retrying ones included — newest last, for the alert monitor's hourly count.
+    /// The database records only a job's LAST failure, so attempts that were retried and then
+    /// succeeded are visible here and nowhere else. Trimmed to <see cref="FailureMemory"/>.
+    /// </summary>
+    private readonly ConcurrentQueue<(DateTime At, JobKind Kind)> _recentFailures = new();
+
+    /// <summary>How long failed attempts are remembered for the alert window.</summary>
+    public static readonly TimeSpan FailureMemory = TimeSpan.FromHours(2);
+
+    /// <summary>A bound on the remembered attempts, so a failure storm cannot grow memory without limit.</summary>
+    private const int FailureMemoryCap = 20_000;
 
     public ReelMetrics(IMeterFactory? meterFactory = null)
     {
@@ -40,6 +55,8 @@ public sealed class ReelMetrics : IDisposable
             "reel.client_errors.accepted", "{report}", "Browser error reports written to the log.");
         _clientErrorsRejected = _meter.CreateCounter<long>(
             "reel.client_errors.rejected", "{report}", "Browser error reports refused (rate_limited or invalid).");
+        _alertsRaised = _meter.CreateCounter<long>(
+            "reel.alerts.raised", "{alert}", "Operator alerts raised (and hourly reminders), by alert code.");
     }
 
     /// <summary>The meter, for listeners that must tell this instance from another one in the same process.</summary>
@@ -50,12 +67,37 @@ public sealed class ReelMetrics : IDisposable
     /// <param name="kind">The job's kind.</param>
     /// <param name="reasonCode">A <c>JobFailureReason</c> code, never the message.</param>
     /// <param name="retrying">Whether the job went back to the queue for another attempt.</param>
-    public void JobFailed(JobKind kind, string reasonCode, bool retrying) =>
+    public void JobFailed(JobKind kind, string reasonCode, bool retrying)
+    {
         _jobsFailed.Add(
             1,
             new KeyValuePair<string, object?>("kind", kind.ToString()),
             new KeyValuePair<string, object?>("reason", reasonCode),
             new KeyValuePair<string, object?>("retrying", retrying));
+        RememberFailure(DateTime.UtcNow, kind);
+    }
+
+    /// <summary>Failed attempts since <paramref name="since"/>, per kind, from this process's memory.</summary>
+    public IReadOnlyDictionary<JobKind, int> FailedAttemptsSince(DateTime since) =>
+        _recentFailures
+            .Where(f => f.At >= since)
+            .GroupBy(f => f.Kind)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+    /// <summary>Records a failed attempt at a given time. Internal for tests that need a past attempt.</summary>
+    internal void RememberFailure(DateTime at, JobKind kind)
+    {
+        _recentFailures.Enqueue((at, kind));
+        var horizon = at - FailureMemory;
+        while ((_recentFailures.Count > FailureMemoryCap
+                || (_recentFailures.TryPeek(out var oldest) && oldest.At < horizon))
+            && _recentFailures.TryDequeue(out _))
+        {
+        }
+    }
+
+    /// <param name="code">An <c>OperatorAlertCodes</c> value.</param>
+    public void AlertRaised(string code) => _alertsRaised.Add(1, new KeyValuePair<string, object?>("code", code));
 
     public void JobYielded(JobKind kind) => _deadlineYields.Add(1, new KeyValuePair<string, object?>("kind", kind.ToString()));
 
