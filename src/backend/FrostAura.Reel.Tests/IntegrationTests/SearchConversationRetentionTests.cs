@@ -58,6 +58,35 @@ public class SearchConversationRetentionTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// The nightly sweep runs with no account pinned. Under the fail-closed tenancy mode an unpinned
+    /// read of a scoped entity throws, so a sweep that leaned on its caller's scope would stop pruning
+    /// the night the default flips to Throw — this one states its accounts itself.
+    /// </summary>
+    [Fact]
+    public async Task The_sweep_prunes_with_no_account_pinned_when_unscoped_reads_fail_closed()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync("ask-retention-strict");
+        var now = new DateTime(2026, 9, 11, 0, 0, 0, DateTimeKind.Utc);
+        var stale = await SeedConversationAsync(accountId, now.AddDays(-120), cards: 2);
+        var fresh = await SeedConversationAsync(accountId, now.AddDays(-1), cards: 1);
+
+        await using (var db = fixture.CreateContext(new AccountContext(new UnscopedReadPolicy(UnscopedReadMode.Throw))))
+        {
+            Assert.True(await SearchConversationRetention.SweepAsync(db, configuration: null, now, CancellationToken.None) >= 1);
+        }
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.False(await verify.SearchConversations.AnyAsync(c => c.Id == stale));
+        Assert.False(await verify.SearchTurnCards.AnyAsync(c => c.ConversationId == stale));
+        Assert.True(await verify.SearchConversations.AnyAsync(c => c.Id == fresh));
+    }
+
+    /// <summary>
     /// THE PROBE: one day either side of the cutoff, and exactly one conversation moves. An
     /// off-by-one in the comparison or in the day arithmetic is invisible to every other assertion
     /// here, and would show up in production as a transcript that vanished a day early.
