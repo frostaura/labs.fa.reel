@@ -1,10 +1,12 @@
-import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
+import type { JobFailure, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import type { LiveProgress, SyncSummary } from "../store/syncSlice";
 import { relTime } from "./format";
 import {
   activeJobLabel,
   failureAftermath,
   failureNoun,
+  jobKindNoun,
+  providerName,
   isTerminalReason,
   purposeCopy,
   reasonCopy,
@@ -145,6 +147,65 @@ function failureIssue(failure: JobFailure, now: number): PillIssue {
   };
 }
 
+/** How many job kinds the job-failures alert names before it stops listing. */
+const ALERT_KINDS_NAMED = 3;
+
+/**
+ * Operator alerts (`alerts`, WS-6 task 6) as pill issues. The API sends them to Founder-tier
+ * accounts only, so everyone else gets none; they are about Reel as a whole, not the caller's own
+ * pipeline, and the copy says so.
+ *
+ *   - `provider_refused` is danger: a 401/402/403 needs a person, and every call to that provider is
+ *     off until one acts. When the provider-health breaker already reports the same provider down,
+ *     the alert adds nothing and is not repeated.
+ *   - `job_failures` is a warning: a pattern across every account, not a failure of the founder's
+ *     own work (those arrive as `lastFailures`).
+ *   - A code this build does not know reads as generic copy, never as the code (the backend's
+ *     contract: "a client maps a code it does not know to generic copy").
+ */
+function operatorAlertIssues(status: SyncStatus): PillIssue[] {
+  const breakers = status.providerHealth?.breakers ?? [];
+  const providerDown = status.providerHealth?.state === "Down";
+  const issues: PillIssue[] = [];
+  for (const alert of status.alerts ?? []) {
+    if (alert.code === "provider_refused") {
+      const alreadyShown = providerDown && breakers.some((b) => b.provider === alert.provider && b.state === "Open");
+      if (alreadyShown) continue;
+      const name = providerName(alert.provider);
+      issues.push({
+        tone: "danger",
+        label: `${name.charAt(0).toUpperCase()}${name.slice(1)} refusing Reel`,
+        detail: `${reasonCopy(alert.reasonCode)} Reel stopped calling ${name} ${relTime(alert.since)}, for every account, until the key or the account is fixed.`,
+        reconnect: false,
+      });
+    } else if (alert.code === "job_failures") {
+      issues.push({ tone: "warn", label: "Jobs failing across Reel", detail: jobFailuresDetail(alert), reconnect: false });
+    } else {
+      issues.push({
+        tone: "warn",
+        label: "Operator alert",
+        detail: "Reel raised an alert this version can't name. The server log has it, under ALERT.",
+        reconnect: false,
+      });
+    }
+  }
+  return issues;
+}
+
+function jobFailuresDetail(alert: OperatorAlert): string {
+  const n = alert.count;
+  const lead =
+    n != null
+      ? `${n.toLocaleString("en-US")} job ${plural(n, "attempt")} failed in the last hour, across every account`
+      : "Job attempts are failing across every account";
+  const threshold = alert.threshold != null ? ` (the alert fires at ${alert.threshold.toLocaleString("en-US")})` : "";
+  const kinds = (alert.kinds ?? [])
+    .slice(0, ALERT_KINDS_NAMED)
+    .map((k) => `${jobKindNoun(k.kind)} ${k.count.toLocaleString("en-US")}`);
+  const more = (alert.kinds?.length ?? 0) > ALERT_KINDS_NAMED ? ", and more" : "";
+  return kinds.length ? `${lead}${threshold}. Most: ${kinds.join(", ")}${more}.` : `${lead}${threshold}.`;
+}
+
 /** Every health issue the status reports, most severe first (stable within a tone). */
 export function healthIssues(status: SyncStatus | undefined, statusFailed: boolean, now: number = Date.now()): PillIssue[] {
   const issues: PillIssue[] = [];
@@ -221,6 +282,8 @@ export function healthIssues(status: SyncStatus | undefined, statusFailed: boole
       reconnect: false,
     });
   }
+
+  issues.push(...operatorAlertIssues(status));
 
   const floor = status.notEnoughRatings;
   if (reason === "NotEnoughRatings" || status.pipelineStage === "NotEnoughRatings") {
