@@ -51,7 +51,7 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
                   }}
                   aria-label={`Drop ${entry.name}`}
                   title="Drop — remove from Continue Watching"
-                  className="absolute right-1.5 top-1.5 rounded-full bg-fa-ink/70 p-1 text-fa-frost-dim opacity-0 transition hover:text-fa-danger group-hover:opacity-100 focus:opacity-100"
+                  className="absolute right-1.5 top-1.5 rounded-full bg-fa-ink/70 p-1 text-3 opacity-0 transition hover:text-fa-danger group-hover:opacity-100 focus:opacity-100"
                   data-testid="drop-button"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -65,7 +65,7 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
                     known, otherwise the watched/total count. The count only renders when totalAired
                     is real — "180/0 episodes" (aired count not yet synced) fell back to a third
                     format and made rows look inconsistent card-to-card. */}
-                <p className="fa-caption text-fa-frost-dim">
+                <p className="fa-caption text-3">
                   {next
                     ? `Next: ${next}`
                     : entry.totalAired > 0

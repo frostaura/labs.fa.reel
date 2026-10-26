@@ -40,6 +40,42 @@ describe("predictionWaterfall", () => {
   });
 });
 
+// WS-5's walk (OnDemandScorer.WaterfallAsync): up to six named features, then the rest of the
+// model as "otherFeatures", then the serving-time corrections, from "where the model starts for you".
+describe("predictionWaterfall over WS-5's server walk", () => {
+  const server = {
+    baseline: 6.512,
+    baselineLabel: "where the model starts for you",
+    steps: [
+      { feature: "directorAffinity", value: 0.81 },
+      { feature: "simLovedCentroid", value: 0.42 },
+      { feature: "traktRating", value: 0.03 },
+      { feature: "otherFeatures", value: 0.11 },
+      { feature: "recentRatingsCorrection", value: 0.2 },
+      { feature: "calibrationToYourScale", value: 0.268 },
+      { feature: "dislikedSimilarity", value: -0.15 },
+    ],
+  };
+
+  it("lands on the shown number and names every serving-time step in the reader's words", () => {
+    const walk = predictionWaterfall(8.2, server)!;
+    expect(walk.start.label).toBe("where the model starts for you");
+    const labels = walk.steps.map((s) => s.label);
+    expect(labels).toContain("your recent ratings");
+    expect(labels).toContain("fitted to how you rate");
+    expect(labels).toContain("similar to titles you passed on");
+    for (const label of labels) expect(label).not.toMatch(/[A-Z]|otherFeatures/);
+  });
+
+  it("merges the server's otherFeatures with the hidden small steps into ONE 'everything else' line", () => {
+    const walk = predictionWaterfall(8.2, server)!;
+    const rest = walk.steps.filter((s) => s.label === "everything else");
+    expect(rest).toHaveLength(1);
+    expect(rest[0].value).toBeCloseTo(0.14, 5);
+    expect(walk.steps.at(-1)?.label).toBe("everything else");
+  });
+});
+
 describe("signedStep and significantContributions", () => {
   it("signs a step with a real minus", () => {
     expect(signedStep(0.84)).toBe("+0.8");

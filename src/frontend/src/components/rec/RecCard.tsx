@@ -54,7 +54,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
             {card.name}
           </Link>
         </p>
-        <p className="fa-caption text-fa-frost-dim">
+        <p className="fa-caption text-3">
           {[card.year, formatRuntime(card.runtimeMinutes)].filter(Boolean).join(" · ")}
         </p>
         {/* The lens's own first clause when copy has been written for this account and title;
@@ -73,7 +73,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
                 key={chip.text}
                 title={chip.description}
                 aria-label={chip.description}
-                className="max-w-full truncate rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption leading-tight text-fa-frost-dim"
+                className="max-w-full truncate rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption leading-tight text-3"
                 data-testid="card-evidence-chip"
               >
                 {chip.text}

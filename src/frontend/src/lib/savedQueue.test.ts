@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  heldOutLine,
   isSavedSort,
   listSyncLabel,
   pinnedPick,
@@ -171,5 +172,29 @@ describe("listSyncLabel (G-3)", () => {
         expect(label(listSync, onManagedList)?.text).not.toBe("syncing…");
       }
     }
+  });
+});
+
+describe("the offList tooltip (WS-4 CR-4)", () => {
+  // Watchlist intake (WS-4 task 8) saves titles that were never written to Up Next, so the old
+  // "taken off on Trakt, or the write-back gave up" was a false story for every one of them.
+  it("states the fact without guessing why", () => {
+    const title = listSyncLabel({ listSync: "offList" })!.title;
+    expect(title).toBe("Saved here; not on your Reel — Up Next list on Trakt.");
+    expect(title).not.toMatch(/gave up|taken off/i);
+  });
+});
+
+describe("heldOutLine (WS-4: Saved holds out what the conditions exclude)", () => {
+  it("says how many saves the conditions hide, and nothing when none are", () => {
+    expect(heldOutLine(0, 5)).toBeNull();
+    expect(heldOutLine(undefined, 5)).toBeNull();
+    expect(heldOutLine(1, 5)).toBe("1 save is hidden by your conditions.");
+    expect(heldOutLine(2, 5)).toBe("2 saves are hidden by your conditions.");
+  });
+
+  it("says ALL of them when nothing is left to show, so a full shelf never reads as empty", () => {
+    expect(heldOutLine(1, 0)).toBe("Your 1 save is hidden by your conditions.");
+    expect(heldOutLine(3, 0)).toBe("All 3 of your saves are hidden by your conditions.");
   });
 });

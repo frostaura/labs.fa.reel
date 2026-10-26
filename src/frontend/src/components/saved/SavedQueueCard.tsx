@@ -54,7 +54,7 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
                 <span
                   key={p.name}
                   title={`${p.name} — streaming now`}
-                  className="fa-overline rounded-[4px] bg-fa-ink/80 px-1 py-0.5 text-fa-frost-dim ring-1 ring-black/30"
+                  className="fa-overline rounded-[4px] bg-fa-ink/80 px-1 py-0.5 text-3 ring-1 ring-black/30"
                 >
                   {p.name.slice(0, 2)}
                 </span>
@@ -74,10 +74,10 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
             {item.name}
           </Link>
         </p>
-        <p className="fa-caption text-fa-frost-dim">
+        <p className="fa-caption text-3">
           {[item.year, runtime].filter(Boolean).join(" · ") || " "}
         </p>
-        <p className="fa-caption text-fa-frost-dim">
+        <p className="fa-caption text-3">
           {band != null ? (
             <span title="Predicted rating, and what predictions for you are typically off by">{band}</span>
           ) : (
@@ -93,7 +93,7 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
         </p>
         {/* The list line says "syncing…" only while a write-back is genuinely waiting — see
             listSyncLabel. With no evidence either way it says nothing rather than guess. */}
-        <p className="fa-caption text-fa-frost-dim/70" data-testid="saved-card-meta">
+        <p className="fa-caption text-3" data-testid="saved-card-meta">
           {savedAgo(item.daysSaved)}
           {syncLabel && (
             <>
@@ -114,7 +114,7 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
           onClick={() => onUnsave(item)}
           aria-label={`Remove ${item.name} from Saved`}
           title="Remove from Saved"
-          className="absolute left-0 top-0 z-10 inline-flex min-h-11 min-w-11 items-center justify-center text-fa-frost-dim transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0"
+          className="absolute left-0 top-0 z-10 inline-flex min-h-11 min-w-11 items-center justify-center text-3 transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0"
           data-testid="saved-unsave"
         >
           <span className="flex items-center justify-center rounded-full bg-fa-ink/70 p-1.5 backdrop-blur-sm">

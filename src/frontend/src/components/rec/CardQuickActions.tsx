@@ -106,9 +106,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   const buttonClass = large
     ? "pointer-events-auto inline-flex min-h-11 min-w-11 lg:[@media(pointer:fine)]:min-h-0 lg:[@media(pointer:fine)]:min-w-0 items-center justify-center " +
       "rounded-full text-fa-frost transition " +
-      "lg:text-fa-frost-dim lg:opacity-0 lg:group-hover:opacity-100 lg:focus:opacity-100 lg:focus-visible:opacity-100 lg:[@media(pointer:coarse)]:opacity-60"
+      "lg:text-3 lg:opacity-0 lg:group-hover:opacity-100 lg:focus:opacity-100 lg:focus-visible:opacity-100 lg:[@media(pointer:coarse)]:opacity-60"
     : "pointer-events-auto inline-flex min-h-11 min-w-11 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0 items-center justify-center " +
-      "rounded-full text-fa-frost-dim transition " +
+      "rounded-full text-3 transition " +
       "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60"
   const pillClass = large
     ? "flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass p-2.5 lg:border-transparent lg:bg-fa-ink/70 lg:p-2 backdrop-blur-sm"
@@ -210,7 +210,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           className="w-auto p-1.5"
           data-testid="quick-reason-picker"
         >
-          <p className="fa-overline text-fa-frost-dim px-2 pb-1.5">why not?</p>
+          <p className="fa-overline text-3 px-2 pb-1.5">why not?</p>
           <div className="flex flex-col">
             {DISLIKE_REASONS.map((reason) => (
               <button
@@ -274,7 +274,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           className="w-auto p-2"
           data-testid="quick-rate-picker"
         >
-          <p className="fa-overline text-fa-frost-dim px-0.5 pb-1.5">your score out of 10</p>
+          <p className="fa-overline text-3 px-0.5 pb-1.5">your score out of 10</p>
           <div className="grid grid-cols-5 gap-1">
             {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
               <button

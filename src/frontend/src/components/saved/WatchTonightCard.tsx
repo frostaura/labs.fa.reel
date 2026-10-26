@@ -56,9 +56,10 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
         <Link
           to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
           state={{ backgroundLocation: location }}
-          className="block w-32 shrink-0 focus:outline-none"
-          aria-label={`Open ${item.name}`}
+          className="block w-32 shrink-0 rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60"
         >
+          {/* Named by the poster (its alt, or the fallback's role="img" label): an aria-label here
+              would hide the visible initials from the name (axe label-content-name-mismatch). */}
           <PosterImage path={item.posterPath} alt={item.name} size="w342" />
         </Link>
 
@@ -70,7 +71,7 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
               </h3>
               {item.predictedRating != null && <PredictedRatingBadge rating={item.predictedRating} />}
             </div>
-            <p className="fa-caption text-fa-frost-dim">
+            <p className="fa-caption text-3">
               {[item.year, runtime].filter(Boolean).join(" · ")}
               {band != null && (
                 <>
@@ -114,7 +115,7 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
               {started ? "Started" : "Started watching"}
             </button>
             {started && (
-              <span className="fa-caption text-fa-frost-dim">
+              <span className="fa-caption text-3">
                 Noted here only — it leaves the queue by itself once Trakt reports the watch.
               </span>
             )}

@@ -34,7 +34,7 @@ export default function SavedSortControl({
             className={`fa-overline inline-flex min-h-11 items-center rounded-md px-2.5 py-1.5 transition [@media(pointer:fine)]:min-h-0 ${
               active
                 ? "bg-fa-frost/15 text-fa-frost-bright"
-                : "text-fa-frost-dim hover:bg-fa-glass-strong hover:text-fa-frost"
+                : "text-3 hover:bg-fa-glass-strong hover:text-fa-frost"
             }`}
           >
             {SAVED_SORT_META[sort].label}

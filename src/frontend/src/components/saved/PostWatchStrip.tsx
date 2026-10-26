@@ -96,14 +96,14 @@ export default function PostWatchStrip() {
                 }}
                 aria-label={`${value} out of 10`}
                 data-testid={`post-watch-rate-${value}`}
-                className="fa-overline h-7 w-7 rounded-md border border-fa-edge bg-fa-glass text-fa-frost-dim tabular-nums transition hover:border-fa-frost/40 hover:text-fa-frost-bright disabled:opacity-50"
+                className="fa-overline h-7 w-7 rounded-md border border-fa-edge bg-fa-glass text-3 tabular-nums transition hover:border-fa-frost/40 hover:text-fa-frost-bright disabled:opacity-50"
               >
                 {value}
               </button>
             ))}
           </div>
 
-          <p className="fa-caption text-fa-frost-dim/70">
+          <p className="fa-caption text-3">
             Closing the loop — Reel only learns how wrong it was when you tell it.
           </p>
         </div>

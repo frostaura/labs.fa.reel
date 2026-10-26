@@ -69,12 +69,12 @@ export default function RecRow({
             <span className="fa-status-orb bg-fa-frost" aria-hidden />
             <span className="fa-section-title text-sm">{title}</span>
           </span>
-          <span className="fa-caption text-fa-frost-dim">more in this genre →</span>
+          <span className="fa-caption text-3">more in this genre →</span>
         </div>
       ) : caption ? (
         <div className="space-y-1">
           <h2 className="fa-section-title text-base">{title}</h2>
-          <p className="fa-caption text-fa-frost-dim" data-testid="rail-caption">
+          <p className="fa-caption text-3" data-testid="rail-caption">
             {caption}
           </p>
         </div>

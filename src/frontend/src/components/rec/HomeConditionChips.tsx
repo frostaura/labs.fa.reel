@@ -4,6 +4,7 @@ import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
 import { conditionChipFace } from "../../lib/conditionChipFace";
 import type { BrowseFilter } from "../../lib/browseFilter";
+import { Button } from "../ui/button";
 
 /**
  * Home's conditions, as chips you can act on (H-20, H-9, O-11): everything shaping tonight's picks,
@@ -58,10 +59,12 @@ export default function HomeConditionChips({
   const hidden = conditions.length - shown.length;
 
   // A 44 px target on any coarse pointer, around a pill that stays caption-sized: the button is the
-  // hit area and the span inside it is what you see (the card quick actions' pattern).
+  // hit area and the span inside it is what you see (the card quick actions' pattern). The Button
+  // primitive's own padding, fill and size are cleared, so only its focus ring is kept.
+  const bare = "h-auto gap-0 rounded-full p-0 font-normal hover:bg-transparent";
   const target = strip
-    ? "inline-flex min-h-11 shrink-0 items-center"
-    : "inline-flex min-h-11 items-center [@media(pointer:fine)]:min-h-0";
+    ? `${bare} min-h-11 shrink-0`
+    : `${bare} min-h-11 [@media(pointer:fine)]:min-h-0`;
   const pill =
     "inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption text-fa-frost transition group-hover:border-fa-frost/40 group-hover:text-fa-frost-bright";
 
@@ -83,7 +86,7 @@ export default function HomeConditionChips({
         >
           {!strip && (
             <span
-              className="fa-overline text-fa-frost-dim"
+              className="fa-overline text-3"
               title="Saved to your account — these apply everywhere. Tap a chip to change them."
             >
               Conditions
@@ -92,9 +95,9 @@ export default function HomeConditionChips({
           {shown.map((chip) => {
             const face = conditionChipFace(chip);
             return (
-              <button
+              <Button
                 key={chip.key}
-                type="button"
+                variant="ghost"
                 onClick={onOpenEditor}
                 aria-label={`${face.spoken} — change conditions`}
                 title={`${face.spoken} — tap to change your conditions`}
@@ -107,19 +110,19 @@ export default function HomeConditionChips({
                   {face.sign === "exclude" && <Minus className="h-3 w-3 shrink-0" aria-hidden />}
                   <span className="first-letter:uppercase inline-block">{face.text}</span>
                 </span>
-              </button>
+              </Button>
             );
           })}
           {conditions.length > limit && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={() => setExpanded((v) => !v)}
               aria-expanded={expanded}
-              className={`${target} px-1 fa-caption text-fa-frost-dim underline-offset-2 hover:text-fa-frost hover:underline`}
+              className={`${target} px-1 text-3 underline-offset-2 hover:text-fa-frost hover:underline`}
               data-testid="conditions-more"
             >
-              {expanded ? "Show fewer" : `+${hidden} more`}
-            </button>
+              <span className="fa-caption">{expanded ? "Show fewer" : `+${hidden} more`}</span>
+            </Button>
           )}
         </div>
       )}
@@ -127,7 +130,7 @@ export default function HomeConditionChips({
       {views.length > 0 && (
         <div className="flex flex-wrap items-center gap-x-1.5" data-testid="summary-group-browse">
           <span
-            className="fa-overline text-fa-frost-dim"
+            className="fa-overline text-3"
             title="This browser only — set by the Movies/TV and availability toggles, and not saved to your account."
           >
             Viewing on this device
@@ -141,16 +144,16 @@ export default function HomeConditionChips({
             >
               {chip.label}
               {onBrowseChange && browse && chip.clear && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
                   onClick={() => onBrowseChange({ ...browse, ...chip.clear })}
                   aria-label={`Clear “${chip.label}” — show everything again`}
                   title={`Clear “${chip.label}”`}
                   data-testid={`clear-${chip.key}`}
-                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full opacity-70 transition hover:opacity-100 focus-visible:opacity-100 [@media(pointer:fine)]:min-h-0 [@media(pointer:fine)]:min-w-0 [@media(pointer:fine)]:p-1"
+                  className="h-auto min-h-11 min-w-11 rounded-full p-0 text-fa-frost hover:bg-transparent hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0 [@media(pointer:fine)]:min-w-0 [@media(pointer:fine)]:p-1"
                 >
-                  <X className="h-3 w-3" />
-                </button>
+                  <X className="h-3 w-3" aria-hidden />
+                </Button>
               )}
             </span>
           ))}

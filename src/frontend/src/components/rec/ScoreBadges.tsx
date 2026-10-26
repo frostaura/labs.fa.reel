@@ -53,7 +53,7 @@ export function ScoreChip({ predictedRating, crowdRating, crowdVotes, userRating
       {plan.showUserRating && (
         <span className="flex items-center gap-1 whitespace-nowrap text-fa-frost-bright" data-testid="user-rating">
           {userRating}
-          <span className="fa-overline font-normal text-fa-frost-dim">yours</span>
+          <span className="fa-overline font-normal text-3">yours</span>
         </span>
       )}
       {plan.showPredicted && (
@@ -64,7 +64,7 @@ export function ScoreChip({ predictedRating, crowdRating, crowdVotes, userRating
               {bandLabel}
             </span>
           )}
-          <span className="fa-overline font-normal text-fa-frost-dim">for you</span>
+          <span className="fa-overline font-normal text-3">for you</span>
         </span>
       )}
       {plan.showCrowd && (
@@ -74,7 +74,7 @@ export function ScoreChip({ predictedRating, crowdRating, crowdVotes, userRating
         >
           <Star className={large ? "h-3.5 w-3.5 shrink-0 fill-current" : "h-2.5 w-2.5 shrink-0 fill-current"} aria-hidden />
           {crowdRating!.toFixed(1)}
-          <span className="fa-overline truncate font-normal text-fa-warning/60">crowd{votes ? ` ${votes}` : ""}</span>
+          <span className="fa-overline truncate font-normal text-3">crowd{votes ? ` ${votes}` : ""}</span>
         </span>
       )}
     </span>

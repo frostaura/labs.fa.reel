@@ -142,7 +142,7 @@ export default function Home() {
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
               {feed?.generatedAt && (
-                <p className="fa-caption text-fa-frost-dim">
+                <p className="fa-caption text-3">
                   ranked for you · {formatRankedAt(feed.generatedAt)}
                 </p>
               )}
@@ -238,7 +238,7 @@ export default function Home() {
               ))}
             </div>
             {building && (
-              <p className="fa-body text-fa-frost-dim text-center">
+              <p className="fa-body text-3 text-center">
                 Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
               </p>
             )}
@@ -299,12 +299,12 @@ export default function Home() {
 
             {(feed?.lockedRowCount ?? 0) > 0 && (
               <section className="fa-card p-5 flex items-center gap-4">
-                <Lock className="h-5 w-5 text-fa-frost-dim shrink-0" />
+                <Lock className="h-5 w-5 text-3 shrink-0" />
                 <div>
                   <p className="fa-body text-fa-frost-bright">
                     {feed!.lockedRowCount} more personalised row{feed!.lockedRowCount === 1 ? "" : "s"} on the full feed
                   </p>
-                  <p className="fa-caption text-fa-frost-dim">
+                  <p className="fa-caption text-3">
                     The free shortlist gives you three picks a day — the paid feed unlocks every row, natural-language
                     search and the managed Trakt queue.
                   </p>

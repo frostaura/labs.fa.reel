@@ -18,7 +18,7 @@ function LinkKindPill({ link }: { link: ProviderLink }) {
       className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px leading-none ${
         link === "deep"
           ? "border-fa-frost/40 bg-fa-frost/10 text-fa-frost-bright"
-          : "border-fa-edge bg-fa-glass text-fa-frost-dim"
+          : "border-fa-edge bg-fa-glass text-3"
       }`}
       data-testid="provider-link-kind"
     >
@@ -44,9 +44,9 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
           region may not be where the person watches (FD-13) — so it is stated, with the way to
           change it one tap away (F-16, G NEW-1). */}
       <div className="flex items-center justify-between gap-3">
-        <h2 className="fa-overline text-fa-frost-dim">where to watch</h2>
+        <h2 className="fa-overline text-3">where to watch</h2>
         {data && (
-          <p className="fa-caption flex items-center gap-1 text-fa-frost-dim/70" data-testid="where-to-watch-region">
+          <p className="fa-caption flex items-center gap-1 text-3" data-testid="where-to-watch-region">
             <span>
               in <span className="text-fa-frost">{data.region}</span>
             </span>
@@ -70,10 +70,10 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
           ))}
         </div>
       ) : !data || data.providers.length === 0 ? (
-        <p className="fa-caption text-fa-frost-dim">
+        <p className="fa-caption text-3">
           No streaming options found in your region.{" "}
           {data && (
-            <a href={data.tmdbWatchPage} target="_blank" rel="noopener noreferrer" className="fa-link">
+            <a href={data.tmdbWatchPage} target="_blank" rel="noopener noreferrer" className="fa-link underline">
               Check TMDB
             </a>
           )}
@@ -94,7 +94,7 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                       {logoUrl(p.logoPath) ? (
                         <img src={logoUrl(p.logoPath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim" aria-hidden>
+                        <div className="h-full w-full flex items-center justify-center fa-caption text-3" aria-hidden>
                           {p.provider.slice(0, 2)}
                         </div>
                       )}
@@ -102,7 +102,7 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                     <div className="pr-1 min-w-0" aria-hidden>
                       <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>
                       <p className="fa-caption leading-tight flex flex-wrap items-center gap-x-1 gap-y-0.5">
-                        <span className="text-fa-frost-dim/70">{kinds}</span>
+                        <span className="text-3">{kinds}</span>
                         <LinkKindPill link={p.link} />
                       </p>
                     </div>
@@ -160,7 +160,7 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
         })()
       )}
 
-      {data && <p className="fa-caption text-fa-frost-dim/60">{data.attribution}</p>}
+      {data && <p className="fa-caption text-3">{data.attribution}</p>}
     </section>
   );
 }

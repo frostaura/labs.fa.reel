@@ -44,7 +44,7 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
   if (people.length === 0) return null;
   return (
     <div className="space-y-2">
-      <p className="fa-overline text-fa-frost-dim">{label}</p>
+      <p className="fa-overline text-3">{label}</p>
       <FadeScrollRow className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
         {people.map((p) => (
           <CastMemberCard key={p.personId} member={p} />
@@ -196,7 +196,7 @@ export default function TitleDetail() {
                       failure may be a 500, a 403 or no answer at all, and how long it lasts is not
                       something this screen knows — so it says nothing it cannot back. */}
                   {failure === "not-found" && (
-                    <p className="fa-caption text-fa-frost-dim">
+                    <p className="fa-caption text-3">
                       The link may be mistyped, or the title has left TMDB&apos;s catalogue.
                     </p>
                   )}
@@ -281,7 +281,7 @@ export default function TitleDetail() {
                               Reel predicted {title.prediction.predictedRating.toFixed(1)} for you
                             </p>
                           )}
-                          <p className="fa-caption text-fa-frost-dim">
+                          <p className="fa-caption text-3">
                             {[
                               title.year,
                               formatRuntime(title.runtimeMinutes),
@@ -322,7 +322,7 @@ export default function TitleDetail() {
                         </button>
                       </PopoverTrigger>
                       <PopoverContent align="start" className="w-auto">
-                        <p className="fa-overline text-fa-frost-dim mb-2">one tap — seen &amp; rated</p>
+                        <p className="fa-overline text-3 mb-2">one tap — seen &amp; rated</p>
                         {/* Two rows of five: ten 44 px targets in one row are wider than a phone. */}
                         <div className="grid grid-cols-5 gap-1">
                           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
@@ -348,14 +348,14 @@ export default function TitleDetail() {
                                 unrate(args);
                                 setRatePickerOpen(false);
                               }}
-                              className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-fa-frost-dim"
+                              className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-3"
                               data-testid="clear-rating"
                             >
                               Clear rating
                             </button>
                           )}
                         </div>
-                        <p className="fa-caption text-fa-frost-dim/70 mt-2">
+                        <p className="fa-caption text-3 mt-2">
                           {title.mediaType === "Movie"
                             ? "Also logs a play on your Trakt history — cleared if you remove the rating."
                             : "Ratings sync to Trakt — your episode history is never touched."}
@@ -439,10 +439,10 @@ export default function TitleDetail() {
                       (F-25), then the bars that pushed it. */}
                   {title.prediction && (waterfall || bars.length > 0) && (
                     <section className="space-y-2">
-                      <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
+                      <h2 className="fa-overline text-3">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
                       {waterfall && (
                         <ol
-                          className="fa-caption flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-fa-frost-dim max-w-2xl"
+                          className="fa-caption flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-3 max-w-2xl"
                           aria-label={`From ${waterfall.start.label} ${waterfall.start.value.toFixed(1)} to ${waterfall.end.toFixed(1)} for you`}
                           data-testid="prediction-waterfall"
                         >
@@ -477,7 +477,7 @@ export default function TitleDetail() {
                                   style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
                                 />
                               </div>
-                              <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">
+                              <span className="fa-caption text-3 tabular-nums w-12 text-right">
                                 {contribution.value >= 0 ? "+" : ""}
                                 {contribution.value.toFixed(1)}
                               </span>
@@ -502,7 +502,7 @@ export default function TitleDetail() {
                               >
                                 {bar}
                                 <ChevronDown
-                                  className={`h-3.5 w-3.5 shrink-0 text-fa-frost-dim transition-transform ${expanded ? "rotate-180" : ""}`}
+                                  className={`h-3.5 w-3.5 shrink-0 text-3 transition-transform ${expanded ? "rotate-180" : ""}`}
                                 />
                               </button>
                               {expanded && (
@@ -519,14 +519,14 @@ export default function TitleDetail() {
                                             {initials(p.name)}
                                           </span>
                                           <span className="fa-caption text-fa-frost-bright">{p.name}</span>
-                                          <span className="fa-caption text-fa-frost-dim tabular-nums">
+                                          <span className="fa-caption text-3 tabular-nums">
                                             you rate them {p.yourAverage.toFixed(1)}
                                           </span>
                                         </Link>
                                       ))}
                                     </div>
                                   ) : (
-                                    detail.note && <p className="fa-caption text-fa-frost-dim">{detail.note}</p>
+                                    detail.note && <p className="fa-caption text-3">{detail.note}</p>
                                   )}
                                 </div>
                               )}

@@ -102,6 +102,11 @@ export interface FeedPayload {
   hero: FeedCard[];
   rows: FeedRow[];
   lockedRowCount: number;
+  /**
+   * The calibrator's band behind every "for you" number (WS-5; the same number Saved shows), 1dp.
+   * Null until the account's closed loop has pairs; absent from an older server.
+   */
+  expectedAbsoluteError?: number | null;
 }
 
 /** A genre rail the home page renders beneath the personalised rows; filled via /feed/more. */
