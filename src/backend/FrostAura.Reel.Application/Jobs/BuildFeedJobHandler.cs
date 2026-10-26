@@ -232,7 +232,7 @@ public class BuildFeedJobHandler(
             ? Math.Clamp(floor, 0m, 10m) : 0m;
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
-        ReportProgress(job, accountId, 10, "Scouting fresh candidates");
+        await ReportProgressAsync(job, accountId, 10, "Scouting fresh candidates", ct);
         // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
         // the same replayability contract the row anchors hold.
         var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
@@ -242,7 +242,7 @@ public class BuildFeedJobHandler(
         // slice over the user's taste centroids — so a well-matched but unpopular title actually
         // enters scoring — then the FastTree model re-ranks the union exactly as before. The
         // retriever applies the same eligibility rule, the poster/tmdbId lane, and the maturity gate.
-        ReportProgress(job, accountId, 30, "Scoring the field");
+        await ReportProgressAsync(job, accountId, 30, "Scoring the field", ct);
 
         var retrieval = await candidateRetriever.RetrieveWithArmsAsync(
             accountId,
@@ -286,13 +286,13 @@ public class BuildFeedJobHandler(
         var needsHydration = shortlist.Where(t => t.LastMetadataRefreshAt == null).ToList();
         if (needsHydration.Count > 0)
         {
-            ReportProgress(job, accountId, 50, $"Enriching {needsHydration.Count} contenders");
+            await ReportProgressAsync(job, accountId, 50, $"Enriching {needsHydration.Count} contenders", ct);
             await hydrator.HydrateBatchAsync(needsHydration, ct);
             await db.SaveChangesAsync(ct);
         }
 
         // ── Phase 4: final score with contributions ─────────────────────────────────────
-        ReportProgress(job, accountId, 70, "Final ranking");
+        await ReportProgressAsync(job, accountId, 70, "Final ranking", ct);
 
         // The dislike demotion is subtracted on the shortlist scores, BEFORE hero and row
         // selection — so a title similar to what the user declined cannot ride a high base score
@@ -354,7 +354,8 @@ public class BuildFeedJobHandler(
         var profileHash = await ProfileHashOrNullAsync(accountId, taste, now, ct);
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
-        ReportProgress(job, accountId, 85, "Assembling tonight's picks");
+        await ReportProgressAsync(job, accountId, 85, "Assembling tonight's picks", ct);
+        capture.Progress = (pct, message) => ReportProgressAsync(job, accountId, pct, message, ct);
         var snapshot = await AssembleAsync(
             account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, profileHash, capture,
             ScoreFinalAsync, ct);
@@ -760,6 +761,9 @@ public class BuildFeedJobHandler(
     private sealed class BuildCapture
     {
         public FeedBuildMode Mode { get; set; }
+
+        /// <summary>Reports a step of assembly to the job row and the pill; null in tests that assemble directly.</summary>
+        public Func<decimal, string, Task>? Progress { get; set; }
 
         public int HeroEligibleCount { get; set; }
 
@@ -1240,6 +1244,11 @@ public class BuildFeedJobHandler(
         // only produce an order it is not allowed to use — and would spend for the privilege.
         // Every verdict lands in the shared 6h fit cache, so the why pass below reads them back for
         // free and the pass costs the build ~5 calls in total rather than two passes' worth.
+        if (mode == FeedBuildMode.Fresh && capture.Progress is { } judging)
+        {
+            await judging(88, "Judging fit for tonight's picks");
+        }
+
         var preAssemblyFits = mode == FeedBuildMode.Fresh
             ? await JudgeFitBeforeAssemblyAsync(account.Id, taste, candidates, effectiveFloor, RankKey, ct)
             : new Dictionary<Guid, double>();
@@ -1871,6 +1880,11 @@ public class BuildFeedJobHandler(
         // AFTER the no-op decision, so a suppressed rebuild never spends a call: kept cards reuse
         // their persisted whys (Preserve), the rest go through the agent within a time-boxed budget
         // into the same 6h fit cache the paginator uses, and every rail ends repeat-free.
+        if (capture.Progress is { } writing)
+        {
+            await writing(94, "Writing why-lines");
+        }
+
         await ApplyCuratedWhysAsync(
             account.Id, taste, planned, previousItems, mode,
             anchors.ToDictionary(a => a.Id, a => a.Name),
@@ -2863,10 +2877,21 @@ public class BuildFeedJobHandler(
         return union == 0 ? 0d : (double)intersection / union;
     }
 
-    private void ReportProgress(SyncJob job, Guid accountId, decimal pct, string message)
+    /// <summary>
+    /// One step of the build, persisted before it is published — the order every other handler
+    /// uses, because the pill has two sources (this frame and a five-second poll of the job row) and
+    /// a poll mid-build read "Scouting fresh candidates" for the whole run (WS-6). The row is written
+    /// with a fenced UPDATE of its two progress columns only, outside the build's unit of work, so a
+    /// progress write never commits half a build; a reclaimed attempt's fence matches no row.
+    /// </summary>
+    private async Task ReportProgressAsync(SyncJob job, Guid accountId, decimal pct, string message, CancellationToken ct)
     {
         job.ProgressPct = pct;
         job.ProgressMessage = message;
+        var (id, attempt) = (job.Id, job.AttemptCount);
+        await db.SyncJobs
+            .Where(j => j.Id == id && j.AttemptCount == attempt && j.Status == JobStatus.Running)
+            .ExecuteUpdateAsync(set => set.SetProperty(j => j.ProgressPct, pct).SetProperty(j => j.ProgressMessage, message), ct);
         events.Publish(accountId, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
         {
             ["kind"] = "feed",

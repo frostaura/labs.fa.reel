@@ -93,6 +93,64 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     [Fact]
+    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // WS-6: the pill reads a frame and a five-second poll of the row. The build published its
+        // steps without writing them, so a poll read "Scouting fresh candidates" for the whole run;
+        // and the long assembly (fit judgement, why pass) reported nothing at all.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        var jobId = Guid.NewGuid();
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.SyncJobs.Add(new SyncJob
+            {
+                Id = jobId, AccountId = accountId, Kind = JobKind.BuildFeed, EnqueuedAt = DateTime.UtcNow,
+                Status = JobStatus.Running, AttemptCount = 1, StartedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var hub = new RowReadingHub(Fixture, jobId);
+        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId);
+
+        Assert.Contains(hub.Frames, f => f.Published == "Writing why-lines");
+        Assert.Contains(hub.Frames, f => f.Published == "Judging fit for tonight's picks");
+        Assert.All(hub.Frames, f => Assert.Equal(f.Published, f.OnRow));
+    }
+
+    /// <summary>On every progress frame, reads the job row through a separate context — what a poll would see.</summary>
+    private sealed class RowReadingHub(PostgresFixture fixture, Guid jobId) : IPipelineEventHub
+    {
+        public List<(string? Published, string? OnRow)> Frames { get; } = [];
+
+        public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data)
+        {
+            if (type != PipelineEventTypes.JobProgress)
+            {
+                return;
+            }
+
+            using var poll = fixture.CreateContext(new AccountContext());
+            Frames.Add((data["message"] as string, poll.SyncJobs.AsNoTracking().Single(j => j.Id == jobId).ProgressMessage));
+        }
+
+        public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
+            Guid accountId, long? lastEventId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+
+    [Fact]
     public async Task Every_card_the_build_plans_is_written_to_the_exposure_log_exactly_once()
     {
         if (!Fixture.Available)
@@ -960,7 +1018,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     private async Task RunBuildAsync(
-        Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null)
+        Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null,
+        IPipelineEventHub? events = null, Guid? persistedJobId = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -997,20 +1056,22 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
             new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
             fitCache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
-            new NoopEventHub(),
+            events ?? new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
-        await handler.ExecuteAsync(
-            new SyncJob
+        // A persisted job is read through the handler's own context, as the runner hands it over.
+        var job = persistedJobId is { } jobId
+            ? await db.SyncJobs.SingleAsync(j => j.Id == jobId)
+            : new SyncJob
             {
                 Id = Guid.NewGuid(),
                 AccountId = accountId,
                 Kind = JobKind.BuildFeed,
                 EnqueuedAt = DateTime.UtcNow,
                 TriggerReason = triggerReason,
-            },
-            CancellationToken.None);
+            };
+        await handler.ExecuteAsync(job, CancellationToken.None);
     }
 
     private async Task<Guid> SeedAccountAsync()
