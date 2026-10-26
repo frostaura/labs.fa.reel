@@ -54,6 +54,8 @@ public class HeuristicPluralNegationTests
     [Theory]
     // Broken before: "-ches" lost only its "s" ("witche").
     [InlineData("no witches", "witch")]
+    // "hero" joined the vocabulary (WS-1 CR-1): the "-oes" plural lands on it like "superheroes" does.
+    [InlineData("no heroes", "hero")]
     // Worked before, and must not change: the singular, the "-ies" pair, the plain "-s".
     [InlineData("no superhero please", "superhero")]
     [InlineData("no zombies", "zombie")]
