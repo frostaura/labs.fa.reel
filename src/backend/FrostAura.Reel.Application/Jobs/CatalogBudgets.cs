@@ -45,6 +45,13 @@ public sealed class CatalogHydrationBudget(IReelDbContext db, IConfiguration? co
     /// enrichment and enrichment is never idle waiting for metadata. At 1,500/day a ~35,000-title
     /// seed is fully hydrated in ~24 days.
     /// </para>
+    /// <para>
+    /// The same ceiling also pays for the metadata refresh sweep (<c>MetadataRefreshPolicy</c>):
+    /// recent releases weekly, everything else every 150 days. For a ~38,000-title catalogue that is
+    /// a steady ~500 refreshes a day, so 1,500 keeps every cached TMDB record inside TMDB's
+    /// six-month limit with room left for new supply. The global sweep logs the projection on every
+    /// run and warns when a lowered value would break the limit.
+    /// </para>
     /// </summary>
     public const string DailyTitlesKey = "HYDRATE_MAX_TITLES_PER_DAY";
 

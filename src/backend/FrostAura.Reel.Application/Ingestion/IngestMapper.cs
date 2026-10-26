@@ -24,7 +24,7 @@ public static class IngestMapper
         title.Certification = movie.Certification ?? title.Certification;
         title.Country = movie.Country ?? title.Country;
         title.Language = movie.Language ?? title.Language;
-        title.Genres = movie.Genres ?? title.Genres;
+        title.Genres = movie.Genres is { } genres ? TvMovieGenre.Preserve(title.Genres, genres) : title.Genres;
         title.Subgenres = movie.Subgenres ?? title.Subgenres;
         title.TraktRating = movie.Rating ?? title.TraktRating;
         title.TraktVotes = movie.Votes;
