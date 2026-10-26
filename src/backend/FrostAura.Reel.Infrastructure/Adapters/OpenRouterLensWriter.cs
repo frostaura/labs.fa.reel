@@ -8,6 +8,7 @@ using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using LlmCallMetrics = FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
