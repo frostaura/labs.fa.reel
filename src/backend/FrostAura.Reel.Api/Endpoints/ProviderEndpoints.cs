@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -69,43 +70,10 @@ public static class ProviderEndpoints
             if (cached.Count == 0)
             {
                 var fresh = await tmdb.GetWatchProvidersAsync(tmdbId, title.MediaType == MediaType.Movie, region, ct);
-                var providerIds = fresh.Select(f => f.ProviderId).Distinct().ToList();
-                var known = await db.StreamingProviders
-                    .Where(p => providerIds.Contains(p.TmdbProviderId))
-                    .ToDictionaryAsync(p => p.TmdbProviderId, ct);
 
-                await db.TitleAvailabilities
-                    .Where(a => a.TitleId == title.Id && a.Region == region)
-                    .ExecuteDeleteAsync(ct);
-
-                foreach (var item in fresh)
-                {
-                    if (!known.TryGetValue(item.ProviderId, out var provider))
-                    {
-                        provider = new Domain.Providers.StreamingProvider
-                        {
-                            Id = Guid.NewGuid(),
-                            TmdbProviderId = item.ProviderId,
-                            Name = item.Name,
-                            LogoPath = item.LogoPath,
-                            DisplayPriority = item.DisplayPriority,
-                        };
-                        known[item.ProviderId] = provider;
-                        db.StreamingProviders.Add(provider);
-                    }
-
-                    db.TitleAvailabilities.Add(new Domain.Providers.TitleAvailability
-                    {
-                        Id = Guid.NewGuid(),
-                        TitleId = title.Id,
-                        Region = region,
-                        ProviderId = provider.Id,
-                        Kind = item.Kind,
-                        FetchedAt = DateTime.UtcNow,
-                    });
-                }
-
-                await db.SaveChangesAsync(ct);
+                // The same writer the availability job uses: opening a title page refetches, and a
+                // refetch must carry each offer's FirstSeenAt, not restamp the whole set as new.
+                await AvailabilitySnapshot.ReplaceAsync(db, title.Id, region, fresh, DateTime.UtcNow, ct);
                 cached = await db.TitleAvailabilities
                     .Where(a => a.TitleId == title.Id && a.Region == region)
                     .ToListAsync(ct);

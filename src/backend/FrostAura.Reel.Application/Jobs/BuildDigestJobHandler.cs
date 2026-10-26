@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -15,7 +16,8 @@ namespace FrostAura.Reel.Application.Jobs;
 
 /// <summary>
 /// Builds the account's weekly digest: eligible titles that either released in the trailing
-/// 7 days or newly landed on one of the account's flatrate providers, scored by the personal
+/// 7 days or arrived on a streaming-now offer in the account's region inside those 7 days (the
+/// provider set changed — <see cref="StreamingNowPolicy.Arrivals"/>), scored by the personal
 /// model, floored at 7.0 predicted — softly, see <see cref="MinPredictedRating"/> — top 10 kept.
 /// Upserts <see cref="AccountDigest"/> on
 /// (AccountId, WeekStart = Monday of the current ISO week, UTC) so re-runs within a week
@@ -67,8 +69,7 @@ public sealed class BuildDigestJobHandler(
 
         job.ProgressMessage = "Collecting this week's arrivals";
 
-        // "New on provider" must not resurface what last week's digest already showed — a title
-        // whose availability row merely got re-fetched would otherwise reappear every week.
+        // "New on provider" must not resurface what last week's digest already announced.
         var previous = await db.AccountDigests
             .FirstOrDefaultAsync(d => d.AccountId == accountId && d.WeekStart == previousWeekStart, ct);
         var previousTitleIds = previous is null
@@ -86,15 +87,22 @@ public sealed class BuildDigestJobHandler(
             .Select(t => t.Id)
             .ToListAsync(ct);
 
-        var newOnProviderIds = await eligibility.EligibleTitles(accountId)
-            .Where(t => t.PosterPath != null && t.TmdbId != null)
-            .Where(t => db.TitleAvailabilities.Any(a =>
-                a.TitleId == t.Id
-                && a.Region == account.Region
-                && a.Kind == AvailabilityKind.Flatrate
-                && a.FetchedAt >= windowStart))
-            .Select(t => t.Id)
-            .ToListAsync(ct);
+        // Arrivals, not refreshes: an offer counts only when the provider set CHANGED to include it
+        // inside the window (FirstSeenAt), under the one streaming-now definition. This used to read
+        // FetchedAt, which every cache refresh rewrites — so NCIS (2003) and Reign Over Me (2007)
+        // went out as "Just landed on your services" the morning after the availability job ran
+        // (IR2S-02). The provider named is the arrival itself; with two, the more prominent.
+        var eligibleCards = eligibility.EligibleTitles(accountId)
+            .Where(t => t.PosterPath != null && t.TmdbId != null);
+        var arrivals = (await StreamingNowPolicy.Arrivals(db.TitleAvailabilities, account.Region, windowStart, now)
+                .Where(a => eligibleCards.Any(t => t.Id == a.TitleId))
+                .Join(db.StreamingProviders, a => a.ProviderId, p => p.Id,
+                    (a, p) => new { a.TitleId, p.Name, p.DisplayPriority })
+                .ToListAsync(ct))
+            .GroupBy(x => x.TitleId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(x => x.DisplayPriority).ThenBy(x => x.Name, StringComparer.Ordinal).First().Name);
 
         // A brand-new release that also just landed on a provider is a "new-release" — the
         // stronger, more specific reason wins.
@@ -104,7 +112,8 @@ public sealed class BuildDigestJobHandler(
             reasons[id] = DigestReasons.NewRelease;
         }
 
-        foreach (var id in newOnProviderIds)
+        // Last week's digest still suppresses: an arrival it already announced is not news twice.
+        foreach (var id in arrivals.Keys)
         {
             if (!reasons.ContainsKey(id) && !previousTitleIds.Contains(id))
             {
@@ -170,7 +179,9 @@ public sealed class BuildDigestJobHandler(
         var items = selected
             .OrderByDescending(kv => kv.Value)
             .Take(MaxItems)
-            .Select(kv => new DigestItem(kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key], degradedReason))
+            .Select(kv => new DigestItem(
+                kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key], degradedReason,
+                reasons[kv.Key] == DigestReasons.NewOnProvider ? arrivals[kv.Key] : null))
             .ToList();
 
         var digest = await db.AccountDigests
@@ -262,7 +273,7 @@ public sealed class BuildDigestJobHandler(
         // degraded reason still outranks it: a push that oversells a relaxed digest is the
         // dishonesty the relaxed floor exists to avoid, and a personal hook oversells it best.
         var body = top.DegradedReason
-            ?? (topHook is { Length: > 0 } hook ? hook : DigestReasons.CopyFor(top.Reason));
+            ?? (topHook is { Length: > 0 } hook ? hook : DigestReasons.CopyFor(top.Reason, top.Provider));
         return new DigestPushPayload(title, body, url);
     }
 

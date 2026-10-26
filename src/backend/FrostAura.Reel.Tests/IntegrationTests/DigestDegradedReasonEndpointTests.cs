@@ -59,7 +59,7 @@ public class DigestDegradedReasonEndpointTests(PostgresFixture fixture, ReelApiF
         await SeedDigestAsync(accountId, JsonSerializer.Serialize(new[]
         {
             new DigestItem(Guid.NewGuid(), 6.7m, DigestReasons.NewRelease, Relaxed),
-            new DigestItem(present, 6.5m, DigestReasons.NewOnProvider, Relaxed),
+            new DigestItem(present, 6.5m, DigestReasons.NewRelease, Relaxed),
         }));
 
         var body = await GetDigestAsync(client);
