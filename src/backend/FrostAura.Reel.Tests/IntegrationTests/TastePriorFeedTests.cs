@@ -61,7 +61,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
     private sealed record Fixture(Guid AccountId, string[] VolumeGenres, string NoHistoryGenre);
 
     [Fact]
-    public async Task A_near_constant_shortlist_under_a_floor_does_not_hand_the_hero_to_a_genre_the_account_never_watches()
+    public async Task A_near_constant_shortlist_under_a_floor_deals_nothing_under_it_and_says_how_little_cleared()
     {
         if (!fixture.Available)
         {
@@ -86,20 +86,16 @@ public class TastePriorFeedTests(PostgresFixture fixture)
 
         Assert.NotEmpty(hero);
 
-        // The media floor: at least round(5 × 0.9) films, from a shortlist that has them.
-        Assert.True(
-            hero.Count(x => x.Title.MediaType == MediaType.Movie) >= 4,
-            $"hero was {string.Join(", ", hero.Select(x => $"{x.Title.Name} ({x.Title.MediaType})"))}");
+        // The bar holds (FD-4's default, XM-07): every film here scores under 6.0, so not one card on
+        // the page is a film, however the prior would have liked to lead with them. Until 2026-10-26
+        // the build relaxed the bar to the shortlist's 80th percentile here and dealt the films.
+        Assert.All(items, x => Assert.True(x.Item.PredictedRating >= Floor, $"{x.Title.Name} {x.Item.PredictedRating}"));
 
-        // And not one card from a genre this account has never rated — enforced by nothing harder
-        // than arithmetic on its own history, which is the point: no genre is named anywhere.
-        Assert.DoesNotContain(hero, x => x.Title.Genres.Contains(account.NoHistoryGenre));
-
-        // The floor was relaxed, and the page says so in the user's own units rather than silently
-        // building out of the fourteen titles that squeaked over it.
+        // And the page says so in the user's own units rather than silently building out of the
+        // fourteen titles that cleared it.
         Assert.NotNull(snapshot.DegradedReason);
         Assert.Contains("6.0", snapshot.DegradedReason);
-        Assert.Contains("relaxed", snapshot.DegradedReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Only 14 titles cleared", snapshot.DegradedReason, StringComparison.Ordinal);
 
         // The instrument agrees with the page: this build genuinely had nothing at the hero's own
         // confidence bar, so the hero is honestly labelled as reaching rather than confident.
@@ -126,8 +122,10 @@ public class TastePriorFeedTests(PostgresFixture fixture)
         var accountId = account.AccountId;
         var (_, realityIds) = await SeedCandidatesAsync(account, movies: 340, realityShows: 14);
         await SeedIsShowDrivenArtifactAsync(accountId);
-        await AddContentFilterAsync(accountId, FilterKind.MinPredictedRating, ContentFilterRules.FormatRating(Floor));
 
+        // No bar: the films (5.5–5.9) and the reality shows (6.2–6.9) are both dealable, so the prior
+        // alone decides who leads. (Under a 6.0 bar only the shows clear it and the films never reach
+        // the page — the test above.)
         await RunBuildAsync(accountId);
 
         await using var db = fixture.CreateContext(new AccountContext());
@@ -280,19 +278,22 @@ public class TastePriorFeedTests(PostgresFixture fixture)
         }
 
         // The fixture holds, checked rather than assumed: the model alone orders the groups
-        // disliked > fewVotes = noCrowd > wellVoted, and the crowd term alone reverses that.
-        string[] order = ["wellVoted", "fewVotes", "noCrowd", "disliked"];
+        // disliked > fewVotes = noCrowd > wellVoted, and the crowd's score and volume terms together
+        // put wellVoted first, then disliked on its 5,000 votes, then the two-vote 10.0 (the shrunk
+        // score lifting it over no crowd at all): the model's lead overturned at both ends (task 9).
+        string[] modelOrder = ["wellVoted", "fewVotes", "noCrowd", "disliked"];
+        string[] order = ["wellVoted", "disliked", "fewVotes", "noCrowd"];
         decimal Lo(string g) => groups[g].Min(id => scores[id]);
         decimal Hi(string g) => groups[g].Max(id => scores[id]);
         double KeyLo(string g) => groups[g].Min(id => (double)scores[id] * CrowdPrior.FactorFor(titles[id]));
         double KeyHi(string g) => groups[g].Max(id => (double)scores[id] * CrowdPrior.FactorFor(titles[id]));
         Assert.All(order.SelectMany(g => groups[g]), id => Assert.True(scores.ContainsKey(id), "every seeded title is scored"));
-        var model = string.Join("; ", order.Select(g => $"{g} {Lo(g)}–{Hi(g)}"));
+        var model = string.Join("; ", modelOrder.Select(g => $"{g} {Lo(g)}–{Hi(g)}"));
         Assert.True(Hi("wellVoted") < Lo("fewVotes") && Hi("wellVoted") < Lo("noCrowd"), $"model must rank wellVoted last: {model}");
         Assert.True(Hi("fewVotes") < Lo("disliked") && Hi("noCrowd") < Lo("disliked"), $"model must rank disliked first: {model}");
         for (var i = 0; i + 1 < order.Length; i++)
         {
-            Assert.True(KeyLo(order[i]) > KeyHi(order[i + 1]), $"the crowd term must reverse the model's order: {model}");
+            Assert.True(KeyLo(order[i]) > KeyHi(order[i + 1]), $"the crowd terms must order the groups {string.Join(" > ", order)}: {model}");
         }
 
         // The hero is the build's RankKey at work: every seat goes to the group the model scored
@@ -301,10 +302,10 @@ public class TastePriorFeedTests(PostgresFixture fixture)
         Assert.NotEmpty(hero);
         Assert.All(hero, id => Assert.Contains(id, groups["wellVoted"]));
 
-        // And the persisted ordering key carries the crowd term, so a reader can reconstruct why:
-        // FinalScore / the shown rating is the crowd factor (×1.042 here, not 1.0), to within the
-        // shown rating's two-decimal rounding.
-        var factor = CrowdPrior.FactorForScore(CrowdRating.Shrink(8.0m, 5_000));
+        // And the persisted ordering key carries the crowd terms, so a reader can reconstruct why:
+        // FinalScore / the shown rating is the crowd factor (score ×1.042 times volume ×1.052 here),
+        // to within the shown rating's two-decimal rounding.
+        var factor = CrowdPrior.FactorForScore(CrowdRating.Shrink(8.0m, 5_000)) * CrowdPrior.VolumeFactorFor(5_000);
         var heroItem = items.First(i => i.TitleId == hero[0]);
         Assert.InRange((double)(heroItem.FinalScore / heroItem.PredictedRating), factor - 0.0015d, factor + 0.0015d);
 
