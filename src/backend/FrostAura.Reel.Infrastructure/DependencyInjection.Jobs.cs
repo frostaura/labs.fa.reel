@@ -4,6 +4,7 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Infrastructure.Background;
 using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Infrastructure.Sse;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -31,6 +32,11 @@ public static partial class DependencyInjection
         // whichever partial runs first; until one exists the status API says "Unmonitored".
         services.AddScoped<SyncStatusQuery>();
         services.TryAddSingleton<IProviderHealthReader, UnmonitoredProviderHealthReader>();
+
+        // ── Observability: instruments, the client-error sink, the M5 job metrics ────────────────
+        services.TryAddSingleton<ReelMetrics>();
+        services.TryAddSingleton<ClientErrorSink>();
+        services.AddScoped<JobMetricsQuery>();
 
         return services;
     }

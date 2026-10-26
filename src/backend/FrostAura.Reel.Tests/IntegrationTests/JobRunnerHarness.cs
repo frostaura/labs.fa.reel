@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Background;
 using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,7 +43,8 @@ internal sealed class JobRunnerHarness : IAsyncDisposable
         string connectionString,
         JobRunnerOptions options,
         Action<IServiceCollection>? configure = null,
-        ILogger<JobRunnerService>? logger = null)
+        ILogger<JobRunnerService>? logger = null,
+        ReelMetrics? metrics = null)
     {
         var events = new RecordingEventHub();
         var services = new ServiceCollection();
@@ -57,7 +59,8 @@ internal sealed class JobRunnerHarness : IAsyncDisposable
             provider.GetRequiredService<IServiceScopeFactory>(),
             new ConfigurationBuilder().Build(),
             logger ?? NullLogger<JobRunnerService>.Instance,
-            options);
+            options,
+            metrics);
         return new JobRunnerHarness(provider, runner, events);
     }
 

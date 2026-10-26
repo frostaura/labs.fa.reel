@@ -11,7 +11,7 @@ using FrostAura.Reel.Domain.Providers;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 
-namespace FrostAura.Reel.Infrastructure.Persistence;
+namespace FrostAura.Reel.Application.Persistence;
 
 /// <summary>
 /// What a stored enum name this build does not define reads as (program §5.0 rule 8). The schema

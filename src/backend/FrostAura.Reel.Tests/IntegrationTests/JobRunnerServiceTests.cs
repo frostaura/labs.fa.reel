@@ -5,6 +5,8 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Background;
+using FrostAura.Reel.Infrastructure.Telemetry;
+using FrostAura.Reel.Tests.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -508,6 +510,227 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
     }
 
     [Fact]
+    public async Task Behind_the_real_provider_breaker_llm_kinds_wait_unspent_and_are_claimed_once_it_half_opens()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // WS-1's breaker as production registers it, on a clock the test moves.
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var breaker = new Infrastructure.Llm.ProviderHealthService(clock: clock);
+        breaker.ReportRefused(ApiProvider.OpenRouter, 402);
+
+        var account = await SeedAccountAsync();
+        var lens = ScriptedHandler.Succeeds(JobKind.PersonaliseTitles);
+        var sync = ScriptedHandler.Succeeds(JobKind.DeltaSync);
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), [lens, sync], services =>
+            services.AddSingleton<IProviderHealthReader>(breaker));
+        var llm = await AddJobAsync(JobKind.PersonaliseTitles, account.Id);
+        var plain = await AddJobAsync(JobKind.DeltaSync, account.Id, priority: 9);
+
+        await harness.Runner.StartAsync(CancellationToken.None);
+        try
+        {
+            // Open: the plain kind runs behind it, the LLM kind is not claimed and spends nothing.
+            await WaitForAsync(plain, j => j.Status == JobStatus.Succeeded, Patience);
+            await Task.Delay(TimeSpan.FromMilliseconds(600));
+            var held = await ReadAsync(llm);
+            Assert.Equal(JobStatus.Pending, held.Status);
+            Assert.Equal(0, held.AttemptCount);
+            Assert.Null(held.Error);
+            Assert.Equal(0, lens.Executions);
+
+            // Past the cool-off nothing else calls the provider; the queue itself must probe.
+            clock.Advance(Infrastructure.Llm.ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+            var ran = await WaitForAsync(llm, j => j.Status == JobStatus.Succeeded, Patience);
+            Assert.Equal(1, ran.AttemptCount);
+            Assert.Equal(1, lens.Executions);
+        }
+        finally
+        {
+            await harness.Runner.StopAsync(CancellationToken.None);
+        }
+    }
+
+    // ── Non-retryable failures (WS-1 CR-5) ─────────────────────────────────────────────────────
+
+    public static TheoryData<string, Func<Exception>> TypedNonRetryable => new()
+    {
+        { "thrown as is", () => new NonRetryableJobException("401 (Unauthorized)") },
+        { "wrapped by a helper", () => new InvalidOperationException("judge failed", new NonRetryableJobException("401 (Unauthorized)")) },
+        { "inside an aggregate", () => new AggregateException(new TimeoutException("slow"), new NonRetryableJobException("401 (Unauthorized)")) },
+    };
+
+    [Theory]
+    [MemberData(nameof(TypedNonRetryable))]
+    public async Task A_typed_non_retryable_failure_is_dead_lettered_on_its_first_attempt_with_its_attempts_unspent(
+        string because, Func<Exception> failure)
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var account = await SeedAccountAsync();
+        var handler = new ScriptedHandler(JobKind.CrossReference, (_, _, _) => throw failure());
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), handler);
+        var id = await AddJobAsync(JobKind.CrossReference, account.Id);
+
+        var outcome = await RunOnceAsync(harness, id, JobKind.CrossReference);
+
+        var row = await ReadAsync(id);
+        Assert.True(outcome == JobRunOutcome.Failed, $"{because}: {outcome}");
+        Assert.Equal(JobStatus.Failed, row.Status);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.NotNull(row.CompletedAt);
+        Assert.Equal(1, handler.Executions);
+        Assert.Contains(harness.Events.Published, e => e.AccountId == account.Id && e.Type == PipelineEventTypes.Failed);
+    }
+
+    [Fact]
+    public async Task An_untyped_failure_with_the_same_message_is_still_retried()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // The control for the theory above: the TYPE decides, never the text.
+        var account = await SeedAccountAsync();
+        var handler = new ScriptedHandler(JobKind.CrossReference, (_, _, _) =>
+            throw new InvalidOperationException("judge failed", new HttpRequestException("401 (Unauthorized)")));
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), handler);
+        var id = await AddJobAsync(JobKind.CrossReference, account.Id);
+
+        Assert.Equal(JobRunOutcome.Retrying, await RunOnceAsync(harness, id, JobKind.CrossReference));
+        var row = await ReadAsync(id);
+        Assert.Equal(JobStatus.Pending, row.Status);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.Null(row.CompletedAt);
+    }
+
+    [Theory]
+    [InlineData(0)] // the first of three attempts
+    [InlineData(1)] // the second: one would still have remained
+    public async Task A_handler_that_raises_its_own_attempt_count_and_throws_is_failed_without_another_attempt(int priorAttempts)
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // How the cross-reference handler asks for no retry today: the write was never saved
+        // (it throws), so the runner used to retry the deterministic failure anyway.
+        var account = await SeedAccountAsync();
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), [], ContextHandler.For(JobKind.CrossReference, (job, _, _) =>
+        {
+            job.AttemptCount = Math.Max(job.AttemptCount, JobRunnerLimits.MaxAttempts);
+            throw new InvalidOperationException("Cross-reference answered none of 3 batch(es): truncated.");
+        }));
+        var id = await AddJobAsync(JobKind.CrossReference, account.Id, attempts: priorAttempts);
+
+        Assert.Equal(JobRunOutcome.Failed, await RunOnceAsync(harness, id, JobKind.CrossReference));
+        var row = await ReadAsync(id);
+        Assert.Equal(JobStatus.Failed, row.Status);
+        Assert.Equal(priorAttempts + 1, row.AttemptCount);
+        Assert.NotNull(row.CompletedAt);
+        Assert.Contains("answered none", row.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_handler_that_moves_the_runners_columns_and_returns_is_completed_on_its_own_fence()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // Saving those columns would move the row off this execution's fence, and the completion
+        // would find no row and report a lease it never lost.
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), [], ContextHandler.For(JobKind.SeedCatalog, (job, _, _) =>
+        {
+            job.AttemptCount = 7;
+            job.Status = JobStatus.Failed;
+            job.CursorJson = """{"page":3}""";
+            return Task.CompletedTask;
+        }));
+        var id = await AddJobAsync(JobKind.SeedCatalog);
+
+        Assert.Equal(JobRunOutcome.Succeeded, await RunOnceAsync(harness, id, JobKind.SeedCatalog));
+        var row = await ReadAsync(id);
+        Assert.Equal(JobStatus.Succeeded, row.Status);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.Equal("""{"page": 3}""", row.CursorJson);
+    }
+
+    // ── Metrics (the M5 sink's live half) ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Every_settled_execution_is_counted_by_kind_with_its_reason_code_and_whether_it_retries()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        using var metrics = new ReelMetrics();
+        using var counters = new MeterRecorder(metrics.Meter);
+        var account = await SeedAccountAsync();
+        var options = Deadline(JobKind.SeedCatalog, TimeSpan.FromMilliseconds(300), DeadlineAction.Yield);
+        var handlers = new IJobHandler[]
+        {
+            new ScriptedHandler(JobKind.CrossReference, (_, _, _) =>
+                throw new NonRetryableJobException("Response status code does not indicate success: 402 (Payment Required).")),
+            new ScriptedHandler(JobKind.BuildFeed, (_, _, _) => throw new TimeoutException("The operation has timed out.")),
+            ScriptedHandler.Succeeds(JobKind.DeltaSync),
+            ScriptedHandler.Blocks(JobKind.SeedCatalog),
+            ScriptedHandler.Blocks(JobKind.Train),
+        };
+        await using var harness = JobRunnerHarness.Create(fixture.ConnectionString, options, services =>
+        {
+            foreach (var handler in handlers)
+            {
+                services.AddSingleton(handler);
+            }
+        }, metrics: metrics);
+
+        var paid = await AddJobAsync(JobKind.CrossReference, account.Id);
+        var slow = await AddJobAsync(JobKind.BuildFeed, account.Id);
+        var sync = await AddJobAsync(JobKind.DeltaSync, account.Id);
+        var sliced = await AddJobAsync(JobKind.SeedCatalog);
+        var stopped = await AddJobAsync(JobKind.Train, account.Id);
+
+        Assert.Equal(JobRunOutcome.Failed, await RunOnceAsync(harness, paid, JobKind.CrossReference));
+        // The sync first: a build is not claimable beside its account's pending sync.
+        Assert.Equal(JobRunOutcome.Succeeded, await RunOnceAsync(harness, sync, JobKind.DeltaSync));
+        Assert.Equal(JobRunOutcome.Retrying, await RunOnceAsync(harness, slow, JobKind.BuildFeed));
+        Assert.Equal(JobRunOutcome.Yielded, await RunOnceAsync(harness, sliced, JobKind.SeedCatalog));
+
+        using (var stopping = new CancellationTokenSource())
+        {
+            var claim = await harness.Runner.ClaimNextAsync([nameof(JobKind.Train)], CancellationToken.None, stopped);
+            var run = harness.Runner.RunAsync(claim!, stopping.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(200));
+            await stopping.CancelAsync();
+            Assert.Equal(JobRunOutcome.Interrupted, await run.WaitAsync(Patience));
+        }
+
+        Assert.Equal(1, counters.Sum("reel.jobs.failed", ("kind", "CrossReference"), ("reason", JobFailureReason.PaymentRequired), ("retrying", false)));
+        Assert.Equal(1, counters.Sum("reel.jobs.failed", ("kind", "BuildFeed"), ("reason", JobFailureReason.TimedOut), ("retrying", true)));
+        Assert.Equal(2, counters.Sum("reel.jobs.failed"));
+        Assert.Equal(1, counters.Sum("reel.jobs.succeeded", ("kind", "DeltaSync")));
+        Assert.Equal(1, counters.Sum("reel.jobs.deadline_yields", ("kind", "SeedCatalog")));
+        Assert.Equal(1, counters.Sum("reel.jobs.interruptions", ("kind", "Train")));
+
+        // The durable half agrees: the M5 columns carry the same slice and refund.
+        Assert.Equal(1, (await ReadAsync(sliced)).DeadlineYields);
+        Assert.NotNull((await ReadAsync(sliced)).RequeuedAt);
+        Assert.Equal(1, (await ReadAsync(stopped)).Interruptions);
+    }
+
+    [Fact]
     public async Task A_kind_this_build_does_not_know_is_never_claimed()
     {
         if (!await ResetAsync())
@@ -912,6 +1135,24 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         var kinds = defaults.Kinds.ToDictionary(k => k.Key, k => k.Value);
         kinds[kind] = kinds[kind] with { Deadline = deadline, OnDeadline = action };
         return defaults with { Kinds = kinds };
+    }
+
+    /// <summary>One execution through the real claim and the real execution path, without the loop.</summary>
+    private static async Task<JobRunOutcome> RunOnceAsync(JobRunnerHarness harness, Guid id, JobKind kind)
+    {
+        var claim = await harness.Runner.ClaimNextAsync([kind.ToString()], CancellationToken.None, id);
+        Assert.NotNull(claim);
+        return await harness.Runner.RunAsync(claim, CancellationToken.None);
+    }
+
+    /// <summary>A clock the test moves by hand, for the provider-health service's cool-off.</summary>
+    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
+    {
+        private long _ticks = start.UtcTicks;
+
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
+
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
     }
 
     /// <summary>Empties the queue; false when there is no database (the collection no-ops).</summary>

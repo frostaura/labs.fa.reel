@@ -1,5 +1,13 @@
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Application.Sync;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
@@ -106,6 +114,395 @@ public class PersistedEnumFallbackTests
         Assert.Equal(JobStatus.Cancelled, TolerantEnumConverter<JobStatus>.Read("Paused"));
         Assert.Equal(JobKind.SeedCatalog, TolerantEnumConverter<JobKind>.Read("RepairAvailability"));
     }
+
+    [Fact]
+    public void No_persisted_enum_is_a_flags_enum()
+    {
+        // Both readers accept only an exact member NAME; a combined flags value is written as
+        // "A, B", which they would read as unknown. Declare a flags enum here on purpose or not at all.
+        var flags = PersistedEnums().Select(e => e.EnumType)
+            .Concat(JsonPersistedEnums().Select(e => e.EnumType))
+            .Where(t => t.IsDefined(typeof(FlagsAttribute), inherit: false))
+            .Distinct()
+            .ToList();
+        Assert.Empty(flags);
+    }
+
+    // ── Enums inside persisted JSON ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every type this build deserializes from a persisted JSON column (or a cookie that outlives a
+    /// deploy). A new one belongs here; the walk below finds the enums inside it, so an enum later
+    /// added to any of them needs a declared fallback before this test passes.
+    /// </summary>
+    private static readonly string[] JsonPersistedTypeNames =
+    [
+        "FrostAura.Reel.Domain.Ports.SearchIntent, FrostAura.Reel.Domain",
+        "FrostAura.Reel.Domain.Lens.LensNote, FrostAura.Reel.Domain",
+        "FrostAura.Reel.Domain.Lens.TasteFacts, FrostAura.Reel.Domain",
+        "FrostAura.Reel.Domain.Feed.DigestItem, FrostAura.Reel.Domain",
+        "FrostAura.Reel.Domain.Tenancy.AccountSettings, FrostAura.Reel.Domain",
+        "FrostAura.Reel.Application.Sync.OutboxDispatcher+OutboxPayload, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Ranking.SharedEvidence, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Jobs.CatalogSeedCursor, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Jobs.DeltaSyncJobHandler+Cursor, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Jobs.FullIngestJobHandler+Cursor, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Jobs.HydrateCatalogJobHandler+Cursor, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Jobs.HydrateCatalogJobHandler+GlobalCursor, FrostAura.Reel.Application",
+        "FrostAura.Reel.Application.Auth.OAuthStateCodec+StatePayload, FrostAura.Reel.Application",
+        "FrostAura.Reel.Infrastructure.Ml.FastTreeModelEngine+Hyperparams, FrostAura.Reel.Infrastructure",
+        "FrostAura.Reel.Api.Endpoints.TitleEndpoints+ContributionEntry, FrostAura.Reel.Api",
+    ];
+
+    /// <summary>
+    /// JSON-persisted enum properties that still read through a converter that throws on an unknown
+    /// name, each with the change request that moves it. The guard below fails when a new one
+    /// appears, and when one listed here has been moved (so the entry is deleted, not left stale).
+    /// </summary>
+    private static readonly Dictionary<string, string> PendingAdoption = new(StringComparer.Ordinal)
+    {
+        ["OutboxPayload.MediaType"] = OutboxReaderPending,
+    };
+
+    /// <summary>
+    /// The production readers of persisted JSON that still fail on a member a newer build wrote,
+    /// each with the change request that fixes it in its owner's file. Each is checked against the
+    /// real reader: while listed, the reader must still show the hazard, so a fix that lands without
+    /// deleting its entry fails; once deleted, the reader must read every newer shape safely. Rolling
+    /// back by REEL_TAG is not safe for these rows until this table is empty.
+    /// </summary>
+    private static readonly Dictionary<string, string> PendingReaders = new(StringComparer.Ordinal)
+    {
+        ["OutboxDispatcher.OutboxPayload"] = OutboxReaderPending,
+        ["AskReelCarry.Parse"] =
+            "R1-43 CR-3 (WS-2, AskReelCarry.cs): read with PersistedJson.Options and UnrecognisedJsonEnumConverter<MediaType>, then drop media types that are not members",
+    };
+
+    private const string OutboxReaderPending =
+        "R1-43 CR-2 (WS-4, OutboxDispatcher.cs): UnrecognisedJsonEnumConverter<MediaType> on the payload, and dead-letter any entry that is not an explicit Movie or Show before any Trakt call";
+
+    private static IReadOnlyList<(string Path, Type EnumType, PropertyInfo? Property)> JsonPersistedEnums()
+    {
+        var found = new List<(string, Type, PropertyInfo?)>();
+        foreach (var name in JsonPersistedTypeNames)
+        {
+            var type = Type.GetType(name, throwOnError: true)!;
+            Walk(type, type.Name, null, found, []);
+        }
+
+        return found;
+    }
+
+    private static void Walk(Type type, string path, PropertyInfo? property, List<(string, Type, PropertyInfo?)> found, HashSet<Type> seen)
+    {
+        var plain = Nullable.GetUnderlyingType(type) ?? type;
+        if (plain.IsEnum)
+        {
+            found.Add((path, plain, property));
+            return;
+        }
+
+        if (plain.IsPrimitive || plain == typeof(string) || plain == typeof(decimal) || plain == typeof(Guid)
+            || plain == typeof(DateTime) || plain == typeof(DateTimeOffset) || plain == typeof(JsonElement)
+            || !seen.Add(plain))
+        {
+            return;
+        }
+
+        if (plain.IsArray)
+        {
+            Walk(plain.GetElementType()!, path + "[]", property, found, seen);
+            return;
+        }
+
+        if (plain.IsGenericType && plain.Namespace?.StartsWith("System", StringComparison.Ordinal) == true)
+        {
+            foreach (var argument in plain.GetGenericArguments())
+            {
+                Walk(argument, path + "[]", property, found, seen);
+            }
+
+            return;
+        }
+
+        foreach (var member in plain.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            Walk(member.PropertyType, $"{plain.Name}.{member.Name}", member, found, seen);
+        }
+    }
+
+    public static TheoryData<Type> AllPersistedEnumTypes()
+    {
+        var data = new TheoryData<Type>();
+        foreach (var type in PersistedEnums().Select(e => e.EnumType).Concat(JsonPersistedEnums().Select(e => e.EnumType)).Distinct())
+        {
+            data.Add(type);
+        }
+
+        return data;
+    }
+
+    [Fact]
+    public void Persisted_json_carries_enums_at_all()
+    {
+        // Guards the walk against passing vacuously: these are the two known today.
+        var paths = JsonPersistedEnums().Select(e => e.Path).ToList();
+        Assert.Contains("SearchIntent.MediaTypes[]", paths);
+        Assert.Contains("PersonQuery.Role", paths);
+        Assert.Contains("OutboxPayload.MediaType", paths);
+    }
+
+    [Fact]
+    public void Every_enum_inside_persisted_json_has_a_fallback_the_schema_steward_declared()
+    {
+        var undeclared = JsonPersistedEnums()
+            .Where(e => !PersistedEnumFallbacks.IsDeclared(e.EnumType))
+            .Select(e => $"{e.Path} ({e.EnumType.Name}): add it to PersistedEnumFallbacks with its reason")
+            .ToList();
+
+        Assert.Empty(undeclared);
+    }
+
+    [Fact]
+    public void Every_annotated_json_enum_reads_through_a_tolerant_converter_or_is_pending_by_name()
+    {
+        var tolerant = new[] { typeof(TolerantJsonEnumConverter<>), typeof(UnrecognisedJsonEnumConverter<>) };
+        var annotated = JsonPersistedEnums()
+            .Where(e => e.Property?.GetCustomAttribute<JsonConverterAttribute>() is not null)
+            .Select(e => (e.Path, Converter: e.Property!.GetCustomAttribute<JsonConverterAttribute>()!.ConverterType))
+            .ToList();
+        var intolerant = annotated
+            .Where(a => a.Converter is null || !a.Converter.IsGenericType || !tolerant.Contains(a.Converter.GetGenericTypeDefinition()))
+            .Select(a => a.Path)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Empty(intolerant.Except(PendingAdoption.Keys));
+        Assert.True(
+            PendingAdoption.Keys.All(intolerant.Contains),
+            "Adopted, so delete from PendingAdoption: " + string.Join(", ", PendingAdoption.Keys.Except(intolerant)));
+    }
+
+    [Theory]
+    [MemberData(nameof(AllPersistedEnumTypes))]
+    public void In_json_every_member_round_trips_by_name_and_reads_from_the_number_the_default_options_wrote(Type enumType) =>
+        Generic(nameof(JsonRoundTrips), enumType);
+
+    [Theory]
+    [MemberData(nameof(AllPersistedEnumTypes))]
+    public void In_json_an_unknown_name_number_or_token_reads_as_the_declared_fallback(Type enumType) =>
+        Generic(nameof(JsonFallsBack), enumType);
+
+    [Fact]
+    public void A_stored_intent_with_media_types_and_roles_from_a_newer_build_reads_with_its_known_values_intact()
+    {
+        // Written exactly as LiveSearchExpansionService writes SearchTurns.IntentJson: default
+        // options, so enums are numbers. Then what a newer build with more members would have added.
+        var stored = JsonSerializer.Serialize(new SearchIntent(
+            ["Drama"], [], [MediaType.Show], "slow burn", null, null,
+            People: [new PersonQuery("Denis Villeneuve", PersonRole.Director)]));
+        var newer = JsonNode.Parse(stored)!;
+        newer["MediaTypes"]!.AsArray().Add(7);
+        newer["MediaTypes"]!.AsArray().Add("Documentary");
+        newer["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Hans Zimmer", ["Role"] = "Composer" });
+        newer["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Roger Deakins", ["Role"] = 9 });
+
+        var read = JsonSerializer.Deserialize<SearchIntent>(newer.ToJsonString(), PersistedJson.Options)!;
+        Assert.Equal([MediaType.Show, MediaType.Movie, MediaType.Movie], read.MediaTypes);
+        Assert.Equal([PersonRole.Director, PersonRole.Any, PersonRole.Any], read.People!.Select(p => p.Role));
+        Assert.Equal("slow burn", read.FreeText);
+
+        // Why the options are needed: the default reader throws on the name and casts the number
+        // into a value no member has.
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<SearchIntent>(newer.ToJsonString()));
+        newer["MediaTypes"]!.AsArray().RemoveAt(2);
+        newer["People"]!.AsArray().RemoveAt(1);
+        var unguarded = JsonSerializer.Deserialize<SearchIntent>(newer.ToJsonString())!;
+        Assert.False(Enum.IsDefined(unguarded.MediaTypes[1]));
+    }
+
+    /// <summary>The outbox payload's shape with the converter WS-4 is asked to adopt.</summary>
+    private sealed record OutboxShape(
+        Guid TitleId,
+        [property: JsonConverter(typeof(UnrecognisedJsonEnumConverter<MediaType>))] MediaType MediaType,
+        long? TmdbId,
+        long? TraktId,
+        short? Rating,
+        DateTime? WatchedAt);
+
+    [Fact]
+    public void An_outbox_payload_from_a_newer_build_reads_as_no_media_type_so_no_trakt_write_can_be_built_from_it()
+    {
+        var titleId = Guid.NewGuid();
+        var current = JsonSerializer.Serialize(new OutboxDispatcher.OutboxPayload(titleId, MediaType.Show, 1399, 1390, 9, null));
+
+        // Every payload the current writer produces reads the same through the tolerant shape.
+        var same = JsonSerializer.Deserialize<OutboxShape>(current)!;
+        Assert.Equal(MediaType.Show, same.MediaType);
+        Assert.Equal(titleId, same.TitleId);
+        Assert.Equal(current, JsonSerializer.Serialize(same));
+
+        var newer = current.Replace("\"Show\"", "\"Episode\"", StringComparison.Ordinal);
+
+        // Adopted: the entry reads, and is neither a movie nor a show, so the dispatcher's
+        // Movie/Show partition sends it nowhere. The declared fallback (Movie) would have sent a
+        // show's id to Trakt's movie endpoint — why this converter is not the table's.
+        var read = JsonSerializer.Deserialize<OutboxShape>(newer)!;
+        Assert.NotEqual(MediaType.Movie, read.MediaType);
+        Assert.NotEqual(MediaType.Show, read.MediaType);
+        Assert.Throws<JsonException>(() => JsonSerializer.Serialize(read));
+    }
+
+    /// <summary>
+    /// Media-type tokens a newer build (or a hand-edited row) could leave in an outbox payload: an
+    /// unknown name, an unknown number, other casing, padding, a comma list (which Enum.TryParse
+    /// reads as the OR of two members), null, and a non-scalar.
+    /// </summary>
+    private static readonly string[] NewerMediaTypeTokens =
+        ["\"Episode\"", "7", "-1", "\"show\"", "\" Show\"", "\"Movie, Show\"", "null", "{\"kind\":\"Season\"}"];
+
+    [Fact]
+    public void The_outbox_reader_reads_a_newer_media_type_as_no_member_or_is_listed_as_pending()
+    {
+        var titleId = Guid.NewGuid();
+        foreach (var known in Enum.GetValues<MediaType>())
+        {
+            // Every payload the current writers produce reads back unchanged, adopted or not.
+            var written = JsonSerializer.Serialize(new OutboxDispatcher.OutboxPayload(titleId, known, 1399, 1390, 9, null));
+            var back = JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(written)!;
+            Assert.Equal(known, back.MediaType);
+            Assert.Equal(written, JsonSerializer.Serialize(back));
+        }
+
+        var template = JsonSerializer.Serialize(new OutboxDispatcher.OutboxPayload(titleId, MediaType.Show, 1399, 1390, 9, null));
+        var unsafeReads = NewerMediaTypeTokens
+            .Where(token => ReadsAsAWrite(template.Replace("\"Show\"", token, StringComparison.Ordinal)))
+            .ToList();
+
+        if (PendingReaders.ContainsKey("OutboxDispatcher.OutboxPayload"))
+        {
+            Assert.True(unsafeReads.Count > 0, "CR-2 landed: delete OutboxDispatcher.OutboxPayload from PendingReaders");
+        }
+        else
+        {
+            Assert.Empty(unsafeReads);
+        }
+
+        // A token is safe only when the entry deserializes (one bad row must not fail the kind's
+        // whole batch) AND names neither member (so no movie or show write can be built from it).
+        static bool ReadsAsAWrite(string json)
+        {
+            try
+            {
+                return Enum.IsDefined(JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(json)!.MediaType);
+            }
+            catch (JsonException)
+            {
+                return true;
+            }
+        }
+    }
+
+    [Fact]
+    public void The_ask_carry_reads_a_stored_intent_from_a_newer_build_or_is_listed_as_pending()
+    {
+        // Written as LiveSearchExpansionService writes SearchTurns.IntentJson today (default options,
+        // so enums are numbers), then what a newer build with more members could have stored.
+        var stored = JsonSerializer.Serialize(new SearchIntent(
+            ["Drama"], [], [MediaType.Show], "slow burn", null, null,
+            People: [new PersonQuery("Denis Villeneuve", PersonRole.Director)]));
+        var current = AskReelCarry.Parse(stored)!;
+        Assert.Equal([MediaType.Show], current.MediaTypes);
+        Assert.Equal([PersonRole.Director], current.People!.Select(p => p.Role));
+
+        var mixed = JsonNode.Parse(stored)!;
+        mixed["MediaTypes"]!.AsArray().Add(7);
+        mixed["MediaTypes"]!.AsArray().Add("Documentary");
+        mixed["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Hans Zimmer", ["Role"] = "Composer" });
+        mixed["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Roger Deakins", ["Role"] = 9 });
+
+        // Only unknown media types: the carry must not invent a filter (reading "Documentary" as the
+        // table's Movie fallback would pin the next turn to movies).
+        var unknownOnly = JsonNode.Parse(stored)!;
+        unknownOnly["MediaTypes"] = new JsonArray("Documentary");
+        var numberOnly = JsonNode.Parse(stored)!;
+        numberOnly["MediaTypes"] = new JsonArray(7);
+
+        var safe =
+            AskReelCarry.Parse(mixed.ToJsonString()) is { } fromMixed
+            && fromMixed.MediaTypes.SequenceEqual([MediaType.Show])
+            && fromMixed.People!.Select(p => p.Role).SequenceEqual([PersonRole.Director, PersonRole.Any, PersonRole.Any])
+            && fromMixed.FreeText == "slow burn"
+            && AskReelCarry.Parse(unknownOnly.ToJsonString()) is { MediaTypes.Count: 0, FreeText: "slow burn" }
+            && AskReelCarry.Parse(numberOnly.ToJsonString()) is { MediaTypes.Count: 0 };
+
+        if (PendingReaders.ContainsKey("AskReelCarry.Parse"))
+        {
+            Assert.False(safe, "CR-3 landed: delete AskReelCarry.Parse from PendingReaders");
+        }
+        else
+        {
+            Assert.True(safe, PendingReaders.GetValueOrDefault("AskReelCarry.Parse", "AskReelCarry.Parse must read a newer intent safely"));
+        }
+    }
+
+    private static void JsonRoundTrips<TEnum>()
+        where TEnum : struct, Enum
+    {
+        var options = PersistedJson.Options;
+        foreach (var value in Enum.GetValues<TEnum>())
+        {
+            var written = JsonSerializer.Serialize(value, options);
+            Assert.Equal(JsonSerializer.Serialize(value, new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } }), written);
+            Assert.Equal(value, JsonSerializer.Deserialize<TEnum>(written, options));
+            Assert.Equal(value, JsonSerializer.Deserialize<TEnum>(JsonSerializer.Serialize(value), options));
+            Assert.Equal(value, JsonSerializer.Deserialize<TEnum>(written, Unrecognised<TEnum>()));
+        }
+    }
+
+    private static void JsonFallsBack<TEnum>()
+        where TEnum : struct, Enum
+    {
+        var fallback = PersistedEnumFallbacks.For<TEnum>();
+        var unrecognised = PersistedEnumFallbacks.Unrecognised<TEnum>();
+        var undefinedNumber = Enum.GetValues<TEnum>().Select(v => Convert.ToInt64(v, System.Globalization.CultureInfo.InvariantCulture)).Max() + 1;
+        var anyMember = Enum.GetNames<TEnum>()[0];
+        string[] unknown =
+        [
+            "\"NotAMemberOfThisBuild\"",
+            undefinedNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "-1",
+            "1.5",
+            "\"\"",
+            "\"1\"",
+            $"\" {anyMember}\"",
+            $"\"{anyMember.ToUpperInvariant()}{(anyMember.ToUpperInvariant() == anyMember ? "x" : string.Empty)}\"",
+            $"\"{anyMember}, {anyMember}\"",
+            "null",
+            "true",
+            "{\"a\":1}",
+            "[1,2]",
+        ];
+
+        foreach (var json in unknown)
+        {
+            Assert.Equal(fallback, JsonSerializer.Deserialize<TEnum>(json, PersistedJson.Options));
+            Assert.Equal(unrecognised, JsonSerializer.Deserialize<TEnum>(json, Unrecognised<TEnum>()));
+        }
+
+        // Inside a document, a skipped object or array leaves the reader on the next property.
+        var wrapped = JsonSerializer.Deserialize<Dictionary<string, TEnum>>(
+            $"{{\"a\":{{\"x\":[1]}},\"b\":\"{anyMember}\"}}", PersistedJson.Options)!;
+        Assert.Equal(fallback, wrapped["a"]);
+        Assert.Equal(Enum.Parse<TEnum>(anyMember), wrapped["b"]);
+
+        // A nullable enum keeps null as null; only a value it cannot name falls back.
+        Assert.Null(JsonSerializer.Deserialize<TEnum?>("null", PersistedJson.Options));
+        Assert.Equal(fallback, JsonSerializer.Deserialize<TEnum?>("\"NotAMemberOfThisBuild\"", PersistedJson.Options));
+    }
+
+    private static JsonSerializerOptions Unrecognised<TEnum>()
+        where TEnum : struct, Enum =>
+        new() { Converters = { new UnrecognisedJsonEnumConverter<TEnum>() } };
 
     private static void RoundTrips<TEnum>()
         where TEnum : struct, Enum
