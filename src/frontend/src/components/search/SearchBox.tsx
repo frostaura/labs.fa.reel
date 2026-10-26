@@ -8,7 +8,7 @@ import {
   useTypeaheadScoresQuery,
 } from "../../store/api";
 import { enterTarget, hiddenLine, peopleFirst, shouldQueryGlobal, strongMatchCount } from "../../lib/globalTypeahead";
-import { mintHandoff } from "../../lib/useAskReelChat";
+import { mintHandoff } from "../../lib/askReel/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 

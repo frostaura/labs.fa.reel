@@ -841,6 +841,62 @@
         }
       }
     },
+    "/api/search/typeahead/global": {
+      "get": {
+        "tags": [
+          "FrostAura.Reel.Api"
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/search/typeahead/scores": {
+      "get": {
+        "tags": [
+          "FrostAura.Reel.Api"
+        ],
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/search/filter-chips": {
+      "get": {
+        "tags": [
+          "FrostAura.Reel.Api"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/taste/dislikes": {
       "get": {
         "tags": [
@@ -1394,6 +1450,27 @@
         }
       }
     },
+    "/api/metrics/cross-reference": {
+      "get": {
+        "tags": [
+          "FrostAura.Reel.Api"
+        ],
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/metrics/interleave": {
       "get": {
         "tags": [
@@ -1478,12 +1555,101 @@
   },
   "components": {
     "schemas": {
+      "AlertKindCount": {
+        "required": [
+          "kind",
+          "count"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "count": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "ApiProvider": {
         "enum": [
           "Trakt",
           "Tmdb",
           "OpenRouter"
         ]
+      },
+      "AskMetrics": {
+        "required": [
+          "turns",
+          "failed",
+          "planFallbacks",
+          "judgeFallbacks",
+          "latency",
+          "stages"
+        ],
+        "type": "object",
+        "properties": {
+          "turns": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "failed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "planFallbacks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "judgeFallbacks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/LatencyStats"
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AskStageLatency"
+            }
+          }
+        }
+      },
+      "AskStageLatency": {
+        "required": [
+          "stage",
+          "latency"
+        ],
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/LatencyStats"
+          }
+        }
       },
       "CallbackRequest": {
         "required": [
@@ -1887,13 +2053,122 @@
           "NamedPass"
         ]
       },
+      "LatencyStats": {
+        "required": [
+          "samples",
+          "p50",
+          "p95",
+          "max"
+        ],
+        "type": "object",
+        "properties": {
+          "samples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "p50": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "p95": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "max": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "LlmPurposeMetrics": {
+        "required": [
+          "purpose",
+          "calls",
+          "answered",
+          "truncated",
+          "fallbacks",
+          "outcomes"
+        ],
+        "type": "object",
+        "properties": {
+          "purpose": {
+            "type": "string"
+          },
+          "calls": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "answered": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "truncated": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "fallbacks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "outcomes": {
+            "type": "object",
+            "additionalProperties": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int64"
+            }
+          }
+        }
+      },
       "MetricsReport": {
         "required": [
           "generatedAt",
           "windowStart",
           "windowHours",
           "jobs",
-          "clientErrors"
+          "clientErrors",
+          "ask",
+          "llm",
+          "llmSince",
+          "alerts"
         ],
         "type": "object",
         "properties": {
@@ -1921,6 +2196,25 @@
           },
           "clientErrors": {
             "$ref": "#/components/schemas/ClientErrorMetrics"
+          },
+          "ask": {
+            "$ref": "#/components/schemas/AskMetrics"
+          },
+          "llm": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LlmPurposeMetrics"
+            }
+          },
+          "llmSince": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorAlert"
+            }
           }
         }
       },
@@ -2001,6 +2295,75 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "OperatorAlert": {
+        "required": [
+          "code",
+          "since",
+          "raisedAt",
+          "reasonCode",
+          "provider",
+          "count",
+          "threshold",
+          "kinds"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "raisedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reasonCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "provider": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiProvider"
+              }
+            ]
+          },
+          "count": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "threshold": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kinds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AlertKindCount"
+            }
           }
         }
       },
@@ -2378,7 +2741,8 @@
           "lastFailures",
           "providerHealth",
           "degradedReason",
-          "notEnoughRatings"
+          "notEnoughRatings",
+          "alerts"
         ],
         "type": "object",
         "properties": {
@@ -2486,6 +2850,12 @@
                 "$ref": "#/components/schemas/RatingsFloor"
               }
             ]
+          },
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorAlert"
+            }
           }
         }
       },

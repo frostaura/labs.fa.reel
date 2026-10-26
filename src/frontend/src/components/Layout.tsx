@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users, Target } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Target } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation } from "../store/api";
 import SyncStatusPill from "./SyncStatusPill";
 import SearchBox from "./search/SearchBox";
@@ -124,9 +124,7 @@ export default function Layout() {
                 <span className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => navigate("/blend")}>
-                  <Users className="h-4 w-4 mr-2" /> Blend
-                </DropdownMenuItem>
+                {/* Blend stays routable at /blend but is off the menu (FD-16 default, WS-10B CR-5). */}
                 {/* Free for every tier, deliberately: a paid accuracy report reads as hiding the
                     scorecard. Sits above Settings because it is a thing to read, not a thing to
                     configure. */}
