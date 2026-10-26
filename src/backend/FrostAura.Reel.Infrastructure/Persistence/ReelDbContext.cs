@@ -347,6 +347,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         modelBuilder.Entity<ModelArtifact>(e =>
         {
             e.HasIndex(a => new { a.AccountId, a.Version }).IsUnique();
+            e.Property(a => a.CalibratorJson).HasColumnType("jsonb");
             // At most one Active artifact per account — enforced by the database, not by the
             // check-then-insert in TrainJobHandler, so a raced retrain fails loudly instead of
             // leaving two Active artifacts for an unordered FirstOrDefault to pick between.
@@ -526,6 +527,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
             e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
             e.Property(s => s.AnnPerClusterJson).HasColumnType("jsonb");
+            e.Property(s => s.OffsetsJson).HasColumnType("jsonb");
             e.Property(s => s.NewlyEligiblePerArmJson).HasColumnType("jsonb");
         });
 

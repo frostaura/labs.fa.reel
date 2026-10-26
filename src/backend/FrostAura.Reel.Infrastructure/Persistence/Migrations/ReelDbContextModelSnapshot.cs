@@ -887,6 +887,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("NewlyEligiblePerArmJson")
                         .HasColumnType("jsonb");
 
+                    b.Property<string>("OffsetsJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<int>("RailsDropped")
                         .HasColumnType("integer");
 
@@ -1568,6 +1571,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("bytea");
 
+                    b.Property<string>("CalibratorJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime?>("CalibratorPinnedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("FeatureSchemaJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -1620,6 +1629,15 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<double>("Bias")
                         .HasColumnType("double precision");
+
+                    b.Property<double?>("ProbeBaseMae")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("ProbeMae")
+                        .HasColumnType("double precision");
+
+                    b.Property<long>("RejectedUpdateCount")
+                        .HasColumnType("bigint");
 
                     b.Property<long>("UpdateCount")
                         .HasColumnType("bigint");

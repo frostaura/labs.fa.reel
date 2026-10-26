@@ -35,24 +35,105 @@ namespace FrostAura.Reel.Application.Ml;
 /// every artifact onto the Active one's level — is documented there. Resolving WHICH artifact is
 /// Active is this class's job, since it is the one with the database.
 ///
-/// Cached ~10 minutes per account and evicted the moment a rating lands (the in-app rating endpoint
-/// and the Trakt ratings ingest both call <see cref="Invalidate"/>), so a rating the user just gave
-/// is reflected in the very next score rather than up to ten minutes later.
+/// <para><b>Pinned per artifact (WS-5 task 7, FD-4 default).</b> Serving reads
+/// <see cref="GetAsync"/>, which returns the map pinned to the Active artifact
+/// (<c>ModelArtifact.CalibratorJson</c>): fitted once, the first time that artifact serves a number,
+/// then applied unchanged to every build and on-demand score of it. Until 2026-10-26 the map refitted
+/// on every rating and every ten minutes, and on top of an online head that also moved, so two builds
+/// of one artifact with no new ratings could show the shortlist at different levels — the "the
+/// numbers churn" complaint. A new rating now reaches calibration through the retrain it triggers
+/// (<c>TrainJobHandler</c> retrains when the training inputs change), which mints a new artifact and
+/// a fresh fit. <see cref="FitAsync"/> stays the live, unpinned fit for diagnostics.</para>
 /// </summary>
 public sealed class RatingCalibrationService(IReelDbContext db, IMemoryCache cache, IConfiguration? configuration = null)
 {
     /// <summary>Short enough that a missed invalidation self-heals; long enough that a feed build fits it once.</summary>
     public static readonly TimeSpan Ttl = TimeSpan.FromMinutes(10);
 
-    /// <summary>The fitted map for this account, from cache or freshly fitted.</summary>
-    public async Task<RatingCalibrator> GetAsync(Guid accountId, CancellationToken ct) =>
-        await cache.GetOrCreateAsync(CacheKey(accountId), async entry =>
+    /// <summary>
+    /// The map every serving surface applies: the one pinned to the account's Active artifact,
+    /// pinning it on first use. An account with no artifact has no predictions to calibrate and gets
+    /// the live fit (the identity, in practice).
+    /// </summary>
+    public async Task<RatingCalibrator> GetAsync(Guid accountId, CancellationToken ct)
+    {
+        var active = await ActiveArtifactIdAsync(accountId, ct);
+        if (active is not { } artifactId)
         {
-            entry.AbsoluteExpirationRelativeToNow = Ttl;
-            return await FitAsync(accountId, ct);
-        }) ?? await FitAsync(accountId, ct);
+            return await cache.GetOrCreateAsync(CacheKey(accountId), async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = Ttl;
+                return await FitAsync(accountId, ct);
+            }) ?? await FitAsync(accountId, ct);
+        }
 
-    /// <summary>Drops the cached map so the next score reflects the rating that just landed.</summary>
+        // Keyed by artifact AND mode: a CALIBRATOR_MODE change re-pins rather than serving a map
+        // fitted under the old rule from memory.
+        return await cache.GetOrCreateAsync(PinKey(artifactId, Mode), async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = PinnedTtl;
+            return (await PinnedAsync(accountId, artifactId, ct)).Calibrator;
+        }) ?? (await PinnedAsync(accountId, artifactId, ct)).Calibrator;
+    }
+
+    /// <summary>A pinned map never changes for its artifact, so it may sit in memory as long as the process likes.</summary>
+    public static readonly TimeSpan PinnedTtl = TimeSpan.FromHours(6);
+
+    /// <summary>What a build records about the map it applied (see <c>FeedBuildStat.OffsetsJson</c>).</summary>
+    public readonly record struct PinnedCalibrator(RatingCalibrator Calibrator, DateTime? PinnedAt, bool PinnedNow);
+
+    /// <summary>
+    /// The map pinned to <paramref name="artifactId"/>, fitting and pinning it when there is none (or
+    /// the stored one was fitted under another <c>CALIBRATOR_MODE</c>, or cannot be read). The pin is
+    /// a guarded UPDATE: when two builds race to pin one artifact the first write wins and the loser
+    /// re-reads it, so every reader of an artifact applies the same map.
+    /// </summary>
+    public async Task<PinnedCalibrator> PinnedAsync(Guid accountId, Guid artifactId, CancellationToken ct)
+    {
+        var mode = Mode;
+        var stored = await StoredPinAsync(artifactId, ct);
+        if (stored is { } pin && RatingCalibrator.FromJson(pin.Json, out var storedMode) is { } pinned && storedMode == mode)
+        {
+            return new PinnedCalibrator(pinned, pin.PinnedAt, PinnedNow: false);
+        }
+
+        var fitted = RatingCalibrator.Fit(await LoadPairsAsync(accountId, ct), artifactId, mode);
+        var json = fitted.ToJson(mode);
+        var now = DateTime.UtcNow;
+        var previous = stored?.Json;
+        var written = await db.ModelArtifacts
+            .Where(a => a.Id == artifactId && a.CalibratorJson == previous)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(a => a.CalibratorJson, json)
+                    .SetProperty(a => a.CalibratorPinnedAt, now),
+                ct);
+        if (written == 1)
+        {
+            return new PinnedCalibrator(fitted, now, PinnedNow: true);
+        }
+
+        // Lost the race: serve the winner's map, not ours.
+        var winner = await StoredPinAsync(artifactId, ct);
+        return RatingCalibrator.FromJson(winner?.Json, out _) is { } theirs
+            ? new PinnedCalibrator(theirs, winner?.PinnedAt, PinnedNow: false)
+            : new PinnedCalibrator(fitted, null, PinnedNow: false);
+    }
+
+    private async Task<(string? Json, DateTime? PinnedAt)?> StoredPinAsync(Guid artifactId, CancellationToken ct)
+    {
+        var row = await db.ModelArtifacts
+            .AsNoTracking()
+            .Where(a => a.Id == artifactId)
+            .Select(a => new { a.CalibratorJson, a.CalibratorPinnedAt })
+            .FirstOrDefaultAsync(ct);
+        return row is null ? null : (row.CalibratorJson, row.CalibratorPinnedAt);
+    }
+
+    /// <summary>
+    /// Drops the account-level cached fit (used only before the first artifact exists). A pinned map
+    /// is deliberately NOT dropped: a rating reaches calibration through the retrain it triggers.
+    /// </summary>
     public void Invalidate(Guid accountId) => cache.Remove(CacheKey(accountId));
 
     /// <summary>The configured <c>CALIBRATOR_MODE</c>. <see cref="CalibratorMode.Auto"/> unless pinned.</summary>
@@ -158,4 +239,6 @@ public sealed class RatingCalibrationService(IReelDbContext db, IMemoryCache cac
     }
 
     private static string CacheKey(Guid accountId) => $"ratingcalibration:{accountId}";
+
+    private static string PinKey(Guid artifactId, CalibratorMode mode) => $"ratingcalibration:pin:{artifactId}:{mode}";
 }

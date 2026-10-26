@@ -202,6 +202,55 @@ public class RatingCalibrationServiceTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task The_map_is_pinned_to_its_artifact_until_a_new_one_is_trained()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var v1 = Guid.NewGuid();
+        await SeedArtifactAsync(accountId, v1, ArtifactStatus.Active, version: 1);
+        var scoredAt = DateTime.UtcNow.AddDays(-10);
+        var ratedAt = DateTime.UtcNow.AddDays(-9);
+        for (var i = 0; i < 12; i++)
+        {
+            var titleId = await SeedTitleAsync();
+            await SeedScoreAsync(accountId, titleId, 7m, scoredAt, v1);
+            await SeedRatingAsync(accountId, titleId, 6, ratedAt);
+        }
+
+        var pinned = await ServiceFor(accountId).GetAsync(accountId, CancellationToken.None);
+        Assert.Equal(12, pinned.PairCount);
+
+        // A thirteenth rating lands far from the prediction. A fresh process (new cache) still serves
+        // the map pinned to v1 — the same artifact shows the same numbers — while the live fit sees it.
+        var fresh = await SeedTitleAsync();
+        await SeedScoreAsync(accountId, fresh, 7m, scoredAt, v1);
+        await SeedRatingAsync(accountId, fresh, 1, ratedAt);
+
+        var afterRestart = ServiceFor(accountId);
+        var reread = await afterRestart.GetAsync(accountId, CancellationToken.None);
+        Assert.Equal(12, reread.PairCount);
+        Assert.Equal(pinned.Calibrate(7d), reread.Calibrate(7d));
+        Assert.Equal(13, (await afterRestart.FitAsync(accountId, CancellationToken.None)).PairCount);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var stored = await db.ModelArtifacts.IgnoreQueryFilters().SingleAsync(a => a.Id == v1);
+            Assert.NotNull(stored.CalibratorJson);
+            Assert.NotNull(stored.CalibratorPinnedAt);
+            await db.ModelArtifacts.IgnoreQueryFilters().Where(a => a.Id == v1)
+                .ExecuteUpdateAsync(u => u.SetProperty(a => a.Status, ArtifactStatus.Superseded));
+        }
+
+        // A retrain mints v2, and v2 gets its own fit over everything known by then.
+        await SeedArtifactAsync(accountId, Guid.NewGuid(), ArtifactStatus.Active, version: 2);
+        Assert.Equal(13, (await ServiceFor(accountId).GetAsync(accountId, CancellationToken.None)).PairCount);
+    }
+
+    [Fact]
     public async Task Every_pair_carries_the_artifact_that_made_the_prediction()
     {
         if (!fixture.Available)

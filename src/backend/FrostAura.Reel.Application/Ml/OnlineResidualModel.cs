@@ -345,6 +345,8 @@ public sealed class OnlineResidualModel(
         var bias = reset ? 0d : state!.Bias;
         var stats = StatsFor(artifact);
 
+        var priorWeights = weights;
+        var priorBias = bias;
         var applied = 0;
         foreach (var observed in events)
         {
@@ -366,6 +368,31 @@ public sealed class OnlineResidualModel(
             return;
         }
 
+        // ── The probe gate (WS-5 task 7) ────────────────────────────────────────────────
+        // The batch's steps are kept only when they leave the head no worse on the account's FIXED
+        // probe set than the head before them, or within ProbeTolerance of the base alone. Without
+        // it nothing stopped a run of soft pseudo-labels walking the head away from what the account
+        // actually rates — the online state was the one serving input that moved between two builds
+        // of one artifact with nobody watching it.
+        var probe = await ProbeAsync(context, vectorBuilder, accountId, artifact, stats, ct);
+        double? probeMae = null, probeBaseMae = null;
+        if (probe is { } fixedProbe)
+        {
+            var verdict = JudgeOnProbe(fixedProbe, priorWeights, priorBias, weights, bias);
+            probeBaseMae = verdict.BaseMae;
+            if (!verdict.Accept)
+            {
+                logger.LogInformation(
+                    "Online residual head for {AccountId}: {Count} event(s) refused by the probe gate "
+                    + "(probe MAE {After:F3} vs {Before:F3} before, {Base:F3} for the base alone).",
+                    accountId, applied, verdict.AfterMae, verdict.BeforeMae, verdict.BaseMae);
+                await RecordRejectionAsync(context, accountId, state, reset, artifact.Id, verdict, now, ct);
+                return;
+            }
+
+            probeMae = verdict.AfterMae;
+        }
+
         var serialized = SerializeWeights(weights);
 
         if (state is null)
@@ -379,6 +406,8 @@ public sealed class OnlineResidualModel(
                 Weights = serialized,
                 Bias = bias,
                 UpdateCount = applied,
+                ProbeMae = probeMae,
+                ProbeBaseMae = probeBaseMae,
                 UpdatedAt = now,
             });
 
@@ -407,6 +436,9 @@ public sealed class OnlineResidualModel(
                     .SetProperty(s => s.Weights, serialized)
                     .SetProperty(s => s.Bias, bias)
                     .SetProperty(s => s.UpdateCount, updateCount)
+                    .SetProperty(s => s.RejectedUpdateCount, s => reset ? 0L : s.RejectedUpdateCount)
+                    .SetProperty(s => s.ProbeMae, probeMae)
+                    .SetProperty(s => s.ProbeBaseMae, probeBaseMae)
                     .SetProperty(s => s.UpdatedAt, now),
                 ct);
 
@@ -414,6 +446,166 @@ public sealed class OnlineResidualModel(
         {
             throw new DbUpdateConcurrencyException(
                 $"Online residual head for account {accountId} moved under us (expected UpdateCount {state.UpdateCount}).");
+        }
+    }
+
+    // ── The fixed probe set ─────────────────────────────────────────────────────────────
+
+    /// <summary>The most ratings the probe holds.</summary>
+    public const int ProbeSize = 60;
+
+    /// <summary>Below this many probe ratings there is nothing stable to judge against and every batch is kept.</summary>
+    public const int ProbeMinSize = 10;
+
+    /// <summary>
+    /// How far (rating points of probe MAE) the head may sit above the base alone. A batch that makes
+    /// the probe worse than the head before it is still kept while the head stays inside this band —
+    /// so ordinary per-title corrections pass, and only a head walking away from the account's own
+    /// ratings is stopped.
+    /// </summary>
+    public const double ProbeTolerance = 0.05d;
+
+    /// <summary>
+    /// The probe, fixed per artifact: up to <see cref="ProbeSize"/> of the account's movie and show
+    /// ratings that existed when the artifact was trained, ordered by title id (an arbitrary but
+    /// stable sample), with their standardised vectors and base scores frozen on first use. Fixed
+    /// means a later rating never enters it, so two judgements of one artifact's head are always
+    /// made against the same yardstick.
+    /// </summary>
+    public sealed record Probe(float[][] Standardized, double[] BaseScores, double[] Actual);
+
+    /// <summary>One gate decision, with the three errors it compared.</summary>
+    public readonly record struct ProbeVerdict(bool Accept, double BeforeMae, double AfterMae, double BaseMae);
+
+    /// <summary>
+    /// The gate as arithmetic: keep the step when the probe MAE after it is no worse than before it,
+    /// or no more than <see cref="ProbeTolerance"/> above the base alone. Public and pure so the rule
+    /// is testable without a database.
+    /// </summary>
+    public static ProbeVerdict JudgeOnProbe(Probe probe, float[] beforeWeights, double beforeBias, float[] afterWeights, double afterBias)
+    {
+        double before = 0d, after = 0d, baseline = 0d;
+        var n = probe.Actual.Length;
+        for (var i = 0; i < n; i++)
+        {
+            var x = probe.Standardized[i];
+            var b = probe.BaseScores[i];
+            var y = probe.Actual[i];
+            before += Math.Abs(b + Residual(beforeWeights, beforeBias, x) - y);
+            after += Math.Abs(b + Residual(afterWeights, afterBias, x) - y);
+            baseline += Math.Abs(b - y);
+        }
+
+        before /= n;
+        after /= n;
+        baseline /= n;
+        var accept = after <= before + 1e-12 || after <= baseline + ProbeTolerance;
+        return new ProbeVerdict(accept, before, after, baseline);
+    }
+
+    private async Task<Probe?> ProbeAsync(
+        IReelDbContext context,
+        FeatureVectorBuilder vectorBuilder,
+        Guid accountId,
+        ModelArtifact artifact,
+        FeatureStandardizer stats,
+        CancellationToken ct)
+    {
+        var key = $"residualprobe:{artifact.Id}";
+        if (cache.TryGetValue(key, out Probe? cached))
+        {
+            return cached;
+        }
+
+        var ratings = await context.UserRatings
+            .Where(r => r.AccountId == accountId
+                && (r.SubjectType == Domain.Library.RatingSubjectType.Movie || r.SubjectType == Domain.Library.RatingSubjectType.Show)
+                && r.FirstRatedAt <= artifact.TrainedAt)
+            .OrderBy(r => r.TitleId)
+            .Select(r => new { r.TitleId, r.Rating })
+            .Take(ProbeSize)
+            .ToListAsync(ct);
+
+        Probe? probe = null;
+        if (ratings.Count >= ProbeMinSize)
+        {
+            var taste = await GetOrBuildTasteAsync(vectorBuilder, accountId, DateTime.UtcNow, ct);
+            var vectors = await vectorBuilder.BuildAsync(taste, [.. ratings.Select(r => r.TitleId)], DateTime.UtcNow, ct);
+            var usable = ratings.Where(r => vectors.ContainsKey(r.TitleId)).ToList();
+            if (usable.Count >= ProbeMinSize)
+            {
+                var scores = engine.ScoreCached(artifact.Id, artifact.ArtifactBytes, [.. usable.Select(r => vectors[r.TitleId])]);
+                probe = new Probe(
+                    [.. usable.Select(r => stats.Standardize(vectors[r.TitleId]))],
+                    [.. scores.Select(v => (double)v)],
+                    [.. usable.Select(r => (double)r.Rating)]);
+            }
+        }
+
+        cache.Set(key, probe, TimeSpan.FromHours(6));
+        return probe;
+    }
+
+    /// <summary>Counts a refused batch without touching the weights; creates the (zero) row when there is none.</summary>
+    private static async Task RecordRejectionAsync(
+        IReelDbContext context,
+        Guid accountId,
+        OnlineModelState? state,
+        bool reset,
+        Guid artifactId,
+        ProbeVerdict verdict,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (state is null)
+        {
+            context.OnlineModelStates.Add(new OnlineModelState
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                BaseArtifactId = artifactId,
+                AlgorithmVersion = CurrentAlgorithmVersion,
+                Weights = SerializeWeights(new float[FeatureSchema.VectorLength]),
+                Bias = 0d,
+                UpdateCount = 0,
+                RejectedUpdateCount = 1,
+                ProbeMae = verdict.BeforeMae,
+                ProbeBaseMae = verdict.BaseMae,
+                UpdatedAt = now,
+            });
+            await context.SaveChangesAsync(ct);
+            return;
+        }
+
+        // A stale head (superseded base or older rule) is re-pinned to the current artifact as the
+        // zero head it already serves as — never with its old weights, which belong to another base.
+        var zero = SerializeWeights(new float[FeatureSchema.VectorLength]);
+        var affected = reset
+            ? await context.OnlineModelStates
+                .Where(s => s.Id == state.Id && s.UpdateCount == state.UpdateCount)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(s => s.BaseArtifactId, artifactId)
+                        .SetProperty(s => s.AlgorithmVersion, CurrentAlgorithmVersion)
+                        .SetProperty(s => s.Weights, zero)
+                        .SetProperty(s => s.Bias, 0d)
+                        .SetProperty(s => s.UpdateCount, 0L)
+                        .SetProperty(s => s.RejectedUpdateCount, 1L)
+                        .SetProperty(s => s.ProbeMae, verdict.BeforeMae)
+                        .SetProperty(s => s.ProbeBaseMae, verdict.BaseMae)
+                        .SetProperty(s => s.UpdatedAt, now),
+                    ct)
+            : await context.OnlineModelStates
+                .Where(s => s.Id == state.Id && s.UpdateCount == state.UpdateCount)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(s => s.RejectedUpdateCount, s => s.RejectedUpdateCount + 1)
+                        .SetProperty(s => s.ProbeMae, verdict.BeforeMae)
+                        .SetProperty(s => s.ProbeBaseMae, verdict.BaseMae),
+                    ct);
+        if (affected == 0)
+        {
+            throw new DbUpdateConcurrencyException("Online residual head moved under the probe gate.");
         }
     }
 

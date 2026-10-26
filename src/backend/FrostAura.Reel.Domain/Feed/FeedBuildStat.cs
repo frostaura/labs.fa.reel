@@ -124,5 +124,14 @@ public class FeedBuildStat : IAccountScoped
     /// </summary>
     public string? NewlyEligiblePerArmJson { get; set; }
 
+    /// <summary>
+    /// Where this build's numbers came from, layer by layer (jsonb, WS-5 task 7):
+    /// <c>{baseP50, residualMean, residualAbsMean, calibratorDeltaMean, calibrator: {kind, pairs,
+    /// maeAfter, pinnedAt}, online: {current, updates, rejected, probeMae, probeBaseMae}}</c> over the
+    /// scored shortlist. When <see cref="ShortlistP50"/> moves between two builds of one artifact, this
+    /// says whether the base, the online head or the calibrator moved it. Null before 2026-10-26.
+    /// </summary>
+    public string? OffsetsJson { get; set; }
+
     public int DurationMs { get; set; }
 }

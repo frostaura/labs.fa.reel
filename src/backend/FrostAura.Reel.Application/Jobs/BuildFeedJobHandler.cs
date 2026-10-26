@@ -383,6 +383,7 @@ public class BuildFeedJobHandler(
                 upserted = a.Upserted,
                 newlyEligible = a.NewlyEligible,
             })),
+            OffsetsJson = await OffsetsJsonAsync(accountId, artifact.Id, calibrator, candidates, ct),
             DurationMs = (int)stopwatch.ElapsedMilliseconds,
         });
 
@@ -788,6 +789,61 @@ public class BuildFeedJobHandler(
     /// Nearest-rank percentile over the shortlist's predicted ratings — no interpolation, so every
     /// reported value is a number the model actually produced for a real title.
     /// </summary>
+    /// <summary>
+    /// <see cref="FeedBuildStat.OffsetsJson"/>: the shortlist's base median, the online head's and
+    /// the calibrator's mean offsets, the pinned map's identity and the head's probe state — so a
+    /// moved <c>ShortlistP50</c> between two builds of one artifact names the layer that moved it.
+    /// </summary>
+    private async Task<string> OffsetsJsonAsync(
+        Guid accountId, Guid artifactId, RatingCalibrator calibrator, IReadOnlyList<Candidate> candidates, CancellationToken ct)
+    {
+        var pinnedAt = await db.ModelArtifacts
+            .AsNoTracking()
+            .Where(a => a.Id == artifactId)
+            .Select(a => a.CalibratorPinnedAt)
+            .FirstOrDefaultAsync(ct);
+        var online = await db.OnlineModelStates
+            .AsNoTracking()
+            .Where(o => o.AccountId == accountId)
+            .Select(o => new { o.BaseArtifactId, o.AlgorithmVersion, o.UpdateCount, o.RejectedUpdateCount, o.ProbeMae, o.ProbeBaseMae })
+            .FirstOrDefaultAsync(ct);
+        var current = online is not null
+            && online.BaseArtifactId == artifactId
+            && online.AlgorithmVersion == OnlineResidualModel.CurrentAlgorithmVersion;
+
+        static double? Median(IEnumerable<double> values)
+        {
+            var sorted = values.Order().ToList();
+            return sorted.Count == 0 ? null : Math.Round(sorted[(sorted.Count - 1) / 2], 3);
+        }
+
+        double? Mean(Func<Candidate, double> pick) =>
+            candidates.Count == 0 ? null : Math.Round(candidates.Average(pick), 3);
+
+        return JsonSerializer.Serialize(new
+        {
+            baseP50 = Median(candidates.Select(c => (double)c.Row.Score)),
+            residualMean = Mean(c => (double)c.BaseScore - c.Row.Score),
+            residualAbsMean = Mean(c => Math.Abs((double)c.BaseScore - c.Row.Score)),
+            calibratorDeltaMean = Mean(c => (double)c.CalibrationDelta),
+            calibrator = new
+            {
+                kind = calibrator.Kind.ToString(),
+                pairs = calibrator.PairCount,
+                maeAfter = Math.Round(calibrator.MaeAfter, 3),
+                pinnedAt,
+            },
+            online = new
+            {
+                current,
+                updates = current ? online!.UpdateCount : 0,
+                rejected = current ? online!.RejectedUpdateCount : 0,
+                probeMae = current ? online!.ProbeMae : null,
+                probeBaseMae = current ? online!.ProbeBaseMae : null,
+            },
+        });
+    }
+
     private static decimal? Percentile(IReadOnlyList<Candidate> candidates, double quantile)
     {
         if (candidates.Count == 0)
