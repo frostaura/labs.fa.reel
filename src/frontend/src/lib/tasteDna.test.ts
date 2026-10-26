@@ -101,8 +101,13 @@ describe("divergingBars (the page's charts, P1 G-12)", () => {
     expect(bars[0]).toEqual({ leftPct: 50, widthPct: 0, side: "level", deltaLabel: "±0.0" });
   });
 
+  it("takes the gap between the printed numbers, so the label agrees with what is on screen", () => {
+    // 6.75 prints as 6.8 and a 6.74 mean as 6.7: the row must read +0.1, not ±0.0.
+    expect(divergingBars([6.75], 6.74).bars[0]).toMatchObject({ side: "above", deltaLabel: "+0.1" });
+  });
+
   it("does not blow rounding noise up to full width: the scale never drops under MIN_SCALE", () => {
-    const chart = divergingBars([6.86, 6.74], 6.8);
+    const chart = divergingBars([6.9, 6.7], 6.8);
     expect(chart.scale).toBe(MIN_SCALE);
     expect(Math.max(...chart.bars.map((b) => b.widthPct))).toBeLessThan(LARGEST_BAR_PCT);
   });

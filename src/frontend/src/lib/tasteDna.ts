@@ -117,8 +117,10 @@ export function signedGap(gap: number): string {
  * inputs are clamped like {@link genreBarGeometry}'s.
  */
 export function divergingBars(affinities: number[], userMean: number): DivergingChart {
-  const mean = clampRating(userMean);
-  const gaps = affinities.map((a) => clampRating(a) - mean);
+  // Gaps are taken between the numbers AS PRINTED (one decimal each): a raw 6.75 against a raw 6.74
+  // printed as "6.8 ±0.0" beside "your 6.7 average", which reads as arithmetic the page got wrong.
+  const mean = round1(clampRating(userMean));
+  const gaps = affinities.map((a) => round1(round1(clampRating(a)) - mean));
   const largest = gaps.reduce((max, gap) => Math.max(max, Math.abs(gap)), 0);
   // Rounded BEFORE it scales anything, so the printed scale is exactly the one the bars are drawn on.
   const scale = Math.max(MIN_SCALE, round2(largest));
