@@ -113,6 +113,8 @@ services:
       INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
       KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      # WS-2 Ask Reel engine: v1 (default) or v2; anything else reads as v1. v1 stays selectable through the soak.
+      ASK_ENGINE: ${ASK_ENGINE:-v1}
       ENRICH_MAX_TITLES_PER_RUN: ${ENRICH_MAX_TITLES_PER_RUN:-}
       # Background loops — each a kill switch. These are read with typed parsing, so a blank value
       # would fail the read: the defaults are spelled out.

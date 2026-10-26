@@ -111,6 +111,7 @@ services:
       # pre-migration dump handshake off (the eval database is a disposable copy).
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8090}
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      ASK_ENGINE: ${ASK_ENGINE:-v1}
       # WS-8 inbound limits, raised on THIS stack only (section 7 lets the eval account have more; FD-8's
       # defaults would block a golden run). Trusted proxies and the key-ring certificate as on the dev stack.
       ASK_TURNS_CONCURRENT: ${ASK_TURNS_CONCURRENT:-2}
