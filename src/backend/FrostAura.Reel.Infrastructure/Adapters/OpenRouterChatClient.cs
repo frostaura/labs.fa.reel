@@ -188,10 +188,10 @@ public sealed class OpenRouterChatClient(
     {
         var lengthFinishes = new StrongBox<int>();
         var result = await CompleteCoreAsync(request, lengthFinishes, ct);
-        // Task 8's counters. A call refused before any attempt was sent is a stop and is not
-        // counted (Record ignores zero attempts); a sent call that did not answer usably is a
-        // fallback for its caller.
-        metrics?.Record(request.Purpose, lengthFinishes.Value, result.HttpAttempts, fallback: !result.Succeeded);
+        // Task 8's counters, the one tally (CR-1). A call refused before any attempt was sent is a
+        // stop: counted under its outcome code, never in a rate; a sent call that did not answer
+        // usably is a fallback for its caller.
+        metrics?.Record(request.Purpose, result, lengthFinishes.Value);
         // WS-6 metrics sink (K-7): one settled call, by closed outcome code, for /api/observability/metrics.
         Telemetry.LlmCallMetrics.Record(request.Purpose, result);
         return result;

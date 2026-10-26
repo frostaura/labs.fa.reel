@@ -461,12 +461,49 @@ public class LlmBudgetGateTests(PostgresFixture fixture)
         Assert.Same(LlmAdmission.Unmetered, await gate.TryReserveAsync(Guid.NewGuid(), ApiUsagePurpose.Probe(ApiUsagePurpose.AskPlan), 1, CancellationToken.None));
     }
 
-    private LlmCallGate Gate(Dictionary<string, string?>? settings = null, IPendingApiUsage? pending = null)
+    [Fact]
+    public async Task The_gate_admits_under_fail_closed_tenancy_and_counts_only_the_callers_spend()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-1 task 10 (J-11). The gate is a singleton and reads through a fresh DI scope whose
+        // account context is unpinned. That is safe only because everything it reads — the ledger
+        // and the accounts table — is deliberately not account-scoped; this pins it, so the day the
+        // ledger gains a tenancy filter the gate's unpinned read fails here, not on every metered
+        // call in production once Tenancy__UnscopedReads flips to Throw.
+        var accountId = await SeedAccountAsync();
+        var other = await SeedAccountAsync();
+        await RecordAsync(other, ApiUsagePurpose.AskPlan, calls: 5, tokens: 10);
+        var (callsSetting, _) = AskBudget.Settings("ASK_PLAN");
+        var gate = Gate(new() { [callsSetting] = "5" }, failClosed: true);
+
+        foreach (var purpose in new[] { ApiUsagePurpose.AskPlan, ApiUsagePurpose.RerankFeed, ApiUsagePurpose.CrossReference })
+        {
+            using var admission = await gate.TryReserveAsync(accountId, purpose, 1_000, CancellationToken.None);
+            Assert.True(admission.Admitted, $"{purpose}: {admission.Refusal}");
+        }
+    }
+
+    private LlmCallGate Gate(Dictionary<string, string?>? settings = null, IPendingApiUsage? pending = null, bool failClosed = false)
     {
         var config = Config(settings);
         var services = new ServiceCollection();
         services.AddSingleton(config);
-        services.AddScoped<IReelDbContext>(_ => fixture.CreateContext(new AccountContext()));
+        if (failClosed)
+        {
+            // What the API registers: a scoped context under the configured policy, here Throw.
+            var policy = new UnscopedReadPolicy(UnscopedReadMode.Throw);
+            services.AddScoped<IAccountContext>(_ => new AccountContext(policy));
+            services.AddScoped<IReelDbContext>(sp => fixture.CreateContext(sp.GetRequiredService<IAccountContext>()));
+        }
+        else
+        {
+            services.AddScoped<IReelDbContext>(_ => fixture.CreateContext(new AccountContext()));
+        }
+
         if (pending is not null)
         {
             services.AddSingleton(pending);
