@@ -1,4 +1,3 @@
-using System.Text.Json;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
@@ -25,8 +24,6 @@ public static class NarrativeEndpoints
     /// field is injected into every rerank prompt in the product, so an unbounded one is a bill.
     /// </summary>
     public const int MaxEditChars = 4000;
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>The trigger of a rewrite the read queued because the writer has moved on from the stored text.</summary>
     public const string OutdatedNarrativeReason = "narrative-outdated";
@@ -188,20 +185,6 @@ public static class NarrativeEndpoints
             }
 
             return Results.Accepted(value: new { queued = true });
-        });
-
-        // The fact sheet the current narrative was written from — the evidence behind the prose,
-        // for anyone who wants to check it. Founder-facing today; harmless and honest to expose.
-        group.MapGet("/facts", async (
-            IAccountContext accountContext, PersonalisationContext personalisation, CancellationToken ct) =>
-        {
-            var narrative = await personalisation.CurrentAsync(accountContext.AccountId!.Value, ct);
-            if (narrative is null)
-            {
-                return Results.NotFound();
-            }
-
-            return Results.Ok(JsonSerializer.Deserialize<TasteFacts>(narrative.FactsJson, JsonOptions));
         });
     }
 }
