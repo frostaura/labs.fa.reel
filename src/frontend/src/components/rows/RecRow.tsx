@@ -6,6 +6,8 @@ import RailRetryTile from "./RailRetryTile";
 
 interface Props {
   title: ReactNode;
+  /** One line under the heading, for a rail that has to qualify its own title (the relaxed digest). */
+  caption?: ReactNode;
   items: FeedCard[];
   /** Visual lane: "default" = personalised rows; "genre" = the distinct genre rails. */
   variant?: "default" | "genre";
@@ -28,7 +30,7 @@ function ShimmerCard() {
 }
 
 /** Generic horizontal scroll-snap row of collapsed cards, with optional infinite paging. */
-export default function RecRow({ title, items, variant = "default", loadMore, loading, failed, onRetry }: Props) {
+export default function RecRow({ title, caption, items, variant = "default", loadMore, loading, failed, onRetry }: Props) {
   // Nothing to show and nothing coming — render nothing. While a first page is in flight (genre
   // rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
   // failed says so rather than vanishing, because an empty rail and a broken one are different news.
@@ -53,6 +55,13 @@ export default function RecRow({ title, items, variant = "default", loadMore, lo
             <span className="fa-section-title text-sm">{title}</span>
           </span>
           <span className="fa-caption text-fa-frost-dim">more in this genre →</span>
+        </div>
+      ) : caption ? (
+        <div className="space-y-1">
+          <h2 className="fa-section-title text-base">{title}</h2>
+          <p className="fa-caption text-fa-frost-dim" data-testid="rail-caption">
+            {caption}
+          </p>
         </div>
       ) : (
         <h2 className="fa-section-title text-base">{title}</h2>

@@ -41,6 +41,7 @@ import LoadFailed from "../ui/load-failed";
 import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, savedMessage, type SaveMessage } from "../ui/save-outcome";
 import { useLeaveGuard } from "./useLeaveGuard";
+import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
 
 interface Props {
   /** Fired after a successful save — the feed surface uses it to adopt the regenerated picks. */
@@ -291,12 +292,12 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       {!bare && (
         <div>
           <h2 className="fa-section-title">Conditions for tonight&apos;s picks</h2>
-          {/* Only what the server enforces. The top-bar typeahead is a name lookup: it drops titles
-              your exclusions rule out without saying so, but not the "for you" floor, and its
-              global leg applies none of them — "all search" was false (R1-26). */}
+          {/* The same sentence as the Home conditions dialog, from one source (conditionsCopy.ts).
+              Ask Reel keeps titles under the minimum behind a tray and the typeahead's global leg
+              applies no rules, so the sentence says "shape" — never "airtight" or "all search"
+              (R1-26, IR1S-06). */}
           <p className="fa-caption text-fa-frost-dim mt-1" data-testid="conditions-scope">
-            These are airtight for the hero, every row and Ask Reel. Quick search in the top bar looks titles up by
-            name and only partly applies them, so it can show a title these rules would leave out.
+            {CONDITIONS_SCOPE_COPY}
           </p>
         </div>
       )}

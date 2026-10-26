@@ -35,7 +35,7 @@ async function bootAuthed(page: Page) {
   });
 }
 
-async function bootHome(page: Page, digestItems: unknown[]) {
+async function bootHome(page: Page, digestItems: unknown[], degradedReason: string | null = null) {
   await bootAuthed(page);
   await mockJson(page, "**/api/feed/continue-watching", []);
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
@@ -45,6 +45,7 @@ async function bootHome(page: Page, digestItems: unknown[]) {
   });
   await mockJson(page, "**/api/digest/current", {
     weekStart: "2026-08-03", generatedAt: digestItems.length > 0 ? new Date().toISOString() : null, items: digestItems,
+    degradedReason,
   });
   await page.goto("/home");
   await expect(page.getByTestId("hero-card").first()).toBeVisible();
@@ -57,6 +58,25 @@ test.describe("weekly digest rail", () => {
     await expect(page.getByText("New & high for you this week")).toBeVisible();
     await expect(page.getByTestId("rec-card").filter({ hasText: "Fresh Signal" })).toHaveCount(1);
     await expect(page.getByTestId("rec-card").filter({ hasText: "High Water" })).toHaveCount(1);
+  });
+
+  test("a digest that met the bar shows no relaxed-bar caption (IR1S-03)", async ({ page }) => {
+    await bootHome(page, [card(2, "Fresh Signal")]);
+
+    await expect(page.getByText("New & high for you this week")).toBeVisible();
+    await expect(page.getByTestId("rail-caption")).toHaveCount(0);
+  });
+
+  // IR1S-03: a build that relaxed the "high for you" bar must not keep the claim in its title.
+  test("a relaxed digest is retitled and says why, in the build's words", async ({ page }) => {
+    const reason =
+      "Only 0 of this week's arrivals cleared the 7 “high for you” bar, so it was relaxed to 6 for this digest.";
+    await bootHome(page, [card(2, "Fresh Signal"), card(3, "High Water")], reason);
+
+    await expect(page.getByRole("heading", { name: "New this week", exact: true })).toBeVisible();
+    await expect(page.getByText("New & high for you this week")).toHaveCount(0);
+    await expect(page.getByTestId("rail-caption")).toHaveText(reason);
+    await expect(page.getByTestId("rec-card").filter({ hasText: "Fresh Signal" })).toHaveCount(1);
   });
 
   test("hides itself entirely while the week's digest is empty", async ({ page }) => {

@@ -25,6 +25,7 @@ import PickConditionsButton, { PickConditionsSummary } from "../components/rec/P
 import { matchesBrowseFilter, matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
+import { digestRailCopy } from "../lib/digestCopy";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
 import TonightMoodChips from "../components/rec/TonightMoodChips";
 import HomeStatusLine from "../components/rec/HomeStatusLine";
@@ -102,6 +103,7 @@ export default function Home() {
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
   // The weekly digest rail hides itself entirely until Friday's build lands something.
   const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
+  const digestCopy = digestRailCopy(digest?.degradedReason);
 
   // The hero's row-level admission, from the same cards the hero shows (the snapshot under the
   // browse filter, less what the user just acted on). Cards paged in later carry no confidence and
@@ -265,9 +267,12 @@ export default function Home() {
             />
           ))}
 
+          {/* "High for you" only when the build met the bar; a relaxed build is retitled and says
+              why, in the build's own words (IR1S-03). */}
           {digestFiltered.length > 0 && (
             <StaticRail
-              title={<span className="text-fa-frost-bright">New &amp; high for you this week</span>}
+              title={<span className="text-fa-frost-bright">{digestCopy.title}</span>}
+              caption={digestCopy.caption}
               items={digestFiltered}
             />
           )}
