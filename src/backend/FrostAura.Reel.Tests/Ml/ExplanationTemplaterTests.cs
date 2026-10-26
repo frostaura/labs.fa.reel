@@ -31,12 +31,12 @@ public class ExplanationTemplaterTests
     [Fact]
     public void Skipping_an_unverified_person_clause_falls_through_to_the_next_contribution()
     {
-        var context = Context(contributions: [("castAffinity", 1.5f), ("tmdbPopularityLog", 0.4f)]);
+        var context = Context(contributions: [("castAffinity", 1.5f), ("traktRating", 0.4f)]);
 
         var sentence = ExplanationTemplater.BuildSentence(context);
 
         Assert.DoesNotContain("cast", sentence, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("right now", sentence); // the popularity clause took its place
+        Assert.Contains("crowd", sentence); // the crowd clause took its place
     }
 
     [Fact]
@@ -275,9 +275,10 @@ public class ExplanationTemplaterTests
             Name = "Sample",
             Year = 1994,
             Genres = ["drama"],
-            // Set so the crowd-rating and fresh-release clauses are exercisable by the
-            // sentence-integrity sweep; no other test passes the features that read these.
-            TraktRating = 7.5m,
+            // Set so the crowd-rating, contrarian and fresh-release clauses are exercisable by the
+            // sentence-integrity sweep: a real crowd (≥ 50 votes, badge 7.8) the clauses may quote.
+            TraktRating = 8.0m,
+            TraktVotes = 400,
             ReleasedAt = DateTime.UtcNow.AddDays(-10),
         };
         return new ExplanationTemplater.Context(
@@ -287,6 +288,8 @@ public class ExplanationTemplaterTests
             new HashSet<string> { "drama" },
             anchorName,
             sharedGenre,
-            tone);
+            tone,
+            // A reader harsher than the crowd, so the contrarian clause is reachable in the sweep.
+            AccountContrarianOffset: -0.5m);
     }
 }

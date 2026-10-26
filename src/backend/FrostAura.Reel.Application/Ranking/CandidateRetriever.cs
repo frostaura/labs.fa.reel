@@ -1,6 +1,8 @@
+using System.Linq.Expressions;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
 using Microsoft.EntityFrameworkCore;
 using Pgvector;
@@ -16,7 +18,8 @@ namespace FrostAura.Reel.Application.Ranking;
 /// was just the least-popular of the popular. This composes two arms over the SAME eligibility rule
 /// and hands the union back to the existing scorer:
 ///
-///   • Popularity arm — the coverage slice; keeps the familiar popular head everyone expects.
+///   • Popularity arm — the coverage slice, ranked as a QUALITY arm: best vote-shrunk crowd score
+///     first (<see cref="CrowdVotes.ShrunkScore"/>), so the head is what a real crowd rates highly.
 ///   • ANN arm — pgvector cosine kNN over plot embeddings against the user's taste. Since B1 that
 ///     is a MULTI-CENTROID pull: one kNN per <see cref="TasteClusterer"/> cluster, budgeted by the
 ///     cluster's weight, plus the unchanged drift pull vs
@@ -77,7 +80,7 @@ public sealed class CandidateRetriever(
     /// The deduped, maturity-filtered hybrid pool for one lane. <paramref name="lane"/> is the
     /// caller's extra predicate (the poster/tmdbId gate, a genre rail, new-for-you recency, the
     /// paginated path's already-seen exclusions) applied to BOTH arms so neither can leak past
-    /// eligibility. Ordering is the popularity head first, then ANN hits best-similarity first — a
+    /// eligibility. Ordering is the quality head first, then ANN hits best-similarity first — a
     /// downstream <c>Take()</c> keeps the whole coverage slice plus the strongest personalized hits.
     /// </summary>
     /// <param name="popCount">Target popularity-arm survivors after maturity filtering.</param>
@@ -170,14 +173,19 @@ public sealed class CandidateRetriever(
             return added;
         }
 
-        // ── Popularity arm: the coverage slice ──────────────────────────────────────────────
-        // The id tie-break is load-bearing: without it, titles tied on popularity land in whatever
+        // ── Popularity arm, ranked as a QUALITY arm ─────────────────────────────────────────
+        // Ordered by the crowd score the card's badge shows — CrowdVotes.ShrunkScore, vote-shrunk
+        // and Trakt-first, the §4.8 ranking signal — not by TMDB popularity. Popularity put whatever
+        // was being watched this week at the head (NCIS in five rails); the shrunk score puts the
+        // titles a real crowd rates highly there, while a 10.0 on 2 votes reads 6.6 and sinks.
+        // Titles with no crowd score come last, ordered by votes, then popularity (so a catalogue
+        // that has no crowd data yet still gets its familiar head), then id.
+        //
+        // The id tie-break is load-bearing: without it, titles tied on every key land in whatever
         // row order Postgres feels like, so two back-to-back builds over identical data can retrieve
         // DIFFERENT pools at the Take() cutoff — which defeats the feed's no-op suppression (an
         // identical rebuild must assemble identically) and makes any build irreproducible.
-        var popular = await Lane()
-            .OrderByDescending(t => t.TmdbPopularity)
-            .ThenBy(t => t.Id)
+        var popular = await QualityFirst(Lane())
             .Take(OverFetch(popCount))
             .ToListAsync(ct);
         AddArm(popular, popCount, RetrievalArm.Popularity);
@@ -360,12 +368,34 @@ public sealed class CandidateRetriever(
             .ToListAsync(ct);
 
     private static int OverFetch(int target) => (int)Math.Ceiling(target * MaturityOverFetch);
+
+    /// <summary>
+    /// <paramref name="titles"/> best shrunk crowd score first (<see cref="CrowdVotes.ShrunkScore"/>),
+    /// titles with none last; then most voted, most popular, and id. In SQL — the expressions are
+    /// WS-3's single definition, so the arm can never rank on a number the badge does not show.
+    /// </summary>
+    internal static IOrderedQueryable<Title> QualityFirst(IQueryable<Title> titles)
+    {
+        var parameter = CrowdVotes.ShrunkScore.Parameters[0];
+        var unscored = Expression.Lambda<Func<Title, bool>>(
+            Expression.Equal(CrowdVotes.ShrunkScore.Body, Expression.Constant(null, typeof(decimal?))),
+            parameter);
+        return titles
+            .OrderBy(unscored)
+            .ThenByDescending(CrowdVotes.ShrunkScore)
+            .ThenByDescending(CrowdVotes.Votes)
+            .ThenByDescending(t => t.TmdbPopularity)
+            .ThenBy(t => t.Id);
+    }
 }
 
 /// <summary>Which retrieval arm put a title into the first-pass pool.</summary>
 public enum RetrievalArm
 {
-    /// <summary>The coverage slice — eligible catalogue by TMDB popularity.</summary>
+    /// <summary>
+    /// The coverage slice — eligible catalogue by vote-shrunk crowd score (the name predates that
+    /// ordering and is persisted in build stats, so it stays).
+    /// </summary>
     Popularity,
 
     /// <summary>

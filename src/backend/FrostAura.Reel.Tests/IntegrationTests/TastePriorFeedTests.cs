@@ -242,7 +242,140 @@ public class TastePriorFeedTests(PostgresFixture fixture)
         Assert.All(page, i => Assert.Equal(MediaType.Movie, i.Title.MediaType));
     }
 
+    [Fact]
+    public async Task The_crowd_term_overturns_a_small_prediction_lead_on_every_feed_ordering_and_changes_no_shown_rating()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // R1-49: the feed's ranking blend reads the vote-shrunk crowd score (WS-3 CR-1). Four crowd
+        // shapes, each given a release year that puts its MODEL score on the wrong side of the crowd:
+        // the well-voted, liked group is the newest and so scores LOWEST on the seeded artifact; the
+        // well-voted, disliked group is the oldest and scores HIGHEST. With equal predictions an
+        // ordering that ignored the crowd would tie and fall back to whatever order the retrieval arm
+        // (itself crowd-ordered) handed it, and a test of it would pass for the wrong reason.
+        var account = await SeedFounderShapedAccountAsync();
+        var accountId = account.AccountId;
+        var groups = await SeedCrowdFixtureAsync(account, perGroup: 6);
+        await SeedIsShowDrivenArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+        var scores = await db.TitleScores
+            .Where(s => s.AccountId == accountId && s.ModelArtifactId == snapshot.ModelArtifactId)
+            .ToDictionaryAsync(s => s.TitleId, s => s.PredictedRating);
+        var seededIds = groups.Values.SelectMany(ids => ids).ToList();
+        var titles = await db.Titles.Where(t => seededIds.Contains(t.Id)).ToDictionaryAsync(t => t.Id);
+
+        // The card still shows the model's number, unmoved by the crowd, for every card on the page.
+        Assert.NotEmpty(items);
+        foreach (var item in items.Where(i => scores.ContainsKey(i.TitleId)))
+        {
+            Assert.Equal(scores[item.TitleId], item.PredictedRating);
+        }
+
+        // The fixture holds, checked rather than assumed: the model alone orders the groups
+        // disliked > fewVotes = noCrowd > wellVoted, and the crowd term alone reverses that.
+        string[] order = ["wellVoted", "fewVotes", "noCrowd", "disliked"];
+        decimal Lo(string g) => groups[g].Min(id => scores[id]);
+        decimal Hi(string g) => groups[g].Max(id => scores[id]);
+        double KeyLo(string g) => groups[g].Min(id => (double)scores[id] * CrowdPrior.FactorFor(titles[id]));
+        double KeyHi(string g) => groups[g].Max(id => (double)scores[id] * CrowdPrior.FactorFor(titles[id]));
+        Assert.All(order.SelectMany(g => groups[g]), id => Assert.True(scores.ContainsKey(id), "every seeded title is scored"));
+        var model = string.Join("; ", order.Select(g => $"{g} {Lo(g)}–{Hi(g)}"));
+        Assert.True(Hi("wellVoted") < Lo("fewVotes") && Hi("wellVoted") < Lo("noCrowd"), $"model must rank wellVoted last: {model}");
+        Assert.True(Hi("fewVotes") < Lo("disliked") && Hi("noCrowd") < Lo("disliked"), $"model must rank disliked first: {model}");
+        for (var i = 0; i + 1 < order.Length; i++)
+        {
+            Assert.True(KeyLo(order[i]) > KeyHi(order[i + 1]), $"the crowd term must reverse the model's order: {model}");
+        }
+
+        // The hero is the build's RankKey at work: every seat goes to the group the model scored
+        // lowest, which only the crowd term can have put there.
+        var hero = items.Where(i => i.Row == FeedRowKind.Hero).Select(i => i.TitleId).ToList();
+        Assert.NotEmpty(hero);
+        Assert.All(hero, id => Assert.Contains(id, groups["wellVoted"]));
+
+        // And the persisted ordering key carries the crowd term, so a reader can reconstruct why:
+        // FinalScore / the shown rating is the crowd factor (×1.042 here, not 1.0), to within the
+        // shown rating's two-decimal rounding.
+        var factor = CrowdPrior.FactorForScore(CrowdRating.Shrink(8.0m, 5_000));
+        var heroItem = items.First(i => i.TitleId == hero[0]);
+        Assert.InRange((double)(heroItem.FinalScore / heroItem.PredictedRating), factor - 0.0015d, factor + 0.0015d);
+
+        // Page 2 is ordered by the same key, all the way down — through the rank alone (no agent),
+        // and through the model-led curation blend that RE-ORDERS the ranked slice when an agent
+        // has judged it. The agent here gives every title the same fit, so the blend's order is its
+        // model side's: a blend that dropped the crowd term would hand page 2 back to the model.
+        AssertCrowdOrdered(await MoreAsync(accountId, FeedRowContext.Hero, limit: 24), "rank");
+        var uniform = new NarrativeFitAgent([.. titles.Keys]);
+        AssertCrowdOrdered(await MoreAsync(accountId, FeedRowContext.Hero, limit: 24, agent: uniform), "curation blend");
+        Assert.True(uniform.RerankCalls > 0, "the curation pass must have run for the blend to be exercised");
+
+        void AssertCrowdOrdered(IReadOnlyList<ScoredFeedItem> served, string path)
+        {
+            var page = served.Select(i => i.Title.Id).ToList();
+            var positions = order.ToDictionary(
+                g => g, g => page.Select((id, ix) => (id, ix)).Where(x => groups[g].Contains(x.id)).Select(x => x.ix).ToList());
+            var described = $"{path}: " + string.Join("; ", order.Select(g => $"{g} at [{string.Join(",", positions[g])}]"));
+            for (var i = 0; i + 1 < order.Length; i++)
+            {
+                Assert.NotEmpty(positions[order[i]]);
+                Assert.NotEmpty(positions[order[i + 1]]);
+                Assert.True(positions[order[i]].Max() < positions[order[i + 1]].Min(), described);
+            }
+        }
+    }
+
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Four groups of <paramref name="perGroup"/> movies in one genre that differ in their crowd and
+    /// in a release year chosen against it: the seeded artifact scores older movies higher, so the
+    /// liked group is the newest (lowest model score) and the disliked group the oldest (highest).
+    /// The perfect score on two votes and the no-crowd group share a year, so the shrinkage alone has
+    /// to put the two-vote 10.0 below the 5,000-vote 8.0 — there is no vote cutoff to do it instead.
+    /// </summary>
+    private async Task<Dictionary<string, List<Guid>>> SeedCrowdFixtureAsync(Fixture account, int perGroup)
+    {
+        (string Group, decimal? Rating, int Votes, int Year)[] shapes =
+        [
+            ("wellVoted", 8.0m, 5_000, 2014),
+            ("fewVotes", 10.0m, 2, 2010),
+            ("noCrowd", null, 0, 2010),
+            ("disliked", 5.0m, 5_000, 2006),
+        ];
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var groups = shapes.ToDictionary(s => s.Group, _ => new List<Guid>());
+        var genre = account.VolumeGenres[0];
+
+        // Reversed, so the group the crowd should lead is inserted last and given the lowest
+        // popularity: an order that comes from either would put it at the bottom, not the top.
+        foreach (var (shape, rank) in Enumerable.Reverse(shapes).Select((shape, rank) => (shape, rank)))
+        {
+            var (group, rating, votes, year) = shape;
+            for (var i = 0; i < perGroup; i++)
+            {
+                var title = NewTitle(
+                    $"crowd {group} {i}", MediaType.Movie, popularity: 10m - rank - (i * 0.001m), year: year, genres: [genre]);
+                title.TraktRating = null;
+                title.TraktVotes = 0;
+                title.TmdbVoteAverage = rating;
+                title.TmdbVoteCount = votes;
+                db.Add(title);
+                groups[group].Add(title.Id);
+            }
+        }
+
+        await db.SaveChangesAsync();
+        return groups;
+    }
 
     private static async Task<FeedSnapshot> ActiveSnapshotAsync(Infrastructure.Persistence.ReelDbContext db, Guid accountId) =>
         await db.FeedSnapshots
@@ -515,7 +648,8 @@ public class TastePriorFeedTests(PostgresFixture fixture)
             CancellationToken.None);
     }
 
-    private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(Guid accountId, FeedRowContext row, int limit)
+    private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(
+        Guid accountId, FeedRowContext row, int limit, ISearchAgent? agent = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId);
@@ -534,7 +668,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
             new DislikeSignal(db, cache),
             new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             tmdb,
-            new UnavailableSearchAgent(),
+            agent ?? new UnavailableSearchAgent(),
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new FrostAura.Reel.Application.CrossReference.RerankBudget(
                 db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),

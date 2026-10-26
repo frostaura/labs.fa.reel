@@ -76,6 +76,22 @@ public static class FeedEndpoints
         string? Hook = null, string? LensClause = null, string? Mood = null, CardTexture? Texture = null,
         IReadOnlyList<SharedEvidence>? Evidence = null);
 
+    /// <summary>The deep-cuts row title that may claim "high for you" — see <see cref="DeepCutsTitle"/>.</summary>
+    public const string DeepCutsHighForYouTitle = "Deep cuts — under-the-radar, high for you";
+
+    /// <summary>The deep-cuts row title when the row's numbers do not back "high for you".</summary>
+    public const string DeepCutsPlainTitle = "Deep cuts — under the radar";
+
+    /// <summary>
+    /// The deep-cuts row title: "high for you" only when the row's mean prediction is at or above
+    /// the account's median rating (<see cref="AccountRatingMedian"/>). With no ratings there is no
+    /// median to clear, so the claim is not made.
+    /// </summary>
+    internal static string DeepCutsTitle(IReadOnlyCollection<decimal> rowPredictions, decimal? accountMedian) =>
+        rowPredictions.Count > 0 && accountMedian is { } median && rowPredictions.Average() >= median
+            ? DeepCutsHighForYouTitle
+            : DeepCutsPlainTitle;
+
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
@@ -182,11 +198,13 @@ public static class FeedEndpoints
                         // The refill is the one path that can put a card on tonight's page without a
                         // build having chosen it, so it has to rank the way the build ranks. The
                         // ordering is the persisted TitleScore — unchanged, still what the card shows
-                        // — TIMES the account's taste prior. Sorted in memory rather than in SQL,
-                        // because the prior needs the title's genres and the account's history and
-                        // neither is expressible in the ORDER BY above.
+                        // — TIMES the account's taste prior and the title's crowd term, the build's
+                        // OrderPrior. Sorted in memory rather than in SQL, because the prior needs the
+                        // title's genres and the account's history and neither is expressible in the
+                        // ORDER BY above.
                         var prior = TastePrior.From(taste);
-                        pool = [.. pool.OrderByDescending(c => prior.Rank(c.PredictedRating, c.Title))];
+                        pool = [.. pool.OrderByDescending(c =>
+                            prior.Rank(c.PredictedRating, c.Title) * (decimal)CrowdPrior.FactorFor(c.Title))];
 
                         var poolIds = pool.Select(c => c.Title.Id).ToList();
                         var personsByTitle = VerifiedPeople.BestByRole(
@@ -202,7 +220,8 @@ public static class FeedEndpoints
                                 personsByTitle.GetValueOrDefault(c.Title.Id) ?? ExplanationTemplater.NoPersons,
                                 c.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet(),
                                 AnchorName: null,
-                                Tone: toneByTitle.GetValueOrDefault(c.Title.Id));
+                                Tone: toneByTitle.GetValueOrDefault(c.Title.Id),
+                                AccountContrarianOffset: taste.OverallContrarianOffset);
                         }
                     }
 
@@ -480,7 +499,15 @@ public static class FeedEndpoints
                 }
             }
 
-            AddKindRow(FeedRowKind.DeepCuts, "deep-cuts", "Deep cuts — under-the-radar, high for you");
+            // "High for you" is a claim about the row's numbers, so it is checked against them: the
+            // row's mean prediction has to reach the account's own median rating. A row of 6.5s
+            // under a reader whose median is 7 is under-the-radar, not high for them (2026-10-25).
+            var deepCutPredictions = items.Where(x => x.Item.Row == FeedRowKind.DeepCuts)
+                .Select(x => x.Item.PredictedRating).ToList();
+            var deepCutsTitle = DeepCutsTitle(
+                deepCutPredictions,
+                deepCutPredictions.Count == 0 ? null : await AccountRatingMedian.ForAsync(db, account.Id, ct));
+            AddKindRow(FeedRowKind.DeepCuts, "deep-cuts", deepCutsTitle);
             AddKindRow(FeedRowKind.NewForYou, "new-for-you", "New & for you");
 
             await LogRefillAsync(items.Select(x => x.Title.Id).ToHashSet());

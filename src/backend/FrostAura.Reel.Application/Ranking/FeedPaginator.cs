@@ -561,7 +561,9 @@ public sealed class FeedPaginator(
                 // rather than only in RankAsync is load-bearing — this blend RE-ORDERS the pool, so
                 // a prior applied only upstream would decide which titles are curated and then be
                 // thrown away deciding which are shown.
-                var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) / 10d;
+                // The crowd term rides the model side for the same reason: it is part of the snapshot
+                // build's RankKey, so page 2 of a rail has to be ordered by it too.
+                var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) * CrowdPrior.FactorFor(s.Title) / 10d;
                 var blend = fit is null ? modelNorm : (0.6 * modelNorm) + (0.4 * fit.Fit);
                 return (Scored: s, Fit: fit, Blend: blend);
             })
@@ -938,7 +940,7 @@ public sealed class FeedPaginator(
         IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, DateTime now, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
-        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t) * CrowdPrior.FactorFor(t);
 
         switch (req.Context)
         {
@@ -983,7 +985,7 @@ public sealed class FeedPaginator(
         Guid anchorId, List<Scored> scored, IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
-        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t) * CrowdPrior.FactorFor(t);
 
         var anchor = await db.Titles.FirstOrDefaultAsync(t => t.Id == anchorId, ct);
         if (anchor is null)
@@ -1090,7 +1092,8 @@ public sealed class FeedPaginator(
                 s.Title, s.Row.TopContributions, persons, ratedGenres, anchor?.Name,
                 sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id),
                 // The anchored-row gate's evidence names the link, exactly as on the built rail.
-                evidence.GetValueOrDefault(s.Title.Id));
+                evidence.GetValueOrDefault(s.Title.Id),
+                taste.OverallContrarianOffset);
         }
 
         return result;

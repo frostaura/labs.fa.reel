@@ -32,10 +32,10 @@ public class WhyLineHonestyTests
     public void The_decade_feature_falls_through_to_the_next_real_reason()
     {
         var sentence = ExplanationTemplater.BuildSentence(
-            Context([("decadeAffinity", 2.1f), ("tmdbPopularityLog", 0.4f)], 2010, 0));
+            Context([("decadeAffinity", 2.1f), ("userGenreAffinity", 0.4f)], 2010, 0));
 
         Assert.DoesNotContain("decade", sentence, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("right now", sentence);
+        Assert.Contains("drama", sentence, StringComparison.OrdinalIgnoreCase); // the genre clause took its place
     }
 
     [Theory]

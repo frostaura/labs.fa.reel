@@ -899,6 +899,13 @@ public class BuildFeedJobHandler(
                 ? components
                 : tastePrior.ComponentsFor(title);
         double Prior(Title title) => PriorOf(title).Multiplier;
+
+        // The crowd term (CrowdPrior): a bounded multiplier off the vote-shrunk, Trakt-first crowd
+        // score the badge prints, kept apart from the taste prior because it is a property of the
+        // title, not of the account — and because AveragePriorMagnitude below is the taste prior's
+        // shrinkage measure and must not be inflated by it. OrderPrior is what every ordering and
+        // the persisted FinalScore multiply by; the card's PredictedRating sees neither.
+        double OrderPrior(Title title) => Prior(title) * CrowdPrior.FactorFor(title);
         capture.AveragePriorMagnitude = priorByTitle.Count > 0
             ? priorByTitle.Values.Average(p => Math.Abs(1d - p.Multiplier))
             : 0d;
@@ -1100,7 +1107,8 @@ public class BuildFeedJobHandler(
                 ratedGenres,
                 anchor?.Name,
                 sharedGenre,
-                toneByTitle.GetValueOrDefault(candidate.Title.Id));
+                toneByTitle.GetValueOrDefault(candidate.Title.Id),
+                AccountContrarianOffset: taste.OverallContrarianOffset);
         }
 
         decimal Freshness(Title title)
@@ -1137,8 +1145,9 @@ public class BuildFeedJobHandler(
                 : CrossReference.VerdictFactor.Neutral;
 
         // The ranking key the whole page is ordered by, once, in one place: the calibrated
-        // prediction the card shows, times the account-level taste prior, times the two bounded
-        // presentation nudges that were already here, times the cross-reference keep factor. Every
+        // prediction the card shows, times the account-level taste prior and the title's crowd term
+        // (OrderPrior), times the two bounded presentation nudges that were already here, times the
+        // cross-reference keep factor. Every
         // ordering below multiplies this by its own slate term (freshness, anchor similarity)
         // rather than re-deriving the common part.
         //
@@ -1147,7 +1156,7 @@ public class BuildFeedJobHandler(
         // contract, and moving an LLM opinion into the shown number would make /api/accuracy a
         // measurement of the judge rather than of the model.
         decimal RankKey(Candidate c) =>
-            c.Predicted * (decimal)Prior(c.Title) * (decimal)PreferenceBoost(c.Title)
+            c.Predicted * (decimal)OrderPrior(c.Title) * (decimal)PreferenceBoost(c.Title)
                 * (decimal)Verdict(c.Title.Id).Factor;
 
         // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────
@@ -1232,7 +1241,8 @@ public class BuildFeedJobHandler(
                     // Null, not NeutralFit, where the pass did not reach this title: null is what
                     // makes ProfileRerankPolicy fall back to the calibrated key for it rather than
                     // ordering it as a genuine mid-scoring verdict it never received.
-                    preAssemblyFits.TryGetValue(x.Candidate.Title.Id, out var judged) ? judged : null))]);
+                    preAssemblyFits.TryGetValue(x.Candidate.Title.Id, out var judged) ? judged : null,
+                    CrowdPrior.FactorFor(x.Candidate.Title)))]);
 
             List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
             var stages = phases.Length > 0
@@ -1751,7 +1761,7 @@ public class BuildFeedJobHandler(
             && SameFeed(previousItems, planned))
         {
             capture.PreservedGeneratedAt = previousSnapshot.GeneratedAt;
-            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness, Prior, PriorOf);
+            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness, OrderPrior, PriorOf);
             return null;
         }
 
@@ -1814,7 +1824,7 @@ public class BuildFeedJobHandler(
                 Rank = item.Rank,
                 TitleId = item.Candidate.Title.Id,
                 PredictedRating = DisplayRating(item.Candidate),
-                FinalScore = FinalScoreOf(item.Candidate, Freshness, Prior),
+                FinalScore = FinalScoreOf(item.Candidate, Freshness, OrderPrior),
                 WhyThisSentence = item.WhyThis,
                 ExplanationJson = ExplanationOf(item.Candidate, PriorOf(item.Candidate.Title)),
                 WhySource = item.WhySource.Name,
@@ -2242,12 +2252,19 @@ public class BuildFeedJobHandler(
 
         // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
         // complaint, so the later card re-seeds its templater variant until distinct (bounded).
+        // The same pass holds each boilerplate phrase family to its share of the rail
+        // (ExplanationTemplater.BoilerplateFamilyShareCap): a card over the cap is re-written
+        // without that clause, saying the next true thing instead.
         foreach (var rail in planned.GroupBy(i => (i.Row, i.AnchorTitleId)))
         {
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in rail.OrderBy(i => i.Rank))
             {
-                if (!seen.Add(item.WhyThis))
+                if (!seen.Contains(item.WhyThis) && !ExplanationTemplater.ExceedsFamilyShare(item.WhyThis, seen))
+                {
+                    seen.Add(item.WhyThis);
+                }
+                else
                 {
                     item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
                     // A card whose model pass failed keeps saying so — the re-seeded line is still
@@ -2603,7 +2620,8 @@ public class BuildFeedJobHandler(
     private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
 
     /// <summary>
-    /// The RANKING score behind the card — predicted × the taste prior × freshness. Distinct from
+    /// The RANKING score behind the card — predicted × the taste prior × the crowd term × freshness
+    /// (<paramref name="prior"/> is the build's OrderPrior, both multipliers together). Distinct from
     /// <see cref="DisplayRating"/> on purpose and now more so: this is the number the page was
     /// ordered by, and it has to carry the prior or the persisted ordering key would disagree with
     /// the order actually served. Nothing renders it; it exists so a later reader can reconstruct
