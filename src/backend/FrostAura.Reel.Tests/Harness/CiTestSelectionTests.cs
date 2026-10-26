@@ -21,7 +21,7 @@ namespace FrostAura.Reel.Tests.Harness;
 public class CiTestSelectionTests
 {
     /// <summary>Fixtures that open the test database. A class consuming one needs Postgres.</summary>
-    private static readonly Type[] DatabaseFixtures = [typeof(PostgresFixture), typeof(JobRunnerDatabaseFixture), typeof(ReelApiFactory)];
+    private static readonly Type[] DatabaseFixtures = [typeof(PostgresFixture), typeof(JobRunnerDatabaseFixture), typeof(MigrationRollbackDatabaseFixture), typeof(ReelApiFactory)];
 
     /// <summary>Fixtures known to need no database. Every fixture in the assembly is one or the other.</summary>
     private static readonly Type[] NonDatabaseFixtures = [];

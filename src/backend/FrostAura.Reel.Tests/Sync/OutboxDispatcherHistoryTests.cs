@@ -134,8 +134,11 @@ public class OutboxDispatcherHistoryTests(PostgresFixture fixture)
         await using (var edit = fixture.CreateContext(new AccountContext()))
         {
             var bad = await edit.TraktOutbox.SingleAsync(o => o.Id == badId);
-            Assert.Contains("\"MediaType\":\"Show\"", bad.PayloadJson, StringComparison.Ordinal);
-            bad.PayloadJson = bad.PayloadJson.Replace("\"MediaType\":\"Show\"", "\"MediaType\":" + storedMediaType, StringComparison.Ordinal);
+            // The column is jsonb, so the stored text is Postgres's rendering: edit the value, not the text.
+            var payload = System.Text.Json.Nodes.JsonNode.Parse(bad.PayloadJson)!.AsObject();
+            Assert.Equal("Show", payload["MediaType"]!.GetValue<string>());
+            payload["MediaType"] = System.Text.Json.Nodes.JsonNode.Parse(storedMediaType);
+            bad.PayloadJson = payload.ToJsonString();
             await edit.SaveChangesAsync();
         }
 
