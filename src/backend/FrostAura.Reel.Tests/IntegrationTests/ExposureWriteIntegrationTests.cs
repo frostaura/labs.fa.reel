@@ -306,7 +306,7 @@ public class ExposureWriteIntegrationTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task A_number_only_refresh_keeps_the_contributions_a_build_stored()
+    public async Task A_refresh_replaces_the_number_and_the_contributions_that_explain_it_together()
     {
         if (!fixture.Available)
         {
@@ -315,6 +315,7 @@ public class ExposureWriteIntegrationTests(PostgresFixture fixture)
 
         var (accountId, titles, artifactId) = await SeedAsync(2);
         const string buildContributions = """[{"feature": "directorAffinity", "value": 0.42}]""";
+        const string rescoreContributions = """[{"feature": "simTopLovedMean", "value": 0.31}]""";
         await using (var db = fixture.CreateContext(Scoped(accountId)))
         {
             await TitleScoreWriter.UpsertAsync(
@@ -323,38 +324,23 @@ public class ExposureWriteIntegrationTests(PostgresFixture fixture)
                 Now, CancellationToken.None);
         }
 
+        // A later scorer (the on-demand path, the paginator): an updated number for the stored title,
+        // with the reasons behind THAT number, and a new row for the other.
         await using (var db = fixture.CreateContext(Scoped(accountId)))
         {
-            // The on-demand scorer: an updated number for the stored title, a new row for the other.
             Assert.Equal(2, await TitleScoreWriter.UpsertAsync(
                 db, accountId, artifactId,
-                [new TitleScoreWriter.Score(titles[0], 7.6m, "[]"), new TitleScoreWriter.Score(titles[1], 6.4m, "[]")],
-                Now.AddMinutes(1), CancellationToken.None, keepStoredContributions: true));
-        }
-
-        await using (var db = fixture.CreateContext(Scoped(accountId)))
-        {
-            var stored = await db.TitleScores.Where(s => s.AccountId == accountId).ToDictionaryAsync(s => s.TitleId);
-            Assert.Equal(7.6m, stored[titles[0]].PredictedRating);
-            Assert.Contains("directorAffinity", stored[titles[0]].ContributionsJson, StringComparison.Ordinal);
-            Assert.Equal("[]", stored[titles[1]].ContributionsJson);
-            Assert.Equal(Now.AddMinutes(1), stored[titles[0]].ScoredAt, TimeSpan.FromSeconds(1));
-        }
-
-        // And a full write (the build) does replace them.
-        await using (var db = fixture.CreateContext(Scoped(accountId)))
-        {
-            await TitleScoreWriter.UpsertAsync(
-                db, accountId, artifactId,
-                [new TitleScoreWriter.Score(titles[0], 7.7m, "[]")],
-                Now.AddMinutes(2), CancellationToken.None);
+                [new TitleScoreWriter.Score(titles[0], 7.6m, rescoreContributions), new TitleScoreWriter.Score(titles[1], 6.4m, "[]")],
+                Now.AddMinutes(1), CancellationToken.None));
         }
 
         await using var verify = fixture.CreateContext(Scoped(accountId));
-        Assert.Equal("[]", await verify.TitleScores
-            .Where(s => s.AccountId == accountId && s.TitleId == titles[0])
-            .Select(s => s.ContributionsJson)
-            .SingleAsync());
+        var stored = await verify.TitleScores.Where(s => s.AccountId == accountId).ToDictionaryAsync(s => s.TitleId);
+        Assert.Equal(7.6m, stored[titles[0]].PredictedRating);
+        Assert.Contains("simTopLovedMean", stored[titles[0]].ContributionsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("directorAffinity", stored[titles[0]].ContributionsJson, StringComparison.Ordinal);
+        Assert.Equal("[]", stored[titles[1]].ContributionsJson);
+        Assert.Equal(Now.AddMinutes(1), stored[titles[0]].ScoredAt, TimeSpan.FromSeconds(1));
     }
 
     private static AccountContext Scoped(Guid accountId)

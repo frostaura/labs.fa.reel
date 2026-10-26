@@ -88,9 +88,66 @@ public static partial class ExplanationTemplater
     public const double BoilerplateFamilyShareCap = 0.25d;
 
     /// <summary>
+    /// How many of the card's largest POSITIVE contributions a clause may always cite. Together with
+    /// <see cref="CitableContributionFloor"/> this is the one rule every clause obeys: a why-line
+    /// names a reason the waterfall on the same title page shows as a reason. Before it, a card whose
+    /// two biggest pushes were clause-less (release era +1.0, release-year fit +0.7) fell through to
+    /// whatever came next — "in the same lane as the titles you love" on simTopLovedMean at +0.03
+    /// (rank 4–5), "the crowd backs it too" on traktRating at +0.04 — on 15 of 15 Home cards, while the
+    /// page below read "feels like your favourites +0.1, crowd rating +0.0" (2026-10-26).
+    /// </summary>
+    public const int CitableTopPositiveCount = 2;
+
+    /// <summary>
+    /// The contribution (in rating points) at which a push is big enough to cite whatever its rank:
+    /// a feature moving the prediction by 0.15 or more is a reason a reader can see in the waterfall
+    /// even behind two bigger ones. See <see cref="CitableTopPositiveCount"/>.
+    /// </summary>
+    public const float CitableContributionFloor = 0.15f;
+
+    /// <summary>
+    /// True when the contribution at <paramref name="index"/> may be cited by a clause: it is positive,
+    /// and it is either among the card's <see cref="CitableTopPositiveCount"/> largest positive
+    /// contributions or at least <see cref="CitableContributionFloor"/>. Ranked by value, not by list
+    /// position, so it holds however the caller ordered the list (the engine orders by |value|, which
+    /// interleaves negatives). Ties go to the earlier entry. Public so the surface harness can check a
+    /// rendered line against the same rule the templater wrote it under.
+    /// </summary>
+    public static bool IsCitable(IReadOnlyList<(string Feature, float Contribution)> contributions, int index)
+    {
+        var value = contributions[index].Contribution;
+        if (value <= 0)
+        {
+            return false;
+        }
+
+        if (value >= CitableContributionFloor)
+        {
+            return true;
+        }
+
+        var larger = 0;
+        for (var j = 0; j < contributions.Count; j++)
+        {
+            var other = contributions[j].Contribution;
+            if (j != index && other > 0 && (other > value || (other == value && j < index)))
+            {
+                larger++;
+            }
+        }
+
+        return larger < CitableTopPositiveCount;
+    }
+
+    /// <summary>
     /// Builds the deterministic why-sentence. <paramref name="variantSeed"/> shifts every phrasing
     /// pick by that many variants — 0 is the title's canonical sentence; the no-repeat guard bumps
     /// it when two cards on one rail would otherwise render identical text.
+    ///
+    /// <para><b>Only the reasons that moved the number.</b> A clause cites a contribution only when
+    /// <see cref="IsCitable"/> admits it — one of the card's two largest positive pushes, or one of at
+    /// least <see cref="CitableContributionFloor"/> — so a line never names a reason the title page's
+    /// waterfall shows as noise.</para>
     ///
     /// <para><b>Never a stub.</b> When no contribution yields a citable clause, an anchored card
     /// gets its anchor clause alone ("Written by Arthur Conan Doyle, like Sherlock.") and an
@@ -112,7 +169,7 @@ public static partial class ExplanationTemplater
             }
 
             var (feature, contribution) = context.Contributions[rank];
-            if (suppressed.Contains(feature))
+            if (suppressed.Contains(feature) || !IsCitable(context.Contributions, rank))
             {
                 continue;
             }

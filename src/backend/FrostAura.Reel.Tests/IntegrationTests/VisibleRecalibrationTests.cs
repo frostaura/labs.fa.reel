@@ -159,6 +159,20 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         // Preserve builds where none happened just because some numbers were rewritten.
         Assert.Equal(FeedBuildOutcome.NoOp, stats[^1].Mode);
         Assert.Null(stats[^1].FeedSnapshotId);
+
+        // Both builds of the one artifact name the calibrator layer they applied, and it is the
+        // same pinned map: the offsets instrument is what tells a moved p50 from a moved calibrator.
+        var offsets = stats.Select(s => System.Text.Json.JsonDocument.Parse(s.OffsetsJson!).RootElement).ToList();
+        Assert.All(offsets, o =>
+        {
+            Assert.True(o.TryGetProperty("baseP50", out _));
+            Assert.True(o.TryGetProperty("residualMean", out _));
+            Assert.True(o.TryGetProperty("calibratorDeltaMean", out _));
+            Assert.True(o.GetProperty("online").TryGetProperty("rejected", out _));
+        });
+        Assert.Equal(
+            offsets[0].GetProperty("calibrator").GetProperty("pinnedAt").GetDateTime(),
+            offsets[1].GetProperty("calibrator").GetProperty("pinnedAt").GetDateTime());
     }
 
     [Fact]

@@ -422,6 +422,26 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
         Assert.Equal(8.40d, moment.Predicted, 6);
         Assert.Equal(nameof(ExposureSurface.FeedHero), moment.Surface);
         Assert.Equal(12, moment.DaysToOutcome);
+
+        // The population is named with the choice that shaped it, and the two wider windows hold
+        // exactly the 90-day pair, so the page is told they add nothing (WS-5 task 11).
+        Assert.Contains("showed you", report.Populations!.Headline.Name, StringComparison.Ordinal);
+        Assert.Contains("picked", report.Populations.Headline.SelectionNote, StringComparison.Ordinal);
+        Assert.Equal(
+            [("90d", 1, (string?)null), ("365d", 1, "90d"), ("all", 1, "90d")],
+            report.WindowSummaries!.Select(w => (w.Key, w.Pairs, w.SameAs)));
+    }
+
+    [Fact]
+    public void Only_windows_that_differ_go_unmarked()
+    {
+        var now = new DateTime(2026, 10, 26, 0, 0, 0, DateTimeKind.Utc);
+        // 3 pairs in the last 90 days, 5 in the last year, 5 all-time.
+        int Since(DateTime? from) => from is null ? 5 : (now - from.Value).TotalDays > 100 ? 5 : 3;
+
+        var summary = AccuracyQuery.SummariseWindows(Since, now);
+
+        Assert.Equal([("90d", 3, (string?)null), ("365d", 5, (string?)null), ("all", 5, "365d")], summary.Select(w => (w.Key, w.Pairs, w.SameAs)));
     }
 
     [Fact]

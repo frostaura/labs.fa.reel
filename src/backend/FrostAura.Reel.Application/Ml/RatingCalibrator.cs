@@ -246,6 +246,63 @@ public sealed class RatingCalibrator
     public double Delta(double predicted) => Calibrate(predicted) - predicted;
 
     /// <summary>
+    /// The fitted map and its metrics as JSON — what <c>ModelArtifact.CalibratorJson</c> pins, so
+    /// every build of one artifact applies the identical map (WS-5 task 7). Knots round-trip exactly
+    /// (doubles serialise losslessly), so a pinned map calibrates bit-for-bit as the fitted one did.
+    /// </summary>
+    public string ToJson(CalibratorMode mode) => System.Text.Json.JsonSerializer.Serialize(new PinnedShape(
+        Kind.ToString(), mode.ToString(), PairCount, _knotsX, _knotsY, _blendWeight, _intercept, Correlation, MaeBefore, MaeAfter));
+
+    /// <summary>
+    /// Reads a map written by <see cref="ToJson"/>, or null when the JSON is absent, malformed, or
+    /// names a kind or mode this binary does not know — the caller then refits rather than serving a
+    /// map it cannot interpret. <paramref name="mode"/> is the mode the map was fitted under.
+    /// </summary>
+    public static RatingCalibrator? FromJson(string? json, out CalibratorMode mode)
+    {
+        mode = CalibratorMode.Auto;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            var shape = System.Text.Json.JsonSerializer.Deserialize<PinnedShape>(json);
+            if (shape is null
+                || !Enum.TryParse<CalibrationKind>(shape.Kind, out var kind)
+                || !Enum.TryParse<CalibratorMode>(shape.Mode, out mode)
+                || shape.KnotsX.Length != shape.KnotsY.Length)
+            {
+                return null;
+            }
+
+            return new RatingCalibrator(kind, shape.PairCount, shape.KnotsX, shape.KnotsY, shape.BlendWeight, shape.Intercept)
+            {
+                Correlation = shape.Correlation,
+                MaeBefore = shape.MaeBefore,
+                MaeAfter = shape.MaeAfter,
+            };
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record PinnedShape(
+        string Kind,
+        string Mode,
+        int PairCount,
+        double[] KnotsX,
+        double[] KnotsY,
+        double BlendWeight,
+        double Intercept,
+        double Correlation,
+        double MaeBefore,
+        double MaeAfter);
+
+    /// <summary>
     /// Picks the rule and builds the (metric-less) instance. Always returns a FRESH object — the
     /// <see cref="Identity"/> singleton is shared and must never have metrics written onto it.
     /// </summary>

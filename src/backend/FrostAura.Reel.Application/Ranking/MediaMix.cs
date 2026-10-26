@@ -89,4 +89,29 @@ public static class MediaMix
 
         return (result, have >= target);
     }
+    /// <summary>
+    /// Re-orders a ranked lane so its first <paramref name="window"/> entries carry the account's
+    /// media mix (<see cref="TargetFor"/>), drawing the missing medium from further down the lane
+    /// in rank order. Displaced entries keep their place at the head of what follows, so the next
+    /// page still opens with them. A mixed library (below the lean threshold) or a lane without
+    /// the wanted medium comes back unchanged.
+    ///
+    /// <para>Why the paginator needs it (WS-5 task 9): the build balanced the hero and its rails, but
+    /// every paginated page — hero pages, genre rails, New for you — ranked straight off the window,
+    /// and on a 91%-movie account those pages ran 31–83% shows (exposure log, last 60 days).</para>
+    /// </summary>
+    public static List<T> BalanceOrder<T>(IReadOnlyList<T> order, int window, Func<T, bool> isMovie, decimal movieRatedShare)
+    {
+        var head = order.Take(window).ToList();
+        var (wantMovies, target) = TargetFor(head.Count, movieRatedShare);
+        if (target == 0)
+        {
+            return [.. order];
+        }
+
+        var tail = order.Skip(window).ToList();
+        var (balanced, _) = Balance(head, tail, t => isMovie(t) == wantMovies, target);
+        var used = new HashSet<T>(balanced);
+        return [.. balanced, .. head.Where(h => !used.Contains(h)), .. tail.Where(t => !used.Contains(t))];
+    }
 }

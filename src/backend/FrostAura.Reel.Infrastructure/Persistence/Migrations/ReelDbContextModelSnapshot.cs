@@ -920,6 +920,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("NewlyEligiblePerArmJson")
                         .HasColumnType("jsonb");
 
+                    b.Property<string>("OffsetsJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<int>("RailsDropped")
                         .HasColumnType("integer");
 
@@ -1502,6 +1505,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("BaselinePrecisionAt10")
                         .HasColumnType("numeric");
 
+                    b.Property<string>("BaselinesJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<decimal?>("CalibrationBias")
                         .HasColumnType("numeric");
 
@@ -1517,6 +1523,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<int?>("EligibleHoldoutCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("FeatureSetHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<int>("HoldoutPositiveCount")
                         .HasColumnType("integer");
@@ -1594,6 +1604,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("bytea");
 
+                    b.Property<string>("CalibratorJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime?>("CalibratorPinnedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("FeatureSchemaJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -1646,6 +1662,15 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<double>("Bias")
                         .HasColumnType("double precision");
+
+                    b.Property<double?>("ProbeBaseMae")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("ProbeMae")
+                        .HasColumnType("double precision");
+
+                    b.Property<long>("RejectedUpdateCount")
+                        .HasColumnType("bigint");
 
                     b.Property<long>("UpdateCount")
                         .HasColumnType("bigint");

@@ -7,6 +7,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -650,7 +651,7 @@ public static class FeedEndpoints
         // the row context + the title ids it has already shown, and gets the next best, never-seen
         // slice — scored live, deepened from TMDB when a lane runs thin. Rows are the paid surface,
         // so the free tier (3-pick hero shortlist) gets nothing here.
-        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, ExposureLog exposures, CrossReferenceFactors crossReference, HttpContext http, CancellationToken ct) =>
+        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, ExposureLog exposures, CrossReferenceFactors crossReference, ISupplyReporter supply, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -767,7 +768,15 @@ public static class FeedEndpoints
             // The paginator already tried to deepen this lane straight from TMDB before returning, so an
             // empty page here means the lane is genuinely dry — an explicit exhaustion signal the client
             // can trust (vs a caught 500/429/offline, which it must NOT latch on). A full page implies more.
-            return Results.Ok(new { items = cards, exhausted = cards.Count == 0 });
+            // A genre rail that came up short says how much of its genre the account's own
+            // conditions hold out (WS-5 task 9, D-16), so "your conditions hide N — see why" can
+            // replace a silently thin rail. Counted through WS-3's supply reporter — the same
+            // eligibility builder that serves the titles — and only when the rail is short.
+            var railIsShort = cards.Count < limit;
+            var railSupply = railIsShort && context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(body.Genre)
+                ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, ct)
+                : null;
+            return Results.Ok(new { items = cards, exhausted = cards.Count == 0, supply = railSupply });
         });
 
         // The genre rails the home page renders beneath the personalised rows: the user's top
@@ -834,6 +843,36 @@ public static class FeedEndpoints
     /// One opaque nonce (≤ 64 chars) per page view, sent on every rail request of that page, so the
     /// server can keep concurrent rails from serving the same title twice. Optional.
     /// </param>
+    /// <summary>
+    /// The supply behind a short genre rail: titles of the genre no condition touches that are
+    /// already seen, and those a standing condition holds out. Null — not a guess — when the account
+    /// has an include-genre rule: the rail waives include-genre (FD-6) while the reporter counts it,
+    /// so the number would overstate what the conditions hide on this rail.
+    /// </summary>
+    internal static async Task<RailSupply?> GenreRailSupplyAsync(
+        IReelDbContext db, ISupplyReporter supply, Guid accountId, string genre, string? mediaType, CancellationToken ct)
+    {
+        var waivesIncludeGenre = await db.ContentFilters
+            .AnyAsync(f => f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre, ct);
+        if (waivesIncludeGenre)
+        {
+            return null;
+        }
+
+        var media = mediaType switch
+        {
+            "movie" => MediaScope.Movies,
+            "show" => MediaScope.Shows,
+            _ => MediaScope.Any,
+        };
+        var report = await supply.ReportAsync(
+            accountId, new HardConstraints([new ConceptTerm(genre, [], [genre])], [], null, null, media), ct);
+        return new RailSupply(report.ExcludedByConditions, report.AlreadySeen, report.ClearingFloor);
+    }
+
+    /// <summary>What a short rail's supply looks like. <c>HiddenByConditions</c> is the N in "your conditions hide N".</summary>
+    public sealed record RailSupply(int HiddenByConditions, int AlreadySeen, int ClearingFloor);
+
     public record MoreRequestDto(
         string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null,
         string[]? PageExcludeTitleIds = null, string? PageToken = null);

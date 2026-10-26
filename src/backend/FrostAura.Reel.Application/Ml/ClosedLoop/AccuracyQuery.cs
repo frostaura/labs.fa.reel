@@ -134,6 +134,30 @@ public sealed record CrossReferenceAccuracy(
     IReadOnlyList<CrossReferenceBacktestSummary> Backtests,
     int MinimumOutcomes);
 
+/// <summary>
+/// Who a number on the track record is about, and how that group was selected. Every rate on the
+/// page is computed over titles the account CHOSE to watch, so none of them is a random sample of
+/// what Reel recommends — the note says which way the choice leans, in words, beside the number
+/// (WS-5 task 11, G-8).
+/// </summary>
+/// <param name="Name">The population in plain words.</param>
+/// <param name="SelectionNote">How the account's own choices shaped it, and which way that pushes the number.</param>
+public sealed record PopulationNote(string Name, string SelectionNote);
+
+/// <summary>The populations behind each block of the track record.</summary>
+public sealed record TrackRecordPopulations(
+    PopulationNote Headline,
+    PopulationNote Counterfactual,
+    PopulationNote Conversion,
+    PopulationNote CrossReference);
+
+/// <summary>
+/// One accepted window and how many predicted-vs-actual pairs it holds. <paramref name="SameAs"/> names
+/// the narrower window holding exactly the same pairs (windows nest, so an equal count is an equal
+/// set): the page shows only windows that differ, rather than three tabs drawing one chart.
+/// </summary>
+public sealed record AccuracyWindowSummary(string Key, int Pairs, string? SameAs);
+
 /// <summary>The whole /api/accuracy payload, before presentation rounding.</summary>
 public sealed record AccuracyReport(
     string Window,
@@ -146,7 +170,9 @@ public sealed record AccuracyReport(
     ConversionStats Conversion,
     IReadOnlyList<CounterfactualWindow> Counterfactual,
     ModelLearned? LearnedThisWeek,
-    CrossReferenceAccuracy CrossReference);
+    CrossReferenceAccuracy CrossReference,
+    TrackRecordPopulations? Populations = null,
+    IReadOnlyList<AccuracyWindowSummary>? WindowSummaries = null);
 
 /// <summary>
 /// "How wrong am I, and what am I doing about it" — computed live, per account, from what already
@@ -231,11 +257,17 @@ public sealed class AccuracyQuery(
 
         var from = days is { } d ? now.AddDays(-d) : (DateTime?)null;
 
-        var pairs = await ExposurePairsAsync(from, ct);
+        // Every window's pairs are read once, all-time, and narrowed in memory: the window summary
+        // needs all three counts, and windows nest, so one read answers them all.
+        var exposureRows = await ExposureRowsAsync(null, ct);
+        var pairs = EarliestPerTitle(exposureRows, from);
         var source = pairs.Count > 0 ? AccuracySource.Exposures : AccuracySource.Retro;
+        Func<DateTime?, int> windowCount = since => EarliestPerTitle(exposureRows, since).Count;
         if (pairs.Count == 0)
         {
-            pairs = await RetroPairsAsync(from, ct);
+            var retroRows = await RetroPairsAsync(null, ct);
+            pairs = [.. retroRows.Where(p => from == null || p.RatedAt >= from)];
+            windowCount = since => retroRows.Count(p => since == null || p.RatedAt >= since);
             if (pairs.Count == 0)
             {
                 source = AccuracySource.None;
@@ -270,8 +302,52 @@ public sealed class AccuracyQuery(
             await ConversionAsync(from, ct),
             report.Counterfactual,
             await learned.GetAsync(accountContext.AccountId.Value, ct),
-            await CrossReferenceAsync(from, ct));
+            await CrossReferenceAsync(from, ct),
+            PopulationsFor(source),
+            SummariseWindows(windowCount, now));
     }
+
+    /// <summary>
+    /// Each accepted window's pair count, with a wider window marked <c>SameAs</c> the narrowest one
+    /// holding the identical set (windows nest, so an equal count is an equal set). Windows are
+    /// ordered narrowest first, as <see cref="Windows"/> declares them.
+    /// </summary>
+    public static List<AccuracyWindowSummary> SummariseWindows(Func<DateTime?, int> pairsSince, DateTime now)
+    {
+        var summaries = new List<AccuracyWindowSummary>(Windows.Count);
+        foreach (var (key, days) in Windows.OrderBy(w => w.Value ?? int.MaxValue))
+        {
+            var count = pairsSince(days is { } d ? now.AddDays(-d) : null);
+            var same = summaries.FirstOrDefault(s => s.SameAs is null && s.Pairs == count);
+            summaries.Add(new AccuracyWindowSummary(key, count, same?.Key));
+        }
+
+        return summaries;
+    }
+
+    /// <summary>Populations and their selection notes. Copy, but copy the numbers depend on, so it lives beside them.</summary>
+    public static TrackRecordPopulations PopulationsFor(string source) => new(
+        source == AccuracySource.Retro
+            ? new PopulationNote(
+                "Titles Reel had scored before you rated them",
+                "Most of these you found and chose outside Reel, so they lean towards titles you expected to like; "
+                + "Reel's number may never have been on your screen.")
+            : new PopulationNote(
+                "Titles Reel showed you that you went on to rate",
+                "You picked which of the shown titles to watch, so these lean towards the ones that looked best to you; "
+                + "titles you passed over never get a rating and are not counted."),
+        new PopulationNote(
+            "Your ratings of titles that reached you through Reel, beside everything else you rated in the same weeks",
+            "Both groups are titles you chose to watch. The comparison says whether Reel's picks fared better than your own, "
+            + "not how Reel would do on a random title."),
+        new PopulationNote(
+            "Cards Reel logged as shown to you",
+            "Counts only what the exposure log recorded since it began; saves, watches and ratings made elsewhere "
+            + "for the same titles count only when they came after Reel showed them."),
+        new PopulationNote(
+            "Titles served under a cross-reference standing that you have since rated",
+            "Only about 2% of ratings are made in the app, so this joins by time rather than cause, and it holds only "
+            + "titles you chose to watch. It corroborates the offline backtest; it never gates anything."));
 
     /// <summary>
     /// The strong evidence base: the outcome view, restricted to exposures that were followed by a
@@ -283,7 +359,13 @@ public sealed class AccuracyQuery(
     /// "predicted 8.4 twelve days before you rated it 5" is the honest framing, and taking the last
     /// exposure would flatter the number by scoring the most recently recalibrated promise.</para>
     /// </summary>
-    private async Task<List<Pair>> ExposurePairsAsync(DateTime? since, CancellationToken ct)
+    /// <summary>
+    /// Every rated exposure since <paramref name="since"/> as a candidate pair, one per EXPOSURE (not
+    /// per title). <see cref="EarliestPerTitle"/> narrows them to a window and keeps each title's
+    /// first claim inside it — so a window summary can read once and narrow per window, with the
+    /// identical semantics the per-window query always had.
+    /// </summary>
+    private async Task<List<Pair>> ExposureRowsAsync(DateTime? since, CancellationToken ct)
     {
         var rows = await (
             from outcome in db.ExposureOutcomes
@@ -306,13 +388,18 @@ public sealed class AccuracyQuery(
             }).ToListAsync(ct);
 
         return rows
-            .GroupBy(r => r.TitleId)
-            .Select(g => g.OrderBy(r => r.OccurredAt).First())
             .Select(r => new Pair(
                 r.TitleId, r.Name, r.Year, r.PosterPath, r.MediaType.ToString(), r.TmdbId,
                 (double)r.Predicted, r.Actual, r.Surface.ToString(), r.OccurredAt, r.RatedAt))
             .ToList();
     }
+
+    /// <summary>The exposure rows inside the window, reduced to each title's earliest claim there.</summary>
+    private static List<Pair> EarliestPerTitle(IReadOnlyList<Pair> exposureRows, DateTime? since) =>
+        [.. exposureRows
+            .Where(r => since == null || r.ShownAt >= since)
+            .GroupBy(r => r.TitleId)
+            .Select(g => g.OrderBy(r => r.ShownAt).First())];
 
     /// <summary>
     /// The fallback: every whole-title rating that arrived after Reel had already committed a score
@@ -454,6 +541,26 @@ public sealed class AccuracyQuery(
     /// pairs do: a title shown twenty times before it was rated is one outcome, and the first claim
     /// is the honest one to score.</para>
     /// </summary>
+    /// <summary>
+    /// The cross-reference block alone, for <c>/api/metrics/cross-reference</c> (WS-5 task 11): the
+    /// detailed stats belong with the model metrics, not on the track record's headline page.
+    /// </summary>
+    public Task<CrossReferenceAccuracy> CrossReferenceForWindowAsync(string window, DateTime now, CancellationToken ct)
+    {
+        if (accountContext.AccountId is null)
+        {
+            throw new InvalidOperationException("AccuracyQuery requires an account-scoped context.");
+        }
+
+        if (!Windows.TryGetValue(window, out var days))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(window), window, $"window must be one of: {string.Join(", ", Windows.Keys)}");
+        }
+
+        return CrossReferenceAsync(days is { } d ? now.AddDays(-d) : null, ct);
+    }
+
     private async Task<CrossReferenceAccuracy> CrossReferenceAsync(DateTime? since, CancellationToken ct)
     {
         var rows = await (

@@ -1,3 +1,4 @@
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 
 namespace FrostAura.Reel.Tests.Feed;
@@ -56,5 +57,21 @@ public class HeroConfidenceTests
         decimal[] livePicks = [6.6m, 6.7m, 6.9m, 7.0m, 7.0m];
 
         Assert.All(livePicks, p => Assert.Equal(HeroConfidence.Reaching, HeroConfidence.For(p, bar)));
+    }
+    [Theory]
+    [InlineData(MediaType.Movie, 6.8, true)]
+    [InlineData(MediaType.Movie, 6.79, false)]
+    [InlineData(MediaType.Show, 7.4, false)] // a show needs more: shows' crowd scores run ~0.7 higher
+    [InlineData(MediaType.Show, 7.5, true)]
+    public void The_crowd_half_of_the_hero_bar_is_per_media_type(MediaType mediaType, double shrunk, bool clears) =>
+        Assert.Equal(clears, HeroConfidence.ClearsCrowdFloor(mediaType, (decimal)shrunk));
+
+    [Fact]
+    public void No_crowd_score_and_a_thin_vote_count_do_not_clear_it()
+    {
+        Assert.False(HeroConfidence.ClearsCrowdFloor(MediaType.Movie, null));
+
+        // 10.0 on 2 votes shrinks to ~6.63 through the prior: a thin crowd cannot carry a headline.
+        Assert.False(HeroConfidence.ClearsCrowdFloor(MediaType.Movie, CrowdRating.Shrink(10.0m, 2)));
     }
 }

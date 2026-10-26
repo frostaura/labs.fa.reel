@@ -38,5 +38,18 @@ public class OnlineModelState : IAccountScoped
     /// </summary>
     public int AlgorithmVersion { get; set; }
 
+    /// <summary>
+    /// Batches of events the probe gate refused since the last reset: applying them would have made
+    /// the head worse on the account's fixed probe set than both the head before them and the base
+    /// alone allow (WS-5 task 7). Counted, never applied.
+    /// </summary>
+    public long RejectedUpdateCount { get; set; }
+
+    /// <summary>Mean absolute error of base + this head on the fixed probe set when it was last written; null before the gate.</summary>
+    public double? ProbeMae { get; set; }
+
+    /// <summary>The same probe's error for the base alone (a zero head) — the floor <see cref="ProbeMae"/> is judged against.</summary>
+    public double? ProbeBaseMae { get; set; }
+
     public DateTime UpdatedAt { get; set; }
 }

@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -173,6 +174,56 @@ public class CandidateRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.DoesNotContain(seenId, ids);   // watched ⇒ excluded by eligibility
         // Semantic order: the close neighbour outranks the far, far-more-popular title.
         Assert.True(ids.IndexOf(similarId) < ids.IndexOf(farId));
+    }
+
+    [Fact]
+    public async Task A_title_seen_after_the_window_was_read_is_not_still_eligible()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var kept = await SeedTitleAsync("Still Fine", popularity: 5m, UnitVector(0));
+        var raced = await SeedTitleAsync("Watched In Another Tab", popularity: 5m, UnitVector(1));
+
+        // The window held both; between the read and the serve the user watched one.
+        await SeedWatchedAsync(accountId, raced);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var still = await new CandidateRetriever(db, new EligibilityQueryBuilder(db))
+            .StillEligibleAsync(accountId, [kept, raced], ignoreGenreFilters: false, maturityCeiling: null, CancellationToken.None);
+
+        Assert.Equal([kept], still);
+    }
+
+    [Fact]
+    public async Task The_keyword_arm_offers_eligible_titles_sharing_a_keyword_nearest_the_anchor_first()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var near = await SeedTitleAsync("Heist Near", popularity: 1m, NearUnit(0, 0.1f));
+        var far = await SeedTitleAsync("Heist Far", popularity: 1m, UnitVector(1));
+        var unrelated = await SeedTitleAsync("No Shared Keyword", popularity: 1m, NearUnit(0, 0.05f));
+        var seen = await SeedTitleAsync("Heist Seen", popularity: 1m, NearUnit(0, 0.02f));
+        await SeedWatchedAsync(accountId, seen);
+        await using (var write = Fixture.CreateContext(new AccountContext()))
+        {
+            await write.Titles.Where(t => t.Id == near || t.Id == far || t.Id == seen)
+                .ExecuteUpdateAsync(u => u.SetProperty(t => t.Keywords, new[] { "bank heist" }));
+        }
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var hits = await new CandidateRetriever(db, new EligibilityQueryBuilder(db)).RetrieveSharingKeywordsAsync(
+            accountId, new Vector(UnitVector(0)), ["bank heist"], lane: null, count: 10, maturityCeiling: null, CancellationToken.None);
+
+        Assert.Equal([near, far], hits.Select(t => t.Id));
+        Assert.DoesNotContain(unrelated, hits.Select(t => t.Id));
     }
 
     private async Task<IReadOnlyList<Title>> RetrieveSimilarAsync(Guid accountId, Guid anchorId, float[] anchorEmbedding, int count)

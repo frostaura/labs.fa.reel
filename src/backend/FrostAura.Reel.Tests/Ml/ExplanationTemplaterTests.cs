@@ -349,6 +349,71 @@ public class ExplanationTemplaterTests
         Assert.Empty(taken);
     }
 
+    [Fact]
+    public void A_line_never_cites_a_rank_four_push_behind_two_clause_less_ones()
+    {
+        // Master and Commander on the fresh build: era +1.0 and the popularity level +0.7 have no
+        // clause, so the sentence fell through to feels-like-your-favourites at +0.058 and the crowd at
+        // +0.044 — "In the same lane as the titles you love, and the crowd backs it too". Neither moved
+        // the number; the card says nothing rather than cite them.
+        var context = Context([
+            ("decadeAffinity", 1.0f), ("tmdbPopularityLog", 0.7f), ("simTopLovedMean", 0.058f), ("traktRating", 0.044f),
+        ]);
+
+        Assert.Equal(string.Empty, ExplanationTemplater.BuildSentence(context));
+    }
+
+    [Theory]
+    [InlineData("simTopLovedMean", 0.15f, true)]
+    [InlineData("simTopLovedMean", 0.149f, false)]
+    [InlineData("traktRating", 0.2f, true)]
+    [InlineData("traktRating", 0.088f, false)]
+    [InlineData("castAffinity", 0.06f, false)]
+    [InlineData("castAffinity", 0.31f, true)]
+    public void A_push_outside_the_top_two_is_citable_only_from_the_floor_up(string feature, float value, bool cited)
+    {
+        var persons = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
+        {
+            [CreditRole.Actor] = new("Russell Crowe", 7.9m),
+        };
+        var context = Context([("decadeAffinity", 1.0f), ("tmdbPopularityLog", 0.7f), (feature, value)], persons: persons);
+
+        Assert.Equal(cited, ExplanationTemplater.BuildSentence(context).Length > 0);
+        Assert.Equal(cited, ExplanationTemplater.IsCitable(context.Contributions, 2));
+    }
+
+    [Fact]
+    public void A_small_push_that_is_one_of_the_two_largest_positive_ones_is_still_a_reason()
+    {
+        // Negatives are not reasons and take no top-two seat: behind one clause-less push and a large
+        // demotion, a +0.05 crowd term is the second-biggest thing pushing the number UP.
+        var context = Context([("decadeAffinity", 1.0f), ("dislikedSimilarity", -0.8f), ("traktRating", 0.05f)]);
+
+        Assert.Contains("crowd", ExplanationTemplater.BuildSentence(context), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Citability_ranks_by_value_whatever_order_the_caller_passes()
+    {
+        (string, float)[] contributions =
+            [("simTopLovedMean", 0.04f), ("traktRating", 0.05f), ("decadeAffinity", 1.0f), ("castAffinity", -0.3f)];
+
+        Assert.False(ExplanationTemplater.IsCitable(contributions, 0)); // third-largest positive, under the floor
+        Assert.True(ExplanationTemplater.IsCitable(contributions, 1));
+        Assert.True(ExplanationTemplater.IsCitable(contributions, 2));
+        Assert.False(ExplanationTemplater.IsCitable(contributions, 3)); // negative: never a reason
+    }
+
+    [Fact]
+    public void Equal_small_pushes_give_the_top_two_seats_to_the_earlier_entries()
+    {
+        (string, float)[] contributions = [("a", 0.05f), ("b", 0.05f), ("c", 0.05f)];
+
+        Assert.True(ExplanationTemplater.IsCitable(contributions, 0));
+        Assert.True(ExplanationTemplater.IsCitable(contributions, 1));
+        Assert.False(ExplanationTemplater.IsCitable(contributions, 2));
+    }
+
     private static ExplanationTemplater.Context Context(
         (string Feature, float Contribution)[] contributions,
         IReadOnlyDictionary<CreditRole, ExplanationTemplater.PersonAffinity>? persons = null,

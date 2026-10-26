@@ -65,7 +65,15 @@ public sealed class OnDemandScorer(
             return new Dictionary<Guid, decimal>();
         }
 
-        var scores = engine.ScoreCached(artifact.Id, artifact.ArtifactBytes, orderedIds.Select(id => vectors[id]).ToArray());
+        // Scored WITH contributions, as the build and the paginator score: a title reached from Ask or
+        // typeahead opens a page whose "why X for you" waterfall reads these rows, and a number-only
+        // score left it explaining a 6.2 with a −0.6 demotion and a +0.0 prior (1,206 of 29,377
+        // TitleScores rows had none, 2026-10-26). Same top-5 the build persists.
+        var scored = engine.ScoreWithContributionsCached(
+            artifact.Id,
+            artifact.ArtifactBytes,
+            orderedIds.Select(id => vectors[id]).ToArray(),
+            FeatureSchema.AllNames());
 
         // Fold in the online residual head (loaded once): base + learned correction, then clamp.
         // Zero head ⇒ no change, so this is a strict no-op until the account has logged events.
@@ -85,7 +93,7 @@ public sealed class OnDemandScorer(
         for (var i = 0; i < orderedIds.Count; i++)
         {
             var titleId = orderedIds[i];
-            var adjusted = scores[i] + OnlineResidualModel.Residual(residual, vectors[titleId]);
+            var adjusted = scored[i].Score + OnlineResidualModel.Residual(residual, vectors[titleId]);
             var predicted = Math.Round((decimal)calibrator.Calibrate(adjusted), 2);
             predicted = Math.Round(
                 DislikeSignal.ApplyDemotion(predicted, demotions.GetValueOrDefault(titleId)), 2);
@@ -93,15 +101,16 @@ public sealed class OnDemandScorer(
         }
 
         // An upsert, not load-then-insert: a title opened while the paginator is scoring it raced
-        // into a 23505. This scorer has no contributions, so a stored row keeps the build's.
+        // into a 23505. The number and the contributions that explain it are written together, so a
+        // stored row never pairs a fresh number with an older score's reasons.
         await TitleScoreWriter.UpsertAsync(
             db,
             accountId,
             artifact.Id,
-            result.Select(kv => new TitleScoreWriter.Score(kv.Key, kv.Value, "[]")),
+            orderedIds.Select((titleId, i) => new TitleScoreWriter.Score(
+                titleId, result[titleId], TitleScoreWriter.SerializeContributions(scored[i].TopContributions))),
             asOf,
-            ct,
-            keepStoredContributions: true);
+            ct);
 
         // Kept from the tracked write this replaced: callers have relied on this method saving
         // their own pending changes alongside the scores. A no-op when nothing is tracked.

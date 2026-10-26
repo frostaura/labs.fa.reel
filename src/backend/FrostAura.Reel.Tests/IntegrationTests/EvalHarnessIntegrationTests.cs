@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Ranking.Interleaving;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -147,6 +148,75 @@ public class EvalHarnessIntegrationTests(PostgresFixture fixture)
         var third = await RunAsync(seed.AccountId, """{"Trees":80,"Leaves":8,"MinExamplesPerLeaf":5,"LearningRate":0.1}""");
         Assert.NotNull(third);
         Assert.Equal(2, third!.Run.Iteration);
+    }
+
+    [Fact]
+    public async Task The_ledger_carries_five_baselines_and_an_input_hash_that_pins_the_ndcg()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var seed = await SeedAsync();
+        var first = await RunAsync(seed.AccountId);
+        var second = await RunAsync(seed.AccountId);
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+
+        // Equal inputs, equal hash, identical NDCG — the instrument is reproducible.
+        Assert.Matches("^[0-9a-f]{64}$", first!.Result.FeatureSetHash);
+        Assert.Equal(first.Result.FeatureSetHash, second!.Result.FeatureSetHash);
+        Assert.Equal(first.Result.NdcgAt10Model, second.Result.NdcgAt10Model);
+        Assert.Equal(first.Result.BaselinesJson, second.Result.BaselinesJson);
+
+        // Every baseline is read at the primary origin, with the as-of caveat.
+        var ledger = JsonSerializer.Deserialize<JsonElement>(first.Result.BaselinesJson!);
+        Assert.Equal(EvalHarness.PrimaryOrigin, ledger.GetProperty("origin").GetDouble());
+        Assert.Equal(first.Result.NdcgAt10Model, ledger.GetProperty("model").GetDecimal());
+        Assert.Contains("present-day", ledger.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+        var baselines = ledger.GetProperty("baselines").EnumerateArray().ToDictionary(b => b.GetProperty("name").GetString()!);
+        Assert.Equal(["popularity", "traktRating", "shrunkCrowd", "genreAffinity", "random"], baselines.Keys);
+        foreach (var (name, baseline) in baselines)
+        {
+            Assert.InRange(baseline.GetProperty("ndcg").GetDecimal(), 0m, 1m);
+            if (name != "random")
+            {
+                Assert.True(baseline.GetProperty("ciHigh").GetDecimal() >= baseline.GetProperty("ciLow").GetDecimal());
+            }
+        }
+
+        // The challenger's pre-registered report: fitted on the 60–70% origins only, read out of
+        // sample at the primary origin with paired CIs against FastTree and popularity.
+        var challenger = ledger.GetProperty("challenger");
+        Assert.Equal(TransparentBlendPolicy.PreRegistration, challenger.GetProperty("preRegistration").GetString());
+        Assert.All(challenger.GetProperty("fitOrigins").EnumerateArray(), o => Assert.True(o.GetDouble() <= 0.70d + 1e-9));
+        Assert.Contains(challenger.GetProperty("weights").GetProperty("affinity").GetDouble(), TransparentBlendPolicy.WeightGrid);
+        var primary = challenger.GetProperty("primary");
+        foreach (var versus in new[] { "versusModel", "versusPopularity" })
+        {
+            var read = primary.GetProperty(versus);
+            Assert.True(read.GetProperty("ciHigh").GetDecimal() >= read.GetProperty("ciLow").GetDecimal());
+            Assert.Contains(read.GetProperty("reading").GetString(), new[] { "better", "worse", "no measurable difference" });
+        }
+
+        Assert.Equal(first.Result.NdcgAt10Model, primary.GetProperty("model").GetDecimal());
+        Assert.Equal(
+            EvalHarness.ChallengerWeights(first.Result.BaselinesJson),
+            (challenger.GetProperty("weights").GetProperty("affinity").GetDouble(), challenger.GetProperty("weights").GetProperty("similarity").GetDouble()));
+
+        // The popularity entry is the gate's own baseline, not a second definition of it.
+        Assert.Equal(first.Result.NdcgAt10Baseline, baselines["popularity"].GetProperty("ndcg").GetDecimal());
+
+        // A title-side change moves the hash: the hash fingerprints features, not just config.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var rated = await db.UserRatings.Where(r => r.AccountId == seed.AccountId).Select(r => r.TitleId).ToListAsync();
+            await db.Titles.Where(t => rated.Contains(t.Id)).ExecuteUpdateAsync(u => u.SetProperty(t => t.TraktVotes, t => t.TraktVotes + 5_000));
+        }
+
+        var third = await RunAsync(seed.AccountId);
+        Assert.NotEqual(first.Result.FeatureSetHash, third!.Result.FeatureSetHash);
     }
 
     // ── Harness construction ────────────────────────────────────────────────────────────

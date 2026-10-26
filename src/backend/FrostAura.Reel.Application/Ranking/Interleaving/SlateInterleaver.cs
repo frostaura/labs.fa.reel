@@ -25,9 +25,18 @@ public sealed class SlateInterleaver
     /// the build branches on, so there is exactly one place that decides whether interleaving
     /// happens and no way for a caller to half-enable it.
     /// </summary>
-    public static SlateInterleaver? For(InterleaveOptions options) =>
+    public static SlateInterleaver? For(InterleaveOptions options) => For(options, null);
+
+    /// <summary>
+    /// As <see cref="For(InterleaveOptions)"/>, with <paramref name="specialise"/> given the catalogue's
+    /// policy for each team and returning the instance to draft with — how the build hands the
+    /// transparent challenger this account's fitted weights.
+    /// </summary>
+    public static SlateInterleaver? For(InterleaveOptions options, Func<IRankingPolicy, IRankingPolicy>? specialise) =>
         options.Enabled
-            ? new SlateInterleaver(RankingPolicyCatalog.Resolve(options.PolicyA), RankingPolicyCatalog.Resolve(options.PolicyB))
+            ? new SlateInterleaver(
+                (specialise ?? (p => p))(RankingPolicyCatalog.Resolve(options.PolicyA)),
+                (specialise ?? (p => p))(RankingPolicyCatalog.Resolve(options.PolicyB)))
             : null;
 
     /// <summary>Team A's policy id — what lands on the exposure rows A contributed.</summary>

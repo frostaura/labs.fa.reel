@@ -86,6 +86,15 @@ public class BuildFeedJobHandler(
     private const int FirstPassPopPool = 700;
     private const int FirstPassAnnPool = 500;
     private const int ShortlistSize = 220;
+
+    /// <summary>
+    /// The quality arm's head that enters the shortlist whatever its first-pass score (WS-5 task 9):
+    /// the best vote-shrunk crowd titles the retriever found. Without the reserve the top-220 cut
+    /// was taken on FastTree's score alone, so head titles the crowd rates highly were cut before
+    /// they were ever fully scored — under either FD-4 answer they now reach final scoring, and the
+    /// account's own floors still decide whether they are shown.
+    /// </summary>
+    internal const int QualityReserve = 40;
     private const int HeroSize = 5;
     // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
     // from this same bar, so a card can never be labelled against a threshold the build did not use.
@@ -268,6 +277,10 @@ public class BuildFeedJobHandler(
             .Take(ShortlistSize)
             .Select(x => x.id)
             .ToHashSet();
+        shortlistIds.UnionWith(retrieval.Hits
+            .Where(hit => hit.Arm == RetrievalArm.Popularity && poolVectors.ContainsKey(hit.Title.Id))
+            .Take(QualityReserve)
+            .Select(hit => hit.Title.Id));
         var shortlist = pool.Where(t => shortlistIds.Contains(t.Id)).ToList();
 
         // ── Phase 3: hydrate the shortlist (credits → affinity features) ────────────────
@@ -320,7 +333,10 @@ public class BuildFeedJobHandler(
                 var calibrated = calibrator.Calibrate(adjusted);
                 var predicted = DislikeSignal.ApplyDemotion(
                     (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
-                return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
+                return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted))
+                {
+                    Challenger = ChallengerSignals.From(finalVectors[title.Id], title),
+                };
             }).ToList();
         }
 
@@ -383,6 +399,7 @@ public class BuildFeedJobHandler(
                 upserted = a.Upserted,
                 newlyEligible = a.NewlyEligible,
             })),
+            OffsetsJson = await OffsetsJsonAsync(accountId, artifact.Id, calibrator, candidates, ct),
             DurationMs = (int)stopwatch.ElapsedMilliseconds,
         });
 
@@ -730,7 +747,11 @@ public class BuildFeedJobHandler(
     /// columns on <c>TitleScore</c>, which stays the write-only serving cache it is documented to be.
     /// </summary>
     private sealed record Candidate(
-        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta)
+    {
+        /// <summary>The transparent challenger's signals, read from the same vector the card was scored on.</summary>
+        public ChallengerSignals? Challenger { get; init; }
+    }
 
     /// <summary>
     /// The counts assembly knows and the caller needs for <see cref="FeedBuildStat"/>. A mutable
@@ -788,6 +809,85 @@ public class BuildFeedJobHandler(
     /// Nearest-rank percentile over the shortlist's predicted ratings — no interpolation, so every
     /// reported value is a number the model actually produced for a real title.
     /// </summary>
+    /// <summary>
+    /// <see cref="FeedBuildStat.OffsetsJson"/>: the shortlist's base median, the online head's and
+    /// the calibrator's mean offsets, the pinned map's identity and the head's probe state — so a
+    /// moved <c>ShortlistP50</c> between two builds of one artifact names the layer that moved it.
+    /// </summary>
+    private async Task<string> OffsetsJsonAsync(
+        Guid accountId, Guid artifactId, RatingCalibrator calibrator, IReadOnlyList<Candidate> candidates, CancellationToken ct)
+    {
+        var pinnedAt = await db.ModelArtifacts
+            .AsNoTracking()
+            .Where(a => a.Id == artifactId)
+            .Select(a => a.CalibratorPinnedAt)
+            .FirstOrDefaultAsync(ct);
+        var online = await db.OnlineModelStates
+            .AsNoTracking()
+            .Where(o => o.AccountId == accountId)
+            .Select(o => new { o.BaseArtifactId, o.AlgorithmVersion, o.UpdateCount, o.RejectedUpdateCount, o.ProbeMae, o.ProbeBaseMae })
+            .FirstOrDefaultAsync(ct);
+        var current = online is not null
+            && online.BaseArtifactId == artifactId
+            && online.AlgorithmVersion == OnlineResidualModel.CurrentAlgorithmVersion;
+
+        static double? Median(IEnumerable<double> values)
+        {
+            var sorted = values.Order().ToList();
+            return sorted.Count == 0 ? null : Math.Round(sorted[(sorted.Count - 1) / 2], 3);
+        }
+
+        double? Mean(Func<Candidate, double> pick) =>
+            candidates.Count == 0 ? null : Math.Round(candidates.Average(pick), 3);
+
+        return JsonSerializer.Serialize(new
+        {
+            baseP50 = Median(candidates.Select(c => (double)c.Row.Score)),
+            residualMean = Mean(c => (double)c.BaseScore - c.Row.Score),
+            residualAbsMean = Mean(c => Math.Abs((double)c.BaseScore - c.Row.Score)),
+            calibratorDeltaMean = Mean(c => (double)c.CalibrationDelta),
+            calibrator = new
+            {
+                kind = calibrator.Kind.ToString(),
+                pairs = calibrator.PairCount,
+                maeAfter = Math.Round(calibrator.MaeAfter, 3),
+                pinnedAt,
+            },
+            online = new
+            {
+                current,
+                updates = current ? online!.UpdateCount : 0,
+                rejected = current ? online!.RejectedUpdateCount : 0,
+                probeMae = current ? online!.ProbeMae : null,
+                probeBaseMae = current ? online!.ProbeBaseMae : null,
+            },
+        });
+    }
+
+    /// <summary>
+    /// Hands the transparent challenger this account's fitted weights — the ones the newest
+    /// evaluation chose on its 60–70% origins — when interleaving is on and the challenger is one of
+    /// the teams. Unfitted (no evaluation yet, or an older ledger row) it drafts with the defaults.
+    /// </summary>
+    private async Task<Func<IRankingPolicy, IRankingPolicy>?> ChallengerWeightsAsync(Guid accountId, CancellationToken ct)
+    {
+        if (!_interleave.Enabled
+            || (_interleave.PolicyA != TransparentBlendPolicy.Id && _interleave.PolicyB != TransparentBlendPolicy.Id))
+        {
+            return null;
+        }
+
+        var ledger = await db.EvaluationResults
+            .AsNoTracking()
+            .Where(r => r.AccountId == accountId && r.BaselinesJson != null)
+            .OrderByDescending(r => r.ComputedAt)
+            .Select(r => r.BaselinesJson)
+            .FirstOrDefaultAsync(ct);
+        return EvalHarness.ChallengerWeights(ledger) is { } weights
+            ? policy => policy is TransparentBlendPolicy ? new TransparentBlendPolicy(weights.Affinity, weights.Similarity) : policy
+            : null;
+    }
+
     private static decimal? Percentile(IReadOnlyList<Candidate> candidates, double quantile)
     {
         if (candidates.Count == 0)
@@ -811,8 +911,7 @@ public class BuildFeedJobHandler(
             candidates.Select(candidate => new TitleScoreWriter.Score(
                 candidate.Title.Id,
                 Math.Round(candidate.Predicted, 2),
-                JsonSerializer.Serialize(
-                    candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })))),
+                TitleScoreWriter.SerializeContributions(candidate.Row.TopContributions))),
             now,
             ct);
 
@@ -1202,7 +1301,9 @@ public class BuildFeedJobHandler(
         //
         // `interleaver` being null is the single branch that decides this. Every `else` below is
         // the code that shipped before this harness existed, unchanged.
-        var interleaver = mode == FeedBuildMode.Fresh ? SlateInterleaver.For(_interleave) : null;
+        var interleaver = mode == FeedBuildMode.Fresh
+            ? SlateInterleaver.For(_interleave, await ChallengerWeightsAsync(account.Id, ct))
+            : null;
 
         // Minted here rather than at the write below because a slate's seed and its InterleaveGroup
         // are both derived from it. Harmlessly discarded on the Preserve no-op path, which returns
@@ -1242,7 +1343,8 @@ public class BuildFeedJobHandler(
                     // makes ProfileRerankPolicy fall back to the calibrated key for it rather than
                     // ordering it as a genuine mid-scoring verdict it never received.
                     preAssemblyFits.TryGetValue(x.Candidate.Title.Id, out var judged) ? judged : null,
-                    CrowdPrior.FactorFor(x.Candidate.Title)))]);
+                    CrowdPrior.FactorFor(x.Candidate.Title),
+                    x.Candidate.Challenger))]);
 
             List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
             var stages = phases.Length > 0
@@ -1267,8 +1369,13 @@ public class BuildFeedJobHandler(
         // predicate is deliberately still c.Predicted: the confidence floor is a claim about what
         // the model believes, and a title must not be admitted to the hero's own bar by a prior or
         // an LLM opinion the label "confident" was never measured against.
+        // The crowd half of the bar (WS-5 task 9): a confident hero pick also clears its media
+        // type's crowd floor on the SHRUNK score. The backfill below may still reach past it, but it
+        // reaches for crowd-backed titles first.
+        static bool CrowdBacked(Candidate c) =>
+            Domain.Feed.HeroConfidence.ClearsCrowdFloor(c.Title.MediaType, CrowdPrior.ShrunkScoreOf(c.Title));
         var heroPool = candidates
-            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
+            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null && CrowdBacked(c))
             .OrderByDescending(HeroKey)
             .ToList();
         // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
@@ -1292,8 +1399,9 @@ public class BuildFeedJobHandler(
                     .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
                     .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
                 HeroSize,
-                (c, chosen) => c.Predicted >= heroFloor
+                (c, chosen) => c.Predicted >= heroFloor && CrowdBacked(c)
                     && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
+                (c, _) => c.Predicted >= heroFloor && CrowdBacked(c),
                 (c, _) => c.Predicted >= heroFloor,
                 (_, _) => true);
         }
@@ -1346,7 +1454,9 @@ public class BuildFeedJobHandler(
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
                 .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(HeroKey)
+                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .ThenByDescending(CrowdBacked)
+                .ThenByDescending(HeroKey)
                 .Take(HeroSize - hero.Count));
         }
 
@@ -1371,9 +1481,15 @@ public class BuildFeedJobHandler(
         if (interleaver is null && mode == FeedBuildMode.Fresh && heroTarget.Count > 0 && hero.Count > 0)
         {
             var seated = hero.Select(h => h.Title.Id).ToHashSet();
+            // Spares in the same preference order the backfill uses — model-confident, then
+            // crowd-backed, then HeroKey — so a media swap never trades a crowd-backed seat for a
+            // title the crowd floor would have kept out (measured: two sub-floor films entered the
+            // hero this way on the first build with the floor).
             var heroSparePool = candidates
                 .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(HeroKey)
+                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .ThenByDescending(CrowdBacked)
+                .ThenByDescending(HeroKey)
                 .ToList();
             var (balanced, met) = MediaMix.Balance(
                 hero,
