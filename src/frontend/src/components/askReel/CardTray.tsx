@@ -51,14 +51,16 @@ export default function CardTray({
       >
         {summary}
       </summary>
-      <h3
+      {/* An h2: the page's one h1 is "Ask Reel", and a tray is a section of the answer under it. An
+          h3 here skipped a level, which axe fails as heading-order. */}
+      <h2
         ref={headingRef}
         tabIndex={-1}
         data-testid={`${testId}-heading`}
         className="fa-section-title mt-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60 rounded"
       >
         {heading}
-      </h3>
+      </h2>
       <p className="fa-caption text-3 mt-1">{caption}</p>
       {extra}
       {cards.length > 0 && (
