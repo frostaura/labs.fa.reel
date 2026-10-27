@@ -50,10 +50,7 @@ public static class PlanSanitizer
             .ToList();
         negations = negations.Where(n => !concepts.Any(c => NegationTerms.EqualsAnyForm(c, n))).ToList();
 
-        // The user's own media word is never lost to a plan that left media unset: "how many ninja
-        // movies are left?" was counted over movies AND shows. Only a message naming exactly one.
-        var mediaNamed = Retrieval.MediaScopes.From(AskReelCarry.MediaNamed(message));
-        var media = delta.Media ?? (mediaNamed == Retrieval.MediaScope.Any ? null : mediaNamed);
+        var media = UserMedia(delta.Media, message);
 
         var clarify = state.ClarifiedOnce ? null : plan.ClarifyQuestion;
         return plan with
@@ -63,6 +60,81 @@ public static class PlanSanitizer
             ClarifyQuestion = clarify,
             ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
         };
+    }
+
+    /// <summary>
+    /// The media a plan searches, with the user's own media word outranking a plan that left it
+    /// unset OR answered "any" (HREV1-ASK-02, HREV1-RET-04). The planner answered "any" for "samurai
+    /// films", "submarine movies" and "Liam Neeson movies" — its input carries the app's media filter,
+    /// which reads "any" when none is set — and the turns returned shows and counted them ("Of the 91
+    /// samurai titles": 66 films and 25 shows). A model's explicit movie or tv stands; "any" is kept
+    /// only where the user's words name both media or neither, ask for one IN ADDITION ("shows too",
+    /// "include series") or rule one out without asking for the other. "Samurai, no tv shows" asks
+    /// for films. Applied to every plan, a fallback plan included, since no model read those.
+    /// </summary>
+    public static Retrieval.MediaScope? UserMedia(Retrieval.MediaScope? planned, string? message)
+    {
+        if (planned is Retrieval.MediaScope.Movies or Retrieval.MediaScope.Shows)
+        {
+            return planned;
+        }
+
+        var words = AskReelIntentSanitizer.ScopedWords(message);
+        if (words.Any(w => AlsoCues.Contains(w.Word))
+            || words.Zip(words.Skip(1)).Any(p => p.First.Word == "as" && p.Second.Word == "well"))
+        {
+            return planned;
+        }
+
+        var asked = Named(words.Where(w => !w.Negated).Select(w => w.Word));
+        var ruledOut = Named(words.Where(w => w.Negated).Select(w => w.Word));
+        return (asked, ruledOut) switch
+        {
+            (Retrieval.MediaScope.Movies, not Retrieval.MediaScope.Movies) => Retrieval.MediaScope.Movies,
+            (Retrieval.MediaScope.Shows, not Retrieval.MediaScope.Shows) => Retrieval.MediaScope.Shows,
+            (null, Retrieval.MediaScope.Shows) => Retrieval.MediaScope.Movies,
+            (null, Retrieval.MediaScope.Movies) => Retrieval.MediaScope.Shows,
+            _ => planned,
+        };
+
+        static Retrieval.MediaScope? Named(IEnumerable<string> said)
+        {
+            var media = AskReelCarry.MediaNamed(string.Join(' ', said));
+            return media.Count == 0 ? null : Retrieval.MediaScopes.From(media);
+        }
+    }
+
+    /// <summary>Words that ask for a medium on top of what is already asked for: "shows too", "also series" (and "as well").</summary>
+    private static readonly IReadOnlySet<string> AlsoCues = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "too", "also", "include", "including", "both", "either", "plus",
+    };
+
+    /// <summary>
+    /// The plan no model wrote, with the server's half of the pointer rules applied: a pointer at a
+    /// card resolves to the rank the user named, exactly as for a model's plan (<see cref="Pointed"/>).
+    /// </summary>
+    public static PlanResult PointFallback(PlanResult plan, string message, ConversationState state)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(state);
+        var shown = state.LastPresented.Select(p => p.Handle).ToHashSet();
+        return plan with { References = Pointed(plan.Act, plan.References.Where(shown.Contains).ToList(), message, state.LastPresented) };
+    }
+
+    /// <summary>
+    /// The position a search plan's message points at when the plan resolved it to no card — or null
+    /// when it points at nothing or resolved. "More like the third one" with no third card the planner
+    /// could name was searched anyway: the topic again, with the judge left to read "the third one"
+    /// itself, and a why-line saying "as in the third title" about a card nobody showed (HREV1-ASK-03).
+    /// A pointer the server cannot resolve is asked back, never searched.
+    /// </summary>
+    public static int? UnresolvedPointer(PlanResult plan, string message)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan.Act is TurnAct.Refine or TurnAct.CritiqueItem && plan.References.Count == 0
+            ? AskReelPointer.Ordinal(message)
+            : null;
     }
 
     /// <summary>The acts a pointer at a card belongs to; anything else keeps the plan's references as they are.</summary>

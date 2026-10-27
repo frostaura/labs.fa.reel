@@ -104,7 +104,7 @@ public class NoneFoundCopyTests
         Assert.Equal("The one unseen ninja movie inside your conditions was already shown in this conversation.", one);
 
         var some = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
-            Ninja() with { Eligible = 8 }, "ninja", MediaScope.Movies, [], 0, 6m, ShownHere: 6));
+            Ninja() with { Eligible = 8 }, "ninja", MediaScope.Movies, [], 0, 6m, ShownHere: 6, Checked: 2, CheckedOfTagged: 2));
         Assert.Equal(
             "6 of your unseen ninja movies were already shown in this conversation. "
             + "You have 2 other unseen ninja movies tagged that way, but none of the ones I checked is really a match.",
@@ -190,20 +190,40 @@ public class NoneFoundCopyTests
         Assert.Equal(expected, text);
     }
 
-    [Fact]
-    public void An_uncounted_check_keeps_the_sentence_it_always_had()
+    /// <summary>
+    /// HREV1-RET-01: v2 never counted which tagged titles its judge saw, and every none-found reply
+    /// it gave said "none of the ones I checked is really a match" — about the Liam Neeson titles the
+    /// previous turn had shown, and about heist titles no model judged. An uncounted check is no
+    /// check. Varied: with titles judged elsewhere, and with nothing judged at all.
+    /// </summary>
+    [Theory]
+    [InlineData(16, "You have 3 unseen ninja movies tagged that way, but none of them was among the 16 titles I checked this time, and none of those is really a match.")]
+    [InlineData(0, "You have 3 unseen ninja movies tagged that way, but I didn't check them against what you asked this time.")]
+    public void An_uncounted_check_claims_no_check(int judged, string expected)
     {
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
-            Ninja() with { Eligible = 3 }, "ninja", MediaScope.Movies, [], 0, 6m, Checked: 16, CheckedOfTagged: null));
+            Ninja() with { Eligible = 3 }, "ninja", MediaScope.Movies, [], 0, 6m, Checked: judged, CheckedOfTagged: null));
 
-        Assert.Equal("You have 3 unseen ninja movies tagged that way, but none of the ones I checked is really a match.", text);
+        Assert.Equal(expected, text);
+    }
+
+    /// <summary>With the judge down, the sentence agrees with the one title it is about.</summary>
+    [Theory]
+    [InlineData(1, "You have 1 unseen kaiju movie tagged that way, but I couldn't check it against what you asked this time.")]
+    [InlineData(2, "You have 2 unseen kaiju movies tagged that way, but I couldn't check them against what you asked this time.")]
+    public void An_unjudged_tagged_supply_agrees_in_number(int clearing, string expected)
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = clearing }, "kaiju", MediaScope.Movies, [], 0, 6m, JudgedAny: false));
+
+        Assert.Equal(expected, text);
     }
 
     [Fact]
     public void Tagged_titles_the_judge_rejected_are_not_called_none_left()
     {
         var supply = Ninja() with { Eligible = 3 };
-        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(supply, "ninja", MediaScope.Movies, [], 0, 6m));
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(supply, "ninja", MediaScope.Movies, [], 0, 6m, Checked: 3, CheckedOfTagged: 3));
 
         Assert.StartsWith(
             "You have 3 unseen ninja movies tagged that way, but none of the ones I checked is really a match.",

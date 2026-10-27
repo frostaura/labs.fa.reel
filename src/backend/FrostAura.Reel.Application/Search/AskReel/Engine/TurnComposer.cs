@@ -14,14 +14,25 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// <param name="NearMissNames">The near-miss tray, in display order.</param>
 /// <param name="UnderBar">The floor tray's size.</param>
 /// <param name="Unchecked">The unchecked tray's size.</param>
-/// <param name="Judged">How many titles the judge was sent.</param>
+/// <param name="Judged">
+/// How many titles the judge actually ruled on — verdicts returned, not titles sent: 0 for a person's
+/// credits, a turn with no model, and a judge that failed outright (HREV1-ASK-01).
+/// </param>
 /// <param name="CarriedForward">The plan failed and the previous state was searched again.</param>
 /// <param name="JudgeFailed">At least one judge batch ruled on nothing.</param>
 /// <param name="Person">The person a person request was about, with the role they were searched in.</param>
 /// <param name="PersonSeen">How many of the person's credited titles the account has seen (FD-3: counted, never named).</param>
 /// <param name="Answer">An ItemQuestion's answer text, or a tool answer composed upstream.</param>
 /// <param name="AnswerTitle">The title an answer is about.</param>
-/// <param name="ShownHere">Titles clearing the bar that this conversation had already shown.</param>
+/// <param name="ShownHere">Titles clearing the bar that this conversation had already shown (the supply's <c>AlreadyShown</c>).</param>
+/// <param name="CheckedOfTagged">
+/// Of the tagged titles clearing the bar and not yet shown, how many the judge ruled on — never a
+/// count of titles sent. Null claims no check (<see cref="NoneFoundCopy.Facts.CheckedOfTagged"/>).
+/// </param>
+/// <param name="FirstTurn">
+/// The conversation had no earlier answer: a carried-forward plan has nothing "before" to carry,
+/// so its lead says it searched the user's own words (HREV1-ASK-06).
+/// </param>
 /// <param name="HeldUnchecked">
 /// Of <paramref name="UnderBar"/>, the cards nobody judged (XM-06: the bar holds back an unchecked card
 /// too). They are in the floor tray but never said to FIT, and are counted with the unchecked cards.
@@ -48,7 +59,9 @@ public sealed record TurnContext(
     string? AnswerTitle = null,
     string? ClarifyQuestion = null,
     int ShownHere = 0,
-    int HeldUnchecked = 0);
+    int HeldUnchecked = 0,
+    int? CheckedOfTagged = null,
+    bool FirstTurn = false);
 
 /// <summary>The reply and the one-line reason, as composed.</summary>
 public sealed record ComposedTurn(string Reply, string? Reason);
@@ -70,6 +83,12 @@ public sealed class TurnComposer : ITurnComposer
 
     /// <summary>The same lead when the previous state named no topic to search for.</summary>
     public const string CarriedForwardPlainLead = "I couldn't fully read that, so I searched the way I did last time.";
+
+    /// <summary>The lead for a plan that failed on a conversation's FIRST turn: nothing came before it.</summary>
+    public const string FirstTurnFallbackLead = "I couldn't fully read that, so I searched for {0}.";
+
+    /// <summary>The first-turn lead when the user's words left nothing to search for by name.</summary>
+    public const string FirstTurnFallbackPlainLead = "I couldn't fully read that, so this is a broad search.";
 
     /// <summary>Small talk: what Ask Reel can do, in one line.</summary>
     public const string ChitchatReply =
@@ -156,10 +175,13 @@ public sealed class TurnComposer : ITurnComposer
             c.NearMissNames.Count,
             c.Floor,
             Unchecked: c.Unchecked + c.HeldUnchecked,
-            JudgedAny: !c.JudgeFailed || c.Judged > 0,
+            // Only a verdict that came back is a check: a judge sent sixteen titles that answered
+            // none, a person's credits and a turn with no model all judged nothing (HREV1-ASK-01).
+            JudgedAny: c.Judged > 0,
             ShownHere: c.ShownHere,
             NearMissNames: c.NearMissNames,
-            Checked: c.Judged));
+            Checked: c.Judged,
+            CheckedOfTagged: c.CheckedOfTagged));
     }
 
     private static string Lead(TurnContext c, string reply)
@@ -169,9 +191,13 @@ public sealed class TurnComposer : ITurnComposer
             return reply;
         }
 
-        var lead = c.Topic is { Length: > 0 } topic
-            ? string.Format(CultureInfo.InvariantCulture, CarriedForwardLead, topic)
-            : CarriedForwardPlainLead;
+        var lead = (c.Topic, c.FirstTurn) switch
+        {
+            ({ Length: > 0 } topic, true) => string.Format(CultureInfo.InvariantCulture, FirstTurnFallbackLead, topic),
+            (_, true) => FirstTurnFallbackPlainLead,
+            ({ Length: > 0 } topic, false) => string.Format(CultureInfo.InvariantCulture, CarriedForwardLead, topic),
+            _ => CarriedForwardPlainLead,
+        };
         return $"{lead} {reply}";
     }
 

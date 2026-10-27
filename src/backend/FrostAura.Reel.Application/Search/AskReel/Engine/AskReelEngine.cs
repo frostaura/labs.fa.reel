@@ -133,6 +133,15 @@ public sealed class AskReelEngine(
         /// <summary>The viewer's persona line, built once for the planner and reused by the judge.</summary>
         public string? Persona { get; set; }
 
+        /// <summary>The conversation had no answer before this turn (its state's version is 0).</summary>
+        public bool FirstTurn { get; set; }
+
+        /// <summary>
+        /// Every title the judge actually ruled on this turn — a verdict that came back, not a title
+        /// sent — with its prediction, for what a none-found reply may claim was checked (HREV1-ASK-01).
+        /// </summary>
+        public Dictionary<Guid, decimal?> Verdicts { get; } = [];
+
         /// <summary>
         /// Stored-only flags (<see cref="SearchTurnDegraded.ArmPrefix"/>): written to the turn's
         /// <c>DegradedFlags</c> so a thin retrieval is a query, never sent to the client — the reply
@@ -178,6 +187,16 @@ public sealed class AskReelEngine(
         var mediaFilter = MediaScopes.From(input.MediaFilter);
         turn.MediaFilter = mediaFilter;
         var state = await LoadStateAsync(input, ct);
+        turn.FirstTurn = state.Version == 0;
+
+        // "The third one" with no answer on screen showing a third card is a question to ask back,
+        // not a search (R1-04, HREV1-ASK-03) — answered deterministically, before any model call.
+        if (AskReelPointer.Ordinal(input.Message) is { } pointer && !AskReelPointer.CanResolve(pointer, input.Presented))
+        {
+            var asked = new PlanResult(
+                TurnAct.Refine, ConversationStateDelta.None, [], [], null, [], PlanSource.CarriedForward, LlmCallMeta.None);
+            return await ClarifyAsync(turn, asked, state, AskReelPointer.NothingToPointAt(pointer, input.Presented), [], ct);
+        }
 
         await PhaseAsync(turn, "planning", "Reading your request");
         PlanResult plan;
@@ -191,8 +210,18 @@ public sealed class AskReelEngine(
             return await RefusedAsync(turn, plan, refusal, state, ct);
         }
 
-        plan = plan.Failure is null ? PlanSanitizer.Clean(plan, input.Message, state, turn.Standing) : plan;
-        var next = ConversationStateReducer.Apply(state, plan, mediaFilter);
+        plan = plan.Failure is null
+            ? PlanSanitizer.Clean(plan, input.Message, state, turn.Standing)
+            : PlanSanitizer.PointFallback(plan, input.Message, state);
+
+        // A pointer nothing resolved is asked back: searched, it ran the topic again and the judge was
+        // left to read "the third one" itself, writing why-lines about a card nobody showed.
+        if (PlanSanitizer.UnresolvedPointer(plan, input.Message) is { } unresolved)
+        {
+            return await ClarifyAsync(turn, plan, state, AskReelPointer.Unresolved(unresolved), [], ct);
+        }
+
+        var next = ConversationStateReducer.SimilarPivot(ConversationStateReducer.Apply(state, plan, mediaFilter), plan, input.Message);
 
         await turn.Emit("plan", new
         {
@@ -617,7 +646,6 @@ public sealed class AskReelEngine(
         var provisional = !personOnly && judgeModel.IsAvailable && room > 0 && retrieval.Provisional.Count > 0
             ? HydrateProvisionalAsync(turn, retrieval.Provisional.Take(room).ToList(), ct)
             : null;
-        var judgedCount = personOnly ? 0 : judgedSlice.Count;
         int? personSeen = null;
         if (personOnly)
         {
@@ -657,7 +685,6 @@ public sealed class AskReelEngine(
                 {
                     var extra = admitted.Select(a => a.Candidate).ToList();
                     await JudgeAsync(turn, next, extra, titles, ct);
-                    judgedCount += extra.Count;
                 }
             }
         }
@@ -697,6 +724,14 @@ public sealed class AskReelEngine(
             await turn.Emit("none-found", new { supply = LiveSearchExpansionService.SupplyWire(supply) });
         }
 
+        // What the reply may say was checked: only the verdicts that came back (HREV1-ASK-01), and of
+        // the tagged supply only the part the judge saw; what this conversation already showed is
+        // named as shown, never as "checked" (the v1 rules of D4 and IREV2-SYS-01, carried to v2).
+        var judgedCount = turn.Verdicts.Count;
+        var checkedOfTagged = supply is { ClearingFloor: > 0 } counted
+            ? await CheckedOfTaggedAsync(turn, hard, counted, ct)
+            : 0;
+
         var judgeFailed = SearchTurnDegraded.JudgeFailed(string.Join(',', turn.Degraded));
         var finalMode = mode == SearchTurnMode.Picks ? FinalMode.Picks : FinalMode.NoneFound;
         var underBar = placedTrays.FirstOrDefault(t => t.Kind == "belowFloor").Cards ?? [];
@@ -722,6 +757,8 @@ public sealed class AskReelEngine(
                 JudgeFailed = judgeFailed,
                 Person = personOnly ? hard.People[0] : null,
                 PersonSeen = personSeen,
+                ShownHere = supply?.AlreadyShown ?? 0,
+                CheckedOfTagged = checkedOfTagged,
             });
         }
 
@@ -1032,6 +1069,11 @@ public sealed class AskReelEngine(
         }
 
         predictions ??= await scoring;
+        foreach (var verdict in verdicts.Values.Where(v => v.Judged))
+        {
+            turn.Verdicts[verdict.TitleId] = predictions.TryGetValue(verdict.TitleId, out var p) && p > 0m ? p : null;
+        }
+
         turn.Timings.Mark(AskStageTimings.Score, scoreMs);
         turn.Timings.Mark(AskStageTimings.Judge, judgeClock.Elapsed.TotalMilliseconds);
         turn.Calls.Add(new LlmCallMeta(judgeModel.ModelId, null, false, batches.Count, (long)judgeClock.Elapsed.TotalMilliseconds));
@@ -1279,6 +1321,36 @@ public sealed class AskReelEngine(
         }
     }
 
+    /// <summary>
+    /// Of the unseen tagged titles <paramref name="supply"/> counts as clearing the bar, how many the
+    /// judge ruled on this turn: a title with a verdict, inside the request's constraints and the
+    /// account's eligibility, at the supply's vote floor and maturity ceiling, clearing the bar. A
+    /// count that cannot be made is 0 — the reply then claims no check rather than one it cannot back.
+    /// </summary>
+    private async Task<int> CheckedOfTaggedAsync(Turn turn, HardConstraints hard, SupplyReport supply, CancellationToken ct)
+    {
+        var ids = turn.Verdicts.Where(v => AskReelGate.Clears(v.Value, turn.Floor)).Select(v => v.Key).ToList();
+        if (ids.Count == 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
+            return (await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId), db, hard)
+                    .Where(t => ids.Contains(t.Id))
+                    .AsNoTracking()
+                    .ToListAsync(ct))
+                .Count(t => CrowdVotes.Of(t) >= supply.MinVotes && EligibilityQueryBuilder.PassesMaturity(t, ceiling));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel v2: the checked share of the supply could not be counted; the reply claims no check.");
+            return 0;
+        }
+    }
+
     private async Task ConflictAsync(Turn turn, HardConstraints hard, CancellationToken ct)
     {
         var intent = IntentOf(hard);
@@ -1408,7 +1480,10 @@ public sealed class AskReelEngine(
         new(
             plan.Act, mode, null, MediaScope.Any, 0, 0, [], 0, [], 0, 0, turn.Floor, null,
             CarriedForward: plan.Source == PlanSource.CarriedForward && plan.Failure is not null,
-            JudgeFailed: false);
+            JudgeFailed: false)
+        {
+            FirstTurn = turn.FirstTurn,
+        };
 
     // ── State ───────────────────────────────────────────────────────────────────────────────
 

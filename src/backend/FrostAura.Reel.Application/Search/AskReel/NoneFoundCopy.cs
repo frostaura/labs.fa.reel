@@ -54,10 +54,12 @@ public static class NoneFoundCopy
     /// <param name="Checked">How many titles the judge actually ruled on this turn.</param>
     /// <param name="CheckedOfTagged">
     /// How many of the unseen titles the supply counts as clearing the bar were among those the judge
-    /// ruled on — or null when that was not counted. The supply counts every tagged title in the
-    /// catalogue and the judge rules on at most <see cref="AskReelJudge.MaxJudged"/> a turn, so "none
-    /// of the ones I checked is really a match" over tagged titles nobody judged implied a check that
-    /// never happened (IREV2-SYS-01). The sentence says how many were checked instead.
+    /// ruled on. The supply counts every tagged title in the catalogue and the judge rules on at most
+    /// <see cref="AskReelJudge.MaxJudged"/> a turn, so "none of the ones I checked is really a match"
+    /// over tagged titles nobody judged implied a check that never happened (IREV2-SYS-01). The
+    /// sentence says how many were checked instead. Null — not counted — reads as NONE checked: a
+    /// caller that did not count a check may not claim one (HREV1-RET-01, where v2 never counted and
+    /// every none-found reply claimed to have checked titles nobody judged).
     /// </param>
     public sealed record Facts(
         SupplyReport? Supply,
@@ -135,7 +137,7 @@ public static class NoneFoundCopy
                 sentences.Add(facts.JudgedAny
                     ? Tagged(fresh, other, topic, facts.Checked, facts.CheckedOfTagged)
                     : FormattableString.Invariant(
-                        $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but I couldn't check them against what you asked this time."));
+                        $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but I couldn't check {(fresh == 1 ? "it" : "them")} against what you asked this time."));
             }
         }
         else
@@ -209,11 +211,12 @@ public static class NoneFoundCopy
     /// <summary>
     /// The tagged-supply sentence on a turn the judge ran: "none of the ones I checked" only when
     /// every one of them was checked, and otherwise how many were, out of how many the judge saw.
+    /// An uncounted check (<paramref name="checkedOfTagged"/> null) is no check.
     /// </summary>
     private static string Tagged(int fresh, string other, string? topic, int judged, int? checkedOfTagged)
     {
         var lead = FormattableString.Invariant($"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way");
-        var ofTagged = checkedOfTagged is { } c ? Math.Clamp(c, 0, fresh) : fresh;
+        var ofTagged = Math.Clamp(checkedOfTagged ?? 0, 0, fresh);
         if (ofTagged >= fresh)
         {
             return $"{lead}, but none of the ones I checked is really a match.";

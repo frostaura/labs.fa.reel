@@ -211,7 +211,9 @@ public sealed class OpenRouterAskPlanner(
                 .ToList(),
             standingConditions = input.Conditions.Summary ?? "none",
             taste = Cap(input.TasteSummary, 1200),
-            mediaFilter = MediaWord(input.MediaFilter),
+            // The app's own filter, applied by the server. "none" rather than "any" when unset: the
+            // planner copied "any" into media and "samurai films" searched shows (HREV1-ASK-02).
+            mediaFilter = input.MediaFilter == MediaScope.Any ? "none" : MediaWord(input.MediaFilter),
             clarifiedAlready = state.ClarifiedOnce,
             message = input.Message,
         };
@@ -233,7 +235,9 @@ public sealed class OpenRouterAskPlanner(
         "FIELDS: concepts = topics the user REQUIRES, in their own words, singular and lower-case (\"ninja movies\" -> " +
         "[\"ninja\"]); never a mood, never a person, never a title, never a word the user negated. genres = genre slugs " +
         "the user names as a requirement (\"comedies\" -> [\"comedy\"]). people = named directors or actors. " +
-        "minYear/maxYear: a decade means both bounds (\"80s\" -> 1980, 1989). media = movie | tv | any | unchanged. " +
+        "minYear/maxYear: a decade means both bounds (\"80s\" -> 1980, 1989). media = movie when the message says " +
+        "film(s)/movie(s), tv when it says show(s)/series/tv, any ONLY when it asks for both, unchanged when it names " +
+        "neither; mediaFilter is the app's own filter, applied by the server — never copy it into media. " +
         "moods = soft feelings (\"feel-good\", \"cosy\", \"tense\"). directions = attribute steers: attribute is one of " +
         "darkness, pacing, complexity, intensity, humor, optimism; trend more|less (\"funnier\" -> humor more). " +
         "negations = ONLY words the user says they do not want, copied from their message (\"no superheroes please\" " +
@@ -248,6 +252,9 @@ public sealed class OpenRouterAskPlanner(
         "two readings differ in what they REQUIRE, and never when clarifiedAlready is true; otherwise clarifyQuestion " +
         "is null and clarifyOptions empty.\n" +
         "EXAMPLES: \"ninja movies\" -> {act:NewRequest, concepts:[ninja], media:movie, tools:[search_catalog]}. " +
+        "\"samurai films\" -> {act:NewRequest, concepts:[samurai], media:movie}. \"Liam Neeson movies\" -> " +
+        "{act:NewRequest, people:[{name:Liam Neeson, role:cast}], media:movie, tools:[filmography]}. \"zombie shows\" -> " +
+        "{act:NewRequest, concepts:[zombie], media:tv}. " +
         "\"feel-good movie\" -> {act:NewRequest, moods:[feel-good], media:movie}. \"no superheroes please\" -> " +
         "{act:Refine, negations:[superheroes], media:unchanged}. \"like John Wick but funnier\" -> {act:NewRequest, " +
         "referenceNames:[John Wick], directions:[{attribute:humor, trend:more}], tools:[similar_to]}. \"none of the " +

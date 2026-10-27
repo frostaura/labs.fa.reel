@@ -504,7 +504,22 @@ uses it only to know which frames to expect.
    `Chitchat` — and returns a delta to the conversation's state, the handles it refers to, and the
    tools it wants. A `length` finish or a timeout is retried once at twice the budget; if the retry
    fails too the previous state is **carried forward**, only additive words from the new message are
-   added (never ordinals, never a negation phrase as a topic), and the turn is degraded (`plan`).
+   added (never ordinals, never a negation phrase as a topic), and the turn is degraded (`plan`). On
+   a conversation's **first** turn there is nothing to carry: the user's positive words are searched
+   as the **phrases** they wrote ("time travel", "liam neeson" — never each word as its own
+   requirement), and the reply leads "I couldn't fully read that, so I searched for …", never "as
+   before". A plan no model wrote (carried forward, or keyless) takes the media the message names.
+   **Media:** the user's own media word outranks a plan that left media unset **or answered
+   `any`** ("samurai films" is films); `any` stands only where the words name both media or neither,
+   ask for one in addition ("shows too") or rule one out ("no tv shows" asks for films).
+   **Pointers:** an ordinal no answer on screen can satisfy ("the third one" after one pick, or
+   with nothing shown) is asked back **before any model call** (`clarify`, R1-04); one some answer
+   could satisfy but that nothing resolved to a card (no handle, and the newest answer has no card
+   there, or "from before" without saying which) is asked back after planning — a search never runs
+   on an unresolved pointer. **"More like the third one"** (a `Refine` whose reference resolved, in
+   a message asking for likeness) searches **near that card**: the earlier person and topics stop
+   being hard filters unless the message restates them; media, years, runtime and the user's own
+   negations still hold.
    A spent plan allowance (`ask_budget_spent`) or an open provider breaker (`provider_unavailable`)
    ends the turn **before any work**: `Failed` with that code and the cause's degraded copy.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
@@ -530,7 +545,12 @@ uses it only to know which frames to expect.
    the bar; the rest are counted as unchecked.
 5. **Compose** — the reply is written by templates from the supply report, the handles and the
    facts. **No model writes a search turn's reply.** No markdown, never "pulled", never an echo of
-   the message.
+   the message. A none-found reply claims a check only for **verdicts that came back** — a person's
+   credits, a turn with no model and a judge whose every batch failed checked nothing — and of the
+   tagged supply only the part the judge saw ("I checked 16 of them … the other 4 weren't among the
+   16 titles I checked"); titles this conversation already showed are named as shown. An
+   `ItemQuestion` answer names the title and states the answer; one that cites Reel's inputs ("the
+   runtime fact says…", "the keywords identify…") is discarded for the fact line, which names the title.
 6. **Persist** — cards are written **as they are emitted** (each `picks` / `tray` frame is a row
    write), so a turn that dies mid-stream still holds what it showed; the turn's act, mode, plan
    source, degraded flags, timings, models and effort are written at the end, and the conversation's
@@ -549,7 +569,7 @@ uses it only to know which frames to expect.
 | `none-found` | a search act with no pick | `{ supply }` — the `done.supply` shape |
 | `degraded` | when anything the client is told about did not run as designed: before `answer` / `clarify`, else before `assistant-message` | `{ what: [flag] }` — the `done.degraded` tokens (`plan`, `plan-cause:{code}`, `judge:n/m`, `judge-missing:n/m`, `no-model`, `answer`); never `arm:` notes |
 | `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — **the turn's reply**: no `assistant-message` follows it. `handle` and `titleId` are null when the answer is about no single title |
-| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), or an item question names no title | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
+| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), an item question names no title, or a pointer ("the third one") resolves to no card — before planning when no answer on screen has that many cards (then no `plan` frame precedes it) | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
 | `assistant-message` | search and refused turns only, once, after the trays and just before `done` | `{ text, degraded }` — the composed reply. A client must accept it before or after the turn's `picks` (the chat UI's own fixtures send it first) |
 | `done` | last, always | every v1 key, plus `engine: "v2"`, `act`, `planSource`, `answer` (string or null) and `clarify` (object or null). `mode` is `Picks` · `NoneFound` · `Clarify` · `Answer` |
 

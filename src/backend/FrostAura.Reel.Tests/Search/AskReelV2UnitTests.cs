@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
@@ -281,6 +282,20 @@ public class AskReelV2UnitTests
     [InlineData("ninja movies or shows", null, null)]
     [InlineData("more of those", null, null)]
     [InlineData("ninja movies", MediaScope.Shows, MediaScope.Shows)]
+    // HREV1-ASK-02 / RET-04: the live planner answered "any" for all three, and the turns returned shows.
+    [InlineData("samurai films", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("submarine movies", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("Liam Neeson movies", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("zombie series", MediaScope.Any, MediaScope.Shows)]
+    // "any" stands where the words name both, neither, or one in addition.
+    [InlineData("ninja movies or shows", MediaScope.Any, MediaScope.Any)]
+    [InlineData("something cosy", MediaScope.Any, MediaScope.Any)]
+    [InlineData("include shows too", MediaScope.Any, MediaScope.Any)]
+    [InlineData("shows as well please", MediaScope.Any, MediaScope.Any)]
+    // A medium ruled out asks for the other one; a word ruled out is never the one asked for.
+    [InlineData("samurai, no tv shows", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("not a movie, a series", MediaScope.Any, MediaScope.Shows)]
+    [InlineData("samurai, no tv shows", null, MediaScope.Movies)]
     public void The_users_own_media_word_survives_a_plan_that_left_media_unset(string message, MediaScope? planned, MediaScope? expected)
     {
         var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Media = planned });
@@ -304,6 +319,109 @@ public class AskReelV2UnitTests
         Assert.NotNull(PlanSanitizer.Clean(plan, "something good", ConversationState.Empty, FilterRuleSet.FromRows([])).ClarifyQuestion);
         Assert.Null(PlanSanitizer.Clean(
             plan, "something good", ConversationState.Empty with { ClarifiedOnce = true }, FilterRuleSet.FromRows([])).ClarifyQuestion);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-06: a plan no model wrote keeps the user's topic as the phrase they wrote ("time
+    /// travel movies" searched "travel"; "Liam Neeson movies" required "liam" AND "neeson") and takes
+    /// the medium their words name. Varied over both fallbacks, a negated clause and a found-footage lead.
+    /// </summary>
+    [Theory]
+    [InlineData("time travel movies", new[] { "time travel" }, MediaScope.Movies)]
+    [InlineData("Liam Neeson movies", new[] { "liam neeson" }, MediaScope.Movies)]
+    [InlineData("found footage horror shows", new[] { "found footage horror" }, MediaScope.Shows)]
+    [InlineData("heist films, no gore", new[] { "heist" }, MediaScope.Movies)]
+    [InlineData("kaiju or mecha", new[] { "kaiju", "mecha" }, null)]
+    public void A_plan_no_model_wrote_searches_the_users_phrases_in_their_medium(string message, string[] concepts, MediaScope? media)
+    {
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.ProviderUnavailable, null, false), LlmCallMeta.None);
+        foreach (var plan in new[] { FallbackPlans.CarriedForward(failed, message, ConversationState.Empty), FallbackPlans.Keyless(message, ConversationState.Empty) })
+        {
+            Assert.Equal(concepts, plan.Delta.Concepts);
+            Assert.Equal(media, plan.Delta.Media);
+        }
+    }
+
+    [Theory]
+    [InlineData("I want some time travel", new[] { "time travel" })]
+    [InlineData("more like the second one you showed me first time round", new string[0])]
+    [InlineData("none of the above are ninja movies. I want ninja movies", new[] { "ninja" })]
+    [InlineData("dark gritty heist, no superheroes", new[] { "dark gritty heist" })]
+    public void The_keyless_phrases_are_the_positive_words_as_written(string message, string[] expected) =>
+        Assert.Equal(expected, AskReelIntentSanitizer.KeylessPhrases(message));
+
+    [Fact]
+    public void A_carried_forward_refine_takes_the_medium_the_words_name()
+    {
+        var state = ConversationState.Empty with { Version = 2, Hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])] } };
+        var plan = FallbackPlans.CarriedForward(
+            PlanResult.Failed(new PlanFailure(AgentFailureKind.Truncated, null, false), LlmCallMeta.None), "now just shows", state);
+        Assert.Equal(MediaScope.Shows, plan.Delta.Media);
+        Assert.Equal(TurnAct.Refine, plan.Act);
+    }
+
+    // ── Pointers and the similar_to pivot ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// HREV1-ASK-03: a search plan whose message points at a card it resolved to no handle is asked
+    /// back. Varied over the acts (a question and a new request are not), and a resolved pointer.
+    /// </summary>
+    [Theory]
+    [InlineData(TurnAct.Refine, false, "more like the third one", 3)]
+    [InlineData(TurnAct.CritiqueItem, false, "less dark than the second one", 2)]
+    [InlineData(TurnAct.Refine, true, "more like the third one", null)]
+    [InlineData(TurnAct.Refine, false, "more of those", null)]
+    [InlineData(TurnAct.NewRequest, false, "the first one was great, now heist movies", null)]
+    [InlineData(TurnAct.ItemQuestion, false, "how long is the second one?", null)]
+    public void A_search_pointer_nothing_resolved_is_unresolved(TurnAct act, bool resolved, string message, int? expected)
+    {
+        var plan = resolved ? Plan(act, null, new TurnHandle(1, 3)) : Plan(act);
+        Assert.Equal(expected, PlanSanitizer.UnresolvedPointer(plan, message));
+    }
+
+    [Fact]
+    public void A_fallback_plan_resolves_the_pointer_to_the_newest_answers_card()
+    {
+        var state = Shown((A, 1, 1), (B, 1, 2), (C, 1, 3));
+        var keyless = PlanSanitizer.PointFallback(FallbackPlans.Keyless("more like the second one", state), "more like the second one", state);
+        Assert.Equal([new TurnHandle(1, 2)], keyless.References);
+        Assert.Null(PlanSanitizer.UnresolvedPointer(keyless, "more like the second one"));
+    }
+
+    /// <summary>
+    /// HREV1-RET-02: after "Liam Neeson movies", "more like the third one" searches near that card —
+    /// the person stops being a hard filter, unless the message restates him; the medium and the
+    /// user's negations still hold. Varied: a restated person, a restated topic, a critique, a
+    /// message that does not ask for likeness, and a reference nothing resolved.
+    /// </summary>
+    [Theory]
+    [InlineData(TurnAct.Refine, "more like the third one", true, 0, 0)]
+    [InlineData(TurnAct.Refine, "something similar to the third one with Neeson", true, 1, 0)]
+    [InlineData(TurnAct.Refine, "more spy films like the third one", true, 0, 1)]
+    [InlineData(TurnAct.CritiqueItem, "less dark than the third one", true, 1, 1)]
+    [InlineData(TurnAct.Refine, "more of the third one's kind but older", true, 1, 1)]
+    [InlineData(TurnAct.Refine, "more like the third one", false, 1, 1)]
+    public void More_like_a_card_pivots_to_it_and_drops_the_earlier_filters_unless_restated(
+        TurnAct act, string message, bool resolves, int people, int concepts)
+    {
+        var state = Shown((A, 1, 1), (B, 1, 2), (C, 1, 3)) with
+        {
+            Hard = new HardConstraints(
+                [new ConceptTerm("spy", [], [])], [new PersonConstraint("Liam Neeson", null, PersonRole.Cast)], null, null, MediaScope.Movies),
+            UserNegations = ["gore"],
+        };
+        var plan = resolves ? Plan(act, null, new TurnHandle(1, 3)) : Plan(act);
+
+        var next = ConversationStateReducer.SimilarPivot(ConversationStateReducer.Apply(state, plan, MediaScope.Any), plan, message);
+
+        Assert.Equal(people, next.Hard.People.Count);
+        Assert.Equal(concepts, next.Hard.Concepts.Count);
+        Assert.Equal(MediaScope.Movies, next.Hard.Media);
+        Assert.Equal(["gore"], next.UserNegations);
+        if (resolves && act == TurnAct.Refine)
+        {
+            Assert.Contains(C, next.Soft.ReferenceTitleIds);
+        }
     }
 
     [Fact]
@@ -379,6 +497,47 @@ public class AskReelV2UnitTests
     {
         var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with { Picks = 3, CarriedForward = true });
         Assert.StartsWith("I couldn't fully read that — searching for ninja as before.", reply.Reply, StringComparison.Ordinal);
+    }
+
+    /// <summary>HREV1-ASK-06: a conversation's first turn has no "before" to carry.</summary>
+    [Theory]
+    [InlineData("time travel", "I couldn't fully read that, so I searched for time travel. 3 time travel movies that fit what you asked.")]
+    [InlineData(null, "I couldn't fully read that, so this is a broad search. 3 movies that fit what you asked.")]
+    public void A_first_turn_fallback_never_says_as_before(string? topic, string expected)
+    {
+        var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with { Topic = topic, Picks = 3, CarriedForward = true, FirstTurn = true });
+        Assert.Equal(expected, reply.Reply);
+        Assert.DoesNotContain("before", reply.Reply, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-01 / RET-01: a none-found reply claims a check only for verdicts that came back.
+    /// The Liam Neeson follow-up (person credits, nothing judged, all four already shown), a judge
+    /// that failed outright, a turn with no model, and a turn that judged some of the tagged titles.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 4, 0, 0, 0, "All 4 unseen Liam Neeson titles inside your conditions were already shown in this conversation.")]
+    [InlineData(3, 0, 0, 0, 7, "You have 3 unseen Liam Neeson titles tagged that way, but I couldn't check them against what you asked this time. 7 titles I couldn't check against your request are below, marked as unchecked.")]
+    [InlineData(1, 0, 0, 0, 1, "You have 1 unseen Liam Neeson title tagged that way, but I couldn't check it against what you asked this time. 1 title I couldn't check against your request is below, marked as unchecked.")]
+    [InlineData(6, 2, 16, 1, 0, "2 of your unseen Liam Neeson titles were already shown in this conversation. You have 4 other unseen Liam Neeson titles tagged that way. I checked 1 of them and it isn't really a match; the other 3 weren't among the 16 titles I checked this time.")]
+    [InlineData(4, 0, 16, 4, 0, "You have 4 unseen Liam Neeson titles tagged that way, but none of the ones I checked is really a match.")]
+    public void A_none_found_reply_claims_only_the_checks_that_happened(
+        int clearing, int shownHere, int judged, int checkedOfTagged, int notChecked, string expected)
+    {
+        var supply = new SupplyReport(clearing, 0, 0, 0, clearing, 0, 0, [], 0, 50, null, true, shownHere);
+        var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
+        {
+            Topic = "Liam Neeson",
+            Media = MediaScope.Any,
+            Floor = 0m,
+            Supply = supply,
+            Judged = judged,
+            CheckedOfTagged = checkedOfTagged,
+            ShownHere = shownHere,
+            Unchecked = notChecked,
+            JudgeFailed = judged == 0 && notChecked > 0,
+        });
+        Assert.Equal(expected, reply.Reply);
     }
 
     [Fact]
@@ -527,6 +686,9 @@ public class AskReelV2UnitTests
         Assert.Equal(["user", "assistant", "user"], messages.Skip(1).Select(m => m.Role));
         Assert.Contains("T1.2 Title 2 (2020)", messages[^1].Content, StringComparison.Ordinal);
         Assert.Contains("\"standingConditions\":\"no horror\"", messages[^1].Content, StringComparison.Ordinal);
+        // No app filter reads "none", never "any" — the planner copied "any" into media (HREV1-ASK-02).
+        Assert.Contains("\"mediaFilter\":\"none\"", messages[^1].Content, StringComparison.Ordinal);
+        Assert.Contains("never copy it into media", messages[0].Content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -574,8 +736,24 @@ public class AskReelV2UnitTests
     [InlineData("It's rated R for violence. It runs 110 minutes. It stars Keanu Reeves.", "It's rated R for violence. It runs 110 minutes.")]
     [InlineData("**Yes** — it is rated R.", "Yes — it is rated R.")]
     [InlineData("   ", null)]
+    // HREV1-ASK-07: an answer that cites Reel's inputs instead of answering is not an answer.
+    [InlineData("The runtime fact says it is 197 minutes long.", null)]
+    [InlineData("The keywords and overview identify Blade of the 47 Ronin as a samurai film; the facts don't identify it as a ninja film.", null)]
+    [InlineData("On the Beach runs 134 minutes.", "On the Beach runs 134 minutes.")]
     public void An_answer_is_two_plain_sentences_at_most(string raw, string? expected) =>
         Assert.Equal(expected, OpenRouterAskAnswerer.Clean(raw));
+
+    /// <summary>HREV1-ASK-07: the answerer is told to name the title and never to cite its inputs, and is not primed with "facts".</summary>
+    [Fact]
+    public void The_answerer_names_the_title_and_never_its_sources()
+    {
+        Assert.Contains("Name the title and state the answer directly", OpenRouterAskAnswerer.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("never write \"fact\", \"facts\", \"keyword\", \"keywords\", \"overview\"", OpenRouterAskAnswerer.SystemPrompt, StringComparison.Ordinal);
+        var sheet = new TitleFactSheet(A, "On the Beach", 1959, MediaType.Movie, ["drama"], ["nuclear war"], "After the war.", 134, "PG", ["Stanley Kramer"], [], [], null, false);
+        var prompt = OpenRouterAskAnswerer.UserPrompt(new AnswerInput("how long is the second one?", sheet));
+        Assert.Contains("\"title\":{\"name\":\"On the Beach\"", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"facts\"", prompt, StringComparison.Ordinal);
+    }
 
     private static JudgeTitle Title(Guid id) => new(id, $"Title {id:N}", 2020, MediaType.Movie, ["action"], ["ninja"], "A ninja.", [], null);
 

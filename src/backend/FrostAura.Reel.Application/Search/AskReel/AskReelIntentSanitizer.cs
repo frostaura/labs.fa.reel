@@ -252,6 +252,75 @@ public static class AskReelIntentSanitizer
     }
 
     /// <summary>
+    /// The topics a raw sentence asks for, read with no model — its positive content words
+    /// (<see cref="ReadKeyless"/>), kept as the PHRASES the user wrote them in: "Liam Neeson movies"
+    /// is one topic, "liam neeson", and "time travel movies" is "time travel". A plan no model wrote
+    /// used to search each word as a separate hard concept, so the dead-provider "time travel movies"
+    /// searched "travel" and "Liam Neeson movies" required both "liam" AND "neeson" as keywords
+    /// (HREV1-ASK-06). A phrase ends at a negation cue, a conjunction, punctuation, a media word or
+    /// any word that is not content; it may start with one of <see cref="PhraseLeads"/>, the stop
+    /// words that pair with a topic word into a topic of their own ("found footage").
+    /// </summary>
+    public static IReadOnlyList<string> KeylessPhrases(string? raw)
+    {
+        var positive = ReadKeyless(raw).Positive.ToHashSet(StringComparer.Ordinal);
+        var phrases = new List<string>();
+        var run = new List<string>();
+        string? lead = null;
+        foreach (var (word, negated) in ScopedWithBreaks(raw))
+        {
+            if (word is not null && !negated && positive.Contains(word))
+            {
+                if (run.Count == 0 && lead is not null)
+                {
+                    run.Add(lead);
+                }
+
+                lead = null;
+                run.Add(word);
+                continue;
+            }
+
+            Flush();
+            lead = word is not null && !negated && PhraseLeads.Contains(word) ? word : null;
+        }
+
+        Flush();
+        return phrases;
+
+        void Flush()
+        {
+            if (run.Count > 0)
+            {
+                var phrase = string.Join(' ', run);
+                if (!phrases.Contains(phrase, StringComparer.Ordinal))
+                {
+                    phrases.Add(phrase);
+                }
+
+                run.Clear();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stop words that start a topic when a content word follows: "time travel", "found footage".
+    /// Only these — a pronoun or a request verb before a topic ("I want heist") never joins it.
+    /// </summary>
+    private static readonly IReadOnlySet<string> PhraseLeads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "time", "found",
+    };
+
+    /// <summary>
+    /// Every word of a raw sentence that is not a negation cue or a conjunction, with whether a cue
+    /// governs it — media words, pointers and filler included, unlike <see cref="ReadKeyless"/>.
+    /// What a deterministic rule reads when it needs to know whether a word was asked for or ruled
+    /// out ("samurai, no tv shows").
+    /// </summary>
+    public static IReadOnlyList<(string Word, bool Negated)> ScopedWords(string? raw) => [.. Scoped(raw)];
+
+    /// <summary>
     /// Every content word of a raw sentence with whether a negation cue governs it. A cue opens the
     /// scope; "but", "and", "with", a comma, a full stop or a semicolon closes it. The cues and those
     /// three conjunctions are never content themselves.
@@ -261,7 +330,14 @@ public static class AskReelIntentSanitizer
     /// ninja films twice. So "none of" / "neither of" followed by a pointer at what was shown opens no
     /// scope, and the words that point are not content.</para>
     /// </summary>
-    private static IEnumerable<(string Word, bool Negated)> Scoped(string? raw)
+    private static IEnumerable<(string Word, bool Negated)> Scoped(string? raw) =>
+        ScopedWithBreaks(raw).Where(w => w.Word is not null).Select(w => (w.Word!, w.Negated));
+
+    /// <summary>
+    /// <see cref="Scoped"/>, with a null word wherever the sentence breaks — a cue, a conjunction, a
+    /// rejection of the results, or punctuation that closes a clause — so phrases can be read off it.
+    /// </summary>
+    private static IEnumerable<(string? Word, bool Negated)> ScopedWithBreaks(string? raw)
     {
         var words = new List<(string Word, bool Closes)>();
         foreach (var token in (raw ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
@@ -295,14 +371,17 @@ public static class AskReelIntentSanitizer
                 i += rejected - 1;
                 closes = words[i].Closes;
                 suppressing = false;
+                yield return (null, false);
             }
             else if (NegationCues.Contains(words[i].Word))
             {
                 suppressing = true;
+                yield return (null, false);
             }
             else if (words[i].Word is "but" or "and" or "with")
             {
                 suppressing = false;
+                yield return (null, false);
             }
             else
             {
@@ -312,6 +391,7 @@ public static class AskReelIntentSanitizer
             if (closes)
             {
                 suppressing = false;
+                yield return (null, false);
             }
         }
     }

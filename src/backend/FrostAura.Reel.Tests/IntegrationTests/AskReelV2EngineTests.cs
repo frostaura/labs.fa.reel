@@ -533,6 +533,303 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV1-ASK-01: the Liam Neeson follow-up. A person's every unseen credit was already on screen,
+    /// so retrieval had nothing left and nothing was judged — and the reply said "You have 4 unseen
+    /// Liam Neeson titles tagged that way, but none of the ones I checked is really a match". They are
+    /// named as shown, and no check is claimed.
+    /// </summary>
+    [Fact]
+    public async Task A_follow_up_whose_whole_supply_was_shown_says_so_and_claims_no_check()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var director = $"Director {Guid.NewGuid():N}"[..20];
+        var credited = await SeedCreditedAsync(director, 3);
+        await SeedScoresAsync(accountId, credited, 8.4m);
+        var conversationId = await SeedConversationAsync(
+            accountId,
+            ConversationState.Empty with
+            {
+                Version = 1,
+                Hard = HardConstraints.None with { People = [new PersonConstraint(director, null, PersonRole.Director)] },
+            });
+        var presented = credited.Select((id, i) => new PresentedCard(1, i + 1, id, $"Credited {i}", 2010, MediaType.Movie)).ToList();
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, new ScriptedPlanner(_ => Plan(TurnAct.Refine)), judge);
+
+        var outcome = await engine.StreamAsync(
+            Input("any more of those?") with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = credited },
+            accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(0, judge.Batches);
+        Assert.Equal($"All 3 unseen {director} titles inside your conditions were already shown in this conversation.", outcome.AssistantText);
+        Assert.DoesNotContain("checked", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-01: a judge that ruled on nothing — every batch failed, or no model at all — checked
+    /// nothing, so the tagged supply is "couldn't check", never "none of the ones I checked".
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_judge_that_ruled_on_nothing_claims_no_check(bool judgeAvailable)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedScoresAsync(accountId, await SeedTopicalAsync(topic, ("V2 Yes", 3)), 8.4m);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, _, emit) = Build(accountId, planner, new DownJudge(judgeAvailable));
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(
+            $"You have 3 unseen {topic} movies tagged that way, but I couldn't check them against what you asked this time. "
+            + "3 titles I couldn't check against your request are below, marked as unchecked.",
+            outcome.AssistantText);
+    }
+
+    /// <summary>
+    /// HREV1-RET-01: the judge rules on at most sixteen titles, so with twenty tagged titles clearing
+    /// the bar the reply says it checked sixteen of them — and "none of the ones I checked" only when
+    /// it really did check every one. Varied over the size of the tagged supply.
+    /// </summary>
+    [Theory]
+    [InlineData(20, "You have 20 unseen {0} movies tagged that way. I checked 16 of them and none is really a match; the other 4 weren't among the 16 titles I checked this time.")]
+    [InlineData(5, "You have 5 unseen {0} movies tagged that way, but none of the ones I checked is really a match.")]
+    public async Task A_none_found_reply_says_how_many_of_the_tagged_titles_were_checked(int count, string expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedScoresAsync(accountId, await SeedTopicalAsync(topic, ("V2 No", count)), 8.4m);
+        var judge = new NameJudge();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, _, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(string.Format(System.Globalization.CultureInfo.InvariantCulture, expected, topic), outcome.AssistantText);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-02 / RET-04: the planner answered media "any" for "samurai films", and the turn
+    /// returned shows and counted them. The user's own media word wins over "any"; a message naming
+    /// both keeps both. Varied: a none-found turn, whose supply counts the films alone.
+    /// </summary>
+    [Theory]
+    [InlineData("{0} films", 2, "Movies")]
+    [InlineData("{0} films or shows", 4, "Any")]
+    public async Task The_users_media_word_outranks_a_plan_that_said_any(string message, int picks, string media)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var movies = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        var shows = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        await MakeShowsAsync(shows);
+        await SeedScoresAsync(accountId, [.. movies, .. shows], 8.4m);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic], Media = MediaScope.Any }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(System.Globalization.CultureInfo.InvariantCulture, message, topic)), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(media, Assert.Single(events, e => e.Event == "plan").Data.GetProperty("media").GetString());
+        var cards = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray()).ToList();
+        Assert.Equal(picks, cards.Count);
+        if (media == "Movies")
+        {
+            Assert.All(cards, c => Assert.Equal("Movie", c.GetProperty("mediaType").GetString()));
+            Assert.Equal([0], JsonDocument.Parse(outcome.IntentJson!).RootElement.GetProperty("MediaTypes").EnumerateArray().Select(m => m.GetInt32()));
+        }
+    }
+
+    [Fact]
+    public async Task A_film_request_counts_only_films_in_its_none_found_supply()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var movies = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        var shows = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        await MakeShowsAsync(shows);
+        await MarkSeenAsync(accountId, movies);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic], Media = MediaScope.Any }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input($"{topic} films"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        var supply = Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply");
+        Assert.Equal(2, supply.GetProperty("matchingInCatalogue").GetInt32());
+        Assert.Equal(2, supply.GetProperty("alreadySeen").GetInt32());
+        Assert.StartsWith($"There are no {topic} movies left for you.", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-03 (R1-04 in v2): an ordinal that points past every answer on screen is asked back
+    /// before any model call — no plan, no search, no judge. Varied: one pick on screen and "the third
+    /// one"; nothing ever shown and "the second one you showed me first time round".
+    /// </summary>
+    [Theory]
+    [InlineData("more like the third one", 1, "My answers here have shown at most 1 title at a time, so there’s no third one to point at. Which title did you mean?")]
+    [InlineData("more like the second one you showed me first time round", 0, "There’s nothing on screen yet for “the second one” to point at — I haven’t shown you any titles in this conversation. Tell me what you’re in the mood for and I’ll look.")]
+    public async Task A_pointer_at_nothing_on_screen_is_asked_back_before_any_model_call(string message, int onScreen, string expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var presented = ids.Take(onScreen).Select((id, i) => new PresentedCard(1, i + 1, id, $"V2 Yes {i}", 2010, MediaType.Movie)).ToList();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.Refine, ConversationStateDelta.None with { Concepts = [topic] }));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(
+            Input(message) with { Presented = presented, ShownTitleIds = ids.Take(onScreen).ToList(), AnswerNumber = onScreen == 0 ? 1 : 2 },
+            accountId, emit, CancellationToken.None);
+
+        Assert.Empty(planner.Inputs);
+        Assert.Equal(0, judge.Batches);
+        Assert.Equal(SearchTurnMode.Clarify, outcome.Mode);
+        Assert.Equal(expected, Assert.Single(events, e => e.Event == "clarify").Data.GetProperty("question").GetString());
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "none-found" or "plan");
+    }
+
+    /// <summary>
+    /// HREV1-ASK-03: a pointer some answer could satisfy, but which neither the planner nor the
+    /// server's rank rule settled ("the second one from before", no handle named), is asked back —
+    /// never searched with the judge left to read "the second one" itself.
+    /// </summary>
+    [Fact]
+    public async Task A_pointer_nothing_resolved_is_asked_back_and_never_judged()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 6));
+        var presented = ids.Take(3).Select((id, i) => new PresentedCard(1, i + 1, id, $"V2 Yes {i}", 2010, MediaType.Movie))
+            .Append(new PresentedCard(2, 1, ids[3], "V2 Yes 3", 2010, MediaType.Movie))
+            .ToList();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.Refine));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(
+            Input("more like the second one from before") with { Presented = presented, ShownTitleIds = ids.Take(4).ToList(), AnswerNumber = 3 },
+            accountId, emit, CancellationToken.None);
+
+        Assert.Single(planner.Inputs);
+        Assert.Equal(0, judge.Batches);
+        Assert.Equal(SearchTurnMode.Clarify, outcome.Mode);
+        Assert.Equal(AskReelPointer.Unresolved(2), outcome.AssistantText);
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "none-found");
+    }
+
+    /// <summary>
+    /// HREV1-RET-02: "more like the second one" after a person request searches near that card — the
+    /// person is no longer a hard filter, so retrieval is not confined to their filmography and the
+    /// judge rules on what it found. Varied: a message that restates the person keeps them.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task More_like_a_card_after_a_person_request_searches_near_the_card(bool restated)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var director = $"Director {Guid.NewGuid():N}"[..20];
+        var credited = await SeedCreditedAsync(director, 4);
+        var conversationId = await SeedConversationAsync(
+            accountId,
+            ConversationState.Empty with
+            {
+                Version = 1,
+                Hard = HardConstraints.None with { People = [new PersonConstraint(director, null, PersonRole.Director)] },
+            });
+        var presented = credited.Take(3).Select((id, i) => new PresentedCard(1, i + 1, id, $"Credited {i}", 2010, MediaType.Movie)).ToList();
+        RetrievalQuery? seen = null;
+        var judge = new NameJudge();
+        var (engine, _, emit) = Build(
+            accountId, new ScriptedPlanner(_ => Plan(TurnAct.Refine)), judge, wrap: inner => new SkippingRetriever(inner, q => seen = q));
+        var message = restated ? $"more like the second one with {director.Split(' ')[1]}" : "more like the second one";
+
+        await engine.StreamAsync(
+            Input(message) with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = credited.Take(3).ToList() },
+            accountId, emit, CancellationToken.None);
+
+        Assert.NotNull(seen);
+        Assert.Contains(credited[1], seen.Soft.ReferenceTitleIds);
+        Assert.Equal(restated ? 1 : 0, seen.Hard.People.Count);
+        // Unrestated, the search left the filmography, so the judge ruled on what it found; restated,
+        // the person's credits are the evidence again and nothing is judged.
+        Assert.Equal(restated, judge.Batches == 0);
+    }
+
+    /// <summary>
+    /// HREV1-ASK-06: a plan that fails on a conversation's first turn searches the user's phrase whole
+    /// and never says "as before" — the dead-provider "time travel movies" searched "travel".
+    /// </summary>
+    [Fact]
+    public async Task A_first_turn_plan_failure_searches_the_users_phrase_and_never_says_as_before()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var phrase = $"{Topic()} {Topic()}";
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(phrase, ("V2 Yes", 3));
+        var planner = new ScriptedPlanner(_ => PlanResult.Failed(
+            new PlanFailure(AgentFailureKind.TimedOut, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input($"{phrase} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal([phrase], Assert.Single(events, e => e.Event == "plan").Data.GetProperty("concepts").EnumerateArray().Select(c => c.GetString()));
+        Assert.Equal("Movies", Assert.Single(events, e => e.Event == "plan").Data.GetProperty("media").GetString());
+        Assert.Equal($"I couldn't fully read that, so I searched for {phrase}. 3 {phrase} movies that fit what you asked.", outcome.AssistantText);
+    }
+
+    /// <summary>
     /// §4.6 acceptance: a recorded v1 conversation resumed under v2 repeats nothing — through the
     /// endpoint, with the state rebuilt from the turn record and written back beside it.
     /// </summary>
@@ -849,6 +1146,61 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         TmdbPopularity = 0m,
         CreatedAt = DateTime.UtcNow,
     };
+
+    /// <summary>
+    /// An Active artifact for the account (bytes the constant model never reads) and a stored score
+    /// for each title, so the supply splits them by score as it would for a trained account.
+    /// </summary>
+    private async Task SeedScoresAsync(Guid accountId, IEnumerable<Guid> titleIds, decimal predicted)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var artifactId = await db.ModelArtifacts.IgnoreQueryFilters()
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            .Select(a => (Guid?)a.Id)
+            .FirstOrDefaultAsync();
+        if (artifactId is null)
+        {
+            var artifact = new ModelArtifact
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Version = 1,
+                ArtifactBytes = [1],
+                TrainingRunId = Guid.NewGuid(),
+                Status = ArtifactStatus.Active,
+                TrainedAt = DateTime.UtcNow,
+                FeatureSchemaJson = JsonSerializer.Serialize(new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+            };
+            db.Add(artifact);
+            artifactId = artifact.Id;
+        }
+
+        foreach (var titleId in titleIds)
+        {
+            db.TitleScores.Add(new TitleScore
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                ModelArtifactId = artifactId.Value,
+                PredictedRating = predicted,
+                ScoredAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task MakeShowsAsync(IReadOnlyList<Guid> titleIds)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        foreach (var title in await db.Titles.Where(t => titleIds.Contains(t.Id)).ToListAsync())
+        {
+            title.MediaType = MediaType.Show;
+        }
+
+        await db.SaveChangesAsync();
+    }
 
     private async Task SeedBarAsync(Guid accountId, decimal bar)
     {

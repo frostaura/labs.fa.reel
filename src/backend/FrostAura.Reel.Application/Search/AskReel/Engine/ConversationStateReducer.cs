@@ -106,6 +106,45 @@ public static class ConversationStateReducer
         };
     }
 
+    /// <summary>
+    /// "More like the third one" is a PIVOT to that card (HREV1-RET-02): the search runs near the
+    /// referenced titles (<c>similar_to</c>), and the earlier turn's person and topics stop being hard
+    /// filters unless this message restates them. After "Liam Neeson movies", "more like the third
+    /// one" kept Liam Neeson as a hard filter, so retrieval stayed inside his filmography minus the
+    /// four titles already shown, nothing was eligible, and the turn dead-ended with relaxations about
+    /// the Liam Neeson pool instead of titles like the one pointed at. Media, years, runtime and the
+    /// user's own negations still hold — they narrow what "like it" may be, they do not replace it.
+    /// Only a <see cref="TurnAct.Refine"/> whose references resolved, in a message that asks for
+    /// likeness; a critique ("less dark than T2.1") steers relative to the card and keeps the search.
+    /// </summary>
+    public static ConversationState SimilarPivot(ConversationState next, PlanResult plan, string? message)
+    {
+        ArgumentNullException.ThrowIfNull(next);
+        ArgumentNullException.ThrowIfNull(plan);
+        var words = AskReelIntentSanitizer.Words(message);
+        if (plan.Act != TurnAct.Refine
+            || ResolveHandles(plan.References, next.LastPresented).Count == 0
+            || !words.Any(LikenessWords.Contains))
+        {
+            return next;
+        }
+
+        var concepts = next.Hard.Concepts
+            .Where(c => NegationTerms.MatchesPhrase(message ?? string.Empty, c.UserWords)
+                        || c.Genres.Any(g => NegationTerms.MatchesPhrase(message ?? string.Empty, g)))
+            .ToList();
+        var people = next.Hard.People
+            .Where(p => AskReelIntentSanitizer.Words(p.Name).Any(n => n.Length >= 3 && words.Contains(n)))
+            .ToList();
+        return next with { Hard = next.Hard with { Concepts = concepts, People = people } };
+    }
+
+    /// <summary>The words that ask for titles LIKE a card: "more like the third one", "something similar to T1.2".</summary>
+    private static readonly IReadOnlySet<string> LikenessWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "like", "similar", "alike", "resembling", "resembles",
+    };
+
     /// <summary>The state with this turn's cards as the newest answer, keeping the last <see cref="PresentedAnswers"/> answers.</summary>
     public static ConversationState Presented(ConversationState state, IReadOnlyList<PresentedRef> thisAnswer)
     {
