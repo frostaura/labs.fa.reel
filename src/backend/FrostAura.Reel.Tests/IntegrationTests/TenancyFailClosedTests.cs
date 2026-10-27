@@ -107,14 +107,14 @@ public class TenancyFailClosedTests(PostgresFixture fixture)
     }
 
     [Theory]
-    [InlineData(null, UnscopedReadPolicy.DefaultMode)]
-    [InlineData("", UnscopedReadPolicy.DefaultMode)]
+    [InlineData(null, UnscopedReadMode.Throw)]
+    [InlineData("", UnscopedReadMode.Throw)]
     [InlineData("throw", UnscopedReadMode.Throw)]
     [InlineData("Warn", UnscopedReadMode.Warn)]
     [InlineData("Allow", UnscopedReadMode.Allow)]
-    [InlineData("Thrown", UnscopedReadPolicy.DefaultMode)]
-    [InlineData("7", UnscopedReadPolicy.DefaultMode)]
-    public void The_mode_comes_from_configuration_and_a_typo_never_switches_tenancy_off(string? raw, UnscopedReadMode expected)
+    [InlineData("Thrown", UnscopedReadMode.Throw)]
+    [InlineData("7", UnscopedReadMode.Throw)]
+    public void Unconfigured_tenancy_fails_closed_and_a_typo_never_switches_it_off(string? raw, UnscopedReadMode expected)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection([new KeyValuePair<string, string?>(UnscopedReadPolicy.ConfigurationKey, raw)])
