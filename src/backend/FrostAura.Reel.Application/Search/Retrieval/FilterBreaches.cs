@@ -232,12 +232,24 @@ public static class FilterBreaches
     /// The two bigint mask expressions over <paramref name="parameter"/>: bit <see cref="BitOf"/> of a
     /// rule is set when the title breaks it. Computed once per title in SQL, so every count that
     /// relaxes one rule can be read off the masks instead of re-scanning.
+    ///
+    /// <para>Two or more keyword exclusions are tested behind one <see cref="AnyKeyword"/> gate: a
+    /// title the gate rejects breaks none of them, so its keyword bits are 0 without running each
+    /// keyword's own pattern over its overview. The per-keyword patterns then run only for the few
+    /// titles the gate admits. Every bit is unchanged, because each keyword's predicate implies the
+    /// gate; the saving is one overview scan per keyword after the first (two keywords: 81 → 56 ms
+    /// over 38k titles, R1-20).</para>
     /// </summary>
     public static (Expression M0, Expression M1) Masks(
         FilterRuleSet rules, IReadOnlyList<FilterRule> all, ParameterExpression parameter, CrowdFloorMeasure measure = CrowdFloorMeasure.Raw)
     {
+        ArgumentNullException.ThrowIfNull(all);
         Expression m0 = Expression.Constant(0L);
         Expression m1 = Expression.Constant(0L);
+        Expression? gated0 = null;
+        Expression? gated1 = null;
+        bool Gateable(FilterRule rule) => rule.Kind == FilterKind.ExcludeKeyword && !rule.Value.Contains('\n', StringComparison.Ordinal);
+        var gate = AnyKeyword(all.Where(Gateable).Select(r => r.Value).ToList());
         var includeSeen = false;
         for (var i = 0; i < all.Count; i++)
         {
@@ -254,7 +266,18 @@ public static class FilterBreaches
             var bit = BitOf(all, i);
             var breach = BodyOn(Breaks(rules, all[i], measure), parameter);
             var term = Expression.Condition(breach, Expression.Constant(1L << (bit % BitsPerMask)), Expression.Constant(0L));
-            if (bit < BitsPerMask)
+            if (gate is not null && Gateable(all[i]))
+            {
+                if (bit < BitsPerMask)
+                {
+                    gated0 = gated0 is null ? term : Expression.Or(gated0, term);
+                }
+                else
+                {
+                    gated1 = gated1 is null ? term : Expression.Or(gated1, term);
+                }
+            }
+            else if (bit < BitsPerMask)
             {
                 m0 = Expression.Or(m0, term);
             }
@@ -264,7 +287,51 @@ public static class FilterBreaches
             }
         }
 
+        // Each mask carries the gate only when it holds a gated bit, so the gate is never evaluated
+        // for a mask it cannot change.
+        if (gate is not null && gated0 is not null)
+        {
+            m0 = Expression.Or(m0, Expression.Condition(BodyOn(gate, parameter), gated0, Expression.Constant(0L)));
+        }
+
+        if (gate is not null && gated1 is not null)
+        {
+            m1 = Expression.Or(m1, Expression.Condition(BodyOn(gate, parameter), gated1, Expression.Constant(0L)));
+        }
+
         return (m0, m1);
+    }
+
+    /// <summary>
+    /// TRUE when a title MAY carry any of <paramref name="keywords"/>, FALSE when it carries none: the
+    /// name and overview tested once against one alternation of every keyword's
+    /// <see cref="LiteralPattern"/>, plus each keyword's own label containment. Each keyword's
+    /// <see cref="CarriesKeyword"/> implies it, which is what makes it a safe gate. Null for fewer than
+    /// two keywords, where a gate would only add a scan. Values spanning a newline are the caller's to
+    /// leave out: their label arm is per-label, not the joined containment repeated here.
+    /// </summary>
+    public static Expression<Func<Title, bool>>? AnyKeyword(IReadOnlyList<string> keywords)
+    {
+        ArgumentNullException.ThrowIfNull(keywords);
+        var values = keywords.Distinct(StringComparer.Ordinal).ToList();
+        if (values.Count < 2)
+        {
+            return null;
+        }
+
+        var pattern = string.Join("|", values.Select(LiteralPattern));
+        Expression<Func<Title, bool>> text = t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+            || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase));
+        var parameter = text.Parameters[0];
+        var body = text.Body;
+        foreach (var keyword in values)
+        {
+            var value = keyword;
+            Expression<Func<Title, bool>> label = t => string.Join("\n", t.Keywords).Contains(value);
+            body = Expression.OrElse(body, BodyOn(label, parameter));
+        }
+
+        return Expression.Lambda<Func<Title, bool>>(body, parameter);
     }
 
     /// <summary>True when bit <paramref name="bit"/> is set in the masks.</summary>

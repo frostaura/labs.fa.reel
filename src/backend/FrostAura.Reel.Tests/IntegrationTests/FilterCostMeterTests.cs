@@ -428,7 +428,9 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         var rules = FilterRuleSet.Create(
             ["comedy", "romance", "anime", "thriller"],
             twoAllowListedGenres ? ["drama", "crime"] : ["drama"],
-            ["zombie"],
+            // One keyword runs ungated; three share the AnyKeyword gate (R1-20), so both phrasings of
+            // the keyword bits are held to the subtractive counts over the whole catalogue.
+            twoAllowListedGenres ? ["zombie", "shark", "c++"] : ["zombie"],
             ["en"],
             6.0m,
             2000,
@@ -579,6 +581,67 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         Assert.Equal(new HashSet<Guid> { cartoon, japaneseDrama }, persisted);
         Assert.Equal(persisted, (await EligibleAsync(accountId, drafted, mine)).ToHashSet());
         Assert.True(Marginal(await MeasureAsync(accountId, drafted), FilterKind.ExcludeGenre, "anime") >= 2);
+    }
+
+    /// <summary>
+    /// R1-20: two or more keyword exclusions share one gate in the meter's pass, and only the titles
+    /// it admits run each keyword's own pattern. Every keyword bit must come out exactly as it did
+    /// ungated, whichever field carries the match (name, overview or label), with a regex
+    /// metacharacter in the mix, and with a title that carries two keywords (its marginal for each is
+    /// 0, because relaxing one still leaves it held by the other). The unique allow-listed genre
+    /// scopes every marginal to this test's titles. Checked against the subtractive counts too.
+    /// </summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task Gated_keyword_exclusions_keep_every_keyword_bit(int keywordCount)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"gated{Guid.NewGuid():N}"[..16];
+        string[] keywords = ["gore", "vampire", "clown", "c++"];
+        void Base(Title t)
+        {
+            t.Genres = [genre];
+            t.Year = 2015;
+            t.TmdbVoteAverage = 7.5m;
+        }
+
+        var inName = await SeedTitleAsync(t => { Base(t); t.Name = $"GORE fest {Guid.NewGuid():N}"; });
+        var inOverview = await SeedTitleAsync(t => { Base(t); t.Overview = "A lonely Vampire in Lisbon"; });
+        var inLabels = await SeedTitleAsync(t => { Base(t); t.Keywords = ["night", "evil clown"]; });
+        var metachar = await SeedTitleAsync(t => { Base(t); t.Overview = "Coding in C++ at midnight"; });
+        var two = await SeedTitleAsync(t => { Base(t); t.Name = $"Vampire {Guid.NewGuid():N}"; t.Overview = "Wall-to-wall gore."; });
+        var clean = await SeedTitleAsync(t => { Base(t); t.Overview = "Coding in C at midnight, gor e, vamp ire"; });
+        var mine = new[] { inName, inOverview, inLabels, metachar, two, clean };
+        var used = keywords[..keywordCount];
+        var rules = FilterRuleSet.Create(null, [genre], used, ["*"], null, null, null);
+
+        var holders = new Dictionary<string, Guid[]>
+        {
+            ["gore"] = [inName, two],
+            ["vampire"] = [inOverview, two],
+            ["clown"] = [inLabels],
+            ["c++"] = [metachar],
+        };
+        var expectedEligible = mine.Where(id => !used.Any(k => holders[k].Contains(id))).ToHashSet();
+        Assert.Equal(expectedEligible, (await EligibleAsync(accountId, rules, mine)).ToHashSet());
+
+        var report = await MeasureAsync(accountId, rules);
+        Assert.Equal(expectedEligible.Count, report.Eligible);
+        foreach (var keyword in used)
+        {
+            // Held out by this keyword and no other kept keyword: "two" counts only when its other
+            // keyword is not in the rule set.
+            var alone = holders[keyword].Count(id => !used.Any(other => other != keyword && holders[other].Contains(id)));
+            Assert.Equal((keyword, alone), (keyword, Marginal(report, FilterKind.ExcludeKeyword, keyword)));
+            var relaxed = await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.ExcludeKeyword, keyword)), mine);
+            Assert.Equal((keyword, relaxed.Count - expectedEligible.Count), (keyword, Marginal(report, FilterKind.ExcludeKeyword, keyword)));
+        }
     }
 
     private static int Marginal(FilterCostReport report, FilterKind kind, string value) =>
