@@ -26,10 +26,13 @@ const count = (n: number) => n.toLocaleString("en-US");
  * - **No count from the server** (every row but genre rails today): an empty rail says it is empty,
  *   in terms true of every rail — they never show what you have seen or what your conditions rule
  *   out — and names no cause it cannot vouch for.
+ * - **A tier that pages no rails** (`tierCapped`, Free): its /feed/more is always empty and exhausted
+ *   with no count, because of the tier and nothing else, so seen titles and conditions would be a
+ *   false cause. No line — the rail vanishes, as it did before RET-07.
  */
 export function railSupplyLine(
   supply: RailSupply | null | undefined,
-  { empty, hiddenByView = 0 }: { empty: boolean; hiddenByView?: number }
+  { empty, hiddenByView = 0, tierCapped = false }: { empty: boolean; hiddenByView?: number; tierCapped?: boolean }
 ): RailSupplyLine | null {
   // Cards this rail did load, hidden by the per-device browse toggles (availability is applied in
   // the browser, not by the server): the server's count is not the reason, so it is not quoted.
@@ -37,7 +40,7 @@ export function railSupplyLine(
     return { text: "Nothing here matches the Movies/TV and availability view set on this device", seeWhy: null };
   }
   if (!supply) {
-    return empty ? { text: "Nothing left here that you haven't seen and your conditions allow", seeWhy: "Your conditions" } : null;
+    return empty && !tierCapped ? { text: "Nothing left here that you haven't seen and your conditions allow", seeWhy: "Your conditions" } : null;
   }
   const hidden = supply.hiddenByConditions;
   const seen = supply.alreadySeen > 0 ? ` · you've seen ${count(supply.alreadySeen)}` : "";

@@ -6,6 +6,7 @@ import RailRetryTile from "./RailRetryTile";
 import PickConditionsButton from "../rec/PickConditionsButton";
 import { Button } from "../ui/button";
 import { railSupplyLine } from "../../lib/railSupplyCopy";
+import { useGetSessionQuery } from "../../store/api";
 
 interface Props {
   title: ReactNode;
@@ -63,19 +64,25 @@ export default function RecRow({
   onSeeWhy,
 }: Props) {
   const [editorOpen, setEditorOpen] = useState(false);
+  const { data: session } = useGetSessionQuery();
   const empty = items.length === 0;
+  // Free pages no rails: its /more is always empty and exhausted, and the tier is the only reason.
+  const supplyLine =
+    exhausted && !loading && !failed
+      ? railSupplyLine(supply, { empty, hiddenByView, tierCapped: session?.tier === "Free" })
+      : null;
 
   // Nothing to show and nothing asked for yet — render nothing. While a first page is in flight
   // (genre rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
   // failed says so rather than vanishing, because an empty rail and a broken one are different news.
   // And a rail the server has said is dry says THAT, with what its conditions hide, instead of
-  // vanishing (RET-07): "nothing here" and "your conditions hide 5,386" are different news too.
-  if (empty && !loading && !failed && !exhausted) {
+  // vanishing (RET-07): "nothing here" and "your conditions hide 5,386" are different news too. A
+  // dry rail with nothing true to say about why (a Free account's) still vanishes.
+  if (empty && !loading && !failed && (!exhausted || !supplyLine)) {
     return null;
   }
 
   const isGenre = variant === "genre";
-  const supplyLine = exhausted && !loading && !failed ? railSupplyLine(supply, { empty, hiddenByView }) : null;
   const seeWhy = () => (onSeeWhy ? onSeeWhy() : setEditorOpen(true));
 
   return (

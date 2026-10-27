@@ -103,3 +103,41 @@ test("an empty 'More like this' says so on the title page, and opens the conditi
   await page.getByTestId("rail-supply-see-why").click();
   await expect(page.getByTestId("conditions-scope")).toBeVisible();
 });
+
+test("a Free account's title page shows no 'More like this' — its tier pages no rails, so no cause is offered (RET-07)", async ({ page }) => {
+  // Free's POST /feed/more is always { items: [], exhausted: true } with no supply (FeedEndpoints:
+  // the tier has no paginated rows). The rail must not blame seen titles or conditions for that.
+  await stubEventSource(page);
+  await mockHomeChrome(page, { filters: FILTERS });
+  await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, tier: "Free" });
+  await mockJson(page, "**/api/sync/status", {
+    pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+    lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+  });
+  await mockJson(page, "**/api/titles/movie/155", {
+    titleId: "00000000-0000-0000-0000-000000000155", mediaType: "Movie", tmdbId: 155, name: "The Dark Knight", year: 2008,
+    overview: "Batman raises the stakes.", runtimeMinutes: 152, genres: ["action"], status: "Released", traktRating: 8.5, traktVotes: 90000,
+    crowdRating: 8.5, crowdVotes: 90000, posterPath: null, backdropPath: null, trailerUrl: null, cast: [], directors: [], writers: [],
+    whyThis: null, prediction: null, contributionDetails: [],
+    userState: { isFullyWatched: false, plays: 0, userRating: null, savedForLater: false, notInterested: false, dropped: false },
+  });
+  await mockJson(page, "**/api/titles/movie/155/lens", { source: "none", lens: null, hook: null, caution: null, anchors: [], mood: null, whenToWatch: null, generatedAt: null });
+  await mockJson(page, "**/api/titles/movie/155/providers", { region: "US", attribution: "x", tmdbWatchPage: "https://www.themoviedb.org/movie/155/watch", providers: [] });
+  let moreCalls = 0;
+  await page.route(
+    (u) => u.pathname === "/api/feed/more",
+    (route) => {
+      moreCalls += 1;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], exhausted: true }) });
+    }
+  );
+  await page.goto("/title/movie/155");
+  await expect(page.getByTestId("title-detail")).toBeVisible();
+  await page.getByTestId("where-to-watch").scrollIntoViewIfNeeded();
+  // Let the rail reach the viewport and its first page come back.
+  await expect.poll(() => moreCalls).toBeGreaterThan(0);
+
+  await expect(page.getByTestId("rail-supply")).toHaveCount(0);
+  await expect(page.getByText("Nothing left here that you haven't seen and your conditions allow")).toHaveCount(0);
+  await expect(page.getByText("More like this", { exact: true })).toHaveCount(0);
+});

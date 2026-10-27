@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockHomeChrome } from "./home-chrome";
 
 /**
  * The hero honesty label.
@@ -36,13 +37,13 @@ async function bootHome(page: Page, hero: unknown[], minPredictedRating = 6, fee
     pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
-  await mockJson(page, "**/api/feed/continue-watching", []);
-  await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
-  await mockJson(page, "**/api/feed/genres", { genres: [] });
-  await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
-  await mockJson(page, "**/api/settings/filters", {
-    excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
-    minPredictedRating, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+  // Home's chrome, accuracy, learned and recently-watched included: an unmocked call fails the run
+  // (R1-21's unmocked-API reporter).
+  await mockHomeChrome(page, {
+    filters: {
+      excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+      minPredictedRating, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+    },
   });
   const snapshot = { generatedAt: new Date().toISOString(), hero, rows: [], lockedRowCount: 0 };
   let feedReads = 0;

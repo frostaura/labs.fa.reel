@@ -42,6 +42,19 @@ describe("railSupplyLine", () => {
     expect(railSupplyLine(undefined, { empty: false })).toBeNull();
   });
 
+  it("on a tier with no paged rails, an empty rail names no cause at all — the tier, not the conditions, is why", () => {
+    // Free's POST /feed/more is always { items: [], exhausted: true } with no supply: "your
+    // conditions" would be a false cause there, so the rail says nothing and vanishes.
+    expect(railSupplyLine(null, { empty: true, tierCapped: true })).toBeNull();
+    expect(railSupplyLine(undefined, { empty: true, tierCapped: true })).toBeNull();
+    // The same answer to an account that can page keeps its line.
+    expect(railSupplyLine(null, { empty: true, tierCapped: false })!.seeWhy).toBe("Your conditions");
+    // The device's own view is still a true cause on any tier.
+    expect(railSupplyLine(null, { empty: true, hiddenByView: 2, tierCapped: true })!.text).toBe(
+      "Nothing here matches the Movies/TV and availability view set on this device"
+    );
+  });
+
   it("an empty rail with nothing seen and nothing hidden says only that it is empty", () => {
     expect(railSupplyLine({ hiddenByConditions: 0, alreadySeen: 0, clearingFloor: 0 }, { empty: true })).toEqual({
       text: "Nothing left here right now",
