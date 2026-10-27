@@ -82,6 +82,7 @@ public class ShowRollupAblationRun
             ["rollupMinusNone"] = new JsonObject
             {
                 ["ndcgAt10Model"] = Delta(with.Result.NdcgAt10Model, without.Result.NdcgAt10Model),
+                ["meanOriginNdcgModel"] = Delta(MeanOriginNdcg(with.Result), MeanOriginNdcg(without.Result)),
                 ["ece"] = Delta(with.Result.Ece, without.Result.Ece),
                 ["mae"] = Delta(with.Result.Mae, without.Result.Mae),
                 ["calibrationBias"] = Delta(with.Result.CalibrationBias, without.Result.CalibrationBias),
@@ -103,6 +104,9 @@ public class ShowRollupAblationRun
         ["featureSetHash"] = r.FeatureSetHash,
         ["ndcgAt10Model"] = r.NdcgAt10Model,
         ["ndcgAt10Baseline"] = r.NdcgAt10Baseline,
+        // The primary origin alone is one 250-title holdout; the mean over every origin is the same
+        // statistic the gate's lift is averaged over, and the two can disagree in sign.
+        ["meanOriginNdcgModel"] = MeanOriginNdcg(r),
         ["ndcgLiftCiLow"] = r.NdcgLiftCiLow,
         ["ndcgLiftCiHigh"] = r.NdcgLiftCiHigh,
         ["passedGate"] = r.PassedGate,
@@ -116,6 +120,17 @@ public class ShowRollupAblationRun
         ["unfilteredHoldout"] = r.UnfilteredHoldoutCount,
         ["origins"] = r.OriginsJson is { } origins ? JsonNode.Parse(origins) : null,
     };
+
+    private static decimal? MeanOriginNdcg(Domain.Ml.EvaluationResult r)
+    {
+        if (r.OriginsJson is not { } json)
+        {
+            return null;
+        }
+
+        var values = JsonNode.Parse(json)!.AsArray().Select(o => o!["ndcgModel"]!.GetValue<decimal>()).ToList();
+        return values.Count == 0 ? null : Math.Round(values.Average(), 6);
+    }
 
     private static decimal? Delta(decimal? with, decimal? without) =>
         with is { } a && without is { } b ? a - b : null;
