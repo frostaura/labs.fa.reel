@@ -83,12 +83,20 @@ test.describe("taste DNA charts", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await bootCharts(page);
 
+    // Measured inside a poll (WS-9 CR-7): one measurement taken while the chart was still laying
+    // out failed once in a full run and never alone.
     const row = page.getByTestId("genre-fingerprint-row").first();
-    const label = await row.locator("span").first().boundingBox();
-    const track = await row.getByTestId("genre-fingerprint-track").boundingBox();
-    expect(label!.y + label!.height).toBeLessThanOrEqual(track!.y);
-    // The bar gets most of the row rather than what a fixed label column leaves.
-    expect(track!.width).toBeGreaterThan(150);
+    await expect
+      .poll(async () => {
+        const label = await row.locator("span").first().boundingBox();
+        const track = await row.getByTestId("genre-fingerprint-track").boundingBox();
+        if (!label || !track) return "not laid out";
+        if (label.y + label.height > track.y) return `label bottom ${label.y + label.height} below track top ${track.y}`;
+        // The bar gets most of the row rather than what a fixed label column leaves.
+        if (track.width <= 150) return `track ${track.width} px wide`;
+        return "ok";
+      })
+      .toBe("ok");
 
     // Against the layout width, not innerWidth (WS-9 CR-9, as landing.spec): WebKit draws a classic
     // vertical scrollbar, so its content box is narrower than the window (380 of 390) and scrollWidth

@@ -127,31 +127,6 @@
     "GET /api/settings/filters",
     "POST /api/feed/more"
   ],
-  "hero-honesty.spec.ts \u203a hero honesty label \u203a a 6.6 pick beside one that cleared the bar says it is reaching, and names the bar": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-honesty.spec.ts \u203a hero honesty label \u203a a lone reaching pick is the whole row: the status line says it, the card does not repeat it": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-honesty.spec.ts \u203a hero honesty label \u203a an 8.1 pick carries no caveat at all": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-honesty.spec.ts \u203a hero honesty label \u203a one pick over the bar retires the row-level band but not that pick's neighbours' labels": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-honesty.spec.ts \u203a hero honesty label \u203a the whole row reaching is said once, on the status line, and on no card": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a Not for me acts instead of navigating, and takes only that hero slide": [
     "GET /api/accuracy",
     "GET /api/feed/learned",

@@ -97,7 +97,9 @@ export function advancedPinLine(
   const shown = Number(item.predictedRating.toFixed(1));
   const error = context.expectedAbsoluteError;
   const band = error != null && Number.isFinite(error) && error > 0 ? ` (±${Number(error.toFixed(1))})` : "";
-  const facts = `${shown.toFixed(1)} for you${band}, ${runtime} against your ${budget}.`;
+  // "inside a … evening", never "your …": the served budget is the resolved one, and an account that
+  // never set a budget gets the default — which the server's own pin never calls "yours" (HREV1-D10).
+  const facts = `${shown.toFixed(1)} for you${band}, ${runtime} inside a ${budget} evening.`;
   if (context.bar != null && shown < context.bar) {
     return `Under ${context.bar.toFixed(1)} for you — the next thing in your queue that's streaming now and fits tonight: ${facts}`;
   }

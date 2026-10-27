@@ -45,11 +45,14 @@ const TOKEN_BANS = [
     selector: "Literal[value=/(^|\\s)outline-none(\\s|$)/]:not([value=/focus(-visible)?:/])",
     message: "outline-none removes the keyboard focus indicator. Pair it with a focus-visible: style in the same class string.",
   },
-  {
-    selector: "JSXOpeningElement[name.name='select']",
-    message: "Native <select> is banned. Use the Select primitive (components/ui/select).",
-  },
 ];
+
+// Everywhere, not only in migrated directories (WS-10B CR-2): the last native <select> went with
+// HREV1-D08, so a new one is a regression the design ratchet would only catch as a count.
+const NATIVE_SELECT_BAN = {
+  selector: "JSXOpeningElement[name.name='select']",
+  message: "Native <select> is banned. Use the Select primitive (components/ui/select).",
+};
 
 const RAW_BUTTON_BAN = {
   selector: "JSXOpeningElement[name.name='button']",
@@ -94,16 +97,16 @@ export default tseslint.config(
       "react-hooks/refs": "warn",
       "react-hooks/immutability": "warn",
       "react-hooks/static-components": "warn",
-      "no-restricted-syntax": ["error", ...FONT_SIZE_BANS],
+      "no-restricted-syntax": ["error", ...FONT_SIZE_BANS, NATIVE_SELECT_BAN],
     },
   },
   // A later block's no-restricted-syntax REPLACES the earlier one, so each repeats the font bans.
   {
     files: MIGRATED_UI,
-    rules: { "no-restricted-syntax": ["error", ...FONT_SIZE_BANS, ...TOKEN_BANS] },
+    rules: { "no-restricted-syntax": ["error", ...FONT_SIZE_BANS, NATIVE_SELECT_BAN, ...TOKEN_BANS] },
   },
   {
     files: MIGRATED,
-    rules: { "no-restricted-syntax": ["error", ...FONT_SIZE_BANS, ...TOKEN_BANS, RAW_BUTTON_BAN] },
+    rules: { "no-restricted-syntax": ["error", ...FONT_SIZE_BANS, NATIVE_SELECT_BAN, ...TOKEN_BANS, RAW_BUTTON_BAN] },
   },
 );

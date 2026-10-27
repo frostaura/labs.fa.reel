@@ -242,7 +242,7 @@ test.describe("title detail", () => {
     // Registered after bootTitle's own providers mock (so it wins) and before the page loads: the
     // first read fails as it did while TMDB was unreachable from the API, the retry succeeds.
     let calls = 0;
-    await bootTitle(page, {}, { beforeGoto: (p) => p.route((u) => u.pathname === "/api/titles/movie/2001/providers", async (route) => {
+    await bootTitle(page, {}, { beforeGoto: async (p) => { await p.route((u) => u.pathname === "/api/titles/movie/2001/providers", async (route) => {
       calls += 1;
       if (calls === 1) return route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
       return route.fulfill({
@@ -250,7 +250,7 @@ test.describe("title detail", () => {
         body: JSON.stringify({ region: "US", attribution: "x", tmdbWatchPage: "https://www.themoviedb.org/movie/2001/watch",
           providers: [{ provider: "Netflix", logoPath: null, kinds: ["Flatrate"], linkKind: "direct", url: "https://www.netflix.com/search?q=x", displayPriority: 1 }] }),
       });
-    }) });
+    }); } });
     const failed = page.getByTestId("where-to-watch-failed");
     await expect(failed).toContainText("Couldn't load where to watch");
     await expect(page.getByTestId("where-to-watch")).toHaveCount(0);

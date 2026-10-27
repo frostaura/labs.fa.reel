@@ -360,12 +360,12 @@ test.describe("cross-reference pass", () => {
   // the pointer elsewhere is checked here, on the page itself.
   for (const gating of ["demote-only", "gating"]) {
     test(`the band on Track record never points back at Track record (${gating})`, async ({ page }) => {
-      await bootPage(page, "/track-record", (p) =>
-        p.route(
+      await bootPage(page, "/track-record", async (p) => {
+        await p.route(
           (u) => u.pathname === "/api/feed/cross-reference",
           (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...BAND_LANDED, gating }) })
-        )
-      );
+        );
+      });
       const band = page.getByTestId("cross-reference-band");
       await expect(page.getByTestId("cross-reference-sentence")).toContainText("Cross-referenced 2,242 titles against your history");
       await expect(band).not.toContainText(/track record/i);

@@ -234,7 +234,7 @@ test.describe("saved queue", () => {
     await expect(page.getByTestId("watch-tonight")).toContainText("Coherence");
     // The advanced pin carries a line of its own — an ordinal, not the server's verdict (HREV1-D05).
     await expect(page.getByTestId("watch-tonight-reason")).toHaveText(
-      "Next-highest-predicted thing in your queue that's streaming now and fits tonight — 7.6 for you (±1.9), 1h 32m against your 2h 30m."
+      "Next-highest-predicted thing in your queue that's streaming now and fits tonight — 7.6 for you (±1.9), 1h 32m inside a 2h 30m evening."
     );
 
     // Two candidates, both declined: the shelf says so rather than re-offering the first.
@@ -245,8 +245,8 @@ test.describe("saved queue", () => {
   // under "WATCH TONIGHT" with no line. Varied twice: the account's minimum (no pin bar from the
   // server), and the server's pin bar of 7.5 over a pick that clears the minimum but not that bar.
   for (const { runnerUpRating, pinBar, expected } of [
-    { runnerUpRating: 5.0, pinBar: undefined, expected: "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.9), 1h 32m against your 2h 30m." },
-    { runnerUpRating: 7.0, pinBar: 7.5, expected: "Under 7.5 for you — the next thing in your queue that's streaming now and fits tonight: 7.0 for you (±1.9), 1h 32m against your 2h 30m." },
+    { runnerUpRating: 5.0, pinBar: undefined, expected: "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.9), 1h 32m inside a 2h 30m evening." },
+    { runnerUpRating: 7.0, pinBar: 7.5, expected: "Under 7.5 for you — the next thing in your queue that's streaming now and fits tonight: 7.0 for you (±1.9), 1h 32m inside a 2h 30m evening." },
   ]) {
     test(`a pin 'Not tonight' advanced to under the bar says so first (${runnerUpRating} vs ${pinBar ?? "For you ≥ 6.0"})`, async ({ page }) => {
       await bootSaved(page);

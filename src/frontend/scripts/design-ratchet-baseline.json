@@ -6,8 +6,7 @@
     "rawButton": 1
   },
   "src/components/settings/ConditionsEditor.tsx": {
-    "rawButton": 2,
-    "nativeSelect": 1
+    "rawButton": 2
   },
   "src/pages/Blend.tsx": {
     "rawButton": 5,

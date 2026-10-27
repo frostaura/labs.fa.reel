@@ -240,7 +240,7 @@ describe("advancedPinLine — the line on a pin 'Not tonight' advanced to", () =
   it("leads with the shortfall when the pick is under the bar", () => {
     const line = advancedPinLine(seized, { bar: 6.0, expectedAbsoluteError: 1.2, eveningBudgetMinutes: 150 });
     expect(line).toBe(
-      "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.2), 1h 50m against your 2h 30m."
+      "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.2), 1h 50m inside a 2h 30m evening."
     );
     expect(line!.startsWith("Under 6.0")).toBe(true);
   });
@@ -249,14 +249,14 @@ describe("advancedPinLine — the line on a pin 'Not tonight' advanced to", () =
     const line = advancedPinLine(item({ titleId: "edge", predictedRating: 5.96, runtimeMinutes: 90 }), {
       bar: 6.0, expectedAbsoluteError: null, eveningBudgetMinutes: 150,
     });
-    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.0 for you, 1h 30m against your 2h 30m.");
+    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.0 for you, 1h 30m inside a 2h 30m evening.");
   });
 
   it("makes no quality claim at all when it cannot tell — never 'highest' or 'good', only 'next'", () => {
     const line = advancedPinLine(item({ titleId: "x", predictedRating: 6.4, runtimeMinutes: 95 }), {
       bar: null, expectedAbsoluteError: 0.9, eveningBudgetMinutes: 120,
     });
-    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.4 for you (±0.9), 1h 35m against your 2h.");
+    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.4 for you (±0.9), 1h 35m inside a 2h evening.");
   });
 
   it("varies with the fixture: every under-bar rating leads with 'Under'", () => {
@@ -266,6 +266,16 @@ describe("advancedPinLine — the line on a pin 'Not tonight' advanced to", () =
         const under = Number(rating.toFixed(1)) < bar;
         expect(line.startsWith("Under "), `${rating} vs ${bar}`).toBe(under);
       }
+    }
+  });
+
+  it("never calls the evening budget 'yours' — the served budget may be the default (HREV1-D10)", () => {
+    for (const minutes of [90, 120, 150, 240]) {
+      const line = advancedPinLine(item({ titleId: "b", predictedRating: 6.8, runtimeMinutes: 80 }), {
+        bar: 6.0, expectedAbsoluteError: null, eveningBudgetMinutes: minutes,
+      })!;
+      expect(line, `${minutes}`).not.toMatch(/your \d/);
+      expect(line, `${minutes}`).toMatch(/inside a \dh( \d+m)? evening\.$/);
     }
   });
 
