@@ -991,18 +991,6 @@
         }
       }
     },
-    "/api/taste/narrative/facts": {
-      "get": {
-        "tags": [
-          "FrostAura.Reel.Api"
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
     "/api/titles/{mediaType}/{tmdbId}/providers": {
       "get": {
         "tags": [
@@ -2099,14 +2087,22 @@
           }
         }
       },
-      "LlmPurposeMetrics": {
+      "LlmPurposeHealth": {
         "required": [
           "purpose",
           "calls",
           "answered",
+          "lengthCalls",
           "truncated",
           "fallbacks",
-          "outcomes"
+          "retries",
+          "stops",
+          "outcomes",
+          "windowCalls",
+          "windowLengthRate",
+          "windowFallbackRate",
+          "windowRetryRate",
+          "alarming"
         ],
         "type": "object",
         "properties": {
@@ -2122,6 +2118,14 @@
             "format": "int64"
           },
           "answered": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lengthCalls": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
               "integer",
@@ -2145,6 +2149,22 @@
             ],
             "format": "int64"
           },
+          "retries": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "stops": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
           "outcomes": {
             "type": "object",
             "additionalProperties": {
@@ -2155,6 +2175,41 @@
               ],
               "format": "int64"
             }
+          },
+          "windowCalls": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "windowLengthRate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "windowFallbackRate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "windowRetryRate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "alarming": {
+            "type": "boolean"
           }
         }
       },
@@ -2203,7 +2258,7 @@
           "llm": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/LlmPurposeMetrics"
+              "$ref": "#/components/schemas/LlmPurposeHealth"
             }
           },
           "llmSince": {
@@ -2364,6 +2419,12 @@
             "items": {
               "$ref": "#/components/schemas/AlertKindCount"
             }
+          },
+          "purpose": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -2742,7 +2803,8 @@
           "providerHealth",
           "degradedReason",
           "notEnoughRatings",
-          "alerts"
+          "alerts",
+          "llmHealth"
         ],
         "type": "object",
         "properties": {
@@ -2856,6 +2918,12 @@
             "items": {
               "$ref": "#/components/schemas/OperatorAlert"
             }
+          },
+          "llmHealth": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LlmPurposeHealth"
+            }
           }
         }
       },
@@ -2905,6 +2973,12 @@
               "string"
             ],
             "format": "int32"
+          },
+          "timeZone": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       }

@@ -1571,39 +1571,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/taste/narrative/facts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/titles/{mediaType}/{tmdbId}/providers": {
         parameters: {
             query?: never;
@@ -2761,19 +2728,34 @@ export interface components {
             /** Format: int64 */
             max: null | number | string;
         };
-        LlmPurposeMetrics: {
+        LlmPurposeHealth: {
             purpose: string;
             /** Format: int64 */
             calls: number | string;
             /** Format: int64 */
             answered: number | string;
             /** Format: int64 */
+            lengthCalls: number | string;
+            /** Format: int64 */
             truncated: number | string;
             /** Format: int64 */
             fallbacks: number | string;
+            /** Format: int64 */
+            retries: number | string;
+            /** Format: int64 */
+            stops: number | string;
             outcomes: {
                 [key: string]: number | string;
             };
+            /** Format: int32 */
+            windowCalls: number | string;
+            /** Format: double */
+            windowLengthRate: number | string;
+            /** Format: double */
+            windowFallbackRate: number | string;
+            /** Format: double */
+            windowRetryRate: number | string;
+            alarming: boolean;
         };
         MetricsReport: {
             /** Format: date-time */
@@ -2785,7 +2767,7 @@ export interface components {
             jobs: components["schemas"]["JobKindMetrics"][];
             clientErrors: components["schemas"]["ClientErrorMetrics"];
             ask: components["schemas"]["AskMetrics"];
-            llm: components["schemas"]["LlmPurposeMetrics"][];
+            llm: components["schemas"]["LlmPurposeHealth"][];
             /** Format: date-time */
             llmSince: string;
             alerts: components["schemas"]["OperatorAlert"][];
@@ -2817,6 +2799,7 @@ export interface components {
             /** Format: int32 */
             threshold: null | number | string;
             kinds: null | components["schemas"]["AlertKindCount"][];
+            purpose?: null | string;
         };
         PersonRateRequest: {
             /** Format: int16 */
@@ -2930,6 +2913,7 @@ export interface components {
             degradedReason: null | components["schemas"]["DegradedReason"];
             notEnoughRatings: null | components["schemas"]["RatingsFloor"];
             alerts: components["schemas"]["OperatorAlert"][];
+            llmHealth: components["schemas"]["LlmPurposeHealth"][];
         };
         UnsubscribeRequest: {
             endpoint: string;
@@ -2940,6 +2924,7 @@ export interface components {
             email: null | string;
             /** Format: int32 */
             eveningBudgetMinutes: null | number | string;
+            timeZone?: null | string;
         };
     };
     responses: never;
