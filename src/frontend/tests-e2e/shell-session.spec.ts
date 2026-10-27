@@ -244,7 +244,9 @@ test.describe("sign-out", () => {
       if (signingOut && path.startsWith("/api/") && path !== "/api/auth/logout") afterSignOut.push(path);
     });
 
-    await page.getByText(SESSION_FOUNDER.displayName).click();
+    // By role: the trigger's name is "Account menu, <name>" (an sr-only span), and the visible name
+    // beside the avatar is the same words, so a text lookup finds both.
+    await page.getByRole("button", { name: `Account menu, ${SESSION_FOUNDER.displayName}` }).click();
     signingOut = true;
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(page).toHaveURL(/\/$/);
