@@ -897,6 +897,53 @@ public class LensPipelineTests(PostgresFixture fixture)
         Assert.Single(await db.TitleLensCopies.Where(c => c.AccountId == accountId && c.TitleId == titleId).ToListAsync());
     }
 
+    /// <summary>
+    /// Claims register, family <c>narrative-and-dna</c>: a stale note renders as "Written before your
+    /// taste last moved" (LensBlock). Verdict FALSE, and this pins why: a note is served as stale
+    /// whenever it is not CURRENT, and current is the fingerprint AND the prompt version AND the
+    /// model-and-effort. A note written at the account's current fingerprint under an older prompt —
+    /// or by another model — is served stale while the taste has not moved at all; its own hash IS
+    /// the current one. The copy owes "an older note" for those, or the source a reason.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_note_served_as_stale_can_have_been_written_at_the_current_taste(bool olderPrompt, bool otherModel)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+        Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default)).Source);
+
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        if (olderPrompt)
+        {
+            row.PromptVersion -= 1;
+        }
+
+        if (otherModel)
+        {
+            row.ModelId = "openai/some-other-model|effort=low";
+        }
+
+        await db.SaveChangesAsync();
+
+        var resolved = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        Assert.Equal(LensSource.Stale, resolved.Source);
+        // The note the client is told predates a taste move was written at the taste the account has now.
+        Assert.Equal(built.ProfileHash, resolved.ProfileHash);
+    }
+
     [Fact]
     public async Task A_note_written_against_an_older_fingerprint_is_served_and_flagged_stale()
     {
