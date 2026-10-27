@@ -22,6 +22,10 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// <param name="Answer">An ItemQuestion's answer text, or a tool answer composed upstream.</param>
 /// <param name="AnswerTitle">The title an answer is about.</param>
 /// <param name="ShownHere">Titles clearing the bar that this conversation had already shown.</param>
+/// <param name="HeldUnchecked">
+/// Of <paramref name="UnderBar"/>, the cards nobody judged (XM-06: the bar holds back an unchecked card
+/// too). They are in the floor tray but never said to FIT, and are counted with the unchecked cards.
+/// </param>
 public sealed record TurnContext(
     TurnAct Act,
     FinalMode Mode,
@@ -43,7 +47,8 @@ public sealed record TurnContext(
     string? Answer = null,
     string? AnswerTitle = null,
     string? ClarifyQuestion = null,
-    int ShownHere = 0);
+    int ShownHere = 0,
+    int HeldUnchecked = 0);
 
 /// <summary>The reply and the one-line reason, as composed.</summary>
 public sealed record ComposedTurn(string Reply, string? Reason);
@@ -104,10 +109,11 @@ public sealed class TurnComposer : ITurnComposer
         }
         else
         {
-            var what = c.Topic is { Length: > 0 } topic ? $"{topic} {Noun(c.Media, total)}" : Noun(c.Media, total);
+            // The noun agrees with the number in front of it: "1 heist movie checked …", never "1 heist movies".
+            string What(int count) => c.Topic is { Length: > 0 } topic ? $"{topic} {Noun(c.Media, count)}" : Noun(c.Media, count);
             sentences.Add(c.UnjudgedPicks > 0
-                ? Inv($"{c.Picks} {what} checked against your request, and {c.UnjudgedPicks} more I couldn't check.")
-                : Inv($"{total} {what} that fit what you asked."));
+                ? Inv($"{c.Picks} {What(c.Picks)} checked against your request, and {c.UnjudgedPicks} more I couldn't check.")
+                : Inv($"{total} {What(total)} that {(total == 1 ? "fits" : "fit")} what you asked."));
         }
 
         if (c.NearMissNames.Count > 0)
@@ -115,12 +121,14 @@ public sealed class TurnComposer : ITurnComposer
             sentences.Add(Inv($"{c.NearMissNames.Count} more {(c.NearMissNames.Count == 1 ? "is" : "are")} close but not quite — tucked away below."));
         }
 
-        if (c.UnderBar > 0)
+        // Only judged matches "fit"; an unchecked card the bar held back is counted as unchecked (XM-06).
+        var fitting = c.UnderBar - c.HeldUnchecked;
+        if (fitting > 0)
         {
-            sentences.Add(Inv($"{c.UnderBar} more {(c.UnderBar == 1 ? "fits" : "fit")} but {(c.UnderBar == 1 ? "sits" : "sit")} under your {AskReelReason.FormatFloor(c.Floor)} bar."));
+            sentences.Add(Inv($"{fitting} more {(fitting == 1 ? "fits" : "fit")} but {(fitting == 1 ? "sits" : "sit")} under your {AskReelReason.FormatFloor(c.Floor)} bar."));
         }
 
-        if (c.JudgeFailed && c.UnjudgedPicks == 0 && c.Unchecked > 0)
+        if (c.JudgeFailed && c.UnjudgedPicks == 0 && c.Unchecked + c.HeldUnchecked > 0)
         {
             sentences.Add(JudgeFailedNote);
         }
@@ -147,7 +155,7 @@ public sealed class TurnComposer : ITurnComposer
             c.UnderBarNames,
             c.NearMissNames.Count,
             c.Floor,
-            Unchecked: c.Unchecked,
+            Unchecked: c.Unchecked + c.HeldUnchecked,
             JudgedAny: !c.JudgeFailed || c.Judged > 0,
             ShownHere: c.ShownHere,
             NearMissNames: c.NearMissNames,
@@ -175,7 +183,8 @@ public sealed class TurnComposer : ITurnComposer
                 Tray: c.UnderBar,
                 NearMiss: c.NearMissNames.Count,
                 Unchecked: c.UnjudgedPicks,
-                UncheckedTray: c.Unchecked),
+                UncheckedTray: c.Unchecked,
+                HeldUnchecked: c.HeldUnchecked),
             c.Floor);
 
     private static string Credit(PersonConstraint person) => person.Role switch

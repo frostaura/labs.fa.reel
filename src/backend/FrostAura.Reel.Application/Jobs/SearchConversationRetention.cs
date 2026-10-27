@@ -26,6 +26,12 @@ namespace FrostAura.Reel.Application.Jobs;
 /// there would be nothing left to notice it by. The same rule holds for the user-facing conversation
 /// delete: this is the second of exactly two places that remove a conversation, and neither may
 /// reach the log.</para>
+///
+/// <para><b>Tenancy is stated, not inherited (J-11).</b> The nightly sweep runs with no account
+/// pinned, and the tenant filters fail closed once <c>Tenancy__UnscopedReads</c> is <c>Throw</c>. Every
+/// query here bypasses them with <c>IgnoreQueryFilters</c> and names its account explicitly instead —
+/// the same contract <c>PendingTurnReconciliation</c> keeps — so the sweep reads and deletes exactly
+/// the rows it means to under any tenancy mode, without depending on its caller to open a system scope.</para>
 /// </summary>
 public static class SearchConversationRetention
 {
@@ -51,6 +57,7 @@ public static class SearchConversationRetention
         IReelDbContext db, Guid accountId, DateTime cutoff, CancellationToken ct)
     {
         var staleIds = await db.SearchConversations
+            .IgnoreQueryFilters()
             .Where(c => c.AccountId == accountId && c.LastTurnAt <= cutoff)
             .Select(c => c.Id)
             .ToListAsync(ct);
@@ -60,9 +67,12 @@ public static class SearchConversationRetention
             return 0;
         }
 
-        await db.SearchTurnCards.Where(c => staleIds.Contains(c.ConversationId)).ExecuteDeleteAsync(ct);
-        await db.SearchTurns.Where(t => staleIds.Contains(t.ConversationId)).ExecuteDeleteAsync(ct);
-        await db.SearchConversations.Where(c => staleIds.Contains(c.Id)).ExecuteDeleteAsync(ct);
+        await db.SearchTurnCards.IgnoreQueryFilters()
+            .Where(c => c.AccountId == accountId && staleIds.Contains(c.ConversationId)).ExecuteDeleteAsync(ct);
+        await db.SearchTurns.IgnoreQueryFilters()
+            .Where(t => t.AccountId == accountId && staleIds.Contains(t.ConversationId)).ExecuteDeleteAsync(ct);
+        await db.SearchConversations.IgnoreQueryFilters()
+            .Where(c => c.AccountId == accountId && staleIds.Contains(c.Id)).ExecuteDeleteAsync(ct);
 
         return staleIds.Count;
     }
@@ -78,6 +88,7 @@ public static class SearchConversationRetention
     {
         var cutoff = utcNow.AddDays(-RetentionDays(configuration));
         var accountIds = await db.SearchConversations
+            .IgnoreQueryFilters()
             .Where(c => c.LastTurnAt <= cutoff)
             .Select(c => c.AccountId)
             .Distinct()

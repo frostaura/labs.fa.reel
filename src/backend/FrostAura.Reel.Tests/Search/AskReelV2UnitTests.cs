@@ -158,6 +158,47 @@ public class AskReelV2UnitTests
         Assert.Empty(clean.Delta.Negations);
     }
 
+    /// <summary>
+    /// The live "survival at sea" turn: the planner's one concept was the message itself, the v1 echo
+    /// rule threw it away, and an empty request judged sixteen random titles to a none-found. A short
+    /// message that IS its topic keeps it; a sentence echoed back as a keyword still does not.
+    /// </summary>
+    [Theory]
+    [InlineData("survival at sea", "survival at sea", true)]
+    [InlineData("Survival at sea", "survival at sea", true)]
+    [InlineData("something brooding and futuristic for tonight", "something brooding and futuristic for tonight", false)]
+    [InlineData("no superheroes please", "no superheroes please", false)]
+    public void A_short_message_that_is_its_own_topic_keeps_it_as_the_concept(string message, string concept, bool kept)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [concept] });
+        var clean = PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(kept, clean.Delta.Concepts.Count == 1);
+    }
+
+    /// <summary>The live "how many ninja movies are left?" plan left media unset and was counted over shows too.</summary>
+    [Theory]
+    [InlineData("how many ninja movies are left?", null, MediaScope.Movies)]
+    [InlineData("any good ninja shows?", null, MediaScope.Shows)]
+    [InlineData("ninja movies or shows", null, null)]
+    [InlineData("more of those", null, null)]
+    [InlineData("ninja movies", MediaScope.Shows, MediaScope.Shows)]
+    public void The_users_own_media_word_survives_a_plan_that_left_media_unset(string message, MediaScope? planned, MediaScope? expected)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Media = planned });
+        Assert.Equal(expected, PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([])).Delta.Media);
+    }
+
+    [Fact]
+    public void A_supply_answer_agrees_in_number()
+    {
+        var hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])], Media = MediaScope.Movies };
+        var one = new SupplyReport(20, 19, 0, 0, 1, 0, 0, [], 0, 50, 6.0m, true);
+        Assert.Equal(
+            "You have 1 unseen ninja movie left that clears your conditions and your bar; you've seen 19.",
+            AskReelEngine.SupplyAnswer(one, hard));
+    }
+
     [Fact]
     public void Only_one_clarifying_question_is_asked_per_conversation()
     {
@@ -203,6 +244,36 @@ public class AskReelV2UnitTests
             reply.Reply);
         Assert.DoesNotMatch("^Here are some .* picks for “", reply.Reply);
         Assert.Equal("6 picks for you · 2 held back by your 6.0 bar — shown below · 1 close but not quite — tucked away below", reply.Reason);
+    }
+
+    /// <summary>
+    /// The live "heist movies" turn said "1 heist movies checked against your request": the noun took the
+    /// total's number. A failed batch with one judged pick, and the bar holding back unchecked cards
+    /// too, which are counted as unchecked and never said to fit (XM-06).
+    /// </summary>
+    [Fact]
+    public void Picks_copy_agrees_in_number_and_never_says_an_unchecked_card_fits()
+    {
+        var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with
+        {
+            Topic = "heist",
+            Picks = 1,
+            UnjudgedPicks = 3,
+            UnderBar = 7,
+            HeldUnchecked = 3,
+            JudgeFailed = true,
+        });
+
+        Assert.Equal(
+            "1 heist movie checked against your request, and 3 more I couldn't check. 4 more fit but sit under your 6.0 bar.",
+            reply.Reply);
+        // …and the live "something quiet and slow-burning" turn's "1 title that fit what you asked".
+        Assert.Equal(
+            "1 title that fits what you asked.",
+            new TurnComposer().Compose(Context(FinalMode.Picks) with { Topic = null, Media = MediaScope.Any, Picks = 1 }).Reply);
+        Assert.Equal(
+            "4 picks for you · 3 more not checked against what you asked · 7 held back by your 6.0 bar, 3 of them not checked against what you asked — shown below",
+            reply.Reason);
     }
 
     [Fact]
@@ -390,6 +461,15 @@ public class AskReelV2UnitTests
         var byPosition = OpenRouterAskJudge.Parse(positional.RootElement, input);
         Assert.Equal([B], byPosition.Keys);
         Assert.Contains("\"id\":\"1\"", OpenRouterAskJudge.UserPrompt(input), StringComparison.Ordinal);
+
+        // A "no" carries no why (it is never shown, and output tokens are what a batch waits on): the
+        // verdict still counts as judged.
+        Assert.Contains("When satisfies is \"no\", why is an empty string", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+        using var silentNo = JsonDocument.Parse("""{"results":[{"id":"1","satisfies":"no","fit":0.1,"why":"","evidence":"genre: drama"}]}""");
+        var no = OpenRouterAskJudge.Parse(silentNo.RootElement, input)[A];
+        Assert.True(no.Judged);
+        Assert.Equal(Satisfies.No, no.Satisfies);
+        Assert.Null(no.Why);
     }
 
     [Theory]
@@ -486,5 +566,42 @@ public class AskReelV2UnitTests
                 }
             }
         }
+    }
+    // ── Wave B: negations into retrieval, conditions() ────────────────────────────────────────
+
+    [Fact]
+    public void Negations_ride_into_retrieval_as_genres_where_they_name_one_and_keywords_in_every_spelling()
+    {
+        var (genres, keywords) = AskReelEngine.NegationRules(["horror", "superheroes"]);
+
+        Assert.Equal(["horror"], genres);
+        Assert.Contains("superheroes", keywords);
+        Assert.Contains("superhero", keywords);
+        Assert.DoesNotContain("horror", keywords);
+        Assert.Equal((Array.Empty<string>(), Array.Empty<string>()), (AskReelEngine.NegationRules([]).Genres.ToArray(), AskReelEngine.NegationRules([]).Keywords.ToArray()));
+    }
+
+    [Fact]
+    public void The_conditions_answer_names_the_rules_the_pool_they_leave_and_what_each_alone_is_costing()
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.ExcludeGenre, Value = "comedy" },
+            new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.MinYear, Value = "2000" },
+        ]);
+        var cost = new FilterCostReport(
+            5319, 421,
+            [new FilterCostRule("ExcludeGenre", "comedy", 812), new FilterCostRule("MinYear", "2000", 1300)],
+            []);
+
+        Assert.Equal(
+            "Your standing conditions: excludes: comedy; min year 2000. They leave 421 unseen titles open to you, out of 5,319 in the "
+            + "catalogue. Relaxing one alone would open the most for: released 2000 or later (+1,300), excluded genre: comedy (+812).",
+            AskReelEngine.ConditionsAnswer(standing, cost));
+        // Unmeasured: the rules alone, no number invented.
+        Assert.Equal("Your standing conditions: excludes: comedy; min year 2000.", AskReelEngine.ConditionsAnswer(standing, null));
+        Assert.Equal(
+            "You have no standing conditions set, so every unseen title in the catalogue is open to you.",
+            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null));
     }
 }

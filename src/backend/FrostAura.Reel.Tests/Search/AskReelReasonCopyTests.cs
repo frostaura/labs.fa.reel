@@ -83,4 +83,11 @@ public class AskReelReasonCopyTests
             CultureInfo.CurrentCulture = previous;
         }
     }
+    /// <summary>XM-06: the floor tray can hold cards nobody judged; its clause says how many, and never calls the turn empty of a verdict.</summary>
+    [Theory]
+    [InlineData(5, 3, "5 held back by your 6.0 bar, 3 of them not checked against what you asked — shown below")]
+    [InlineData(3, 3, "3 not checked against what you asked and held back by your 6.0 bar — shown below")]
+    [InlineData(2, 0, "no picks matched what you asked · 2 held back by your 6.0 bar — shown below")]
+    public void The_floor_tray_clause_counts_the_unchecked_cards_the_bar_held_back(int tray, int heldUnchecked, string expected) =>
+        Assert.Equal(expected, AskReelReason.Build(new TurnCounts(Picks: 0, Outside: 0, Tray: tray, HeldUnchecked: heldUnchecked), 6.0m));
 }

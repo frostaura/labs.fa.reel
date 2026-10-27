@@ -10,6 +10,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Search.Retrieval;
+using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -100,7 +101,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.NotNull(state);
         Assert.Equal(4, state.LastPresented.Count);
         Assert.Equal(1, state.Version);
-        Assert.Equal($"4 {topic} titles that fit what you asked. 3 more are close but not quite — tucked away below.", outcome.AssistantText);
+        // "movies" because the message says so (the sanitizer keeps the user's media word).
+        Assert.Equal($"4 {topic} movies that fit what you asked. 3 more are close but not quite — tucked away below.", outcome.AssistantText);
     }
 
     [Fact]
@@ -143,6 +145,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Empty(outcome.Cards);
         Assert.Equal("ItemQuestion", outcome.Act);
         Assert.Equal(answerer.Text, outcome.AssistantText);
+        // The `answer` frame IS the reply: no `assistant-message` repeats it (a client renders both).
+        Assert.DoesNotContain(events, e => e.Event == "assistant-message");
+        Assert.Equal(["answer", "done"], events.Select(e => e.Event).TakeLast(2));
     }
 
     /// <summary>Task 4: "how many X are left?" is the supply tool — counts only, no cards, no judge.</summary>
@@ -167,7 +172,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         var outcome = await engine.StreamAsync(Input($"how many {topic} movies are left?"), accountId, emit, CancellationToken.None);
 
-        Assert.Equal($"You have 3 unseen {topic} titles left inside your conditions; you've seen 2.", outcome.AssistantText);
+        Assert.Equal($"You have 3 unseen {topic} movies left inside your conditions; you've seen 2.", outcome.AssistantText);
         Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
         Assert.Equal(0, judge.Batches);
         Assert.DoesNotContain(events, e => e.Event is "picks" or "tray");
@@ -203,7 +208,112 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(0, judge.Batches);
         Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "none-found");
         Assert.True(ConversationStateJson.Read(outcome.ConversationStateJson)!.ClarifiedOnce);
+        Assert.DoesNotContain(events, e => e.Event == "assistant-message");
+        Assert.Equal("Do you mean the film or the series?", outcome.AssistantText);
     }
+
+    /// <summary>
+    /// XM-06: the bar binds every card. With the judge down, nothing is checked, and a card the
+    /// account's bar holds back (here: unscored while a bar is set) goes to the labelled floor tray —
+    /// never the unchecked tray, which reads as cards that cleared it.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_unchecked_card_the_bar_holds_back_is_in_the_floor_tray_never_the_unchecked_one(bool judgeAvailable)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        await SeedBarAsync(accountId, 6.0m);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, events, emit) = Build(accountId, planner, new DownJudge(judgeAvailable));
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        var trays = events.Where(e => e.Event == "tray").ToDictionary(e => e.Data.GetProperty("kind").GetString()!, e => e.Data);
+        Assert.Equal(3, trays["belowFloor"].GetProperty("cards").GetArrayLength());
+        Assert.False(trays.ContainsKey("unchecked"));
+        var done = events[^1].Data;
+        Assert.Equal(0, done.GetProperty("unchecked").GetArrayLength());
+        Assert.Equal(3, done.GetProperty("belowFloor").GetArrayLength());
+        Assert.All(done.GetProperty("belowFloor").EnumerateArray(), c => Assert.Equal(JsonValueKind.Null, c.GetProperty("satisfies").ValueKind));
+        Assert.All(outcome.Cards, c => Assert.Equal(SearchTurnCardTier.BelowFloor, c.Tier));
+        Assert.DoesNotContain(events, e => e.Event == "picks");
+    }
+
+    /// <summary>
+    /// A mood request's text is embedded before retrieval, so the semantic arm — its only topical arm —
+    /// has the vector; a request with a concept is not held up for it.
+    /// </summary>
+    [Fact]
+    public async Task A_mood_request_is_embedded_before_retrieval_and_a_concept_request_is_not()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var mood = $"cosy{Guid.NewGuid():N}"[..12];
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 1));
+        var embeddings = new RecordingEmbeddings();
+        var planner = new ScriptedPlanner(input => input.Message.StartsWith(mood, StringComparison.Ordinal)
+            ? Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Moods = [mood] })
+            : Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, _, emit) = Build(accountId, planner, new NameJudge(), embeddings: embeddings);
+
+        var moodTurn = await engine.StreamAsync(Input($"{mood} please"), accountId, emit, CancellationToken.None);
+        await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal([mood], embeddings.Asked);
+        Assert.Contains(AskStageTimings.RetrieveEmbed, moodTurn.StageTimingsJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// WS-3 CR-2b/c: the user's own rejections, the message and the region ride into retrieval, and an
+    /// arm that contributed nothing is noted on the stored row only — never sent as a degraded turn.
+    /// </summary>
+    [Fact]
+    public async Task Retrieval_gets_the_rejections_message_and_region_and_a_skipped_arm_is_stored_not_shown()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+        {
+            Concepts = [topic],
+            Negations = ["horror", "superheroes"],
+        }));
+        RetrievalQuery? seen = null;
+        var (engine, events, emit) = Build(
+            accountId, planner, new NameJudge(), wrap: inner => new SkippingRetriever(inner, q => seen = q, "tmdb-late"));
+
+        var message = $"{topic} movies, no horror and no superheroes";
+        var outcome = await engine.StreamAsync(Input(message), accountId, emit, CancellationToken.None);
+
+        Assert.NotNull(seen);
+        Assert.Equal(["horror"], seen.ExcludeGenres);
+        Assert.Contains("superhero", seen.ExcludeKeywords);
+        Assert.Equal(message, seen.Message);
+        Assert.Equal("US", seen.Region);
+        Assert.Contains(SearchTurnDegraded.ArmPrefix + "tmdb-late", outcome.DegradedFlags!.Split(','));
+        Assert.DoesNotContain(events, e => e.Event == "degraded");
+        Assert.Equal(0, events[^1].Data.GetProperty("degraded").GetArrayLength());
+        Assert.Equal(2, events.Where(e => e.Event == "picks").Sum(e => e.Data.GetProperty("cards").GetArrayLength()));
+    }
+
 
     [Fact]
     public async Task A_spent_plan_allowance_is_a_coded_refusal_before_any_work()
@@ -315,7 +425,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(3, supply.GetProperty("alreadySeen").GetInt32());
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
         Assert.Equal(0, judge.Batches);
-        Assert.StartsWith($"There are no {topic} titles left for you.", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.StartsWith($"There are no {topic} movies left for you.", outcome.AssistantText, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -395,7 +505,64 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// An item question answers BESIDE the grid, and a resume keeps it that way: the restored grid is
+    /// the search the question was about — its cards, its mode — not the question's empty answer.
+    /// </summary>
+    [Fact]
+    public async Task A_resume_after_an_item_question_restores_the_answer_it_was_about()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var planner = new ScriptedPlanner(input => input.Message.StartsWith("is the first", StringComparison.Ordinal)
+            ? Plan(TurnAct.ItemQuestion, references: new TurnHandle(1, 1)) with { Tools = [new ToolRequest(AskTool.TitleFacts)] }
+            : Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        using var factory = api.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting(AskReelEngineOptions.Setting, AskReelEngineOptions.V2);
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IAskReelPlanner>();
+                services.AddSingleton<IAskReelPlanner>(planner);
+                services.RemoveAll<IRequestJudgeModel>();
+                services.AddSingleton<IRequestJudgeModel>(new NameJudge());
+                services.RemoveAll<ITmdbClient>();
+                services.AddSingleton<ITmdbClient, SilentTmdbClient>();
+            });
+        });
+        var (_, client) = await SignInAsync(factory, $"ask-v2-iq-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+            var first = await AskAsync(client, new { query = $"{topic} movies", clientTurnId = Guid.NewGuid() });
+            var conversationId = first.Single(f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
+            var question = await AskAsync(client, new { query = "is the first one violent?", conversationId, clientTurnId = Guid.NewGuid() });
+            Assert.Single(question, f => f.Event == "answer");
+            Assert.DoesNotContain(question, f => f.Event == "assistant-message");
+
+            var resumed = await client.GetFromJsonAsync<JsonElement>($"/api/search/conversations/{conversationId}");
+
+            Assert.Equal(ids.Order(), resumed.GetProperty("cards").EnumerateArray().Select(c => c.GetProperty("titleId").GetGuid()).Order());
+            Assert.Equal("Picks", resumed.GetProperty("mode").GetString());
+            var answers = resumed.GetProperty("turns").EnumerateArray().Where(t => t.GetProperty("role").GetString() == "assistant").ToList();
+            Assert.Equal(["Picks", "Answer"], answers.Select(t => t.GetProperty("mode").GetString()));
+            Assert.Equal(0, answers[1].GetProperty("cards").GetArrayLength());
+        }
+    }
+
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The catalogue arms these tests read match a concept by its own words; nothing to resolve.</summary>
+    private sealed class PassThroughResolver : IConceptResolver
+    {
+        public Task<HardConstraints> ResolveAsync(HardConstraints hard, CancellationToken ct) => Task.FromResult(hard);
+
+        public Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct) => Task.FromResult(concept);
+    }
 
     private static string Topic() => $"vtopic{Guid.NewGuid():N}"[..18];
 
@@ -407,7 +574,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         new(message, [], [], [], "US", [], Domain.Sync.ApiUsagePurpose.RerankAsk);
 
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
-        Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null)
+        Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
+        Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -422,9 +590,12 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             new DislikeSignal(db, cache), new RatingCalibrationService(db, cache));
         var engine = new AskReelEngine(
             db, planner, new RequestJudge(judge, cache, NullLogger<RequestJudge>.Instance), judge, answerer ?? new ScriptedAnswerer("-"),
-            new TitleFacts(db), new FacetRetriever(db, eligibility, supply), supply, eligibility, scorer,
+            new TitleFacts(db), (wrap ?? (r => r))(new FacetRetriever(db, eligibility, supply)), supply, eligibility, scorer,
             new ExposureLog(db, NullLogger<ExposureLog>.Instance), features, new PersonalisationContext(db, new DislikeSignal(db, cache)),
-            new TurnComposer(), NullLogger<AskReelEngine>.Instance);
+            new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
+            new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            cache, new ConceptEmbeddings(embeddings ?? new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            NullLogger<AskReelEngine>.Instance);
 
         var events = new List<(string, JsonElement)>();
         LiveSearchExpansionService.Emit emit = (name, payload) =>
@@ -512,7 +683,22 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         CreatedAt = DateTime.UtcNow,
     };
 
+    private async Task SeedBarAsync(Guid accountId, decimal bar)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new Domain.Filters.ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = Domain.Filters.FilterKind.MinPredictedRating,
+            Value = bar.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
     private async Task MarkSeenAsync(Guid accountId, IEnumerable<Guid> titleIds)
+
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in titleIds)
@@ -693,7 +879,58 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>No embedding provider: the default for these tests, whose retriever never embeds.</summary>
+    private sealed class NoEmbeddings : IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            throw new InvalidOperationException("No embedding provider in this fixture.");
+    }
+
+    /// <summary>Records what it was asked to embed and answers with a constant unit vector.</summary>
+    private sealed class RecordingEmbeddings : IEmbeddingProvider
+    {
+        public List<string> Asked { get; } = [];
+
+        public bool IsAvailable => true;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
+        {
+            lock (Asked)
+            {
+                Asked.AddRange(texts);
+            }
+
+            return Task.FromResult(texts.Select(_ => Enumerable.Repeat(1f / MathF.Sqrt(1536), 1536).ToArray()).ToArray());
+        }
+    }
+
+    /// <summary>A judge that is down: unavailable altogether, or available with every batch failing.</summary>
+    private sealed class DownJudge(bool available) : IRequestJudgeModel
+    {
+        public bool IsAvailable => available;
+
+        public string ModelId => "down-judge";
+
+        public string CacheSalt => $"down-judge-{Guid.NewGuid():N}";
+
+        public Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct) =>
+            Task.FromResult(new JudgeBatchResult([], new LlmCallMeta("down-judge", "none", false, 1, 3, "provider_error"), true));
+    }
+
+    /// <summary>The real retriever, with the query it was asked recorded and some arms reported as skipped.</summary>
+    private sealed class SkippingRetriever(IAskReelRetriever inner, Action<RetrievalQuery> record, params string[] skipped) : IAskReelRetriever
+    {
+        public async Task<Application.Search.Retrieval.RetrievalResult> RetrieveAsync(RetrievalQuery q, CancellationToken ct)
+        {
+            record(q);
+            return await inner.RetrieveAsync(q, ct) with { SkippedArms = skipped };
+        }
+    }
+
     private sealed class ScriptedAnswerer(string text) : IAskReelAnswerer
+
     {
         public string Text { get; } = text;
 

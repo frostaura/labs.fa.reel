@@ -504,14 +504,26 @@ uses it only to know which frames to expect.
    A spent plan allowance (`ask_budget_spent`) or an open provider breaker (`provider_unavailable`)
    ends the turn **before any work**: `Failed` with that code and the cause's degraded copy.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
-   sheet an `ItemQuestion` answer is written from.
+   sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
+   (genres, and keywords in every spelling), the message and the account's region into retrieval.
+   An arm that contributed nothing is stored on the row as `arm:{name}` (`arm:semantic`,
+   `arm:tmdb-late`, `arm:provisional-n/m` …) and is **never** sent in `done.degraded` — the cards were
+   fused without it and are still what they claim (§4.10). When the catalogue leaves the judged slice
+   short, up to 6 TMDB-only titles are hydrated beside the first judge pass (2.5 s), admitted through
+   eligibility, this turn's rejections and the hard constraints, and judged as one more pass.
+   `conditions()` answers with the pool the standing rules leave and the three rules costing the most,
+   each with its marginal (the Conditions editor's own numbers).
 3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6**, at most
    **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and **emitted as it
    returns**.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
-   go to `unchecked` when the turn has no judged pick.
+   go to `unchecked` when the turn has no judged pick. **The bar binds first (XM-06):** a card nobody
+   judged that the bar holds back (under it, or unscored while one is set) goes to `belowFloor` with
+   `satisfies: null`, never to `unchecked` — so `unchecked` only ever holds cards that clear the bar.
+   Only cards something judged (the judge, or a person's credits) are named or said to "fit" under
+   the bar; the rest are counted as unchecked.
 5. **Compose** — the reply is written by templates from the supply report, the handles and the
    facts. **No model writes a search turn's reply.** No markdown, never "pulled", never an echo of
    the message.
@@ -528,13 +540,13 @@ uses it only to know which frames to expect.
 | `phase` | at every stage, and repeated with `heartbeat: true` after 5 s of silence | `{ stage, label }` — `stage` is `planning` · `searching` · `judging` · `answering` · `composing`; `label` is a plain sentence a narration line can show as-is ("Checking 16 titles against your request") |
 | `plan` | once, after planning | `{ act, concepts: ["ninja"], people: [{ name, role: "Director" \| "Cast" \| "Any" }], references: ["T2.3"], media: "Any" \| "Movies" \| "Shows", source: "Llm" \| "LlmRetry" \| "CarriedForward" }` |
 | `conflict` | when the request collides with a standing condition | the v1 shape, unchanged |
-| `picks` | once per judge batch that produced at least one pick | `{ batch, cards: [card] }` — append in arrival order; never re-sort |
+| `picks` | once per judge batch that produced at least one pick | `{ batch, cards: [card] }` — append in arrival order; never re-sort. `batch` is the batch's ordinal within its judge pass (a turn that judges TMDB-only titles runs a second pass, numbered from 0 again): informational, never a key |
 | `tray` | once per non-empty tray, after judging | `{ kind: "nearMiss" \| "belowFloor" \| "unchecked", cards: [card] }` — the whole tray in one frame |
 | `none-found` | a search act with no pick | `{ supply }` — the `done.supply` shape |
-| `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — `handle` and `titleId` are null when the answer is about no single title |
-| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation) | `{ question, options: [string] }` |
-| `degraded` | before `done`, when anything did not run as designed | `{ what: [flag] }` — the `done.degraded` tokens |
-| `assistant-message` | once, just before `done` | `{ text, degraded }` — the composed reply |
+| `degraded` | when anything the client is told about did not run as designed: before `answer` / `clarify`, else before `assistant-message` | `{ what: [flag] }` — the `done.degraded` tokens (`plan`, `plan-cause:{code}`, `judge:n/m`, `judge-missing:n/m`, `no-model`, `answer`); never `arm:` notes |
+| `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — **the turn's reply**: no `assistant-message` follows it. `handle` and `titleId` are null when the answer is about no single title |
+| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), or an item question names no title | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
+| `assistant-message` | search and refused turns only, once, after the trays and just before `done` | `{ text, degraded }` — the composed reply. A client must accept it before or after the turn's `picks` (the chat UI's own fixtures send it first) |
 | `done` | last, always | every v1 key, plus `engine: "v2"`, `act`, `planSource`, `answer` (string or null) and `clarify` (object or null). `mode` is `Picks` · `NoneFound` · `Clarify` · `Answer` |
 
 A v2 turn emits **no** `candidate`, `candidate-scored` or `candidate-reranked` frames; `done.results`
@@ -547,7 +559,18 @@ user and the planner both use), `tier` (`Pick` · `NearMiss` · `BelowFloor` · 
 
 **An answer turn** (`mode: "Answer"`) leaves the grid exactly as it was: no cards, no judge call, no
 exposure. Its text is at most two sentences, every claim in it taken from the fact sheet it was
-written from, and it is the turn's assistant text.
+written from, and it is the turn's assistant text. A `Clarify` turn leaves the grid the same way. On
+**resume**, the top-level `cards`, `belowFloor`, `nearMiss`, `unchecked`, `mode` and `reason` are the
+newest *search* answer and its pages — an `Answer` or `Clarify` turn after it never becomes the grid
+(`SearchTurnMode.LeavesGrid`); its own `turns[].cards` is empty. A client therefore keeps the grid
+under the search answer it belongs to, not under the question asked beside it.
+
+**Frame order, as the chat UI is built against it.** Search turn: `conversation` → `phase` →
+`plan` → `phase`… → [`conflict`] → `picks`… (per batch) → `tray`… (`belowFloor`, `nearMiss`,
+`unchecked`, each once, non-empty only) → [`none-found`] → [`degraded`] → `assistant-message` →
+`done`. Answer / clarify turn: `conversation` → `phase` → `plan` → [`phase`] → [`degraded`] →
+`answer` | `clarify` → `done`. Refused turn (spent allowance, open breaker): `conversation` → `phase` →
+`degraded` → `assistant-message` (the cause's copy, `degraded: true`) → `done` (`failed: true`).
 
 ### Acts and what they do to the state
 

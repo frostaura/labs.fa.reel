@@ -219,9 +219,11 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
     {
         var results = new Dictionary<Guid, RerankResult>();
         var uncached = new List<RerankInput>();
+        var salt = agent.CacheSalt(usagePurpose);
+        var batchIds = inputs.Select(i => i.TitleId).ToList();
         foreach (var input in inputs)
         {
-            if (cache.TryGetValue<RerankResult>(FitKey(accountId, input.TitleId, qnorm, agent.ModelId), out var hit)
+            if (cache.TryGetValue<RerankResult>(FitKey(salt, accountId, input.TitleId, qnorm, batchIds), out var hit)
                 && hit is { FitSource: ResultSource.Llm })
             {
                 results[input.TitleId] = hit;
@@ -258,7 +260,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
                         results[result.TitleId] = result;
                         if (result.FitSource == ResultSource.Llm)
                         {
-                            cache.Set(FitKey(accountId, result.TitleId, qnorm, agent.ModelId), result, FitTtl);
+                            cache.Set(FitKey(salt, accountId, result.TitleId, qnorm, batchIds), result, FitTtl);
                         }
                     }
                 });
@@ -293,11 +295,13 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
         string.Join(' ', query.ToLowerInvariant().Split([' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries));
 
     /// <summary>
-    /// The per-(account, title, request) verdict key, versioned by the prompt generation and the model:
-    /// a verdict is the output of one prompt against one model, and serving a six-hour-old verdict
-    /// from the previous prompt is how a prompt fix looks like it did nothing.
+    /// The per-(account, title, request) verdict key, in the one shape every re-rank cache shares
+    /// (<see cref="RerankCacheKey.For"/>, WS-1 CR-4): the agent's salt for the purpose — result
+    /// version, model, the effort it runs at and the prompt and schema fingerprint — the account, the
+    /// title, the request in its prompt generation, and the batch the title was judged among, because
+    /// the prompt spreads fits across the batch. A verdict from another prompt, model, effort or
+    /// company misses rather than serving as if nothing had changed.
     /// </summary>
-    internal static string FitKey(Guid accountId, Guid titleId, string qnorm, string modelId) => string.Create(
-        System.Globalization.CultureInfo.InvariantCulture,
-        $"rerank:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{titleId}:{qnorm}");
+    internal static string FitKey(string salt, Guid accountId, Guid titleId, string qnorm, IEnumerable<Guid> batch) =>
+        RerankCacheKey.For("askfit", salt, accountId, titleId, $"{AskReelPromptVersion.Current}|{qnorm}", batch);
 }
