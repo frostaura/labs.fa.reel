@@ -78,7 +78,7 @@ function ReconnectTraktButton({ label }: { label: string }) {
       onClick={reconnect}
       disabled={isLoading}
       data-testid="sync-reconnect"
-      className="rounded-full px-3 py-1 fa-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-danger/60"
+      className="rounded-full px-3 py-1 text-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-danger/60"
     >
       <span className="h-1.5 w-1.5 rounded-full shrink-0 bg-fa-danger" aria-hidden />
       <span data-testid="sync-health-label" className="truncate max-w-[10rem]">
@@ -204,7 +204,7 @@ function PillBody({ view, status }: { view: PillView; status: SyncStatus | undef
           {...triggerProps}
           data-testid="sync-health"
           data-health={view.tone}
-          className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-3 py-1 fa-caption font-normal hover:bg-fa-glass focus-visible:outline-none focus-visible:border-fa-frost/40"
+          className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-3 py-1 text-caption font-normal hover:bg-fa-glass focus-visible:outline-none focus-visible:border-fa-frost/40"
         >
           <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${DOT[view.tone]}`} aria-hidden />
           <span
