@@ -421,25 +421,49 @@ public class AskReelV2UnitTests
     }
 
     /// <summary>
-    /// HREV2-RET-01: the judge's order puts every candidate the bar lets through ahead of every one it
-    /// holds back, and keeps retrieval's order inside each group.
+    /// HREV2-RET-01: the judge's order is the retrieved candidates the bar lets through, then the
+    /// supply's top-up ('t'), then the retrieved candidates with no prediction ('u'), then those under
+    /// the bar ('h') — and each group keeps its own order. Varied over every mix, with and without a
+    /// top-up, and with no candidate of a group at all.
     /// </summary>
     [Theory]
-    [InlineData("hhhhcc", "ccHHHH")]
-    [InlineData("chch", "ccHH")]
-    [InlineData("cccc", "cccc")]
-    [InlineData("hhhh", "HHHH")]
-    public void The_judge_order_puts_the_bar_clearing_candidates_first_and_keeps_retrieval_order(string retrieved, string expected)
+    [InlineData("hhhhcc", 0, "cchhhh")]
+    [InlineData("chch", 0, "cchh")]
+    [InlineData("cccc", 0, "cccc")]
+    [InlineData("hhhh", 0, "hhhh")]
+    [InlineData("hhhh", 2, "tthhhh")]
+    [InlineData("huhcuc", 3, "cctttuuhh")]
+    [InlineData("uuu", 1, "tuuu")]
+    [InlineData("", 2, "tt")]
+    public void The_judge_order_puts_what_can_become_a_pick_first_and_keeps_each_groups_order(string retrieved, int topUps, string expected)
     {
         var candidates = retrieved.Select((kind, i) => (Kind: kind, Candidate: new Candidate(Guid.NewGuid(), 1d - (i / 100d), null, ["keyword:x"]))).ToList();
-        var clears = candidates.Where(c => c.Kind == 'c').Select(c => c.Candidate.TitleId).ToHashSet();
+        var topUp = Enumerable.Range(0, topUps).Select(_ => new Candidate(Guid.NewGuid(), 0d, null, ["keyword:x"])).ToList();
+        var kinds = candidates.ToDictionary(c => c.Candidate.TitleId, c => c.Kind);
+        foreach (var t in topUp)
+        {
+            kinds[t.TitleId] = 't';
+        }
 
-        var ordered = AskReelEngine.OrderForJudge(candidates.Select(c => c.Candidate).ToList(), clears.Contains);
+        var ordered = AskReelEngine.OrderForJudge(
+            candidates.Select(c => c.Candidate).ToList(),
+            topUp,
+            id => kinds[id] switch
+            {
+                'c' => AskReelEngine.JudgeTier.Clears,
+                'u' => AskReelEngine.JudgeTier.Unscored,
+                _ => AskReelEngine.JudgeTier.Under,
+            });
 
-        Assert.Equal(expected.ToLowerInvariant(), string.Concat(ordered.Select(c => clears.Contains(c.TitleId) ? 'c' : 'h')));
-        var held = candidates.Where(c => c.Kind == 'h').Select(c => c.Candidate).ToList();
-        Assert.Equal(held, ordered.Where(c => !clears.Contains(c.TitleId)).ToList());
-        Assert.Equal(candidates.Where(c => c.Kind == 'c').Select(c => c.Candidate).ToList(), ordered.Where(c => clears.Contains(c.TitleId)).ToList());
+        Assert.Equal(expected, string.Concat(ordered.Select(c => kinds[c.TitleId])));
+        foreach (var kind in "chu")
+        {
+            Assert.Equal(
+                candidates.Where(c => c.Kind == kind).Select(c => c.Candidate).ToList(),
+                ordered.Where(c => kinds[c.TitleId] == kind).ToList());
+        }
+
+        Assert.Equal(topUp, ordered.Where(c => kinds[c.TitleId] == 't').ToList());
     }
 
     /// <summary>"words|genre,genre;words|-" → concepts ("-" for none), plus an optional cast person.</summary>

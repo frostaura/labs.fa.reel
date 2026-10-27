@@ -850,6 +850,104 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV2-RET-01, the "Show me more" page: ordering the retrieved pool is not enough when the pool
+    /// itself holds few titles that clear the bar. Live, page two of "scary horror films" judged ten
+    /// titles under the bar and answered none-found while the supply held 43 more that cleared it,
+    /// none of them retrieved. Here the titles that clear the bar sit OUTSIDE the retrieved pool; they
+    /// are still judged and picked. Varied: past retrieval's depth on a first page; on a second page
+    /// whose first page's titles are excluded; and a short retrieval of fewer titles than the judge
+    /// rules on. In every case a seen title and one under the supply's vote floor, both "clearing" on
+    /// a stored score, are never judged — the top-up is the supply's own clearing set, nothing wider.
+    /// </summary>
+    [Theory]
+    [InlineData(44, 0, 0)]
+    [InlineData(44, 20, 0)]
+    [InlineData(10, 0, 8)]
+    public async Task Titles_that_clear_the_bar_outside_the_retrieved_pool_are_still_judged_and_picked(int under, int shownBefore, int retrievedOnly)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        // One seeding, most voted first: retrieval returns the shown and held titles before any other.
+        var seeded = await SeedTopicalAsync(
+            topic, ("V2 Yes shown", shownBefore), ("V2 Yes held", under), ("V2 Yes clears", 3), ("V2 Yes seen", 1), ("V2 Yes thin", 1));
+        var shown = seeded.Take(shownBefore).ToList();
+        var held = seeded.Skip(shownBefore).Take(under).ToList();
+        var clears = seeded.Skip(shownBefore + under).Take(3).ToList();
+        var seen = seeded[^2];
+        var thin = seeded[^1];
+        await SeedPredictionsAsync(accountId, shown, 8.4m);
+        await SeedPredictionsAsync(accountId, held, 2.0m);
+        await SeedPredictionsAsync(accountId, [.. clears, seen, thin], 8.4m);
+        await MarkSeenAsync(accountId, [seen]);
+        await SetVotesAsync([thin], CrowdVotes.MinRelaxVotes - 1);
+        await SeedBarAsync(accountId, 6.0m);
+        var judge = new CountingJudge();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var model = new RuntimeModelEngine();
+        var (engine, events, emit) = Build(
+            accountId, planner, judge, model: model,
+            wrap: retrievedOnly > 0 ? inner => new ShortRetriever(inner, retrievedOnly) : null);
+
+        var outcome = await engine.StreamAsync(
+            Input($"{topic} movies") with { ShownTitleIds = shown }, accountId, emit, CancellationToken.None);
+
+        var picks = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray())
+            .Select(c => c.GetProperty("titleId").GetGuid()).ToList();
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.Equal(clears.Order(), picks.Order());
+        Assert.All(clears, id => Assert.Equal(1, judge.SendsOf(id)));
+        Assert.All(shown.Append(seen).Append(thin), id => Assert.Equal(0, judge.SendsOf(id)));
+        // The top-up comes from the stored predictions the supply splits by: no pool scored on demand.
+        Assert.Equal(0, model.PoolScorings);
+    }
+
+    /// <summary>
+    /// HREV2-ASK-04 with HREV2-RET-01: scoring the retrieved pool on demand put 0.4–3 s in front of the
+    /// first card, and the active model stores predictions for few titles, so the pool usually has
+    /// none. When the supply's stored predictions alone fill the judge's slice with titles that clear
+    /// the bar, nothing is scored before the judge starts; only when they cannot is the pool scored.
+    /// Varied over how many stored titles clear the bar outside the pool: enough to fill the judge,
+    /// and too few.
+    /// </summary>
+    [Theory]
+    [InlineData(RequestJudge.MaxJudged, 0)]
+    [InlineData(3, 1)]
+    public async Task The_pool_is_scored_on_demand_only_when_the_stored_predictions_cannot_fill_the_judge(int clearing, int poolScorings)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var seeded = await SeedTopicalAsync(topic, ("V2 Yes unscored", 44), ("V2 Yes clears", clearing));
+        var unscored = seeded.Take(44).ToList();
+        var clears = seeded.Skip(44).ToList();
+        await SeedPredictionsAsync(accountId, unscored, 2.0m, stored: false);
+        await SeedPredictionsAsync(accountId, clears, 8.4m);
+        await SeedBarAsync(accountId, 6.0m);
+        var judge = new CountingJudge();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var model = new RuntimeModelEngine();
+        var (engine, events, emit) = Build(accountId, planner, judge, model: model);
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        var picks = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray())
+            .Select(c => c.GetProperty("titleId").GetGuid()).ToList();
+        Assert.Equal(clears.Order(), picks.Order());
+        Assert.All(clears, id => Assert.Equal(1, judge.SendsOf(id)));
+        Assert.Equal(poolScorings, model.PoolScorings);
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+    }
+
+    /// <summary>
     /// HREV1-ASK-02 / RET-04: the planner answered media "any" for "samurai films", and the turn
     /// returned shows and counted them. The user's own media word wins over "any"; a message naming
     /// both keeps both. Varied: a none-found turn, whose supply counts the films alone.
@@ -1658,6 +1756,18 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         await db.SaveChangesAsync();
     }
 
+    private async Task SetVotesAsync(IReadOnlyList<Guid> titleIds, int votes)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        foreach (var title in await db.Titles.Where(t => titleIds.Contains(t.Id)).ToListAsync())
+        {
+            title.TmdbVoteCount = votes;
+            title.TraktVotes = 0;
+        }
+
+        await db.SaveChangesAsync();
+    }
+
     private async Task MakeShowsAsync(IReadOnlyList<Guid> titleIds)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
@@ -1997,6 +2107,16 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         public Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct) =>
             Task.FromResult(new JudgeBatchResult([], new LlmCallMeta("down-judge", "none", false, 1, 3, "provider_error"), true));
+    }
+
+    /// <summary>The real retriever, cut short: it returns only its first <paramref name="take"/> candidates.</summary>
+    private sealed class ShortRetriever(IAskReelRetriever inner, int take) : IAskReelRetriever
+    {
+        public async Task<Application.Search.Retrieval.RetrievalResult> RetrieveAsync(RetrievalQuery q, CancellationToken ct)
+        {
+            var result = await inner.RetrieveAsync(q, ct);
+            return result with { Candidates = [.. result.Candidates.Take(take)] };
+        }
     }
 
     /// <summary>The real retriever, with the query it was asked recorded and some arms reported as skipped.</summary>

@@ -748,7 +748,8 @@ public sealed class AskReelEngine(
         }
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
-        var candidates = await JudgeOrderAsync(turn, db, () => scorer, Judgeable(retrieval, titles, exclude, next), turn.Timings, ct);
+        var candidates = await JudgeOrderAsync(
+            turn, db, () => scorer, next, Judgeable(retrieval, titles, exclude, next), titles, exclude, turn.Timings, ct);
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
@@ -1039,8 +1040,9 @@ public sealed class AskReelEngine(
             var titles = await scopedDb.Titles.AsNoTracking().Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
             // Ordered exactly as the turn will order it, or the early batch is spent on titles the turn
             // then judges after the bar-clearing ones — or never (HREV2-RET-01).
+            var exclude = query.Exclude.ToHashSet();
             var ordered = await JudgeOrderAsync(
-                turn, scopedDb, services.GetRequiredService<OnDemandScorer>, Judgeable(result, titles, query.Exclude.ToHashSet(), next), null, ct);
+                turn, scopedDb, services.GetRequiredService<OnDemandScorer>, next, Judgeable(result, titles, exclude, next), titles, exclude, null, ct);
             var slice = ordered.Take(RequestJudge.MaxJudged).ToList();
             if (slice.Count == 0)
             {
@@ -1070,44 +1072,72 @@ public sealed class AskReelEngine(
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
         return retrieval.Candidates
             .Where(c => titles.ContainsKey(c.TitleId) && !exclude.Contains(c.TitleId))
-            .Where(c => titles[c.TitleId].TmdbId is not { } tmdb || !legacy.Contains(tmdb))
-            .Where(c => !next.UserNegations.Any(n => Trips(titles[c.TitleId], n)))
+            .Where(c => JudgeableTitle(titles[c.TitleId], legacy, next))
             .ToList();
     }
 
+    /// <summary>Not a legacy exclusion, and carrying none of the user's own negations as a keyword or a genre.</summary>
+    private static bool JudgeableTitle(Title title, IReadOnlySet<long> legacy, ConversationState next) =>
+        (title.TmdbId is not { } tmdb || !legacy.Contains(tmdb))
+        && !next.UserNegations.Any(n => Trips(title, n));
+
     /// <summary>
-    /// The order the judge takes the candidates in: retrieval's, except that when there are more of
-    /// them than it rules on and the account has a bar, the ones the bar lets through go first —
-    /// stably, so equal footing keeps retrieval's order.
+    /// The candidates the judge takes, in the order it takes them. With no bar it is retrieval's
+    /// candidates in retrieval's order. With a bar, the titles it rules on first are the ones that can
+    /// become a pick: the retrieved titles the bar lets through, then — when those are fewer than the
+    /// judge rules on — the request's own supply that clears the bar but was never retrieved, then the
+    /// retrieved titles with no prediction, then the ones under the bar. Each group keeps its order:
+    /// retrieval's, and the top-up's best prediction first.
     ///
     /// <para><b>Why (HREV2-RET-01, IREV2-SYS-01 carried to v2).</b> The judge rules on the first
-    /// <see cref="RequestJudge.MaxJudged"/> titles. Retrieval's order says nothing about which of
-    /// them can become a pick, and a title under the bar can only ever reach the floor tray: "scary
-    /// horror films" spent all sixteen judgements on titles under the bar and answered none-found
-    /// while Dead Silence (7.5) and Lake Mungo (7.4) cleared it and were never judged; "heist movies"
-    /// spent six of sixteen on Heist 88 (2.3) and The Order (1.3). Under the cap every candidate is
-    /// judged anyway, so nothing is read or scored.</para>
+    /// <see cref="RequestJudge.MaxJudged"/> titles, and a title under the bar can only ever reach the
+    /// floor tray. "Scary horror films" spent all sixteen judgements on titles under the bar and
+    /// answered none-found while Dead Silence and Lake Mungo cleared it unjudged. Reordering the
+    /// retrieved pool fixed the first page and not the second: "Show me more" retrieved forty horror
+    /// titles of which only six cleared the bar, judged ten under it, and answered none-found while the
+    /// supply held 43 more that cleared it — retrieval simply never returned them. So the pool is
+    /// topped up from the supply itself: the reply already counts those titles as "clearing your bar",
+    /// and the judge now sees them.</para>
     ///
-    /// <para><b>Ordered on the stored predictions</b> — the account's active model's rows, the ones
-    /// the supply splits the bar by, so the titles judged first are the ones the reply counts as
-    /// clearing it — and only a candidate with no stored row is scored on demand. Scoring the whole
-    /// pool on demand put about a second between retrieval and the first judge batch; the slice the
-    /// judge takes is still placed on fresh predictions, scored beside the judge as before.</para>
+    /// <para><b>The top-up is the supply's clearing set and nothing wider</b>
+    /// (<see cref="SupplyTopUpAsync"/>): the request's hard constraints over the account's eligibility,
+    /// the supply's vote floor and maturity ceiling, and a STORED prediction from the active model that
+    /// clears the bar — the very split the reply's counts come from. Then the same exclusions every
+    /// retrieved title passes: shown, rejected, referenced, legacy, and the user's negations.</para>
+    ///
+    /// <para><b>Ordered on stored predictions; scored on demand only when that cannot fill the
+    /// judge.</b> The active model stores predictions for about 1,400 of 38,000 titles, so a pool title
+    /// often has none. Scoring every one before the judge starts put 0.4–3 s in front of the first card
+    /// (HREV2-ASK-04), so it happens only when the titles known to clear — retrieved or topped up —
+    /// cannot fill the judge's slice and some retrieved title would otherwise be left unjudged. The slice
+    /// the judge takes is still placed on fresh predictions, scored beside the judge as before.</para>
     ///
     /// <para>Timed as <see cref="AskStageTimings.Score"/> on <paramref name="timings"/> — null from the
     /// speculation, which runs beside the turn and may not touch its (unsynchronised) timings. The
-    /// scorer is resolved only when a candidate needs it.</para>
+    /// scorer is resolved only when a candidate needs it. A topped-up title is added to
+    /// <paramref name="titles"/>.</para>
     /// </summary>
     private static async Task<List<Candidate>> JudgeOrderAsync(
-        Turn turn, IReelDbContext store, Func<OnDemandScorer> scoring, List<Candidate> candidates, AskStageTimings? timings, CancellationToken ct)
+        Turn turn,
+        IReelDbContext store,
+        Func<OnDemandScorer> scoring,
+        ConversationState next,
+        List<Candidate> candidates,
+        Dictionary<Guid, Title> titles,
+        IReadOnlySet<Guid> exclude,
+        AskStageTimings? timings,
+        CancellationToken ct)
     {
-        if (turn.Floor <= 0m || candidates.Count <= RequestJudge.MaxJudged)
+        var hard = next.Hard;
+        var topical = hard.HasConcepts || hard.People.Count > 0;
+        if (turn.Floor <= 0m || (!topical && candidates.Count <= RequestJudge.MaxJudged))
         {
             return candidates;
         }
 
         var ids = candidates.Select(c => c.TitleId).ToList();
         var predicted = new Dictionary<Guid, decimal>();
+        List<Candidate> topUp = [];
         using (timings?.Stage(AskStageTimings.Score))
         {
             var activeId = await store.ModelArtifacts
@@ -1115,37 +1145,144 @@ public sealed class AskReelEngine(
                 .OrderByDescending(a => a.Version)
                 .Select(a => (Guid?)a.Id)
                 .FirstOrDefaultAsync(ct);
-            if (activeId is { } artifact)
+            if (activeId is not { } artifact)
             {
-                foreach (var row in await store.TitleScores
-                             .Where(s => s.AccountId == turn.AccountId && s.ModelArtifactId == artifact && ids.Contains(s.TitleId))
-                             .Select(s => new { s.TitleId, s.PredictedRating })
-                             .ToListAsync(ct))
-                {
-                    predicted.TryAdd(row.TitleId, row.PredictedRating);
-                }
+                return candidates;
+            }
 
-                var missing = ids.Where(id => !predicted.ContainsKey(id)).ToList();
-                if (missing.Count > 0)
+            foreach (var row in await store.TitleScores
+                         .Where(s => s.AccountId == turn.AccountId && s.ModelArtifactId == artifact && ids.Contains(s.TitleId))
+                         .Select(s => new { s.TitleId, s.PredictedRating })
+                         .ToListAsync(ct))
+            {
+                predicted.TryAdd(row.TitleId, row.PredictedRating);
+            }
+
+            var clearing = ids.Count(id => ClearsOn(predicted, id, turn.Floor));
+            if (topical && clearing < RequestJudge.MaxJudged)
+            {
+                topUp = await SupplyTopUpAsync(
+                    turn, store, next, artifact, ids, exclude, RequestJudge.MaxJudged - clearing, titles, ct);
+            }
+
+            var missing = ids.Where(id => !predicted.ContainsKey(id)).ToList();
+            if (missing.Count > 0
+                && candidates.Count + topUp.Count > RequestJudge.MaxJudged
+                && clearing + topUp.Count < RequestJudge.MaxJudged)
+            {
+                foreach (var (id, p) in await scoring().ScoreAsync(turn.AccountId, missing, DateTime.UtcNow, ct))
                 {
-                    foreach (var (id, p) in await scoring().ScoreAsync(turn.AccountId, missing, DateTime.UtcNow, ct))
+                    predicted[id] = p;
+                }
+            }
+        }
+
+        return OrderForJudge(candidates, topUp, id =>
+            !predicted.ContainsKey(id) ? JudgeTier.Unscored
+            : ClearsOn(predicted, id, turn.Floor) ? JudgeTier.Clears
+            : JudgeTier.Under);
+    }
+
+    private static bool ClearsOn(IReadOnlyDictionary<Guid, decimal> predicted, Guid id, decimal floor) =>
+        AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, floor);
+
+    /// <summary>
+    /// Up to <paramref name="need"/> titles of the request's supply that clear the bar and were not
+    /// retrieved (<see cref="JudgeOrderAsync"/>): the supply's own predicate — hard constraints over
+    /// the account's eligibility, at least <see cref="CrowdVotes.MinRelaxVotes"/> votes, inside the
+    /// maturity ceiling, a stored prediction from the active model clearing the bar at badge
+    /// precision — less every title this turn may not show, best prediction first.
+    /// </summary>
+    private static async Task<List<Candidate>> SupplyTopUpAsync(
+        Turn turn,
+        IReelDbContext store,
+        ConversationState next,
+        Guid artifact,
+        IReadOnlyCollection<Guid> retrieved,
+        IReadOnlySet<Guid> exclude,
+        int need,
+        Dictionary<Guid, Title> titles,
+        CancellationToken ct)
+    {
+        var accountId = turn.AccountId;
+        var eligible = new EligibilityQueryBuilder(store);
+        var outside = retrieved.Concat(exclude).Distinct().ToList();
+        // Widened by a tenth in SQL; the exact test is the gate's, at the precision the badge renders.
+        var lowest = turn.Floor - 0.1m;
+        var supply = CrowdVotes.AtLeast(HardConstraintFilter.Apply(eligible.EligibleTitles(accountId), store, next.Hard), CrowdVotes.MinRelaxVotes)
+            .Where(t => !outside.Contains(t.Id));
+        var scored = await store.TitleScores
+            .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact && s.PredictedRating >= lowest)
+            .Where(s => supply.Any(t => t.Id == s.TitleId))
+            .Select(s => new { s.TitleId, s.PredictedRating })
+            .ToListAsync(ct);
+        var ranked = scored
+            .GroupBy(s => s.TitleId)
+            .Select(g => (Id: g.Key, Predicted: g.First().PredictedRating))
+            .Where(s => AskReelGate.Clears(s.Predicted, turn.Floor))
+            .OrderByDescending(s => s.Predicted)
+            .ThenBy(s => s.Id)
+            .Select(s => s.Id)
+            .ToList();
+        if (ranked.Count == 0)
+        {
+            return [];
+        }
+
+        var ceiling = await eligible.MaturityCeilingAsync(accountId, ct);
+        var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
+        var topUp = new List<Candidate>(need);
+        foreach (var chunk in ranked.Chunk(Math.Max(need * 2, RequestJudge.MaxJudged)))
+        {
+            var loaded = await store.Titles.AsNoTracking().Where(t => chunk.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
+            foreach (var id in chunk)
+            {
+                if (loaded.TryGetValue(id, out var title)
+                    && EligibilityQueryBuilder.PassesMaturity(title, ceiling)
+                    && JudgeableTitle(title, legacy, next))
+                {
+                    titles[id] = title;
+                    topUp.Add(new Candidate(id, FusedScore: 0d, Similarity: null, HardConstraintFilter.EvidenceFor(title, next.Hard)));
+                    if (topUp.Count == need)
                     {
-                        predicted[id] = p;
+                        return topUp;
                     }
                 }
             }
         }
 
-        return OrderForJudge(candidates, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, turn.Floor));
+        return topUp;
     }
 
-    /// <summary>The candidates the bar lets through, then the rest — each in retrieval order.</summary>
-    internal static List<Candidate> OrderForJudge(IReadOnlyList<Candidate> candidates, Func<Guid, bool> clearsBar) =>
-        [.. candidates
-            .Select((c, index) => (c, index))
-            .OrderBy(p => clearsBar(p.c.TitleId) ? 0 : 1)
-            .ThenBy(p => p.index)
-            .Select(p => p.c)];
+    /// <summary>Where a retrieved candidate stands against the bar, for the judge's order.</summary>
+    internal enum JudgeTier
+    {
+        /// <summary>Its prediction clears the bar.</summary>
+        Clears,
+
+        /// <summary>No prediction: it may clear the bar once scored.</summary>
+        Unscored,
+
+        /// <summary>Its prediction is under the bar: it can only reach the floor tray.</summary>
+        Under,
+    }
+
+    /// <summary>
+    /// The retrieved candidates that clear the bar, then the supply's top-up, then the retrieved
+    /// candidates with no prediction, then those under the bar — each group in its own order.
+    /// </summary>
+    internal static List<Candidate> OrderForJudge(
+        IReadOnlyList<Candidate> candidates, IReadOnlyList<Candidate> topUp, Func<Guid, JudgeTier> tierOf)
+    {
+        var tiers = candidates.Select(c => (c, Tier: tierOf(c.TitleId))).ToList();
+        return
+        [
+            .. tiers.Where(t => t.Tier == JudgeTier.Clears).Select(t => t.c),
+            .. topUp,
+            .. tiers.Where(t => t.Tier == JudgeTier.Unscored).Select(t => t.c),
+            .. tiers.Where(t => t.Tier == JudgeTier.Under).Select(t => t.c),
+        ];
+    }
 
     /// <summary>
     /// The plan's retrieval: the speculative one when it asked for exactly this query, else a fresh
