@@ -16,6 +16,9 @@ namespace FrostAura.Reel.Infrastructure.Background;
 /// <para>Gate: <c>Background:KeywordVocabulary</c> (default on). Off, the concept resolver still
 /// resolves by containment and synonyms; only its nearest-label fallback has nothing to read. A
 /// failed run is logged and retried on the next tick; it never stops the app.</para>
+///
+/// <para>Each pass reads the whole catalogue for every account, so it runs in a system scope
+/// (<see cref="SystemScopes"/>) and keeps working when <c>Tenancy:UnscopedReads</c> is Throw.</para>
 /// </summary>
 public sealed class KeywordLabelRefreshService(
     IServiceScopeFactory scopeFactory,
@@ -47,8 +50,7 @@ public sealed class KeywordLabelRefreshService(
             await Task.Delay(WarmDelay, stoppingToken);
             try
             {
-                using var warm = scopeFactory.CreateScope();
-                await warm.ServiceProvider.GetRequiredService<KeywordVocabulary>().LabelsAsync(stoppingToken);
+                await WarmAsync(stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -60,9 +62,7 @@ public sealed class KeywordLabelRefreshService(
             {
                 try
                 {
-                    using var scope = scopeFactory.CreateScope();
-                    var refresher = scope.ServiceProvider.GetRequiredService<KeywordLabelRefresher>();
-                    await refresher.RefreshAsync(EmbedsPerRun, stoppingToken);
+                    await RefreshOnceAsync(stoppingToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -76,5 +76,19 @@ public sealed class KeywordLabelRefreshService(
         {
             // Shutting down.
         }
+    }
+
+    /// <summary>One warm-up pass: reads the vocabulary into the shared cache.</summary>
+    internal async Task WarmAsync(CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateSystemScope();
+        await scope.ServiceProvider.GetRequiredService<KeywordVocabulary>().LabelsAsync(ct);
+    }
+
+    /// <summary>One refresh pass: re-counts every label and embeds up to <see cref="EmbedsPerRun"/>.</summary>
+    internal async Task<KeywordLabelRefresh> RefreshOnceAsync(CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateSystemScope();
+        return await scope.ServiceProvider.GetRequiredService<KeywordLabelRefresher>().RefreshAsync(EmbedsPerRun, ct);
     }
 }

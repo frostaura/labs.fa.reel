@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using Microsoft.EntityFrameworkCore;
@@ -24,7 +25,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// keyword labels and genres that carry it, one ranked list per mood. Soft: it finds and orders, never
 /// filters.</item>
 /// <item><b>Semantic</b> — kNN on the positive concept text (moods included, rejected words never),
-/// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/>; an uncached
+/// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/> (none at all
+/// for a concept request, where the arm only re-ranks what the catalogue admits); an uncached
 /// text that misses it falls back to the mean of the precomputed embeddings of the labels the
 /// concepts and moods reached, and only with none of those is the arm fused without and reported in
 /// <see cref="RetrievalResult.SkippedArms"/>. <c>hnsw.iterative_scan</c> is on for every connection
@@ -33,7 +35,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// dark") and its moods' implied lean, relative to the reference titles' centroid when there are any.
 /// It re-ranks what the other arms found, and reads the whole pool only when nothing else spoke.</item>
 /// <item><b>TMDB</b> — <see cref="TmdbDiscoveryArm"/>, the standing conditions sent with the fetch,
-/// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>), run on its own database
+/// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>, and not at all once the
+/// catalogue's evidence holds <see cref="SufficientShare"/> of a concept request), run on its own database
 /// context so it overlaps the catalogue arms. Titles
 /// not yet in the catalogue come back as <see cref="RetrievalResult.Provisional"/>.</item>
 /// </list>
@@ -80,6 +83,13 @@ public sealed class HybridRetriever(
     /// background and its keyword ids are cached for the next turn.
     /// </summary>
     public static readonly TimeSpan TmdbWait = TimeSpan.FromMilliseconds(900);
+
+    /// <summary>
+    /// The share of the request the catalogue's evidence must hold before retrieval stops waiting on
+    /// TMDB for a concept (R1-18): from half the want, TMDB would mostly re-rank and add provisional
+    /// titles the next turn can use; below it, the titles TMDB adds are the answer.
+    /// </summary>
+    public const double SufficientShare = 0.5;
 
     /// <summary>How long the semantic arm waits for its embedding (§4.7: 1.0 s, then fuse without it).</summary>
     public static readonly TimeSpan SemanticBudget = TimeSpan.FromSeconds(1);
@@ -158,6 +168,15 @@ public sealed class HybridRetriever(
             ? [.. lists.GetValueOrDefault("facet", []), .. lists.GetValueOrDefault("fulltext", [])]
             : null;
 
+        // R1-18: with a concept the semantic arm can only re-rank titles that evidence admits, so its
+        // embedding is never waited for (taken if it has arrived, else the reached labels stand in);
+        // a cold concept text takes 1.2-2.7 s, so the 1.0 s wait used to buy nothing on most turns.
+        // TMDB can add titles the catalogue lacks, so it is waited for only while the evidence is
+        // thin — under SufficientShare of the want. Both calls finish in the background either way,
+        // warming the embedding and keyword-id caches for the next turn.
+        var rerankOnlySemantic = admitted is not null;
+        var sufficient = admitted is not null && admitted.Count >= Math.Max(1, (int)Math.Ceiling(want * SufficientShare));
+
         // Moods (soft): one ranked list per mood the catalogue can read — its tone, labels and genres.
         // With a concept they only re-rank what the concept admits (fusion ignores anything else).
         var moodResult = MoodArmResult.Empty;
@@ -179,7 +198,10 @@ public sealed class HybridRetriever(
 
         if (q.Arms.HasFlag(RetrievalArms.Semantic))
         {
-            var vector = await embedding;
+            var waitClock = Stopwatch.StartNew();
+            var late = rerankOnlySemantic && !embedding.IsCompleted;
+            var vector = late ? null : await embedding;
+            timings["semantic-wait"] = waitClock.ElapsedMilliseconds;
             timings["semantic-embed"] = semanticClock.ElapsedMilliseconds;
             if (vector is null && semanticText.Length > 0)
             {
@@ -197,7 +219,12 @@ public sealed class HybridRetriever(
             var anchor = await AnchorAsync(vector, q.Soft.ReferenceTitleIds, ct);
             if (anchor is null)
             {
-                if (semanticText.Length > 0 || q.Soft.ReferenceTitleIds.Count > 0)
+                if (late)
+                {
+                    // Not waited for (it could only re-rank) and no label stood in.
+                    skipped.Add("semantic-late");
+                }
+                else if (semanticText.Length > 0 || q.Soft.ReferenceTitleIds.Count > 0)
                 {
                     skipped.Add("semantic");
                 }
@@ -250,7 +277,7 @@ public sealed class HybridRetriever(
         if (q.Arms.HasFlag(RetrievalArms.Tmdb))
         {
             clock.Restart();
-            var remaining = TmdbWait - started.Elapsed;
+            var remaining = sufficient ? TimeSpan.Zero : TmdbWait - started.Elapsed;
             if (!tmdb.IsCompleted && remaining > TimeSpan.Zero)
             {
                 await Task.WhenAny(tmdb, Task.Delay(remaining, ct));
@@ -579,7 +606,7 @@ public sealed class HybridRetriever(
     /// </summary>
     private Task<(SupplyReport Report, long ElapsedMs)>? StartScopedSupply(RetrievalQuery q, HardConstraints hard, CancellationToken ct)
     {
-        var scope = scopes.CreateScope();
+        var scope = PinnedScope(q.AccountId);
         if (scope.ServiceProvider.GetService<ISupplyReporter>() is not { } scoped)
         {
             scope.Dispose();
@@ -597,6 +624,19 @@ public sealed class HybridRetriever(
                 return (report, clock.ElapsedMilliseconds);
             }
         }
+    }
+
+    /// <summary>
+    /// A new DI scope pinned to the turn's account (R1-01, J-11). A fresh scope has a fresh, unpinned
+    /// <see cref="IAccountContext"/>; without the pin every account-scoped read on it (the account's
+    /// conditions, its seen titles) is an unscoped read — every tenant's rows under Warn, a refused
+    /// query under Throw. Pinned before anything is resolved from it.
+    /// </summary>
+    private IServiceScope PinnedScope(Guid accountId)
+    {
+        var scope = scopes.CreateScope();
+        scope.ServiceProvider.GetService<IAccountContext>()?.SetAccount(accountId);
+        return scope;
     }
 
     /// <summary>The supply report — the overlapped one when it was started, else counted now — with its own time recorded.</summary>
@@ -622,7 +662,7 @@ public sealed class HybridRetriever(
     {
         try
         {
-            using var scope = scopes.CreateScope();
+            using var scope = PinnedScope(q.AccountId);
             var arm = scope.ServiceProvider.GetRequiredService<TmdbDiscoveryArm>();
             var concepts = hard.Concepts.Select(c => ConceptResolver.Normalise(c.UserWords)).Where(w => w.Length > 0).Distinct().ToList();
             var genres = hard.Concepts.SelectMany(c => c.Genres).Distinct().ToList();

@@ -617,7 +617,10 @@ public class TmdbClient(
             Certifications(dto),
             dto.BelongsToCollection is { Id: > 0 } collection
                 ? new TmdbCollectionRef(collection.Id, collection.Name ?? string.Empty)
-                : null);
+                : null,
+            [.. (dto.CreatedBy ?? [])
+                .Where(c => c.Id > 0 && !string.IsNullOrWhiteSpace(c.Name))
+                .Select(c => new TmdbCreator(c.Id, c.Name!.Trim(), string.IsNullOrEmpty(c.ProfilePath) ? null : c.ProfilePath))]);
     }
 
     /// <summary>
@@ -704,9 +707,13 @@ public class TmdbClient(
         [property: JsonPropertyName("release_dates")] ReleaseDatesDto? ReleaseDates = null,
         [property: JsonPropertyName("content_ratings")] ContentRatingsDto? ContentRatings = null,
         // Movies only; null for a standalone film.
-        [property: JsonPropertyName("belongs_to_collection")] CollectionRefDto? BelongsToCollection = null);
+        [property: JsonPropertyName("belongs_to_collection")] CollectionRefDto? BelongsToCollection = null,
+        // TV only: the show's creators. Absent on movies.
+        [property: JsonPropertyName("created_by")] CreatorDto[]? CreatedBy = null);
 
     private sealed record CollectionRefDto(long Id, string? Name);
+
+    private sealed record CreatorDto(long Id, string? Name, [property: JsonPropertyName("profile_path")] string? ProfilePath);
 
     private sealed record CollectionDto(long Id, string? Name, ListResultDto[]? Parts);
 

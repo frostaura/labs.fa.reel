@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Text.RegularExpressions;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 
@@ -74,13 +75,55 @@ public static class FilterBreaches
         return AnyOf(arms);
     }
 
-    /// <summary>An ExcludeKeyword: the value in the name, the overview or any TMDB keyword (containment, as stored).</summary>
+    /// <summary>
+    /// An ExcludeKeyword: the value in the name, the overview or any TMDB keyword (containment, as
+    /// stored). The name and overview are matched case-insensitively by a LITERAL pattern
+    /// (<see cref="LiteralPattern"/>, Postgres <c>~*</c>) rather than <c>lower(…) LIKE</c>: the same
+    /// titles, but <c>lower()</c> over every overview was the single most expensive term in the cost
+    /// meter's one pass — about 130 ms of a 38k-title scan per excluded keyword against 60 ms for the
+    /// pattern (R1-20). The keyword arm stays a case-sensitive containment (the value arrives
+    /// lower-cased from <see cref="FilterRuleSet"/>, as TMDB keywords are stored), read over the labels
+    /// joined by newlines — one string search per title instead of a subplan unnesting every label,
+    /// which halved that arm. A value that itself spans a newline could match across two labels, so
+    /// such a value keeps the per-label form.
+    /// </summary>
     public static Expression<Func<Title, bool>> CarriesKeyword(string keyword)
     {
+        ArgumentNullException.ThrowIfNull(keyword);
         var value = keyword;
-        return t => t.Name.ToLower().Contains(value)
-            || (t.Overview != null && t.Overview.ToLower().Contains(value))
-            || t.Keywords.Any(k => k.Contains(value));
+        var pattern = LiteralPattern(keyword);
+        if (value.Contains('\n', StringComparison.Ordinal))
+        {
+            return t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+                || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase))
+                || t.Keywords.Any(k => k.Contains(value));
+        }
+
+        return t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+            || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase))
+            || string.Join("\n", t.Keywords).Contains(value);
+    }
+
+    /// <summary>
+    /// A Postgres regular expression (ARE) that matches <paramref name="value"/> literally: every
+    /// character that is not a letter or digit is backslash-escaped, which an ARE always reads as that
+    /// character itself ("sci.fi" never matches "sci-fi", "c++" is not a quantifier).
+    /// </summary>
+    public static string LiteralPattern(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        var pattern = new System.Text.StringBuilder(value.Length * 2);
+        foreach (var c in value)
+        {
+            if (!char.IsLetterOrDigit(c))
+            {
+                pattern.Append('\\');
+            }
+
+            pattern.Append(c);
+        }
+
+        return pattern.ToString();
     }
 
     /// <summary>The IncludeGenre allow-list: non-empty and the title carries none of it.</summary>
@@ -123,12 +166,13 @@ public static class FilterBreaches
             return Not(CrowdVotes.ShrunkAtLeast(value));
         }
 
-        Expression<Func<Title, bool>> passes = t =>
-            (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
-                ? t.TmdbVoteAverage
-                : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
-            >= value;
-        return Not(passes);
+        // Spelled as two-valued tests on purpose (R1-06). The resolved reading is NULL in SQL for a
+        // title with no rating, and NOT (NULL >= floor) is NULL, not true: a breach bit built from
+        // it stayed clear, so the meter counted every unrated title as clearing the floor. Each
+        // conjunct here is false (never NULL) when its rating is missing, so the breach is true.
+        return t => !((t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m && t.TmdbVoteAverage >= value)
+            || (!(t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m)
+                && t.TraktRating != null && t.TraktRating > 0m && t.TraktRating >= value));
     }
 
     /// <summary>The MinYear bound: a dated title released before it. An undated title passes.</summary>
@@ -188,12 +232,24 @@ public static class FilterBreaches
     /// The two bigint mask expressions over <paramref name="parameter"/>: bit <see cref="BitOf"/> of a
     /// rule is set when the title breaks it. Computed once per title in SQL, so every count that
     /// relaxes one rule can be read off the masks instead of re-scanning.
+    ///
+    /// <para>Two or more keyword exclusions are tested behind one <see cref="AnyKeyword"/> gate: a
+    /// title the gate rejects breaks none of them, so its keyword bits are 0 without running each
+    /// keyword's own pattern over its overview. The per-keyword patterns then run only for the few
+    /// titles the gate admits. Every bit is unchanged, because each keyword's predicate implies the
+    /// gate; the saving is one overview scan per keyword after the first (two keywords: 81 → 56 ms
+    /// over 38k titles, R1-20).</para>
     /// </summary>
     public static (Expression M0, Expression M1) Masks(
         FilterRuleSet rules, IReadOnlyList<FilterRule> all, ParameterExpression parameter, CrowdFloorMeasure measure = CrowdFloorMeasure.Raw)
     {
+        ArgumentNullException.ThrowIfNull(all);
         Expression m0 = Expression.Constant(0L);
         Expression m1 = Expression.Constant(0L);
+        Expression? gated0 = null;
+        Expression? gated1 = null;
+        bool Gateable(FilterRule rule) => rule.Kind == FilterKind.ExcludeKeyword && !rule.Value.Contains('\n', StringComparison.Ordinal);
+        var gate = AnyKeyword(all.Where(Gateable).Select(r => r.Value).ToList());
         var includeSeen = false;
         for (var i = 0; i < all.Count; i++)
         {
@@ -210,7 +266,18 @@ public static class FilterBreaches
             var bit = BitOf(all, i);
             var breach = BodyOn(Breaks(rules, all[i], measure), parameter);
             var term = Expression.Condition(breach, Expression.Constant(1L << (bit % BitsPerMask)), Expression.Constant(0L));
-            if (bit < BitsPerMask)
+            if (gate is not null && Gateable(all[i]))
+            {
+                if (bit < BitsPerMask)
+                {
+                    gated0 = gated0 is null ? term : Expression.Or(gated0, term);
+                }
+                else
+                {
+                    gated1 = gated1 is null ? term : Expression.Or(gated1, term);
+                }
+            }
+            else if (bit < BitsPerMask)
             {
                 m0 = Expression.Or(m0, term);
             }
@@ -220,7 +287,51 @@ public static class FilterBreaches
             }
         }
 
+        // Each mask carries the gate only when it holds a gated bit, so the gate is never evaluated
+        // for a mask it cannot change.
+        if (gate is not null && gated0 is not null)
+        {
+            m0 = Expression.Or(m0, Expression.Condition(BodyOn(gate, parameter), gated0, Expression.Constant(0L)));
+        }
+
+        if (gate is not null && gated1 is not null)
+        {
+            m1 = Expression.Or(m1, Expression.Condition(BodyOn(gate, parameter), gated1, Expression.Constant(0L)));
+        }
+
         return (m0, m1);
+    }
+
+    /// <summary>
+    /// TRUE when a title MAY carry any of <paramref name="keywords"/>, FALSE when it carries none: the
+    /// name and overview tested once against one alternation of every keyword's
+    /// <see cref="LiteralPattern"/>, plus each keyword's own label containment. Each keyword's
+    /// <see cref="CarriesKeyword"/> implies it, which is what makes it a safe gate. Null for fewer than
+    /// two keywords, where a gate would only add a scan. Values spanning a newline are the caller's to
+    /// leave out: their label arm is per-label, not the joined containment repeated here.
+    /// </summary>
+    public static Expression<Func<Title, bool>>? AnyKeyword(IReadOnlyList<string> keywords)
+    {
+        ArgumentNullException.ThrowIfNull(keywords);
+        var values = keywords.Distinct(StringComparer.Ordinal).ToList();
+        if (values.Count < 2)
+        {
+            return null;
+        }
+
+        var pattern = string.Join("|", values.Select(LiteralPattern));
+        Expression<Func<Title, bool>> text = t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+            || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase));
+        var parameter = text.Parameters[0];
+        var body = text.Body;
+        foreach (var keyword in values)
+        {
+            var value = keyword;
+            Expression<Func<Title, bool>> label = t => string.Join("\n", t.Keywords).Contains(value);
+            body = Expression.OrElse(body, BodyOn(label, parameter));
+        }
+
+        return Expression.Lambda<Func<Title, bool>>(body, parameter);
     }
 
     /// <summary>True when bit <paramref name="bit"/> is set in the masks.</summary>

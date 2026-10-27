@@ -428,7 +428,9 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         var rules = FilterRuleSet.Create(
             ["comedy", "romance", "anime", "thriller"],
             twoAllowListedGenres ? ["drama", "crime"] : ["drama"],
-            ["zombie"],
+            // One keyword runs ungated; three share the AnyKeyword gate (R1-20), so both phrasings of
+            // the keyword bits are held to the subtractive counts over the whole catalogue.
+            twoAllowListedGenres ? ["zombie", "shark", "c++"] : ["zombie"],
             ["en"],
             6.0m,
             2000,
@@ -454,6 +456,95 @@ public class FilterCostMeterTests(PostgresFixture fixture)
                 (rule.Kind, rule.Value, Math.Max(0, without - eligible)),
                 (rule.Kind, rule.Value, Marginal(report, rule.Kind, rule.Value)));
         }
+    }
+
+    /// <summary>
+    /// R1-06: a title with no crowd rating from either source FAILS the floor on the serving path, so
+    /// it breaks the floor in the meter too. In SQL the raw reading is NULL for such a title, and
+    /// NOT (NULL &gt;= floor) is NULL, so the breach bit stayed clear and the meter counted every
+    /// unrated title as eligible — 3,706 against a SQL truth of 3,507 on the founder's rules. Each
+    /// way a title can be unrated is its own case: no TMDB average, a zero TMDB average (TMDB's "no
+    /// votes"), and a zero Trakt rating behind either.
+    /// </summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(0.0, null)]
+    [InlineData(null, 0.0)]
+    [InlineData(0.0, 0.0)]
+    public async Task An_unrated_title_breaks_the_crowd_floor_in_the_meter_as_it_does_in_eligibility(double? tmdb, double? trakt)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"unrated{Guid.NewGuid():N}"[..16];
+        var rated = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.TmdbVoteCount = 900; });
+        var traktOnly = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = null; t.TraktRating = 7.1m; });
+        var unrated = await SeedTitleAsync(t =>
+        {
+            t.Genres = [genre];
+            t.Year = 2016;
+            t.TmdbVoteAverage = (decimal?)tmdb;
+            t.TraktRating = (decimal?)trakt;
+        });
+
+        // Allow-listing a genre only these three carry keeps the counts to this test's own titles.
+        var rules = FilterRuleSet.Create(null, [genre], null, null, 6.0m, null, null);
+        Assert.Equal(new HashSet<Guid> { rated, traktOnly }, (await EligibleAsync(accountId, rules, [rated, traktOnly, unrated])).ToHashSet());
+
+        var report = await MeasureAsync(accountId, rules);
+        Assert.Equal(2, report.Eligible);
+        Assert.Equal(1, Marginal(report, FilterKind.MinCrowdRating, "6.0"));
+        Assert.Equal((await EligibleShrunkAsync(accountId, rules, [rated, traktOnly, unrated])).Count, report.EligibleUnderShrunkFloor);
+    }
+
+    /// <summary>
+    /// A keyword exclusion matches its value LITERALLY and regardless of case in the name and the
+    /// overview, on the persisted path, the draft path and the meter alike. The draft path and the
+    /// meter read a pattern rather than lower(…) (R1-20, for speed), so a value carrying a pattern
+    /// character — "sci.fi", "c++", "(500)" — is the case that would tell the two phrasings apart.
+    /// </summary>
+    [Theory]
+    [InlineData("sci.fi", "A loud SCI.FI romp", "A loud sci-fi romp")]
+    [InlineData("c++", "Coding in C++ at midnight", "Coding in C at midnight")]
+    [InlineData("(500)", "Days (500) of summer", "Days 500 of summer")]
+    [InlineData("zombie", "The ZOMBIE apocalypse", "The zomb ie apocalypse")]
+    public async Task Keyword_exclusions_match_literally_and_ignore_case_on_every_path(string keyword, string matches, string doesNot)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"literal{Guid.NewGuid():N}"[..16];
+        var inOverview = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Overview = matches; });
+        var inName = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Name = $"{matches} {Guid.NewGuid():N}"; });
+        var lookalike = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Overview = doesNot; });
+        var inKeywords = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Keywords = ["night", $"old {keyword} lore"]; });
+
+        // Split across two labels: the labels are searched joined, and a match must never span two.
+        var acrossLabels = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Keywords = [keyword[..2], keyword[2..]]; });
+        var mine = new[] { inOverview, inName, lookalike, inKeywords, acrossLabels };
+        await SeedFilterAsync(accountId, FilterKind.IncludeGenre, genre);
+        await SeedFilterAsync(accountId, FilterKind.ExcludeKeyword, keyword);
+        await SeedFilterAsync(accountId, FilterKind.Language, "*");
+
+        HashSet<Guid> persisted;
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db).EligibleTitles(accountId).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync()).ToHashSet();
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        Assert.Equal(new HashSet<Guid> { lookalike, acrossLabels }, persisted);
+        Assert.Equal(persisted, (await EligibleAsync(accountId, drafted, mine)).ToHashSet());
+        var report = await MeasureAsync(accountId, drafted);
+        Assert.Equal(2, report.Eligible);
+        Assert.Equal(3, Marginal(report, FilterKind.ExcludeKeyword, keyword));
     }
 
     [Fact]
@@ -490,6 +581,67 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         Assert.Equal(new HashSet<Guid> { cartoon, japaneseDrama }, persisted);
         Assert.Equal(persisted, (await EligibleAsync(accountId, drafted, mine)).ToHashSet());
         Assert.True(Marginal(await MeasureAsync(accountId, drafted), FilterKind.ExcludeGenre, "anime") >= 2);
+    }
+
+    /// <summary>
+    /// R1-20: two or more keyword exclusions share one gate in the meter's pass, and only the titles
+    /// it admits run each keyword's own pattern. Every keyword bit must come out exactly as it did
+    /// ungated, whichever field carries the match (name, overview or label), with a regex
+    /// metacharacter in the mix, and with a title that carries two keywords (its marginal for each is
+    /// 0, because relaxing one still leaves it held by the other). The unique allow-listed genre
+    /// scopes every marginal to this test's titles. Checked against the subtractive counts too.
+    /// </summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task Gated_keyword_exclusions_keep_every_keyword_bit(int keywordCount)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"gated{Guid.NewGuid():N}"[..16];
+        string[] keywords = ["gore", "vampire", "clown", "c++"];
+        void Base(Title t)
+        {
+            t.Genres = [genre];
+            t.Year = 2015;
+            t.TmdbVoteAverage = 7.5m;
+        }
+
+        var inName = await SeedTitleAsync(t => { Base(t); t.Name = $"GORE fest {Guid.NewGuid():N}"; });
+        var inOverview = await SeedTitleAsync(t => { Base(t); t.Overview = "A lonely Vampire in Lisbon"; });
+        var inLabels = await SeedTitleAsync(t => { Base(t); t.Keywords = ["night", "evil clown"]; });
+        var metachar = await SeedTitleAsync(t => { Base(t); t.Overview = "Coding in C++ at midnight"; });
+        var two = await SeedTitleAsync(t => { Base(t); t.Name = $"Vampire {Guid.NewGuid():N}"; t.Overview = "Wall-to-wall gore."; });
+        var clean = await SeedTitleAsync(t => { Base(t); t.Overview = "Coding in C at midnight, gor e, vamp ire"; });
+        var mine = new[] { inName, inOverview, inLabels, metachar, two, clean };
+        var used = keywords[..keywordCount];
+        var rules = FilterRuleSet.Create(null, [genre], used, ["*"], null, null, null);
+
+        var holders = new Dictionary<string, Guid[]>
+        {
+            ["gore"] = [inName, two],
+            ["vampire"] = [inOverview, two],
+            ["clown"] = [inLabels],
+            ["c++"] = [metachar],
+        };
+        var expectedEligible = mine.Where(id => !used.Any(k => holders[k].Contains(id))).ToHashSet();
+        Assert.Equal(expectedEligible, (await EligibleAsync(accountId, rules, mine)).ToHashSet());
+
+        var report = await MeasureAsync(accountId, rules);
+        Assert.Equal(expectedEligible.Count, report.Eligible);
+        foreach (var keyword in used)
+        {
+            // Held out by this keyword and no other kept keyword: "two" counts only when its other
+            // keyword is not in the rule set.
+            var alone = holders[keyword].Count(id => !used.Any(other => other != keyword && holders[other].Contains(id)));
+            Assert.Equal((keyword, alone), (keyword, Marginal(report, FilterKind.ExcludeKeyword, keyword)));
+            var relaxed = await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.ExcludeKeyword, keyword)), mine);
+            Assert.Equal((keyword, relaxed.Count - expectedEligible.Count), (keyword, Marginal(report, FilterKind.ExcludeKeyword, keyword)));
+        }
     }
 
     private static int Marginal(FilterCostReport report, FilterKind kind, string value) =>
