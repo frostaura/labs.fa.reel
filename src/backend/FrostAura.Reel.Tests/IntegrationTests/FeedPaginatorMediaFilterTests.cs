@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ml;
@@ -65,7 +66,62 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         Assert.All(showItems, i => Assert.Equal(MediaType.Show, i.Title.MediaType));
     }
 
+    /// <summary>
+    /// HREV1-RET-08: a genre rail serves the genre as its supply counts it. TMDB's TV taxonomy has no
+    /// Thriller, so TV thrillers are tagged by keyword ("psychopath", "cat and mouse") or carry
+    /// Trakt's alias genre ("suspense"); the rail filtered on the tag alone and came back empty on
+    /// Shows while <see cref="RailSupply.ForGenreRailAsync"/> counted 44 clearing the bar. The rail
+    /// must reach the stand-in and alias shows, and must stay exactly as strict as the supply
+    /// predicate everywhere else: a FILM with only a stand-in keyword is not a thriller (TMDB tags
+    /// films with the genre itself), and a show with neither is not one either.
+    /// </summary>
+    [Fact]
+    public async Task Thriller_rail_on_shows_serves_stand_in_and_alias_shows_the_supply_counts()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var standInShows = new List<Guid>
+        {
+            await SeedTitleAsync(MediaType.Show, 21m, genres: ["drama"], keywords: ["psychopath"]),
+            await SeedTitleAsync(MediaType.Show, 20.5m, genres: ["crime"], keywords: ["cat and mouse", "detective"]),
+            await SeedTitleAsync(MediaType.Show, 20m, genres: ["drama"], keywords: ["psychological thriller"]),
+        };
+        var aliasShow = await SeedTitleAsync(MediaType.Show, 19.5m, genres: ["suspense"], keywords: []);
+        var plainShow = await SeedTitleAsync(MediaType.Show, 22m, genres: ["drama"], keywords: ["family"]);
+        var standInFilm = await SeedTitleAsync(MediaType.Movie, 22m, genres: ["drama"], keywords: ["psychopath"]);
+        var taggedFilm = await SeedTitleAsync(MediaType.Movie, 21m, genres: ["thriller"], keywords: []);
+        await SeedActiveArtifactAsync(accountId);
+
+        var shows = await MoreAsync(accountId, media: "show", context: FeedRowContext.Genre, genre: "thriller", limit: 30);
+        var showIds = shows.Select(i => i.Title.Id).ToHashSet();
+        Assert.All(standInShows, id => Assert.Contains(id, showIds));
+        Assert.Contains(aliasShow, showIds);
+        Assert.DoesNotContain(plainShow, showIds);
+        Assert.All(shows, i => Assert.Equal(MediaType.Show, i.Title.MediaType));
+
+        // Every card is one the supply's own predicate counts — the rail and "N clear your bar"
+        // read the same genre.
+        var supplyPredicate = FilterBreaches.ExcludedGenre("thriller").Compile();
+        Assert.All(shows, i => Assert.True(supplyPredicate(i.Title), $"{i.Title.Name} is not a thriller by the supply's predicate"));
+
+        // Both media: the tagged film is a thriller; the film with only a TV stand-in keyword is not.
+        var any = await MoreAsync(accountId, media: null, context: FeedRowContext.Genre, genre: "thriller", limit: 30);
+        var anyIds = any.Select(i => i.Title.Id).ToHashSet();
+        Assert.Contains(taggedFilm, anyIds);
+        Assert.DoesNotContain(standInFilm, anyIds);
+        Assert.DoesNotContain(plainShow, anyIds);
+        Assert.All(any, i => Assert.True(supplyPredicate(i.Title), $"{i.Title.Name} is not a thriller by the supply's predicate"));
+    }
+
     private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(Guid accountId, string media)
+        => await MoreAsync(accountId, media, FeedRowContext.Hero, genre: null, limit: 12);
+
+    private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(
+        Guid accountId, string? media, FeedRowContext context, string? genre, int limit)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId);
@@ -87,7 +143,7 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
                 db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
             cache, NullLogger<FeedPaginator>.Instance);
 
-        var req = new MoreFeedRequest(FeedRowContext.Hero, AnchorTitleId: null, Genre: null, ExcludeTitleIds: [], Limit: 12, MediaType: media);
+        var req = new MoreFeedRequest(context, AnchorTitleId: null, Genre: genre, ExcludeTitleIds: [], Limit: limit, MediaType: media);
         return await paginator.MoreAsync(account, req, CancellationToken.None);
     }
 
@@ -110,7 +166,8 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         return account.Id;
     }
 
-    private async Task<Guid> SeedTitleAsync(MediaType media, decimal popularity)
+    private async Task<Guid> SeedTitleAsync(
+        MediaType media, decimal popularity, string[]? genres = null, string[]? keywords = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -122,7 +179,8 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
             Name = $"{media} {Guid.NewGuid():N}",
             Language = "en", // eligibility defaults to English-only when no language filter is configured
             PosterPath = "/p.jpg",
-            Genres = ["drama"],
+            Genres = genres ?? ["drama"],
+            Keywords = keywords ?? [],
             TmdbPopularity = popularity,
             ReleasedAt = media == MediaType.Movie ? DateTime.UtcNow.AddYears(-1) : null,
             FirstAiredAt = media == MediaType.Show ? DateTime.UtcNow.AddYears(-1) : null,

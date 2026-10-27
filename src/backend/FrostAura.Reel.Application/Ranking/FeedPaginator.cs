@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
@@ -911,8 +912,15 @@ public sealed class FeedPaginator(
 
                 if (req.Context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(req.Genre))
                 {
-                    var genre = req.Genre;
-                    q = q.Where(t => t.Genres.Contains(genre));
+                    // The rail's genre is what its supply counts (RailSupply.ForGenreRailAsync →
+                    // HardConstraintFilter → FilterBreaches.ExcludedGenre): the tag, its alias genres
+                    // (Trakt's "suspense" for thriller), the anime composite and, on a medium whose
+                    // TMDB taxonomy has no id for the genre, its stand-in keywords. On the tag alone
+                    // the Thriller rail on Shows served nothing while its supply said 44 cleared the
+                    // bar (HREV1-RET-08): TMDB's TV list has no Thriller, Horror, Romance, History or
+                    // Music, so those shows are tagged by keyword. One predicate, so the two never
+                    // disagree.
+                    q = q.Where(FilterBreaches.ExcludedGenre(GenreRailSlug(req.Genre)));
                 }
 
                 if (req.Context == FeedRowContext.NewForYou)
@@ -947,6 +955,12 @@ public sealed class FeedPaginator(
     /// </summary>
     public static bool IgnoresGenreFilters(MoreFeedRequest req) =>
         req.Context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(req.Genre);
+
+    /// <summary>
+    /// A genre rail's slug as its supply reads it (<see cref="RailSupply.ForGenreRailAsync"/> trims
+    /// and lower-cases), so a rail requested as " Thriller" serves and counts the same genre.
+    /// </summary>
+    internal static string GenreRailSlug(string genre) => genre.Trim().ToLowerInvariant();
 
     /// <summary>
     /// The "more like this" window: the eligible catalog semantically nearest to the VIEWED title's
@@ -1128,7 +1142,7 @@ public sealed class FeedPaginator(
         try
         {
             if (req.Context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(req.Genre)
-                && TmdbGenres.SlugToIds.TryGetValue(req.Genre, out var ids))
+                && TmdbGenres.SlugToIds.TryGetValue(GenreRailSlug(req.Genre), out var ids))
             {
                 if (wantMovies && ids.Movie is { } movieGenre)
                 {
