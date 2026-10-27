@@ -3,7 +3,7 @@ import type { AskCard, DoneData } from "../askReelStream";
 import { AskStreamError } from "../askReelStream";
 import { chatReducer, failureFor, gridRowOf, initialChatState, type ChatAction } from "./reducer";
 import { failureCopy, refineChips, waitPhrase } from "./copy";
-import { transcriptOf, type ConversationPayload } from "./transcript";
+import { answerRowIndex, transcriptOf, type ConversationPayload } from "./transcript";
 
 /**
  * Chat UI v2 (WS-2 task 3) — the reducer half. Each test drives the state machine with the frames
@@ -242,6 +242,79 @@ describe("v2 none-found, answer, clarify, degraded and plan", () => {
       { type: "done", data: done({ results: [card(2)] }) },
     ]);
     expect(bare.plan).toBeNull();
+  });
+});
+
+/**
+ * R1-32. The server restores the newest SEARCH answer as the grid and skips an item question or a
+ * clarifying question (`SearchTurnMode.LeavesGrid`), but the client anchored that grid — and the
+ * collision notice, and the question the seam names, and the turn a page extends — to the newest
+ * assistant row of any mode. Resume after "is the first one violent?" and the ninja cards sat
+ * under "Yes — it opens on a massacre." with the item question named as what they answered.
+ */
+describe("an item question or a clarifying question never becomes the grid's row (R1-32)", () => {
+  /** A search, then a follow-up whose reply is `mode`. Ids on every assistant row, as the server sends. */
+  function thread(mode: string | null): ConversationPayload {
+    return {
+      id: "c1",
+      turns: [
+        { role: "user", text: "ninja movies", status: "Completed", kind: "ask" },
+        { id: "turn-1", role: "assistant", text: "Ninja picks.", status: "Completed", kind: "ask", mode: "Picks", cards: [card(1), card(2)] },
+        { role: "user", text: "is the first one violent?", status: "Completed", kind: "ask" },
+        { id: "turn-2", role: "assistant", text: "Yes — it opens on a massacre.", status: "Completed", kind: "ask", mode, cards: [] },
+      ],
+      cards: [card(1), card(2)],
+      mode: "Picks",
+      conflict: { message: "Your conditions permanently exclude comedy.", excludedGenres: ["Comedy"] },
+    };
+  }
+
+  it.each(["Answer", "Clarify"])("resumes a thread whose newest reply is %s with the grid under the search reply", (mode) => {
+    const s = chatReducer(initialChatState, { type: "resume", payload: thread(mode) });
+    expect(gridRowOf(s)).toBe(1);
+    expect(answerRowIndex(s.turns)).toBe(1);
+    // The notice explains the grid, so it goes on the grid's reply and nowhere else.
+    expect(s.turns[1].conflict).toBe(true);
+    expect(s.turns[3].conflict).toBeUndefined();
+    // The seam names the question the cards answer, and a page extends THAT turn…
+    expect(s.answeredQuery).toBe("ninja movies");
+    expect(s.pageQuery).toBe("ninja movies");
+    expect(s.pageTurnId).toBe("turn-1");
+    // …while "Ask again" still replays the newest question.
+    expect(s.lastQuery).toBe("is the first one violent?");
+  });
+
+  it.each([["Picks"], ["NoneFound"], [null]])("keeps the newest reply as the grid's row when it is a search (%s)", (mode) => {
+    // Fixture variation, one field: the newest reply's `mode`. Absent reads as Picks, as on the server.
+    const s = chatReducer(initialChatState, { type: "resume", payload: thread(mode) });
+    expect(gridRowOf(s)).toBe(3);
+    expect(answerRowIndex(s.turns)).toBe(3);
+    expect(s.turns[3].conflict).toBe(true);
+    expect(s.answeredQuery).toBe("is the first one violent?");
+    expect(s.pageTurnId).toBe("turn-2");
+  });
+
+  it.each([
+    ["answer", { type: "answer", data: { text: "Yes — it opens on a massacre." } }, "Answer"],
+    ["clarify", { type: "clarify", data: { question: "Which one did you mean?", options: ["Title 1"] } }, "Clarify"],
+  ] as [string, ChatAction, string][])("anchors the live answer's row past a %s reply", (_name, frame, mode) => {
+    const s = run([
+      ...answered("ninja movies", [card(1), card(2)]),
+      { type: "userTurn", message: "is the first one violent?", fresh: false },
+      frame,
+      { type: "done", data: done({ mode }) },
+    ]);
+    expect(gridRowOf(s)).toBe(1);
+    expect(answerRowIndex(s.turns)).toBe(1);
+  });
+
+  it("is minus one when the only reply is an item question's", () => {
+    const s = run([
+      { type: "userTurn", message: "is Heat violent?", fresh: true },
+      { type: "answer", data: { text: "Yes." } },
+      { type: "done", data: done({ mode: "Answer" }) },
+    ]);
+    expect(answerRowIndex(s.turns)).toBe(-1);
   });
 });
 

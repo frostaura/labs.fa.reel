@@ -2,7 +2,7 @@ import { AskStreamError, isCard, isFailedDone, isKnockout, judgeDegraded, type A
 import { excludedTerms } from "./copy";
 import { answeredQuestion, pageIsExhausted, resumedPageTarget, wasPaged, type PageRefusal } from "./paging";
 import {
-  answerRowIndex, lastTurnOutcome, lastUserQuery, markTurnReply, mergeCards, resumedConflict, stoppedTranscript,
+  answerRowIndex, lastTurnOutcome, leavesGrid, lastUserQuery, markTurnReply, mergeCards, resumedConflict, stoppedTranscript,
   transcriptOf, type ChatTurn, type ConversationPayload, type ResumedTail, type TurnAnswer,
 } from "./transcript";
 
@@ -533,11 +533,6 @@ function released(state: State): State {
   };
 }
 
-/** Is this turn one that answers beside the grid rather than replacing it (§4.9 answer, clarify)? */
-function leavesGrid(mode: string | null | undefined): boolean {
-  return mode === "Answer" || mode === "Clarify";
-}
-
 /**
  * The ranking score for a card. The server sends its own `blend` and its order is authoritative,
  * so prefer it: re-deriving a second blend here from the parts produced a subtly different order
@@ -957,7 +952,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (state.appending) return state;
       return {
         ...state,
-        turns: markTurnReply([...state.turns, { role: "assistant", text: action.data.text }], state.turnDegraded),
+        turns: markTurnReply([...state.turns, { role: "assistant", text: action.data.text, besideGrid: true }], state.turnDegraded),
       };
     case "clarify":
       // A question back, with the readings to choose between. Like an answer, it leaves the grid.
@@ -965,7 +960,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state,
         turns: markTurnReply(
-          [...state.turns, { role: "assistant", text: action.data.question, clarifyOptions: action.data.options }],
+          [...state.turns, { role: "assistant", text: action.data.question, clarifyOptions: action.data.options, besideGrid: true }],
           state.turnDegraded,
         ),
       };

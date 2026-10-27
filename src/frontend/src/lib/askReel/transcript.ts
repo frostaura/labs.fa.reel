@@ -50,6 +50,23 @@ export interface ChatTurn {
    * button that asks it; absent on every other reply.
    */
   clarifyOptions?: string[];
+  /**
+   * Assistant rows only: this reply answered BESIDE the grid — an item question, a count or a
+   * clarifying question (§4.9 `answer` / `clarify`, stored as mode `Answer` / `Clarify`). It shows
+   * no cards, so it is never the row the grid belongs to; see {@link answerRowIndex} (R1-32).
+   */
+  besideGrid?: boolean;
+}
+
+/**
+ * Does a turn of this mode answer beside the grid rather than replacing it?
+ *
+ * The server's `SearchTurnMode.LeavesGrid`, verbatim: `Answer` and `Clarify` show no cards, so the
+ * answer on screen is still the search before them — live, and on a resume, which replays the newest
+ * turn that is NOT one of these. Anything else, absent included, is a search.
+ */
+export function leavesGrid(mode: string | null | undefined): boolean {
+  return mode === "Answer" || mode === "Clarify";
 }
 
 /** One earlier answer, as it stood when the thread moved past it. Same card shape as the grid. */
@@ -282,7 +299,8 @@ export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
               ...(t.judgeDegraded ? { unchecked: true } : {}),
             }
             : { role: t.role as "user" | "assistant", text: t.text };
-      return answer ? { ...row, answer } : row;
+      const placed = t.role === "assistant" && !row.failed && leavesGrid(t.mode) ? { ...row, besideGrid: true } : row;
+      return answer ? { ...placed, answer } : placed;
     });
 }
 
@@ -401,7 +419,8 @@ export function questionFor(turns: ChatTurn[], index: number): string {
 }
 
 /**
- * Which transcript row the answer on screen IS — the newest assistant row that is not a failure.
+ * Which transcript row the answer on screen IS — the newest assistant row that is not a failure,
+ * and not a reply that answered beside the grid.
  *
  * R5-01. The anchor for the collision notice was "the newest assistant row", which is right on an
  * ordinary screen and wrong the moment a failed turn sits between the answer and what came after
@@ -412,10 +431,15 @@ export function questionFor(turns: ChatTurn[], index: number): string {
  * A failed row is never the answer — it has none, which is the whole point of it — so skipping it
  * lands on the row whose cards are actually in the grid. -1 when nothing on screen is an answer,
  * which is where the notice falls back to a block of its own.
+ *
+ * R1-32. An item question's or a clarifying question's reply is never the answer either: it showed
+ * no cards, and both the live screen and the resume keep the search before it as the grid. Taking
+ * the newest row of any mode put the restored ninja grid — and its collision notice — under "Yes —
+ * it opens on a massacre." the moment someone asked about one of the cards.
  */
 export function answerRowIndex(turns: ChatTurn[]): number {
   for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === "assistant" && !turns[i].failed) return i;
+    if (turns[i].role === "assistant" && !turns[i].failed && !turns[i].besideGrid) return i;
   }
   return -1;
 }
