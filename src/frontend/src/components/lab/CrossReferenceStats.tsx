@@ -45,7 +45,7 @@ export default function CrossReferenceStats() {
     <section className="fa-card p-5 space-y-4" data-testid="lab-xref">
       <div>
         <h2 className="fa-section-title">Cross-reference — backtests and outcomes</h2>
-        <p className="fa-caption text-fa-frost-dim mt-1">
+        <p className="fa-caption text-3 mt-1">
           Every prompt generation&apos;s offline backtest, newest first, and how titles served under each
           verdict were later rated (all time). An outcome row needs {minimumOutcomes.toLocaleString("en-US")}{" "}
           ratings before it is read as anything.
@@ -57,10 +57,10 @@ export default function CrossReferenceStats() {
           <p className="fa-body text-fa-frost-bright">
             Prompt v{b.promptVersion}
             {b.current && <span className="fa-caption text-fa-success"> · running now</span>}
-            <span className="fa-caption text-fa-frost-dim"> · evaluated {relTime(b.evaluatedAt)} · gating: {b.gating}</span>
+            <span className="fa-caption text-3"> · evaluated {relTime(b.evaluatedAt)} · gating: {b.gating}</span>
           </p>
           <p className="fa-caption text-fa-frost">{xrefBacktestCaveat(b)}</p>
-          <p className="fa-caption text-fa-frost-dim">
+          <p className="fa-caption text-3">
             Separation between what you loved and what you disliked (AUC): {num(b.auc, 3)} — 0.500 would be none.
             Kept titles later averaged {num(b.meanLaterRatingKeep)}, {pct(b.keepLovedRate, 1)} of them loved and{" "}
             {pct(b.keepDislikedRate, 1)} disliked; ruled-out titles averaged {num(b.meanLaterRatingOut)}.
@@ -71,10 +71,10 @@ export default function CrossReferenceStats() {
 
       {online.length > 0 && (
         <div className="border-t border-fa-edge/50 pt-3 space-y-1">
-          <p className="fa-overline text-fa-frost-dim">online outcomes</p>
+          <p className="fa-overline text-3">online outcomes</p>
           {online.map((o) => (
             <p key={o.verdict} className="fa-caption text-fa-frost" data-testid="lab-xref-online-row">
-              <span className="text-fa-frost-dim">{xrefVerdictLabel(o.verdict)}:</span> {xrefOnlineNote(o)} · loved{" "}
+              <span className="text-3">{xrefVerdictLabel(o.verdict)}:</span> {xrefOnlineNote(o)} · loved{" "}
               {pct(o.lovedRate, 1)} · disliked {pct(o.dislikedRate, 1)}
             </p>
           ))}

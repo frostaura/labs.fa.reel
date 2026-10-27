@@ -30,12 +30,12 @@ import {
   NO_MODEL_SOURCE_NOTE,
   PROVENANCE_NOTE,
   WINDOW_LABELS,
-  agreementNote,
   biasNote,
   headlineSentence,
   learnedSentence,
   num,
   offeredWindows,
+  outcomeDelay,
   pct,
   signed,
   singleWindowNote,
@@ -106,10 +106,11 @@ function MomentCard({ moment }: { moment: AccuracyMoment }) {
           {moment.predicted.toFixed(1)} → {moment.actual}
         </span>
       </p>
-      {(where || moment.daysToOutcome != null) && (
-        <p className="fa-caption text-3 truncate">
-          {where ?? "scored"}
-          {moment.daysToOutcome != null && ` · ${moment.daysToOutcome}d`}
+      {where && <p className="fa-caption text-3 truncate">{where}</p>}
+      {/* Said in words (HREV1-D09): a bare "· 41d" did not say 41 days of what. */}
+      {moment.daysToOutcome != null && (
+        <p className="fa-caption text-3" data-testid="moment-delay">
+          {outcomeDelay(moment.daysToOutcome)}
         </p>
       )}
     </Link>
@@ -234,7 +235,10 @@ export default function TrackRecord() {
         )}
 
         {!empty && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+          // Three tiles, not four (HREV1-D09): the rank-agreement statistic lives on Lab, as "rank
+          // agreement (ρ ± SE)" over its own named population. Printed here as well, as a bare
+          // "agreement 0.157", it put two different numbers under the same question.
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
             <div className="fa-card px-4 py-3">
               <p className="fa-stat-label">average miss</p>
               <p className="fa-stat-value">{num(data.headline.meanAbsoluteError)}</p>
@@ -245,12 +249,7 @@ export default function TrackRecord() {
               <p className="fa-stat-value">{signed(data.headline.bias)}</p>
               <p className="fa-caption text-3 mt-1">{biasNote(data.headline.bias)}</p>
             </div>
-            <div className="fa-card px-4 py-3">
-              <p className="fa-stat-label">agreement</p>
-              <p className="fa-stat-value">{num(data.headline.correlation, 3)}</p>
-              <p className="fa-caption text-3 mt-1">{agreementNote(data.headline.correlation)}</p>
-            </div>
-            <div className="fa-card px-4 py-3">
+            <div className="fa-card px-4 py-3 col-span-2 sm:col-span-1" data-testid="headline-scored-on">
               <p className="fa-stat-label">scored on</p>
               <p className="fa-stat-value">{data.headline.n}</p>
               <p className="fa-caption text-3 mt-1">

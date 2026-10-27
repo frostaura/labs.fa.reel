@@ -177,13 +177,15 @@ test.describe("track record", () => {
     await expect(provenance).not.toContainText("judged on internally");
 
     const headline = page.getByTestId("headline");
-    // The average miss, the direction of the miss, and the fact that the ordering carries no
-    // signal — all three stated, none softened.
+    // The average miss and the direction of the miss — both stated, neither softened.
     await expect(headline).toContainText("1.94");
     await expect(headline).toContainText("+0.37");
     await expect(headline).toContainText("Reel promises more than you give");
-    await expect(headline).toContainText("no relationship worth the name");
     await expect(headline).toContainText("116");
+    // HREV1-D09: no rank statistic here. Lab carries rank agreement (ρ ± SE) over its own named
+    // population; a bare "agreement" here put a second, different number under the same question.
+    await expect(headline).not.toContainText(/agreement/i);
+    await expect(headline).not.toContainText("does the order match yours?");
   });
 
   test("says out loud when the numbers come from the weaker retro evidence", async ({ page }) => {
@@ -215,6 +217,10 @@ test.describe("track record", () => {
     await expect(moments.first()).toContainText("Succubus");
     await expect(moments.first()).toContainText("9.8 → 3");
     await expect(moments.first()).toContainText("tonight's picks");
+    // HREV1-D09: the day count says what it counts, rather than "· 11d".
+    await expect(moments.first().getByTestId("moment-delay")).toHaveText("rated 11 days after it was shown");
+    await expect(moments.nth(1).getByTestId("moment-delay")).toHaveText("rated 7 days after it was shown");
+    await expect(moments.first()).not.toContainText(/\b\d+d\b/);
   });
 
   test("shows the funnel and the counterfactual, including a negative gap", async ({ page }) => {

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  agreementNote,
   offeredWindows,
   singleWindowNote,
   biasNote,
   headlineSentence,
   learnedSentence,
+  outcomeDelay,
   NO_MODEL_SOURCE_NOTE,
   num,
   pct,
@@ -95,20 +95,29 @@ describe("sourceNote", () => {
   });
 });
 
-describe("biasNote and agreementNote", () => {
+describe("biasNote", () => {
   it("names which way the model is wrong", () => {
     expect(biasNote(0.37)).toBe("Reel promises more than you give");
     expect(biasNote(-0.4)).toBe("Reel sells titles short");
   });
+});
 
-  it("calls a near-zero correlation what it is instead of 'still learning'", () => {
-    // The live value is −0.004. Dressing that up as progress is the single most tempting
-    // dishonesty available on this page.
-    expect(agreementNote(-0.004)).toBe("no relationship worth the name");
-    expect(agreementNote(0.42)).toBe("does the order match yours?");
-    expect(agreementNote(null)).toBe("not measurable yet");
+describe("outcomeDelay (HREV1-D09)", () => {
+  it("says what the day count measures, in words", () => {
+    expect(outcomeDelay(41)).toBe("rated 41 days after it was shown");
+    expect(outcomeDelay(3)).toBe("rated 3 days after it was shown");
+  });
+
+  it("singular for one day, and the same day for zero", () => {
+    expect(outcomeDelay(1)).toBe("rated 1 day after it was shown");
+    expect(outcomeDelay(0)).toBe("rated the day it was shown");
+  });
+
+  it("groups a long wait with an invariant separator", () => {
+    expect(outcomeDelay(1200)).toBe("rated 1,200 days after it was shown");
   });
 });
+
 
 describe("learnedSentence", () => {
   const learned = (overrides: Partial<NonNullable<AccuracyPayload["learnedThisWeek"]>> = {}) => ({

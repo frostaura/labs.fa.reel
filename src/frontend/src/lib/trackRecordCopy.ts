@@ -75,13 +75,12 @@ export function biasNote(bias: number): string {
 }
 
 /**
- * What the correlation means, plainly. Near zero is the honest reading of the founder's live data
- * and it must not be dressed up as "still learning" — the order the model puts titles in currently
- * bears no relationship to the order he does.
+ * How long after Reel showed a title it came back rated, in words (HREV1-D09). The card used to
+ * print "· 41d", which said neither what the 41 days measured nor that it was days.
  */
-export function agreementNote(correlation: number | null): string {
-  if (correlation == null) return "not measurable yet";
-  return Math.abs(correlation) < 0.1 ? "no relationship worth the name" : "does the order match yours?";
+export function outcomeDelay(days: number): string {
+  if (days <= 0) return "rated the day it was shown";
+  return `rated ${days.toLocaleString("en-US")} ${days === 1 ? "day" : "days"} after it was shown`;
 }
 
 /**
