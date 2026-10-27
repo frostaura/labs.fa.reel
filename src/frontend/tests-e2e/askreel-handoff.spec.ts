@@ -3,6 +3,7 @@ import {
   SESSION_FOUNDER, askAbortLive, askEnd, askPush, askRequests, mockJson, stubAskReel, stubEventSource,
   waitForAsk,
 } from "./helpers";
+import { mockHomeChrome } from "./home-chrome";
 
 /**
  * The Home → /search hand-off.
@@ -68,6 +69,10 @@ const gridNames = (page: Page) => page.locator('[data-testid="semantic-results"]
  * never asked anything, "stored" serves the thread above from every conversation route.
  */
 async function boot(page: Page, opts: { resume?: "none" | "stored" } = {}) {
+  // The hand-off starts on Home, and Home asks for its rails, digest and accuracy around the picks.
+  // Chromium usually leaves for /search before they fire; WebKit under load does not, and the
+  // unmocked-API reporter fails the run. Registered first, so every mock below wins.
+  await mockHomeChrome(page);
   await stubEventSource(page);
   await stubAskReel(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
