@@ -89,31 +89,29 @@ public sealed partial class LiveSearchExpansionService
 
     /// <summary>
     /// How many of a person's credits the account has seen (watched or rated): every catalogued title
-    /// the supply's person predicate credits to them in the request's media — the count v2 and the
-    /// none-found supply give — plus any title on TMDB's credit page the catalogue holds no credit row
-    /// for yet. Not narrowed by the account's conditions: "you've seen N" is a fact about the person's
-    /// work and the account's history, and the conditions only decide what may be offered.
+    /// the supply's person predicate credits to them in the request's media — the number v2 and the
+    /// none-found supply give for the same question. Not narrowed by the account's conditions: "you've
+    /// seen N" is a fact about the person's work and the account's history, and the conditions only
+    /// decide what may be offered.
     ///
-    /// <para><b>Why (HREV2-ASK-03).</b> It was counted over the discovered titles alone — TMDB's forty
-    /// newest credits — inside the conditions, so "Liam Neeson movies" said "You've seen 11" to an
-    /// account that had seen 39 of his catalogued films, and v2 said 39 for the same question.</para>
+    /// <para><b>Why (HREV2-ASK-03).</b> It was counted over the discovered titles — TMDB's forty newest
+    /// credits — inside the conditions, so "Liam Neeson movies" said "You've seen 11" to an account
+    /// that had seen 39 of his catalogued films, while v2 said 39. TMDB's page is not a second source
+    /// either: it lists uncredited cameos the catalogue's credits leave out (his voice in Star Wars:
+    /// The Rise of Skywalker), and counting those made v1 say 40 where v2 says 39.</para>
     /// </summary>
-    private async Task<int> SeenCreditCountAsync(
-        Guid accountId, Retrieval.HardConstraints hard, IReadOnlyList<Guid> discovered, IReadOnlyList<MediaType> media, CancellationToken ct)
+    private async Task<int> SeenCreditCountAsync(Guid accountId, Retrieval.HardConstraints hard, CancellationToken ct)
     {
+        if (hard.People.Count == 0)
+        {
+            return 0;
+        }
+
         var seen = db.Titles.Where(t =>
             db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
             || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id));
         var person = new Retrieval.HardConstraints([], hard.People, null, null, hard.Media);
-        var credited = hard.People.Count > 0
-            ? await Retrieval.HardConstraintFilter.Apply(seen, db, person).Select(t => t.Id).ToListAsync(ct)
-            : [];
-        var onPage = discovered.Count == 0
-            ? []
-            : (await seen.Where(t => discovered.Contains(t.Id)).ToListAsync(ct))
-                .Where(t => MatchesMedia(t, media))
-                .Select(t => t.Id);
-        return credited.Union(onPage).Count();
+        return await Retrieval.HardConstraintFilter.Apply(seen, db, person).CountAsync(ct);
     }
 
     /// <summary>

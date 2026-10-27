@@ -597,7 +597,7 @@ public sealed partial class LiveSearchExpansionService(
             {
                 // The reply counts what it holds back and names none of it (FD-3): the model's sentence
                 // was written before any credit was looked up and can name a seen title.
-                var seenCredits = await SeenCreditCountAsync(accountId, hard, discovered, intent.MediaTypes, ct);
+                var seenCredits = await SeenCreditCountAsync(accountId, hard, ct);
                 var shown = Math.Min(eligible.Count, PersonReturnCount);
                 var personReply = agentReply.Degraded
                     ? modelSentence

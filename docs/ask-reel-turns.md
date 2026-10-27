@@ -659,8 +659,9 @@ same default (HREV2-ASK-03): its person path reads the account's full eligibilit
 person's catalogued credits as well as TMDB's newest-first credit page, and its reply is the
 composer's counted sentence, not the model's, which was written before any credit was looked up.
 "You've seen N" is the same number in both engines: every seen title the person predicate credits to
-them in the request's media (plus, in v1, a page title not yet credited), whatever the account's
-conditions hold out — v1 once counted the credit page alone and said 11 where v2 said 39.
+them in the request's media, whatever the account's conditions hold out — v1 once counted TMDB's
+credit page alone and said 11 where v2 said 39. The page is not counted beside the credits either:
+it lists uncredited cameos the catalogue leaves out, which made v1 say 40.
 
 ### Pre-v2 conversations
 

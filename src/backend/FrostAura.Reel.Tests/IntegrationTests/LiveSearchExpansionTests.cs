@@ -104,25 +104,29 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         var inception = Random.Shared.NextInt64(1_000_000_000, 2_000_000_000);
         var tenet = inception + 1;
         var accountId = await SeedAccountAsync();
-        await SeedSeenTitleAsync(accountId, tmdbId: inception, name: "Inception", seenBy);
+        // Credited in the catalogue, as a synced title is: the seen count reads the credits (HREV2-ASK-03).
+        // Named for this case alone: titles are global, and an earlier case's Nolan films are unseen here.
+        var director = $"Christopher Nolan {Guid.NewGuid():N}"[..26];
+        var nolan = await SeedPersonAsync(director);
+        await SeedSeenTitleAsync(accountId, tmdbId: inception, name: "Inception", seenBy, creditedTo: (nolan, CreditRole.Director));
         if (bothSeen)
         {
-            await SeedSeenTitleAsync(accountId, tmdbId: tenet, name: "Tenet", seenBy);
+            await SeedSeenTitleAsync(accountId, tmdbId: tenet, name: "Tenet", seenBy, creditedTo: (nolan, CreditRole.Director));
         }
 
         var tmdb = new FakeTmdbClient
         {
-            PersonResult = new TmdbPerson(525, "Christopher Nolan", "Directing"),
+            PersonResult = new TmdbPerson(525, director, "Directing"),
             PersonCredits =
             [
                 new(inception, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
                 new(tenet, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
             ],
         };
-        var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director), "Christopher Nolan made Inception and Tenet.");
+        var agent = new FakePersonAgent(new PersonQuery(director, PersonRole.Director), $"{director} made Inception and Tenet.");
         var (service, events) = BuildService(accountId, tmdb, out var emit, agent);
 
-        await service.StreamAsync("show me all movies Christopher Nolan directs", region: "US", emit, CancellationToken.None);
+        await service.StreamAsync($"show me all movies {director} directs", region: "US", emit, CancellationToken.None);
 
         Assert.True(tmdb.PersonCreditFetches > 0, "the director query must route through person credits, not keyword/title search");
 
@@ -144,7 +148,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         {
             var names = done.Data.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("name").GetString()).ToList();
             Assert.Equal(["Tenet"], names);
-            Assert.Equal("You've seen 1 title directed by Christopher Nolan; here is one you haven't.", reply);
+            Assert.Equal($"You've seen 1 title directed by {director}; here is one you haven't.", reply);
         }
     }
 
@@ -153,14 +157,17 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     /// alone, inside the account's conditions: "Liam Neeson movies" said "You've seen 11" when the
     /// account had seen 39 of his catalogued films, and offered two titles under the bar while four
     /// that cleared it sat past the page. The seen count is now the catalogue's credits by the same
-    /// person predicate the supply and v2 count with (plus any page title not yet credited), whatever
-    /// the conditions hold out; the shelf takes the catalogued credits too. Varied over how many seen
-    /// credits sit past the page, and over one that the account's conditions hold out.
+    /// person predicate the supply and v2 count with, whatever the conditions hold out; the shelf takes
+    /// the catalogued credits too. Varied over how many seen credits sit past the page, over one the
+    /// account's conditions hold out, and over none at all. A seen title on TMDB's page with no credit
+    /// row (his uncredited voice in The Rise of Skywalker, live) is not counted, or v1 says 40 where
+    /// v2 says 39.
     /// </summary>
     [Theory]
     [InlineData(3, false)]
     [InlineData(3, true)]
     [InlineData(0, true)]
+    [InlineData(0, false)]
     public async Task A_person_reply_counts_every_seen_credit_and_offers_unseen_ones_past_the_discovery_page(int offPageSeen, bool heldByConditions)
     {
         if (!Fixture.Available)
@@ -206,9 +213,13 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         var done = Assert.Single(events, e => e.Event == "done");
         var names = done.Data.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("name").GetString()).ToList();
         Assert.Equal(["Off Page Unseen", "Page Unseen"], names.Order());
-        var seen = 1 + offPageSeen + (heldByConditions ? 1 : 0);
+        var seen = offPageSeen + (heldByConditions ? 1 : 0);
         var reply = string.Concat(events.Where(e => e.Event == "assistant-message").Select(e => e.Data.GetProperty("text").GetString()));
-        Assert.Equal($"You've seen {seen} {(seen == 1 ? "title" : "titles")} starring {name}; here are 2 you haven't.", reply);
+        Assert.Equal(
+            seen == 0
+                ? $"Here are 2 starring {name} you haven't seen."
+                : $"You've seen {seen} {(seen == 1 ? "title" : "titles")} starring {name}; here are 2 you haven't.",
+            reply);
     }
 
     [Fact]
@@ -553,8 +564,12 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         await db.SaveChangesAsync();
     }
 
-    /// <summary>A title the account has seen — watched (the default) or only rated (<paramref name="seenBy"/> "rating").</summary>
-    private async Task SeedSeenTitleAsync(Guid accountId, long tmdbId, string name, string seenBy = "watch")
+    /// <summary>
+    /// A title the account has seen — watched (the default) or only rated (<paramref name="seenBy"/>
+    /// "rating") — credited to <paramref name="creditedTo"/> when given.
+    /// </summary>
+    private async Task SeedSeenTitleAsync(
+        Guid accountId, long tmdbId, string name, string seenBy = "watch", (Guid Person, CreditRole Role)? creditedTo = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -568,6 +583,11 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
             CreatedAt = DateTime.UtcNow,
         };
         db.Add(title);
+        if (creditedTo is { } credit)
+        {
+            db.TitleCredits.Add(new TitleCredit { Id = Guid.NewGuid(), TitleId = title.Id, PersonId = credit.Person, Role = credit.Role });
+        }
+
         if (seenBy == "rating")
         {
             db.UserRatings.Add(new UserRating
