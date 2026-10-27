@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -177,15 +178,12 @@ public static class PersonEndpoints
                 character = creditsByTitle.TryGetValue(x.Title.Id, out var a) ? a.Character : null,
             }).ToList();
 
-            // Derived affinity = shrunken mean of the user's ratings of this person's titles.
-            var userMean = await db.UserRatings
-                .Where(r => r.AccountId == accountId
-                    && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
-                .Select(r => (double?)r.Rating)
-                .AverageAsync(ct) ?? 7d;
+            // "You rate their work X on average across N titles": the plain mean of the user's own
+            // ratings of this person's titles, over ratedTitleCount of them (HREV2-D-01). It used to be
+            // the shrunken model value, which read 6.4 for three titles rated 7, 5 and 6.
             var ratedInFilmography = filmography.Where(f => f.userRating != null).Select(f => (short)f.userRating!).ToList();
             decimal? derivedAffinity = ratedInFilmography.Count > 0
-                ? Math.Round(TasteMath.ShrunkenMean(ratedInFilmography, (decimal)userMean), 2)
+                ? Math.Round(VerifiedPeople.PlainMean(ratedInFilmography), 2)
                 : null;
 
             return Results.Ok(new

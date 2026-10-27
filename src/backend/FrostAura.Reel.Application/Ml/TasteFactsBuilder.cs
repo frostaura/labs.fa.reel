@@ -416,18 +416,24 @@ public sealed class TasteFactsBuilder(
     /// <see cref="VerifiedPeople"/> — a person seen once is a coincidence, and the narrative must
     /// not present one as a preference. The role is the one the person most often holds in this
     /// account's rated library, so a director is described as a director.
+    ///
+    /// <para>Ranked by the shrunken affinity, but the fact carries the PLAIN mean of the user's own
+    /// ratings of the person's titles, each title once (HREV2-D-01): the narrative quotes it as what
+    /// the user gives this person's work, and a shrunken 7.2 for titles rated 7, 9 and 7 is not that.</para>
     /// </summary>
     private async Task<List<PersonFact>> VerifiedPeopleAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
     {
-        var eligible = taste.PersonRatings
-            .Where(kv => kv.Value.Count >= VerifiedPeople.MinRatedTitles)
-            .Select(kv => new
+        var eligible = taste.PersonRatings.Keys
+            .Select(personId => new { PersonId = personId, Own = VerifiedPeople.OwnRatings(taste, personId) })
+            .Where(p => p.Own.Count >= VerifiedPeople.MinRatedTitles)
+            .Select(p => new
             {
-                PersonId = kv.Key,
-                Average = TasteMath.ShrunkenMean(kv.Value, taste.UserMean),
-                kv.Value.Count,
+                p.PersonId,
+                Shrunk = TasteMath.ShrunkenMean(p.Own.Sum(r => (decimal)r), p.Own.Count, taste.UserMean),
+                Average = VerifiedPeople.PlainMean(p.Own),
+                p.Own.Count,
             })
-            .OrderByDescending(p => p.Average)
+            .OrderByDescending(p => p.Shrunk)
             .ThenByDescending(p => p.Count)
             .Take(TopPeople * 3)
             .ToList();

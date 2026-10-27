@@ -178,7 +178,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
         /// take its WHOLE fold out of every pool rather than its own rating alone. Null only where a
         /// caller built a state by hand; <see cref="Build"/> then falls back to leave-one-out.
         /// </summary>
-        FoldPools? Folds = null);
+        FoldPools? Folds = null,
+        /// <summary>
+        /// The user's OWN rating of each title a person was credited on, per capacity: title → rating,
+        /// one entry per title, with no explicit person rating folded in. What every printed "you rate
+        /// X N on average" is computed from (<see cref="Ranking.VerifiedPeople.OwnRatings(TasteState, Guid, CreditRole)"/>),
+        /// because <see cref="PersonRoleRatings"/> is a model input: an explicit person rating replaces
+        /// it with pseudo-observations. Null only where a caller built a state by hand.
+        /// </summary>
+        IReadOnlyDictionary<(Guid PersonId, CreditRole Role), IReadOnlyDictionary<Guid, short>>? PersonRoleTitleRatings = null);
 
     /// <summary>
     /// The rating-mean pools (the overall mean the shrinkage pulls toward, genre, decade, person and
@@ -529,7 +537,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
             notInterestedCentroid,
             movieRatedShare,
             personRoleRatings,
-            OutOfFoldPools ? new FoldPools(foldOverall, foldGenre, foldDecade, foldPerson, foldContrarian, foldGenreContrarian) : null);
+            OutOfFoldPools ? new FoldPools(foldOverall, foldGenre, foldDecade, foldPerson, foldContrarian, foldGenreContrarian) : null,
+            personRoleTitles.ToDictionary(kv => kv.Key, kv => (IReadOnlyDictionary<Guid, short>)kv.Value));
 
         static void Add<TKey>(Dictionary<TKey, (int Count, decimal Sum)> pool, TKey key, decimal value)
             where TKey : notnull

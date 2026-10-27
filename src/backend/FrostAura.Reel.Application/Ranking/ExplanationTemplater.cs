@@ -22,8 +22,13 @@ public static partial class ExplanationTemplater
     /// </summary>
     public const string GenericFallback = "Strong fit with your taste profile.";
 
-    /// <summary>A person the user has actually rated (count ≥ 2), with their shrunken affinity.</summary>
-    public record PersonAffinity(string Name, decimal Affinity);
+    /// <summary>
+    /// A person the user has actually rated (≥ 2 titles in this capacity), with the PLAIN mean of the
+    /// user's own ratings of those <paramref name="TitleCount"/> titles — the number every "you rate X
+    /// N on average" clause prints (HREV2-D-01). Never the model's shrunken affinity: that is pulled
+    /// toward the user's overall mean and is not what they gave this person's work.
+    /// </summary>
+    public record PersonAffinity(string Name, decimal Average, int TitleCount = VerifiedPeople.MinRatedTitles);
 
     /// <summary>Shared empty person map — a title with no user-rated cast/crew grounds no name clause.</summary>
     public static readonly IReadOnlyDictionary<CreditRole, PersonAffinity> NoPersons =
@@ -404,18 +409,18 @@ public static partial class ExplanationTemplater
             // tier" the user cannot verify on the card.
             "castAffinity" or "lovedCastCount" when Verified(context, CreditRole.Actor) is { } actor =>
                 Pick(id, seed,
-                    string.Create(CultureInfo.InvariantCulture, $"you rate {actor.Name} {actor.Affinity:0.0} on average"),
-                    string.Create(CultureInfo.InvariantCulture, $"{actor.Name} is in this — {Rated(actor.Affinity)} for you on average"),
-                    string.Create(CultureInfo.InvariantCulture, $"stars {actor.Name}, whose work you rate {actor.Affinity:0.0}")),
+                    string.Create(CultureInfo.InvariantCulture, $"you rate {actor.Name} {actor.Average:0.0} on average"),
+                    string.Create(CultureInfo.InvariantCulture, $"{actor.Name} is in this — {Rated(actor.Average)} for you on average"),
+                    string.Create(CultureInfo.InvariantCulture, $"stars {actor.Name}, whose work you rate {actor.Average:0.0}")),
             "directorAffinity" when Verified(context, CreditRole.Director) is { } director =>
                 Pick(id, seed,
-                    string.Create(CultureInfo.InvariantCulture, $"you rate {director.Name} {director.Affinity:0.0} on average"),
-                    string.Create(CultureInfo.InvariantCulture, $"directed by {director.Name}, who you rate {director.Affinity:0.0}"),
-                    string.Create(CultureInfo.InvariantCulture, $"{director.Name} directs — you rate them {director.Affinity:0.0}")),
+                    string.Create(CultureInfo.InvariantCulture, $"you rate {director.Name} {director.Average:0.0} on average"),
+                    string.Create(CultureInfo.InvariantCulture, $"directed by {director.Name}, who you rate {director.Average:0.0}"),
+                    string.Create(CultureInfo.InvariantCulture, $"{director.Name} directs — you rate them {director.Average:0.0}")),
             "writerAffinity" when Verified(context, CreditRole.Writer) is { } writer =>
                 Pick(id, seed,
-                    string.Create(CultureInfo.InvariantCulture, $"you rate {writer.Name} {writer.Affinity:0.0} on average"),
-                    string.Create(CultureInfo.InvariantCulture, $"written by {writer.Name}, who you rate {writer.Affinity:0.0}")),
+                    string.Create(CultureInfo.InvariantCulture, $"you rate {writer.Name} {writer.Average:0.0} on average"),
+                    string.Create(CultureInfo.InvariantCulture, $"written by {writer.Name}, who you rate {writer.Average:0.0}")),
             "castAffinity" or "lovedCastCount" or "directorAffinity" or "writerAffinity" => null,
             "userGenreAffinity" when TopRatedGenre(context) is { } genre =>
                 Pick(id, seed,
