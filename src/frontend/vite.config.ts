@@ -57,7 +57,14 @@ export default defineConfig({
         short_name: "Reel",
         theme_color: "#0B1B30",
         background_color: "#06121F",
-        display: "standalone"
+        display: "standalone",
+        // Rendered from the brand mark by `npm run pwa:icons` (scripts/pwaIcons.ts). Without them an
+        // install got a browser-made letter tile (PH-11); pwa-install.preview.spec decodes each one.
+        icons: [
+          { src: "/pwa-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/pwa-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          { src: "/pwa-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
+        ]
       },
       injectManifest: {
         globPatterns: ["**/*.{js,css,html,svg,png,ico,webp,woff2}"],

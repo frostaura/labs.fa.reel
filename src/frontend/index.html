@@ -2,9 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: without it every env(safe-area-inset-*) is 0 and the tab bar's and the
+         composer's home-indicator padding never applies on an iPhone (PH-11). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0B1B30" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- The iPhone home-screen icon (Safari reads no manifest icons); remade by `npm run pwa:icons`. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <title>Reel</title>
     <link rel="preconnect" href="https://image.tmdb.org">
   </head>
