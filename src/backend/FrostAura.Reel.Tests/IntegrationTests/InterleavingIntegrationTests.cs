@@ -479,6 +479,7 @@ public class InterleavingIntegrationTests(PostgresFixture fixture)
             .ToDictionaryAsync(e => e.TitleId);
 
         Assert.NotEmpty(items);
+        Assert.Contains(items.GroupBy(i => (i.Row, i.AnchorTitleId)), row => row.Count() >= 3); // alternation is tested, not implied by two cards
         foreach (var row in items.GroupBy(i => (i.Row, i.AnchorTitleId)))
         {
             var policies = row.Select(i => exposures[i.TitleId].PolicyId).ToList();
@@ -487,6 +488,16 @@ public class InterleavingIntegrationTests(PostgresFixture fixture)
             if (row.Count() >= 2)
             {
                 Assert.Equal(2, policies.Distinct().Count());
+            }
+
+            // "Alternately" (R1-48): in the order the row is served, the rankers take turns — no two
+            // neighbouring cards come from the same ranker, so the counts differ by at most one.
+            var served = row.OrderBy(i => i.Rank).Select(i => exposures[i.TitleId].PolicyId).ToList();
+            for (var i = 1; i < served.Count; i++)
+            {
+                Assert.True(
+                    served[i] != served[i - 1],
+                    $"row {row.Key.Row}: cards {i - 1} and {i} both came from {served[i]} ({string.Join(", ", served)})");
             }
         }
     }
