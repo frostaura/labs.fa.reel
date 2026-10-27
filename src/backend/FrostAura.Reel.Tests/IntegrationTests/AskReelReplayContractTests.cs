@@ -180,9 +180,15 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
     /// F4-06, the read half. The client restores the notice and the "under your conditions" pill
     /// from the same payload that restores the cards, on both routes that hand a stored turn back —
     /// and as a JSON OBJECT, not a string, so nobody parses it twice.
+    ///
+    /// <para>R1-29, varied over the stored wording: a notice stored before the fix said "permanently
+    /// exclude", which was never true (conditions are editable), and a resume must not keep repeating
+    /// it — both routes hand back the corrected sentence, whichever wording the row holds.</para>
     /// </summary>
-    [Fact]
-    public async Task A_resumed_thread_and_a_reconnected_turn_both_carry_the_stored_notice()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_resumed_thread_and_a_reconnected_turn_both_carry_the_stored_notice(bool storedBeforeR129)
     {
         if (!fixture.Available)
         {
@@ -192,7 +198,11 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
         var (accountId, client) = await SignInAsync($"replay-conflict-{Guid.NewGuid():N}");
         using (client)
         {
-            var (conversationId, _) = await SeedCompletedTurnAsync(accountId, cards: 2, conflict: StoredConflict);
+            var stored = storedBeforeR129
+                ? StoredConflict.Replace("Your conditions exclude", "Your conditions permanently exclude", StringComparison.Ordinal)
+                : StoredConflict;
+            Assert.Equal(storedBeforeR129, stored.Contains("permanently", StringComparison.Ordinal));
+            var (conversationId, _) = await SeedCompletedTurnAsync(accountId, cards: 2, conflict: stored);
 
             using var resume = await client.GetAsync($"/api/search/conversations/{conversationId}");
             Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
@@ -284,7 +294,7 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
     private const string StoredConflict =
         """
         {"excludedGenres":["comedy"],"excludedKeywords":["anime"],"minYear":2000,"maxYear":null,
-         "message":"Your conditions permanently exclude comedy and anime, so nothing you asked for there can appear. You can change that under Conditions."}
+         "message":"Your conditions exclude comedy and anime, so nothing you asked for there can appear. You can change that under Conditions."}
         """;
 
     private static void AssertNotice(JsonElement conflict)
@@ -296,6 +306,9 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
         Assert.Equal(["anime"], conflict.GetProperty("excludedKeywords").EnumerateArray().Select(k => k.GetString()));
         Assert.Equal(2000, conflict.GetProperty("minYear").GetInt32());
         Assert.Contains("Conditions", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(
+            "Your conditions exclude comedy and anime, so nothing you asked for there can appear. You can change that under Conditions.",
+            conflict.GetProperty("message").GetString());
     }
 
     private async Task<Guid> NewestAssistantTurnIdAsync(Guid accountId, Guid conversationId)

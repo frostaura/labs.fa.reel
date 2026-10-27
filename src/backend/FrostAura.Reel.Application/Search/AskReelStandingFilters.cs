@@ -7,7 +7,7 @@ namespace FrostAura.Reel.Application.Search;
 /// The account's standing content rules, as the conversation needs to see them.
 ///
 /// <para>Ask Reel used to resolve an intent in total ignorance of the exclusions the server would
-/// then apply. So the model could cheerfully promise a genre the account has permanently excluded,
+/// then apply. So the model could cheerfully promise a genre the account has excluded,
 /// the pipeline would honour the exclusion, and the turn came back empty with a reply that had just
 /// said yes — a collision invisible to the model and unexplainable to the user. Two halves fix it:
 /// the rules are DESCRIBED to the model before it answers, and any collision that survives is
@@ -27,8 +27,14 @@ public static class AskReelStandingFilters
     /// The one-line summary handed to the interpret prompt, or <c>null</c> when the account has no
     /// standing rules at all. Short and mechanical on purpose: it rides in a prompt, so every extra
     /// clause is tokens on every turn for the rest of the account's life.
+    ///
+    /// <para><paramref name="maturityCeiling"/> is the account's maturity ceiling, which lives on the
+    /// account's settings rather than in <see cref="FilterRuleSet"/> but is a condition all the same:
+    /// the conditions editor shows it beside the rest, and every discovery surface applies it. Left
+    /// out, an account whose only condition is a ceiling was told it had no conditions at all
+    /// (R1-12).</para>
     /// </summary>
-    public static string? Describe(FilterRuleSet rules)
+    public static string? Describe(FilterRuleSet rules, string? maturityCeiling = null)
     {
         var parts = new List<string>(6);
         if (rules.ExcludeGenres.Count > 0)
@@ -69,11 +75,16 @@ public static class AskReelStandingFilters
             parts.Add(FormattableString.Invariant($"min crowd {crowd:0.0}"));
         }
 
+        if (!string.IsNullOrWhiteSpace(maturityCeiling))
+        {
+            parts.Add($"max maturity {maturityCeiling.Trim()}");
+        }
+
         return parts.Count == 0 ? null : string.Join("; ", parts);
     }
 
     /// <summary>
-    /// The genres this turn asked for that the account has permanently excluded — the collision the
+    /// The genres this turn asked for that the account has excluded — the collision the
     /// user is owed an explanation for. Compared case-insensitively because the model writes the
     /// intent and the editor writes the rows, and only one of them is normalised.
     ///
@@ -92,7 +103,7 @@ public static class AskReelStandingFilters
         Colliding(rules.ExcludeGenres, AskedFor(rawQuery: null, intent, requested));
 
     /// <summary>
-    /// The words this turn asked for that the account permanently AVOIDS — the same collision as
+    /// The words this turn asked for that the account AVOIDS — the same collision as
     /// <see cref="CollidingGenres"/>, one vocabulary down.
     ///
     /// <para>It exists because the excluded thing is not always a genre. "anime" and "musical" are
@@ -185,7 +196,7 @@ public static class AskReelStandingFilters
     /// the turn's keywords. That assumes the conditions editor and the interpreter agree about which
     /// vocabulary a word belongs to, and they do not: the founder holds "anime" as an excluded
     /// genre, "an anime series" is read by the heuristic as a keyword, and a turn asking for exactly
-    /// the thing the account permanently excludes therefore emitted no conflict frame at all —
+    /// the thing the account excludes therefore emitted no conflict frame at all —
     /// while the model's own prose in the same stream said the filters excluded anime. Which list
     /// the editor happened to write a rule to is an implementation detail of the editor; the user
     /// asked for a word, and the pipeline is about to enforce a rule against it.</para>
@@ -285,7 +296,9 @@ public static class AskReelStandingFilters
         var excluded = excludedGenres.Concat(excludedKeywords).ToList();
         if (excluded.Count > 0)
         {
-            parts.Add($"Your conditions permanently exclude {Humanised(excluded)}, so nothing you asked for there can appear.");
+            // Never "permanently" (R1-29): a condition is editable behind the settings PIN, and Ask
+            // Reel itself offers to relax one — the sentence below says where.
+            parts.Add($"Your conditions exclude {Humanised(excluded)}, so nothing you asked for there can appear.");
         }
 
         if (yearCollides)

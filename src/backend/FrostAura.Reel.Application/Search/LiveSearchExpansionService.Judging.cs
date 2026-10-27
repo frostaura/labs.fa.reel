@@ -56,14 +56,14 @@ public sealed partial class LiveSearchExpansionService
 
     /// <summary>
     /// Splits the similarity-ordered pool into the picks, the flagged "outside your request"
-    /// reserve — and, before either, drops everything the account permanently excludes.
+    /// reserve — and, before either, drops everything the account's conditions exclude.
     ///
     /// <para><b>Two rules, not one, because the two sources are not the same kind of fact.</b></para>
     ///
     /// <para><b>A standing exclusion is airtight.</b> A title tripping one is removed from the pool
-    /// outright and can appear in neither channel. That is the account's own permanent rule, set
-    /// behind a PIN, and the product says so in as many words: "Your conditions permanently exclude
-    /// comedy, so nothing you asked for there can appear." It was not true. Standing exclusions
+    /// outright and can appear in neither channel. That is the account's own standing rule, set
+    /// behind a PIN, and the product says so in as many words: "Your conditions exclude comedy, so
+    /// nothing you asked for there can appear." It was not true. Standing exclusions
     /// reached this method as ordinary soft negations — the interpret prompt is TOLD about them and
     /// the model echoes them back on <c>intent.ExcludeGenres</c> — so the very same turn that
     /// rendered that notice also rendered three comedy cards in the reserve beneath it, each

@@ -27,7 +27,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
 /// <summary>
-/// What happens when the turn asks for something the account has permanently ruled out.
+/// What happens when the turn asks for something the account's conditions rule out.
 ///
 /// <para>Until now: nothing anyone could see. The interpret prompt was never told about the
 /// account's standing rules, so the model happily promised a genre the pipeline was about to
@@ -76,6 +76,8 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
         Assert.Equal(JsonValueKind.Number, conflict.GetProperty("catalogueSize").ValueKind);
         Assert.Contains("horror", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
         Assert.Contains("Conditions", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        // R1-29: a condition is editable, so the notice never calls it permanent.
+        Assert.DoesNotContain("permanent", conflict.GetProperty("message").GetString()!, StringComparison.OrdinalIgnoreCase);
 
         // Before the grid starts ranking, so the client can render it above the results rather than
         // as an afterthought under them.
@@ -181,6 +183,8 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
         var conflict = events.Single(e => e.Event == "conflict").Data;
         Assert.Equal(["anime"], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
         Assert.Contains("anime", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        // R1-29: a condition is editable, so the notice never calls it permanent.
+        Assert.DoesNotContain("permanent", conflict.GetProperty("message").GetString()!, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -304,7 +308,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
     /// drama and whose <c>Keywords</c> say "black comedy" passes <c>EligibilityQueryBuilder</c>'s
     /// exact-match genre filter and then trips this pipeline's richer matcher — which is how three
     /// comedy cards reached the reserve channel underneath a notice reading "Your conditions
-    /// permanently exclude comedy, so nothing you asked for there can appear."
+    /// exclude comedy, so nothing you asked for there can appear."
     ///
     /// <para>It must appear in NEITHER list. A notice that a filter is absolute, printed above cards
     /// the filter did not stop, is worse than no notice at all.</para>

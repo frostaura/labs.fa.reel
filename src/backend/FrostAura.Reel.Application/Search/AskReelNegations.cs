@@ -71,7 +71,7 @@ public sealed record AskReelNegations(
         new([], [], Clean(genres), Floored(Clean(keywords)));
 
     /// <summary>
-    /// A turn whose account permanently excludes these — the airtight shape.
+    /// A turn whose account's conditions exclude these — the airtight shape.
     /// </summary>
     public static AskReelNegations FromStanding(
         IReadOnlyList<string>? genres = null, IReadOnlyList<string>? keywords = null) =>
