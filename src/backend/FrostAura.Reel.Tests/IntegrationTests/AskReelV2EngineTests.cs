@@ -229,13 +229,21 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
                 Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])] },
             });
         var planner = new ScriptedPlanner(_ => Plan(TurnAct.Refine));
-        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
 
         var outcome = await engine.StreamAsync(
             Input(message) with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = ids.Take(3).ToList() },
             accountId, emit, CancellationToken.None);
 
         var expected = presented[index];
+        // The judge never sees the screen, so it is told which title the pointer resolved to; left to
+        // read "the second one" itself, the live judge picked a card from another answer (R1-30).
+        Assert.NotEmpty(judge.Requests);
+        Assert.All(judge.Requests, r => Assert.Contains($"Points at: {expected.Name} (2010)", r, StringComparison.Ordinal));
+        Assert.All(
+            presented.Where(p => p.TitleId != expected.TitleId),
+            p => Assert.All(judge.Requests, r => Assert.DoesNotContain(p.Name + " (", r, StringComparison.Ordinal)));
         var plan = Assert.Single(events, e => e.Event == "plan").Data;
         Assert.Equal([$"T1.{index + 1}"], plan.GetProperty("references").EnumerateArray().Select(r => r.GetString()));
         var state = ConversationStateJson.Read(outcome.ConversationStateJson);
@@ -1016,6 +1024,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         public int Batches => Volatile.Read(ref _batches);
 
+        /// <summary>The request text every batch was judged against.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<string> Requests { get; } = new();
+
         public bool IsAvailable => true;
 
         public string ModelId => "name-judge";
@@ -1025,6 +1036,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         public Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct)
         {
             Interlocked.Increment(ref _batches);
+            Requests.Enqueue(input.Request);
             var verdicts = input.Titles.Select(t =>
             {
                 var satisfies = t.Name.StartsWith("V2 Yes", StringComparison.Ordinal) ? Satisfies.Yes

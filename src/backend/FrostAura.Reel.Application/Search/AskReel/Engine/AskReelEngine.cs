@@ -1495,10 +1495,27 @@ public sealed class AskReelEngine(
         return persona;
     }
 
-    /// <summary>The request the judge rules on: the message, in its conversation's requirements.</summary>
+    /// <summary>
+    /// The request the judge rules on: the message, in its conversation's requirements — and, when it
+    /// points at cards, which titles those are. The judge sees the request and the candidates, never
+    /// the screen; left to read "more like the second one" itself, the live judge resolved it to a
+    /// card from an earlier answer and ruled every title near the right one "partial" (R1-30). A
+    /// reference the conversation no longer shows has no name here and is left out; one named in the
+    /// message ("like John Wick") is already in the request.
+    /// </summary>
     internal static string JudgeRequest(string message, ConversationState state)
     {
         var parts = new List<string> { $"Request: {message.Trim()}" };
+        var pointedAt = state.Soft.ReferenceTitleIds
+            .Distinct()
+            .Select(id => state.LastPresented.FirstOrDefault(p => p.TitleId == id))
+            .OfType<PresentedRef>()
+            .Select(p => p.Year is { } year ? string.Create(CultureInfo.InvariantCulture, $"{p.Name} ({year})") : p.Name)
+            .ToList();
+        if (pointedAt.Count > 0)
+        {
+            parts.Add($"Points at: {string.Join(", ", pointedAt)}");
+        }
         if (state.Hard.Concepts.Count > 0)
         {
             parts.Add($"Requires: {string.Join(", ", state.Hard.Concepts.Select(c => c.UserWords))}");

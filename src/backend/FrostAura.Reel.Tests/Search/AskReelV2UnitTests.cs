@@ -199,6 +199,52 @@ public class AskReelV2UnitTests
         Assert.Equal(expected, string.Join(",", clean.References.Select(r => r.ToString())));
     }
 
+    /// <summary>
+    /// R1-30, the judge's half: the judge is shown the request and the titles, never the screen, so a
+    /// bare "more like the second one" left it to guess which card was meant. Live, it guessed a card
+    /// from an EARLIER answer ("not a dog-training story" against McFarland, USA) and returned
+    /// none-found on every run. The request now names the titles the pointer resolved to, by name and
+    /// year; a reference the conversation no longer shows has no name to give and is left out, and a
+    /// turn with no reference adds nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("A", "Points at: McFarland, USA (2015)")]
+    [InlineData("B", "Points at: Pay It Forward (2000)")]
+    [InlineData("A,B", "Points at: McFarland, USA (2015), Pay It Forward (2000)")]
+    [InlineData("C", "Points at: A Dog's Journey")]
+    [InlineData("A,D", "Points at: McFarland, USA (2015)")]
+    [InlineData("D", null)]
+    [InlineData("", null)]
+    public void The_judge_is_told_which_titles_a_pointer_resolved_to(string references, string? expected)
+    {
+        var d = Guid.Parse("00000000-0000-0000-0000-00000000000d");
+        var ids = new Dictionary<string, Guid> { ["A"] = A, ["B"] = B, ["C"] = C, ["D"] = d };
+        var state = ConversationState.Empty with
+        {
+            Version = 2,
+            LastPresented =
+            [
+                new PresentedRef(B, new TurnHandle(2, 1), "Pay It Forward", 2000, MediaType.Movie),
+                new PresentedRef(A, new TurnHandle(2, 2), "McFarland, USA", 2015, MediaType.Movie),
+                new PresentedRef(C, new TurnHandle(1, 2), "A Dog's Journey", null, MediaType.Movie),
+            ],
+            Soft = new SoftPreferences([], [], references.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(r => ids[r]).ToList()),
+        };
+
+        var request = AskReelEngine.JudgeRequest("more like the second one", state);
+
+        Assert.StartsWith("Request: more like the second one", request, StringComparison.Ordinal);
+        if (expected is null)
+        {
+            Assert.DoesNotContain("Points at", request, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains(expected, request, StringComparison.Ordinal);
+            Assert.DoesNotContain(expected + ",", request, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void The_acceptance_follow_up_keeps_ninja_as_a_concept_not_a_negation()
     {
