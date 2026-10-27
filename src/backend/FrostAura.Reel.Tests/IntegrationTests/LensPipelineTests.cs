@@ -248,6 +248,67 @@ public class LensPipelineTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task A_background_run_rewrites_the_profile_once_taste_has_moved()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        await RunNarrativeAsync(db, deps, accountId);
+
+        await MoveTasteAsync(accountId);
+        var job = await RunNarrativeAsync(db, deps, accountId);
+
+        Assert.StartsWith("Taste profile rewritten", job.ProgressMessage, StringComparison.Ordinal);
+        Assert.Equal(2, await db.AccountTasteNarratives.CountAsync(n => n.AccountId == accountId));
+    }
+
+    /// <summary>
+    /// Claims register, family <c>narrative-and-dna</c> (R1-45): the narrative's sync card reads
+    /// "Rewritten only when your taste has genuinely moved". Its verdict is FALSE, and this pins why.
+    /// The card is shown for exactly one narrative job — the user's regenerate — and that job spends
+    /// on an unmoved fingerprint by design; the rewrite that does wait for taste to move (the feed
+    /// build's, the weekly pass's, the outdated-prompt one) never shows a card at all. A narrative
+    /// from another model or effort is also rewritten with taste unmoved
+    /// (<see cref="A_narrative_from_another_model_or_effort_is_rewritten_once_and_keeps_the_edit"/>).
+    /// When the copy changes this test stays: it is the code fact the copy must agree with.
+    /// </summary>
+    [Fact]
+    public async Task The_only_narrative_rewrite_with_a_card_is_the_forced_one_and_it_spends_on_unmoved_taste()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        Assert.Equal(JobVisibility.UserVisible, JobVisibilityPolicy.Classify(
+            JobKind.BuildTasteNarrative, JobVisibilityPolicy.NarrativeRegenerateReason, PipelineStage.FeedReady));
+        foreach (var reason in new string?[] { null, "weekly-narrative", Api.Endpoints.NarrativeEndpoints.OutdatedNarrativeReason })
+        {
+            Assert.Equal(JobVisibility.Background, JobVisibilityPolicy.Classify(JobKind.BuildTasteNarrative, reason, PipelineStage.FeedReady));
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        await RunNarrativeAsync(db, deps, accountId);
+        var unmoved = await RunNarrativeAsync(db, deps, accountId);
+        Assert.Equal("Taste profile already current", unmoved.ProgressMessage);
+
+        var forced = await RunNarrativeAsync(
+            db, deps, accountId, BuildTasteNarrativeJobHandler.ForceCursor, JobVisibilityPolicy.NarrativeRegenerateReason);
+
+        Assert.StartsWith("Taste profile rewritten", forced.ProgressMessage, StringComparison.Ordinal);
+        var versions = await db.AccountTasteNarratives.Where(n => n.AccountId == accountId).OrderBy(n => n.Version).ToListAsync();
+        Assert.Equal(2, versions.Count);
+        Assert.Equal(versions[0].ProfileHash, versions[1].ProfileHash);
+    }
+
+    [Fact]
     public async Task A_user_edit_wins_and_survives_regeneration_until_they_ask_for_a_rewrite()
     {
         if (!fixture.Available)
@@ -836,6 +897,53 @@ public class LensPipelineTests(PostgresFixture fixture)
         Assert.Single(await db.TitleLensCopies.Where(c => c.AccountId == accountId && c.TitleId == titleId).ToListAsync());
     }
 
+    /// <summary>
+    /// Claims register, family <c>narrative-and-dna</c>: a stale note renders as "Written before your
+    /// taste last moved" (LensBlock). Verdict FALSE, and this pins why: a note is served as stale
+    /// whenever it is not CURRENT, and current is the fingerprint AND the prompt version AND the
+    /// model-and-effort. A note written at the account's current fingerprint under an older prompt —
+    /// or by another model — is served stale while the taste has not moved at all; its own hash IS
+    /// the current one. The copy owes "an older note" for those, or the source a reason.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_note_served_as_stale_can_have_been_written_at_the_current_taste(bool olderPrompt, bool otherModel)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+        Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default)).Source);
+
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        if (olderPrompt)
+        {
+            row.PromptVersion -= 1;
+        }
+
+        if (otherModel)
+        {
+            row.ModelId = "openai/some-other-model|effort=low";
+        }
+
+        await db.SaveChangesAsync();
+
+        var resolved = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        Assert.Equal(LensSource.Stale, resolved.Source);
+        // The note the client is told predates a taste move was written at the taste the account has now.
+        Assert.Equal(built.ProfileHash, resolved.ProfileHash);
+    }
+
     [Fact]
     public async Task A_note_written_against_an_older_fingerprint_is_served_and_flagged_stale()
     {
@@ -1152,7 +1260,8 @@ public class LensPipelineTests(PostgresFixture fixture)
 
     // ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
-    private static async Task RunNarrativeAsync(ReelDbContext db, Deps deps, Guid accountId)
+    private static async Task<SyncJob> RunNarrativeAsync(
+        ReelDbContext db, Deps deps, Guid accountId, string? cursor = null, string? triggerReason = null)
     {
         var handler = new BuildTasteNarrativeJobHandler(
             db, deps.Features, deps.Narratives, NullLogger<BuildTasteNarrativeJobHandler>.Instance);
@@ -1162,11 +1271,46 @@ public class LensPipelineTests(PostgresFixture fixture)
             AccountId = accountId,
             Kind = JobKind.BuildTasteNarrative,
             EnqueuedAt = DateTime.UtcNow,
+            CursorJson = cursor,
+            TriggerReason = triggerReason,
         };
         db.SyncJobs.Add(job);
         await db.SaveChangesAsync();
         await handler.ExecuteAsync(job, default);
         await CompleteAsync(db, job);
+        return job;
+    }
+
+    /// <summary>Twelve more ratings in a genre the seed never rated, all 10s: a move no fingerprint band absorbs.</summary>
+    private async Task MoveTasteAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        for (var i = 0; i < 12; i++)
+        {
+            var title = new Title
+            {
+                Id = Guid.NewGuid(),
+                MediaType = MediaType.Movie,
+                TraktSlug = $"moved-{accountId:N}-{i}",
+                TmdbId = Random.Shared.Next(1, int.MaxValue),
+                Name = $"Moved {i}",
+                Year = 1980 + i,
+                Genres = ["comedy", "animation"],
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.Titles.Add(title);
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = 10,
+                RatedAt = DateTime.UtcNow.AddMinutes(-i),
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     private static async Task RunLensJobAsync(ReelDbContext db, Deps deps, Guid accountId)

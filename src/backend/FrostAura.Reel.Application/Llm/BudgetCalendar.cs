@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -23,31 +24,43 @@ namespace FrostAura.Reel.Application.Llm;
 /// budgets sum across accounts, and a global ceiling read by one calendar must be written by
 /// the same one.</para>
 ///
-/// <para><b>Where the zone comes from.</b> The account's IANA zone id in <c>Accounts.Timezone</c>
-/// (ADD-22, WS-8's M7). Until that column is in the model, an unknown or unreadable zone, and an
-/// account that has none, all mean UTC — the behaviour before this change. A zone is cached for
-/// <see cref="ZoneLifetime"/>; <see cref="Forget"/> drops it at once when the account changes it.</para>
+/// <para><b>Where the zone comes from.</b> The account's IANA zone id in
+/// <see cref="Domain.Tenancy.AccountSettings.TimeZone"/> (ADD-22, WS-8's M7: a field in the
+/// settings jsonb, written by <c>PUT /api/settings</c>, not a column), resolved by
+/// <see cref="Domain.Tenancy.AccountTimeZone.Resolve"/> — the same rule the settings API reports
+/// as <c>effectiveTimeZone</c>. An unknown or unreadable zone, and an account that has none, all
+/// mean UTC — the behaviour before this change.</para>
+///
+/// <para><b>Fresh before the call, cached after it.</b> <see cref="TodayAsync"/> — what every
+/// per-account ceiling is checked on before its call is sent — reads the zone every time, and leaves
+/// it behind for <see cref="DayFor"/>, the recorder's synchronous hot path, which stamps the row once
+/// the call returns. A zone changed in settings therefore counts from the account's very next call,
+/// and the row lands on the day its ceiling was checked on. The cache used to serve both for ten
+/// minutes, and nothing in the settings API told it the zone had moved, so a change kept the old
+/// zone's day for up to ten minutes (R1-14 residual). The read is one primary-key lookup in front of
+/// a model call that takes hundreds of milliseconds.</para>
 /// </summary>
 public interface IBudgetCalendar
 {
     /// <summary>
     /// Today's ledger day for a call: the account-local date when <paramref name="accountId"/> is
-    /// set and <paramref name="purpose"/> has a per-account ceiling, the UTC date otherwise. Never
-    /// blocks on a cached account; an uncached one is read once.
+    /// set and <paramref name="purpose"/> has a per-account ceiling, the UTC date otherwise. Uses the
+    /// zone the account's last <see cref="TodayAsync"/> read, without blocking; one not read within
+    /// <see cref="BudgetCalendar.ZoneLifetime"/> is read here.
     /// </summary>
     DateTime DayFor(Guid? accountId, string? purpose);
 
-    /// <summary>Today in the account's time zone — the day its per-account ceilings are counted on.</summary>
+    /// <summary>
+    /// Today in the account's time zone — the day its per-account ceilings are counted on. Always
+    /// reads the zone the account has now.
+    /// </summary>
     Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct);
-
-    /// <summary>Drops a cached zone, so the account's next call reads the zone it now has.</summary>
-    void Forget(Guid accountId);
 }
 
 /// <inheritdoc />
 public sealed class BudgetCalendar : IBudgetCalendar
 {
-    /// <summary>How long a read zone is trusted before it is read again.</summary>
+    /// <summary>How long <see cref="DayFor"/> trusts a zone read before it reads it itself.</summary>
     public static readonly TimeSpan ZoneLifetime = TimeSpan.FromMinutes(10);
 
     /// <summary>A calendar that is always UTC: for code built by hand, which has no accounts table to read.</summary>
@@ -76,11 +89,11 @@ public sealed class BudgetCalendar : IBudgetCalendar
     public static DateTime LocalDay(DateTimeOffset now, TimeZoneInfo zone) =>
         DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(now, zone).Date, DateTimeKind.Utc);
 
-    /// <summary>An IANA (or Windows) zone id as a zone; null, blank or unknown is UTC.</summary>
-    public static TimeZoneInfo ParseZone(string? id) =>
-        !string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id.Trim(), out var zone)
-            ? zone
-            : TimeZoneInfo.Utc;
+    /// <summary>
+    /// A stored zone id as a zone, by <see cref="AccountTimeZone.Resolve"/> so the ledger day and the
+    /// settings API's <c>effectiveTimeZone</c> can never disagree; null, blank or unknown is UTC.
+    /// </summary>
+    public static TimeZoneInfo ParseZone(string? id) => AccountTimeZone.Resolve(id?.Trim());
 
     /// <inheritdoc />
     public DateTime DayFor(Guid? accountId, string? purpose)
@@ -95,14 +108,8 @@ public sealed class BudgetCalendar : IBudgetCalendar
     }
 
     /// <inheritdoc />
-    public async Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct)
-    {
-        var now = _time.GetUtcNow();
-        return LocalDay(now, Cached(accountId, now) ?? await ReadAsync(accountId, ct));
-    }
-
-    /// <inheritdoc />
-    public void Forget(Guid accountId) => _zones.TryRemove(accountId, out _);
+    public async Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct) =>
+        LocalDay(_time.GetUtcNow(), await ReadAsync(accountId, ct));
 
     private TimeZoneInfo? Cached(Guid account, DateTimeOffset now) =>
         _zones.TryGetValue(account, out var entry) && now - entry.ReadAt < ZoneLifetime ? entry.Zone : null;
@@ -112,7 +119,7 @@ public sealed class BudgetCalendar : IBudgetCalendar
 
     /// <summary>
     /// The synchronous read, for the recorder's hot path. Practically never taken: every per-account
-    /// ceiling is checked (<see cref="TodayAsync"/>) before its call is sent, which caches the zone
+    /// ceiling is checked (<see cref="TodayAsync"/>) before its call is sent, which leaves the zone
     /// the recorder then stamps the row with.
     /// </summary>
     private TimeZoneInfo Read(Guid account)
@@ -145,7 +152,6 @@ public sealed class BudgetCalendar : IBudgetCalendar
         _zones[account] = (zone, _time.GetUtcNow());
         return zone;
     }
-
 }
 
 /// <summary>Where an account's IANA zone id is read from. Null means the account has none.</summary>
@@ -158,32 +164,34 @@ public interface IAccountZoneSource
 }
 
 /// <summary>
-/// Reads <c>Accounts.Timezone</c> (ADD-22) through a fresh scope. Until that column is in the model
-/// every account reads as having no zone — UTC — so this needs no change when WS-8's M7 lands; the
-/// <c>Accounts</c> table carries no tenancy filter, so the unpinned scope reads it safely.
+/// Reads the account's <see cref="AccountSettings.TimeZone"/> (ADD-22, M7) through a fresh scope.
+///
+/// <para><b>Why the settings document, not a column.</b> M7 landed the zone as a field in the
+/// account's owned settings jsonb (no migration), and <c>PUT /api/settings</c> writes it there. The
+/// first version of this source probed for an <c>Accounts.Timezone</c> column that was never added,
+/// so every account read as UTC even after the user set a zone (R1-14) — while Ask told them the
+/// allowance resets "at midnight in your account's time zone". The <c>Accounts</c> table carries no
+/// tenancy filter, so the unpinned scope reads it safely.</para>
 /// </summary>
 public sealed class AccountZoneSource(IServiceScopeFactory scopes) : IAccountZoneSource
 {
-    /// <summary>The property on <c>Account</c> that holds its IANA zone id.</summary>
-    public const string ZoneProperty = "Timezone";
-
     public async Task<string?> ZoneIdAsync(Guid accountId, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<IReelDbContext>();
-        return HasZoneColumn(db)
-            ? await db.Accounts.Where(a => a.Id == accountId).Select(a => EF.Property<string?>(a, ZoneProperty)).FirstOrDefaultAsync(ct)
-            : null;
+        return await db.Accounts.AsNoTracking()
+            .Where(a => a.Id == accountId)
+            .Select(a => a.Settings.TimeZone)
+            .FirstOrDefaultAsync(ct);
     }
 
     public string? ZoneId(Guid accountId)
     {
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<IReelDbContext>();
-        return HasZoneColumn(db)
-            ? db.Accounts.Where(a => a.Id == accountId).Select(a => EF.Property<string?>(a, ZoneProperty)).FirstOrDefault()
-            : null;
+        return db.Accounts.AsNoTracking()
+            .Where(a => a.Id == accountId)
+            .Select(a => a.Settings.TimeZone)
+            .FirstOrDefault();
     }
-
-    private static bool HasZoneColumn(IReelDbContext db) => db.Accounts.EntityType.FindProperty(ZoneProperty) is not null;
 }

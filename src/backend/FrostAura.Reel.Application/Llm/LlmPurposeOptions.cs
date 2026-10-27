@@ -165,12 +165,23 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
         [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 370),
         [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 370),
 
-        // ── Ask Reel v2 (§4.11 stage budgets). Plan and answer are not measurable until WS-2's
-        // prompts exist and keep §4.11-derived ceilings; the judge uses the rerank-ask measurement,
-        // its closest existing shape (a satisfies verdict + fit + why per title), and moves with it. ──
-        [ApiUsagePurpose.AskPlan] = Search(maxTokens: 600, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
+        // ── Ask Reel v2 (§4.11 stage budgets; R1-51) ──
+        // Each is p99 × 1.5 of per-call completion tokens on luna at effort none, on the eval slot,
+        // 2026-10-27, with every call 0 truncations; a length finish still retries once at 2×.
+        // Plan: 40 calls — 10 live opening turns (86–114) and 30 probe follow-ups (84–151, p50 99)
+        // planned with one to three earlier exchanges and their cards on screen, across critique,
+        // refine, item-question, new-request and chitchat messages of one word to five constraints —
+        // and WS-2's 43 live v2 calls averaged 93. 151 × 1.5 = 227, inside 250.
+        // Answer: 27 probe calls over the production fact sheet (TitleFacts) and thirty item questions,
+        // answerable and not, seen and unseen titles, "tell me everything" included: 22–107, p50 46
+        // (the 4 live calls ever made averaged 42). 107 × 1.5 = 161, rounded up to 170; its own
+        // two-sentence, 360-character cap discards anything past roughly 100 tokens anyway.
+        // The judge uses the rerank-ask measurement, its closest shape (a satisfies verdict + fit +
+        // why per title), and moves with it; 11 judge calls averaged 304 tokens a call (per-turn means
+        // 228–395), inside even a one-title batch's 470. ──
+        [ApiUsagePurpose.AskPlan] = Search(maxTokens: 250, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
         [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 370),
-        [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 300, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
+        [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 170, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
 
         // ── Background writers ──
         // Cross-reference: a fixed allowance for the envelope (and any residual reasoning) plus a
