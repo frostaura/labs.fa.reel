@@ -21,12 +21,12 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// A genre rail keeps its own <c>supply</c> and carries no anchored count.
 /// </summary>
 [Collection("postgres")]
-public class AnchoredRailSupplyTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>
+public class AnchoredRailSupplyTests(PostgresFixture fixture, ReelApiFactory api) : EmbeddedCatalogTestBase(fixture), IClassFixture<ReelApiFactory>
 {
     [Fact]
     public async Task An_empty_similar_rail_says_the_gate_held_back_its_neighbours()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
