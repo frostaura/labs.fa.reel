@@ -1,9 +1,9 @@
 {
   "note": "Surface-harness gates (WS-7 tasks 8 and 10), registered 2026-10-24 after the 99c0761 surface baseline existed (the P0 review found the harness had no gate or compare at all). Absolute targets are task 8's goals and are the G1 bar, not a per-merge bar; the regression tolerances block a merge. Rates are per suggestion card, because the cards a build serves differ run to run. Change them only by a reviewed commit, never to make a run pass.",
   "baselines": {
-    "keyless": "eval/surfaces/baselines/224eea0-keyless",
+    "keyless": "eval/surfaces/baselines/20429ff-keyless",
     "keyed": "eval/surfaces/baselines/99c0761",
-    "note": "--compare runs against these. 99c0761-keyless and 9f42c9d-keyless stay in the tree as references (their provenance.md); neither seeded digest arrivals, so --compare refuses them against a seeded run. The keyed 99c0761 is in the same position until its re-run on the eval key."
+    "note": "--compare runs against these. 224eea0-keyless (wave A), 9f42c9d-keyless and 99c0761-keyless stay in the tree as references (their provenance.md); the last two seeded no digest arrivals, so --compare refuses them against a seeded run. The keyed 99c0761 is in the same position until its re-run on the eval key."
   },
   "gates": [
     {
@@ -51,6 +51,24 @@
     {
       "metric": "traktCalls",
       "label": "Trakt calls from the eval stack",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "uncitableWhyLines",
+      "label": "Why-lines with a clause citing a push IsCitable rejects",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "falseCopyClaims",
+      "label": "False copy claims (claims audit)",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "unregisteredCopyClaims",
+      "label": "Claim-shaped copy the claims register does not cover",
       "op": "<=",
       "target": 0
     }
@@ -104,6 +122,21 @@
       "metric": "traktCalls",
       "higherIsBetter": false,
       "tolerance": 0
+    },
+    {
+      "metric": "uncitableWhyLines",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "falseCopyClaims",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "unregisteredCopyClaims",
+      "higherIsBetter": false,
+      "tolerance": 0
     }
   ],
   "amendments": [
@@ -120,6 +153,27 @@
       "dataSeen": "int-r3's keyless run (1c11da8: digest empty, BuildDigest wrote a 0-item row) and two keyless runs of 224eea0 on fresh clones (both: 10 digest cards, every gate and every compare row passing)",
       "change": "(a) --fresh seeds digest arrivals (eval/surfaces/seed-arrivals.sql: the 60 most popular titles with a streaming-now offer in the account's region marked FirstSeenAt yesterday, FetchedAt now; eligible or not) after the drain and builds the digest after it; (b) how arrivals were made is a comparability key, so --compare refuses runs seeded differently; (c) the keyless baseline moves to 224eea0-keyless, the build/trust-v1 tip at the time",
       "reason": "IREV3S-02. Since M3b the digest reads arrivals (FirstSeenAt inside the week), and the snapshot carries none, so the digest had no data on every eval copy and the coverage gate could never pass. Seeding what a provider-set change would stamp measures the digest's selection, copy and eligibility (ineligible titles are seeded on purpose, so the leak check sees the digest's own filter). Accepting an empty digest instead was rejected: it would leave the surface unmeasured for the rest of the program."
+    },
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-wave-b",
+      "dataSeen": "none — no run has recorded contributions yet; every committed baseline re-scores to no data (null) on this metric",
+      "change": "(a) recordings from version 4 freeze each suggestion card's stored contributions for the serving artifact; (b) a new metric, uncitableWhyLines: templated whyThis lines carrying a clause whose features ExplanationTemplater.IsCitable does not admit, read through eval/surfaces/citable-clauses.json (generated from the templater by CitableClauseCatalogueTests); gated at 0 absolute and 0 regression",
+      "reason": "WS-5's IREV3S-01 fix (a clause cites only a top-two positive push or one of at least 0.15) asked for a harness check against the same rule. The metric is registered before any run measured it, so the first keyed and keyless runs that record contributions become its baselines; until then compare reports 'no baseline data', never a pass."
+    },
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-wave-b",
+      "dataSeen": "the first claims audit of build/trust-v1 @ 20429ff (268 claim-shaped strings; 194 claims in 35 families: 115 true, 14 false, 65 unverified) — no surface run has recorded it yet",
+      "change": "(a) recordings from version 4 carry the claims audit of the tree the harness runs from; (b) falseCopyClaims (the register's false claims) and unregisteredCopyClaims (claim-shaped copy the register does not cover) replace 'not measured yet', each gated at 0 absolute and 0 regression",
+      "reason": "Task 8 lists false copy claims from task 9. The absolute gate fails today on the 14 false claims, each owned in eval/claims/claims.json (as the stub gate fails on WS-5's stub lines); a merge that adds a false or unregistered claim is a regression."
+    },
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-wave-b",
+      "dataSeen": "two keyless runs of the wave-A merge (API sources = 20429ff) on fresh clones; both pass every compare row against 224eea0-keyless and each other",
+      "change": "the keyless baseline moves from 224eea0-keyless to 20429ff-keyless, the first recording (version 4) that measures uncitableWhyLines, falseCopyClaims and unregisteredCopyClaims",
+      "reason": "Without it every run reports 'no baseline data' on the three wave-B metrics, so a regression in them could never block a merge. 224eea0-keyless stays as the wave-A reference."
     }
   ]
 }

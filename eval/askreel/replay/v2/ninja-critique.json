@@ -1,0 +1,44 @@
+{
+  "id": "ninja-critique",
+  "scenario": "ninja-critique",
+  "provenance": "authored from the open-set scenario and the founder's live conversation it was seeded from; the plans and verdicts are what a correct planner and judge return, written before any live v2 run (no eval key)",
+  "account": { "filters": [["ExcludeGenre", "animation"]] },
+  "titles": [
+    { "name": "Ninja Assassin", "keywords": ["ninja"], "votes": 5000 },
+    { "name": "Ninja Scroll", "keywords": ["ninja"], "genres": ["animation", "action"], "votes": 4900, "out": "ExcludeGenre animation" },
+    { "name": "Batman Begins", "keywords": ["ninja"], "votes": 4800 },
+    { "name": "Shinobi", "keywords": ["ninja"], "votes": 4700 },
+    { "name": "Revenge of the Ninja", "keywords": ["ninja"], "votes": 4600 },
+    { "name": "Teenage Mutant Ninja Turtles", "keywords": ["ninja"], "votes": 4500 },
+    { "name": "The Hunt for the Ninja", "keywords": ["ninja"], "votes": 4400, "seen": true, "out": "watched" },
+    { "name": "Blade of the 47 Ronin", "keywords": ["ninja", "samurai"], "votes": 4300 },
+    { "name": "Enter the Ninja", "keywords": ["ninja"], "votes": 4200 }
+  ],
+  "turns": [
+    {
+      "message": "ninja movies",
+      "plan": { "act": "NewRequest", "concepts": ["ninja"], "media": "Movies", "tools": ["SearchCatalog"] },
+      "verdicts": {
+        "Ninja Assassin": "Yes", "Batman Begins": "No", "Shinobi": "Yes", "Revenge of the Ninja": "Yes",
+        "Teenage Mutant Ninja Turtles": "Partial", "Blade of the 47 Ronin": "Yes", "Enter the Ninja": "Yes"
+      },
+      "expect": {
+        "mode": "Picks",
+        "picks": ["Ninja Assassin", "Shinobi", "Revenge of the Ninja", "Blade of the 47 Ronin", "Enter the Ninja"],
+        "neverShown": ["Batman Begins"]
+      }
+    },
+    {
+      "message": "none of the above are ninja movies. I want ninja movies",
+      "plan": { "act": "CritiqueSet", "concepts": ["ninja"], "media": "Movies", "tools": ["SearchCatalog"] },
+      "verdicts": { "Teenage Mutant Ninja Turtles": "Partial", "Batman Begins": "No" },
+      "expect": { "mode": "NoneFound", "picks": [], "noRepeatTurns": [1] }
+    },
+    {
+      "message": "wait, is the second one actually a ninja film or a samurai film?",
+      "plan": { "act": "ItemQuestion", "references": ["T1.2"], "tools": ["TitleFacts"], "question": "is it actually a ninja film or a samurai film?" },
+      "answer": "Its catalogue keywords tag it as a ninja film.",
+      "expect": { "mode": "Answer", "answerHandle": "T1.2" }
+    }
+  ]
+}

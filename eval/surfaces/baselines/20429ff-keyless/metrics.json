@@ -1,0 +1,388 @@
+{
+ "summary": {
+  "label": "20429ff-keyless",
+  "build": "d86e65a0b636674180d0f37bb106f81ebeddad14",
+  "buildInfo": {
+   "commit": "d86e65a0b636674180d0f37bb106f81ebeddad14",
+   "dllSha256": "52f6e0370f2d784b9bfa930303d09fdc721137c0602bf5d00da1245f2264071a",
+   "builtAt": "2026-10-26T20:14:58Z",
+   "slot": "/Users/deanmartin/src/fa.reel-ws/bin/build-slot"
+  },
+  "snapshotId": "reel-2026-10-23",
+  "fresh": true,
+  "buildStatus": "Succeeded",
+  "artifact": {
+   "input": "0536acbf-a642-4a26-a68d-19a0b527c484",
+   "id": "0536acbf-a642-4a26-a68d-19a0b527c484",
+   "version": 101,
+   "changedDuringFetch": false
+  },
+  "modelKey": "no OpenRouter key (model calls cannot succeed)",
+  "suggestionCards": 171,
+  "cardsBySurface": {
+   "feed-hero": 5,
+   "feed-row": 16,
+   "more": 36,
+   "genre-rail": 96,
+   "similar": 8,
+   "digest": 10,
+   "saved": 34,
+   "watch-tonight": 1,
+   "person": 187,
+   "typeahead": 29
+  },
+  "stubRate": 0,
+  "stubKinds": {
+   "generic": 0,
+   "composed": 0,
+   "aligned": 0
+  },
+  "exclusionLeaks": 0,
+  "leakRate": 0,
+  "crossRailRepeats": 0,
+  "evidenceShare": 1,
+  "anchoredCards": 14,
+  "hedgingWhyLines": 0,
+  "hedgeRate": 0,
+  "nonLatinWhyLines": 0,
+  "lookupFootprint": 0,
+  "httpErrors": 0,
+  "surfacesWithoutData": [],
+  "complete": true,
+  "uncitableWhyLines": 0,
+  "citableChecked": 59,
+  "citableUnscored": 0,
+  "copyClaimsChecked": 194,
+  "falseCopyClaims": 15,
+  "unregisteredCopyClaims": 0,
+  "randomCosineP90": 0.383398741483691,
+  "exposuresWritten": 135,
+  "costUsd": 0,
+  "traktCalls": 0,
+  "jobsDrainedBeforeFetch": true,
+  "wallSeconds": 67,
+  "digestSeed": "seeded:60"
+ },
+ "perSurface": {
+  "feed-hero": {
+   "blocks": 1,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 5,
+   "renderedFrom": {
+    "hook": 1
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "feed-row": {
+   "blocks": 2,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 16,
+   "renderedFrom": {
+    "whyThis": 7
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 6,
+   "evidencePass": 6,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 7,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "more": {
+   "blocks": 4,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 1,
+   "cards": 36,
+   "renderedFrom": {
+    "whyThis": 16
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 16,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "genre-rail": {
+   "blocks": 8,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 96,
+   "renderedFrom": {
+    "whyThis": 19
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 19,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "similar": {
+   "blocks": 5,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 1,
+   "cards": 8,
+   "renderedFrom": {
+    "whyThis": 8
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 8,
+   "evidencePass": 8,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 8,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "digest": {
+   "blocks": 1,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 10,
+   "renderedFrom": {
+    "whyThis": 9,
+    "lensClause": 1
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 9,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "saved": {
+   "blocks": 1,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 34,
+   "renderedFrom": {},
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "watch-tonight": {
+   "blocks": 1,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 1,
+   "renderedFrom": {
+    "reason": 1
+   },
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 0,
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "person": {
+   "blocks": 5,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 0,
+   "cards": 187,
+   "renderedFrom": {},
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 75,
+   "footprintNames": [
+    "Cinderella Man (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Gladiator (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Man of Steel (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Greatest Beer Run Ever (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Pope's Exorcist (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Thor: Love and Thunder (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "A Beautiful Mind (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Beast (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "3:10 to Yuma (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Insider (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "State of Play (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Unhinged (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Get Out (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Poker Face (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Kraven the Hunter (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Nice Guys (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "American Gangster (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "Robin Hood (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Mummy (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
+    "The Quick and the Dead (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)"
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
+  },
+  "typeahead": {
+   "blocks": 10,
+   "errors": 0,
+   "errorKeys": [],
+   "emptyBlocks": 1,
+   "cards": 29,
+   "renderedFrom": {},
+   "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
+   "hedgingWhy": 0,
+   "nonLatinWhy": 0,
+   "leaks": 0,
+   "leakNames": [],
+   "anchored": 0,
+   "evidencePass": 0,
+   "footprint": 20,
+   "footprintNames": [
+    "The Matrix Reloaded (typeahead:matrix)",
+    "The Matrix Revolutions (typeahead:matrix)",
+    "The Matrix Resurrections (typeahead:matrix)",
+    "Ninja (typeahead:ninja)",
+    "Ninja Assassin (typeahead:ninja)",
+    "Ninja: Shadow of a Tear (typeahead:ninja)",
+    "The Dark Knight (typeahead:the)",
+    "The Avengers (typeahead:the)",
+    "The Lord of the Rings: The Fellowship of the Ring (typeahead:the)",
+    "The Lord of the Rings: The Return of the King (typeahead:the)",
+    "The Hunger Games (typeahead:the)",
+    "The Batman (typeahead:the)",
+    "The Prestige (typeahead:the)",
+    "The Hobbit: An Unexpected Journey (typeahead:the)",
+    "Blade Runner 2049 (typeahead:blade runner)",
+    "The Maze Runner (typeahead:blade runner)",
+    "Blade II (typeahead:blade runner)",
+    "Severance (typeahead:severance)",
+    "Dune (typeahead:dune)",
+    "Dune: Part Two (typeahead:dune)"
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
+  }
+ },
+ "hedges": [],
+ "uncitable": [],
+ "repeats": [],
+ "ledger": [
+  {
+   "provider": "Tmdb",
+   "model": "",
+   "purpose": "",
+   "calls": 84,
+   "promptTokens": 0,
+   "completionTokens": 0
+  }
+ ]
+}

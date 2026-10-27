@@ -1,6 +1,46 @@
 // Pure scorer for the surface harness (scripts/eval/surfaces.mjs). No API, no database, no paid call:
 // everything it reads is frozen into the recording, so a recorded run re-scores identically in CI.
+import { readFileSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { STUB_WHY, HEDGE_WHY, NON_LATIN } from "./askreel-score.mjs";
+
+// The IsCitable check (WS-5's IREV3S-01 rule): a templated clause may cite a contribution only when it is
+// positive and one of the card's two largest positive pushes, or at least the floor. The phrase catalogue
+// and the rule's constants live in eval/surfaces/citable-clauses.json; CitableClauseCatalogueTests
+// generates the rule, a rendered sample of every Translate phrasing and IsCitable vectors from
+// ExplanationTemplater itself, so this twin cannot drift from the C# rule without a red test on each side.
+const CITABLE = JSON.parse(readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."), "eval", "surfaces", "citable-clauses.json"), "utf8"));
+export const CITABLE_RULE = CITABLE.rule;
+export const CITABLE_CLAUSES = CITABLE.clauses.map((c) => ({ id: c.id, features: c.features ?? [], prefix: c.featurePrefix ?? null, re: new RegExp(c.pattern, "iu") }));
+// Stored contributions are rounded to 3 decimals (TitleScoreWriter), so a push that rounded UP to the floor
+// may have been a hair under it when the templater ruled: give it the benefit of the doubt rather than
+// report a defect the stored number cannot prove.
+const FLOOR_MARGIN = 0.5 * 10 ** -(CITABLE_RULE.storedPrecision ?? 3);
+export function isCitable(contributions, index, rule = CITABLE_RULE) {
+  const value = contributions[index][1];
+  if (!(value > 0)) return false;
+  if (value >= rule.floor - FLOOR_MARGIN) return true;
+  let larger = 0;
+  for (let j = 0; j < contributions.length; j++) {
+    const other = contributions[j][1];
+    if (j !== index && other > 0 && (other > value || (other === value && j < index))) larger++;
+  }
+  return larger < rule.topPositiveCount;
+}
+const covers = (clause, feature) => clause.features.includes(feature) || (clause.prefix !== null && feature.startsWith(clause.prefix));
+// The templated clauses in `text` whose features the card's contributions do not make citable: a clause
+// citing a feature that is absent from the stored top contributions, or present but not citable. A line
+// with no catalogued clause (an anchor clause alone, model copy) returns [].
+export function uncitableClauses(text, contributions) {
+  const out = [];
+  for (const clause of CITABLE_CLAUSES) {
+    if (!clause.re.test(text)) continue;
+    const ok = contributions.some(([feature], i) => covers(clause, feature) && isCitable(contributions, i));
+    if (!ok) out.push(clause.id);
+  }
+  return out;
+}
 
 // Suggestion surfaces: everything shown must pass eligibility. Lookup surfaces (Saved, Watch tonight,
 // typeahead, person pages) legitimately show titles you know; there the question is the footprint.
@@ -60,8 +100,11 @@ export function scoreSurfaces(rec) {
   const eligible = new Set(f.eligible);
   const seenSet = new Set(f.seen ?? []);
   const perSurface = {};
-  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, stubKinds: { generic: 0, composed: 0, aligned: 0 }, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [] });
+  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, stubKinds: { generic: 0, composed: 0, aligned: 0 }, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [], citableChecked: 0, uncitable: 0, citableUnscored: 0 });
   const hedges = [];
+  // Recordings before version 4 froze no contributions: the IsCitable check has no data there (null).
+  const contributions = f.contributions ?? null;
+  const uncitable = [];
   for (const block of rec.blocks) {
     const s = bump(block.surface);
     s.blocks++;
@@ -77,6 +120,16 @@ export function scoreSurfaces(rec) {
         if (kind) { s.stubWhy++; s.stubKinds[kind]++; }
         if (HEDGE_WHY.test(why.text)) { s.hedgingWhy++; if (hedges.length < 40) hedges.push(`${block.key} · ${c.name} [${why.from}]: ${why.text}`); }
         if (NON_LATIN.test(why.text)) s.nonLatinWhy++;
+        // Only the templater's whyThis is held to IsCitable; a lens clause or a hook is model copy.
+        if (contributions && why.from === "whyThis" && SUGGESTION.has(block.surface)) {
+          const mine = contributions[c.titleId];
+          if (!mine) s.citableUnscored++;
+          else {
+            s.citableChecked++;
+            const bad = uncitableClauses(why.text, mine);
+            if (bad.length) { s.uncitable++; if (uncitable.length < 40) uncitable.push(`${block.key} · ${c.name}: ${why.text} [${bad.join(", ")}; top ${mine.map(([k, v]) => `${k} ${v}`).join(", ")}]`); }
+          }
+        }
       }
       const ok = eligible.has(c.titleId);
       if (SUGGESTION.has(block.surface) && !ok) { s.leaks++; if (s.leakNames.length < 20) s.leakNames.push(`${c.name} (${block.key})`); }
@@ -115,13 +168,18 @@ export function scoreSurfaces(rec) {
       hedgingWhyLines: total("hedgingWhy"), hedgeRate: ratio(total("hedgingWhy"), cards), nonLatinWhyLines: total("nonLatinWhy"),
       lookupFootprint: Object.entries(perSurface).filter(([s]) => FOOTPRINT_GATED.has(s)).reduce((n, [, v]) => n + v.footprint, 0),
       httpErrors: Object.values(perSurface).reduce((n, v) => n + v.errors, 0), surfacesWithoutData, complete: surfacesWithoutData.length === 0,
-      copyClaimsChecked: null, randomCosineP90: f.randomCosineP90,
+      uncitableWhyLines: contributions ? total("uncitable") : null, citableChecked: contributions ? total("citableChecked") : null,
+      citableUnscored: contributions ? total("citableUnscored") : null,
+      // The claims audit (task 9) recorded with the run: null on a recording that predates it.
+      copyClaimsChecked: rec.claims?.claims ?? null, falseCopyClaims: rec.claims?.falseClaims ?? null,
+      unregisteredCopyClaims: rec.claims?.unregistered ?? null, randomCosineP90: f.randomCosineP90,
       exposuresWritten: rec.exposuresWritten, costUsd: rec.costUsd ?? null, traktCalls: (rec.ledger ?? []).filter((r) => r.provider === "Trakt").reduce((n, r) => n + r.calls, 0),
       jobsDrainedBeforeFetch: rec.jobsDrainedBeforeFetch ?? null, wallSeconds: rec.wallSeconds,
       digestSeed: digestSeedKey(rec),
     },
     perSurface,
     hedges,
+    uncitable,
     repeats: repeats.map(([id, keys]) => ({ titleId: id, name: rec.names[id] ?? id, rows: [...new Set(keys)] })),
     ledger: rec.ledger,
   };

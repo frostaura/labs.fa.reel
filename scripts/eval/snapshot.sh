@@ -13,9 +13,11 @@
 #       Print the snapshot id stamped on <db>.
 #
 # Sanitising (program §4.12, WS-7 task 1):
-#   - every TraktConnections token is replaced by a placeholder that cannot decrypt, so no refresh can
-#     ever rotate the founder's single-use refresh token (the columns are NOT NULL, so "null" is a
-#     constant placeholder rather than SQL NULL);
+#   - every TraktConnections token is blanked (''), so no refresh can ever rotate the founder's
+#     single-use refresh token (the columns are NOT NULL, so "null" is the empty string rather than SQL
+#     NULL). Blank, not a placeholder: the app reads a non-empty token as a live connection
+#     (TraktRatingsBackfill.HasLiveConnectionAsync), so the old 'eval-sanitised' placeholder left the
+#     Trakt ratings back-fill armed on every clone (wave-A integrator CR);
 #   - the Trakt outbox is truncated, so no write can reach his real profile;
 #   - pending and running jobs are deleted, so a slot started with the job runner on cannot replay
 #     the live queue against real providers;
@@ -37,8 +39,8 @@ sanitise() {
   eval_psql "$db" -q <<'SQL'
 BEGIN;
 UPDATE "TraktConnections"
-   SET "AccessTokenEncrypted" = 'eval-sanitised', "RefreshTokenEncrypted" = 'eval-sanitised'
- WHERE "AccessTokenEncrypted" <> 'eval-sanitised' OR "RefreshTokenEncrypted" <> 'eval-sanitised';
+   SET "AccessTokenEncrypted" = '', "RefreshTokenEncrypted" = ''
+ WHERE "AccessTokenEncrypted" <> '' OR "RefreshTokenEncrypted" <> '';
 TRUNCATE "TraktOutbox";
 DELETE FROM "SyncJobs" WHERE "Status" IN ('Pending', 'Running');
 DELETE FROM "PushSubscriptions";
@@ -53,7 +55,7 @@ SQL
 verify() {
   local db="$1" bad
   bad=$(eval_psql "$db" -Atc "
-    SELECT (SELECT count(*) FROM \"TraktConnections\" WHERE \"AccessTokenEncrypted\" <> 'eval-sanitised' OR \"RefreshTokenEncrypted\" <> 'eval-sanitised')
+    SELECT (SELECT count(*) FROM \"TraktConnections\" WHERE \"AccessTokenEncrypted\" <> '' OR \"RefreshTokenEncrypted\" <> '')
          + (SELECT count(*) FROM \"TraktOutbox\")
          + (SELECT count(*) FROM \"SyncJobs\" WHERE \"Status\" IN ('Pending','Running'))
          + (SELECT count(*) FROM \"PushSubscriptions\")
@@ -61,7 +63,7 @@ verify() {
          + (SELECT count(*) FROM \"DataProtectionKeys\")
          + (SELECT count(*) FROM \"RefreshSessions\")")
   [ "$bad" = "0" ] || eval_die "$db is NOT sanitised ($bad offending rows)"
-  echo "sanitised: $db (tokens placeholdered, outbox empty, no pending jobs, no push subscriptions, no live secrets or sessions)"
+  echo "sanitised: $db (Trakt tokens blank, outbox empty, no pending jobs, no push subscriptions, no live secrets or sessions)"
 }
 
 stamp() { # stamp <db> <snapshot-id>

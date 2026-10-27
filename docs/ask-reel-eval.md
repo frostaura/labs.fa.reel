@@ -12,7 +12,7 @@ integrator, which no build lane passes.
 | Piece | Where | What isolates it |
 |---|---|---|
 | Postgres | `fareel-eval-postgres`, `127.0.0.1:5434`, volume `fareel_eval_pgdata` | A separate container and volume; adopted (not recreated) by `docker-compose.eval.yml` behind the `db` profile |
-| Snapshot | `reel_eval_template` → `reel_eval` / lane slots | `scripts/eval/snapshot.sh` placeholders every Trakt token, truncates the outbox, deletes pending jobs, push subscriptions, `AppSecrets` (the VAPID private key), `DataProtectionKeys` and `RefreshSessions`, archives the ledger of any database it is about to drop, and stamps the snapshot id (`COMMENT ON DATABASE`) |
+| Snapshot | `reel_eval_template` → `reel_eval` / lane slots | `scripts/eval/snapshot.sh` blanks every Trakt token (`''`: the app reads a non-empty token as a live connection, which armed the ratings back-fill on every clone), truncates the outbox, deletes pending jobs, push subscriptions, `AppSecrets` (the VAPID private key), `DataProtectionKeys` and `RefreshSessions`, archives the ledger of any database it is about to drop, and stamps the snapshot id (`COMMENT ON DATABASE`) |
 | API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances; refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), exports every credential the env file leaves unset as empty, and refuses an env file with no `JWT_SECRET`. It boots the copy the way the merged code needs: from the dll's own folder (the content root, so `appsettings.json` loads), with `Database__AutoMigrateOnStartup=true` and no dump handshake, `Background__DataRepairs` and `Background__TrustPurge` off, Trakt tokens empty and `TRAKT_CLIENT_ID=eval-no-trakt`; it never runs on a `*_template` database (`--dry-run` lists the names the API would get, and the values of the switches it sets) |
 | Model key | `EVAL_OPENROUTER_API_KEY` (its own $10/day cap) | **Not supplied yet.** The shared lane key in `~/src/fa.reel-ws/lane.env` **is the founder's own OpenRouter key** (SHA-256 match with the live clone's `.env`, compared without printing either). Every paid call WS-7 has made — the three 99c0761 baselines, the surface baseline and the aborted attempts — went on it. `run-api.sh`, `askreel.mjs live` and `surfaces.mjs` now refuse that key unless the founder's sign-off is passed (`EVAL_FOUNDER_KEY_SIGNOFF` / `--founder-key-signoff`) and recorded in the recording |
 
@@ -65,7 +65,7 @@ node scripts/eval/askreel.mjs check --db reel_eval --api http://127.0.0.1:5180  
 # Surface harness: one Fresh build (API started with --jobs), then every surface; compare against a baseline.
 node scripts/eval/surfaces.mjs --api http://127.0.0.1:5180 --db reel_eval --label <name> --fresh --api-env <eval env> --build-info <...>
 node scripts/eval/surfaces.mjs --replay <recording.json>
-node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/224eea0-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
+node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/20429ff-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
 
 # Zero-footprint audit of the exposure log (exit 1 on any exposure served after its lock started).
 node scripts/eval/footprint-audit.mjs --db reel_eval [--since <ISO time>]
@@ -87,10 +87,20 @@ transport, and still reads the ledger from the day its first attempt started). A
 Baselines that gate merges are promoted into `eval/askreel/baselines/` and `eval/surfaces/baselines/`; the
 holdout's baseline lives with the holdout in `~/src/fa.reel-eval-sealed/`.
 
-**Replay is a scorer replay.** It re-scores a frozen recording with no API, database or paid call, which
-proves the committed metrics and every scoring rule. It does not yet drive an executor or composer from
-recorded plans (§4.12's replay), because the v2 executor does not exist; that half lands with WS-2's
-engine. It is not wired into CI or `make ci` yet (change request to WS-8).
+**Replay has two halves.** The scorer replay (`node --test 'scripts/eval/*.test.mjs'`, `askreel.mjs
+replay`) re-scores a frozen recording with no API, database or paid call, which proves the committed
+metrics and every scoring rule; `make ci-replay` runs it. The **engine replay** (§4.12) is
+`IT/AskReelGolden/Replay/AskReelV2ReplayTests` (`[Trait("Suite", "Replay")]`): each fixture in
+`eval/askreel/replay/v2/` is a small world (titles, standing conditions, footprint) and a conversation —
+per turn the planner's plan, the judge's verdict per title and an item question's answer — driven through
+`POST /api/search/ask` with `ASK_ENGINE=v2`, so the real executor, composer, eligibility, trays, state,
+handles and persistence run deterministically with the model ports replaced by the recording. It checks
+the golden eval's machine expectations: mode, exact or minimum picks, titles that must never appear (every
+standing exclusion and footprint title in the world), no repeat of an earlier turn, the handle an answer
+resolves, and a grounded, non-echoing reply. Four fixtures (facet + critique + item question, honest empty,
+media switch, pagination past the 40-candidate window) run in about 10 s with 0 paid calls. The fixtures are
+authored (`provenance` says so) until the eval key exists. It runs in the integration pass today;
+`make ci-replay` running `--filter Suite=Replay` is a change request to WS-8.
 
 ## The scenario set
 
@@ -137,7 +147,9 @@ bar at badge precision, and `supply/rules.sql` for which single rule holds each 
 every relaxation from both sides, and pins the reply wording the eval parses (`NoneFoundCopy`).
 
 **The ExcludeGenre rule includes the taxonomy gaps.** The API also excludes a title by an alias genre
-(Trakt's `children` for family, `suspense` for thriller) or by a stand-in keyword on a medium whose TMDB
+(Trakt's `children` for family, `suspense` for thriller), by a composite of catalogue facts (`anime` is
+animation whose original language is Japanese, on both media — WS-3's H-7; before it "no anime" removed
+nothing), or by a stand-in keyword on a medium whose TMDB
 taxonomy has no id for the genre (`GenreStandIns`: TV romance, horror, history, thriller and music; anime
 and musical on both media). Both truth files carry that rule's DATA as generated `VALUES` lists between
 `-- BEGIN/END GENERATED` markers; `StandInTruthSqlTests` fails when they drift from `GenreStandIns`, and
@@ -215,7 +227,8 @@ them, which is the point of the baseline.
 | Surfaces (`eval/surfaces/baselines/99c0761/`) | Partial, keyed (founder's key): digest returned no cards (no data), person pages and Watch tonight were not fetched, chained jobs ran mid-fetch, the artifact was not recorded (`provenance.md`), and it kept only `whyThis`, so the lens copy and hooks users read are unmeasured. Re-scored under the 2026-10-25 rules (stub 0.212). Re-run with the current harness on the eval key |
 | Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | The pre-program keyless reference, kept for what the re-baseline was measured against. Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
 | Surfaces, keyless (`eval/surfaces/baselines/9f42c9d-keyless/`) | The keyless reference for round 3 (IR2S-04), superseded by `224eea0-keyless` because it seeded no digest arrivals. Same snapshot and input artifact. Its lower anchored and Similar volume is the evidence gate (3 of 99c0761's 126 anchored cards pass it; all 12 of these do). Its stub rate is owned by WS-5, not waived: the absolute stub gate still fails (`provenance.md`) |
-| Surfaces, keyless (`eval/surfaces/baselines/224eea0-keyless/`) | **The reference for keyless runs** since wave A (IREV3S-02): the first baseline with seeded digest arrivals (`eval/surfaces/seed-arrivals.sql`), so the digest is measured (10 cards) instead of empty. Reproduced on a second fresh clone with every compare row passing (`provenance.md`). The keyed `99c0761/` seeded nothing, so `--compare` refuses it against a seeded run until the keyed re-run on the eval key |
+| Surfaces, keyless (`eval/surfaces/baselines/224eea0-keyless/`) | The wave-A reference (IREV3S-02): the first baseline with seeded digest arrivals (`eval/surfaces/seed-arrivals.sql`), so the digest is measured (10 cards) instead of empty. The keyed `99c0761/` seeded nothing, so `--compare` refuses it against a seeded run until the keyed re-run on the eval key |
+| Surfaces, keyless (`eval/surfaces/baselines/20429ff-keyless/`) | **The reference for keyless runs** since wave B: the wave-A merge (API sources = `20429ff`), the first recording (v4) with the uncitable why-line and false-copy-claim metrics. Passes every row against `224eea0-keyless`; uncitable 0 of 59 checked; false copy claims 15 (owned). Reproduced on a second fresh clone (`provenance.md`) |
 
 ## The LLM judge and κ
 
@@ -234,8 +247,8 @@ labels are not in, and no judge call has been made (no eval key).
   SHA-256, so the engine under test cannot be tuned to the judge's wording.
 - **The labels.** `eval/askreel/labels/founder-100.csv`: 100 cards from 100 different turns of the 99c0761
   open baseline, drawn by `judge.mjs items --seed 42`, with the scale and instructions in
-  `eval/askreel/labels/README.md`. WS-3's 20 ninja films are appended as confirm rows (`--confirm`) once
-  that list exists.
+  `eval/askreel/labels/README.md`, followed by WS-3's 20 ninja films as yes/no confirm rows (`--confirm`;
+  κ reads only the 100 `satisfies` rows).
 - **κ.** `judge.mjs kappa --labels … --judge …`: unweighted Cohen's κ on the 0–3 scale is the
   pre-registered gate (`gates.json` → `judge`, registered before any label or verdict existed), with the
   quadratic-weighted and relevant/not-relevant κ beside it. It exits 0 only at κ ≥ 0.6 with every labelled
@@ -259,7 +272,23 @@ measured by the golden eval on the same truth. `eval/surfaces/gates.json` holds 
 regression tolerances `--compare` applies (rates per suggestion card; a surface the baseline measured that
 goes dark is a regression; each suggestion surface, and anchored cards, must keep at least half the
 baseline's cards; different snapshots, or Fresh builds that started from different artifacts, are refused).
-False copy claims wait for the claims audit (task 9).
+Since recording version 4 it also reports **uncitable why-lines** and **false copy claims** (both below);
+recordings before it score `null` on them ("no data"), never zero.
+
+**Uncitable why-lines (WS-5's IREV3S-01 rule).** `ExplanationTemplater.IsCitable` lets a clause cite only
+one of the card's two largest positive pushes, or one of at least 0.15. The recording freezes each
+suggestion card's stored contributions (`TitleScores.ContributionsJson` for the artifact serving the fetch),
+and the scorer reads every rendered `whyThis` through the phrase catalogue in
+`eval/surfaces/citable-clauses.json`: a clause none of whose features is citable is counted (lens clauses
+and hooks are model copy and are not checked). `CitableClauseCatalogueTests` generates the catalogue's rule
+constants, a rendered sample of every `Translate` phrasing (alone and behind each kind of anchor clause)
+and a set of IsCitable vectors from the templater itself, and fails when a phrasing is read as the wrong
+feature, as two, or as none; `surfaces-score.test.mjs` replays the same samples and vectors through the
+JavaScript twin. Stored contributions are rounded to 3 decimals, so a push within 0.0005 of the floor is
+given the benefit of the doubt.
+
+**False copy claims (task 9).** See *The claims audit* below; the harness records the audit of the tree it
+runs from and gates `falseCopyClaims` and `unregisteredCopyClaims` at 0.
 
 **Copy is scored as rendered.** The recording keeps every copy field raw (`whyThis`, `lensClause`, `hook`,
 the pin's `reason`) and the component that renders each block; the scorer derives the string on screen:
@@ -283,6 +312,37 @@ week (`TitleAvailabilities.FirstSeenAt`), and a snapshot carries none, so `--fre
 region stamped as arrived yesterday, eligible or not, so the digest's own filter is what the leak check
 measures — after the chained jobs drain and before the digest build. How arrivals were made is part of a
 recording (`digestSeed`) and a comparability key: `--compare` refuses runs seeded differently.
+
+## The claims audit (WS-7 task 9)
+
+`node scripts/eval/claims.mjs check | report | unregistered`. `scripts/eval/claims-extract.mjs` sweeps every
+string a user can read — the frontend through the TypeScript compiler (JSX text, string and template
+literals; tests and fixtures excluded) and the backend's user-facing C# literals (logging, exceptions,
+regexes, SQL and routing statements excluded) — and keeps the **claim-shaped** ones: prose that asserts
+what the product does (absolutes, automatic behaviour, sync and privacy, money, timing such as "tonight",
+the product's "for you" vocabulary). `eval/claims/claims.json` is the register:
+
+- every extracted string is registered, either in a **claim family** or as `notClaims` with a reason
+  (a heading, a button label, a job progress label);
+- a family names its **owner** (the workstream that owns the behaviour), a **verdict** checked against the
+  code — `true` (pinned by the tests it names), `false` (a defect: the family says the fix) or
+  `unverified` (the sweep could not establish it; the owner owes the test) — its evidence, and tests that
+  must exist (`path::test name`);
+- `check` fails on unregistered copy, on registered text that left its file (an edited claim is
+  re-audited), and on a missing owner, verdict, defect or test. It does not fail on a false or unverified
+  claim: those are owned defects, ratcheted like the exclusion matrix's leaks and counted by the surface
+  harness.
+
+`claims.test.mjs` (in the replay suite) runs the check on the tree, so new claim-shaped copy is audited
+before it merges. `IT/ClaimsAudit/ClaimsAuditTests` pins the claims no owner's test covered (the push
+port's only consumer is the weekly digest; nothing can send an email; the scoring model never reads the
+taste narrative; the retrain threshold the status reports is the one the nightly gate applies). The first
+audit (build/trust-v1 @ 20429ff): 268 claim-shaped strings; 194 claims in 36 families — 123 true, 15 false
+(9 families), 56 unverified (6 families); 78 not claims. One false claim was found by the harness rather
+than by reading: `askreel.mjs check --db --api` showed WS-3's cost meter counting 199 unrated titles as
+clearing the crowd floor, so "These rules leave N of M titles" overstates N
+(`EligibilityTruthParityTests.The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect`
+ledgers it until WS-3's fix).
 
 ## The exclusion matrix (WS-7 task 7)
 

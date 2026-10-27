@@ -13,11 +13,12 @@ SELECT t."Id"
                     WHERE x."AccountId" = :'account' AND x."TitleId" = t."Id" AND x."RevokedAt" IS NULL
                       AND x."Kind" IN ('NotInterested', 'SaveForLater', 'Dropped'))
    -- ExcludeGenre: no excluded genre on the title — by its own genre tags; by an alias genre a Trakt-synced
-   -- title carries instead (children for family, suspense for thriller); or, on a medium whose TMDB taxonomy
+   -- title carries instead (children for family, suspense for thriller); by a composite of catalogue facts
+   -- (anime is animation whose original language is Japanese, on both media); or, on a medium whose TMDB taxonomy
    -- has no id for the genre (TV for romance, horror, history, thriller, music; both media for anime and
    -- musical), by a stand-in keyword label. An Exact label matches the whole label; a Word stem matches as
-   -- a whole word or phrase inside a label ("teenage romance", never "bromance"). The two VALUES lists are
-   -- the rule's DATA (which labels stand in, on which media) and are generated from GenreStandIns by
+   -- a whole word or phrase inside a label ("teenage romance", never "bromance"). The three VALUES lists are
+   -- the rule's DATA (which aliases, which composites, which labels stand in on which media) and are generated from GenreStandIns by
    -- StandInTruthSqlTests (REEL_REGENERATE_EVAL_SQL=1) so they cannot drift; the matching is written here.
    AND NOT EXISTS (SELECT 1 FROM "ContentFilters" f
                     WHERE f."AccountId" = :'account' AND f."Kind" = 'ExcludeGenre'
@@ -29,6 +30,12 @@ SELECT t."Id"
                                       -- END GENERATED genre-aliases
                                       ) a (slug, genres)
                                        WHERE a.slug = f."Value" AND a.genres && t."Genres")
+                           OR EXISTS (SELECT 1 FROM (
+                                      -- BEGIN GENERATED genre-composites
+                                      VALUES ('anime', 'animation', 'ja')
+                                      -- END GENERATED genre-composites
+                                      ) c (slug, genre, language)
+                                       WHERE c.slug = f."Value" AND c.genre = ANY (t."Genres") AND lower(t."Language") = c.language)
                            OR EXISTS (SELECT 1 FROM (
                                       -- BEGIN GENERATED genre-stand-ins
                                       VALUES ('anime', ARRAY['Movie', 'Show']::text[],

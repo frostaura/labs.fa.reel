@@ -1,0 +1,20 @@
+{
+  "id": "submarine-honest-empty",
+  "scenario": "empty-supply",
+  "provenance": "authored for the empty-supply category: every title on the topic is held out by the footprint or a standing rule, so the only honest answer is none-found with no picks",
+  "account": { "filters": [["Language", "en"]] },
+  "titles": [
+    { "name": "Das Boot", "keywords": ["submarine"], "language": "de", "votes": 5000, "out": "Language en" },
+    { "name": "Crimson Tide", "keywords": ["submarine"], "votes": 4900, "seen": true, "out": "watched" },
+    { "name": "K-19 The Widowmaker", "keywords": ["submarine"], "votes": 4800, "reaction": "NotInterested", "out": "not interested" },
+    { "name": "U-571", "keywords": ["submarine"], "votes": 4700, "rated": 7, "out": "rated" }
+  ],
+  "turns": [
+    {
+      "message": "submarine movies",
+      "plan": { "act": "NewRequest", "concepts": ["submarine"], "media": "Movies", "tools": ["SearchCatalog"] },
+      "verdicts": { "Das Boot": "Yes", "Crimson Tide": "Yes", "K-19 The Widowmaker": "Yes", "U-571": "Yes" },
+      "expect": { "mode": "NoneFound", "picks": [] }
+    }
+  ]
+}

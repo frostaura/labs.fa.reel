@@ -62,6 +62,20 @@ public class StandInTruthSqlTests
     }
 
     [Fact]
+    public void The_generated_composite_row_states_the_rule_the_builder_applies()
+    {
+        // WS-3 CR-3 (H-7): "no anime" removes animation whose original language is Japanese. The generated
+        // row must name exactly the facts MatchesComposite reads, so the SQL and the API cannot disagree on
+        // which genre and language make a title anime.
+        Assert.Contains("VALUES ('anime', 'animation', 'ja')", Render(Template()), StringComparison.Ordinal);
+        Assert.Equal([GenreStandIns.AnimeSlug], GenreStandIns.CompositeSlugs);
+        var anime = new FrostAura.Reel.Domain.Catalog.Title { Genres = [GenreStandIns.AnimeGenre], Language = "JA" };
+        var dubbed = new FrostAura.Reel.Domain.Catalog.Title { Genres = [GenreStandIns.AnimeGenre], Language = "en" };
+        Assert.True(GenreStandIns.MatchesComposite(anime, GenreStandIns.AnimeSlug));
+        Assert.False(GenreStandIns.MatchesComposite(dubbed, GenreStandIns.AnimeSlug));
+    }
+
+    [Fact]
     public void A_missing_marker_pair_is_refused_rather_than_silently_generating_nothing()
     {
         var error = Assert.Throws<InvalidOperationException>(() => Render("SELECT 1\n-- BEGIN GENERATED genre-aliases\n"));
@@ -76,6 +90,7 @@ public class StandInTruthSqlTests
     {
         var lines = sql.Split('\n').ToList();
         Replace(lines, "genre-aliases", AliasValues());
+        Replace(lines, "genre-composites", CompositeValues());
         Replace(lines, "genre-stand-ins", StandInValues());
         return string.Join('\n', lines);
     }
@@ -98,6 +113,19 @@ public class StandInTruthSqlTests
         Values(GenreStandIns.Aliases
             .OrderBy(a => a.Key, StringComparer.Ordinal)
             .Select(a => $"({Literal(a.Key)}, {Array(a.Value)})"));
+
+    /// <summary>
+    /// The composite slugs (WS-3 H-7: anime is animation whose original language is Japanese) as
+    /// (slug, genre, language) rows. A composite <see cref="GenreStandIns"/> gains without a statement
+    /// here is refused, so a new composite can never reach the API while the truth silently ignores it.
+    /// </summary>
+    private static List<string> CompositeValues() =>
+        Values(GenreStandIns.CompositeSlugs
+            .Order(StringComparer.Ordinal)
+            .Select(slug => string.Equals(slug, GenreStandIns.AnimeSlug, StringComparison.Ordinal)
+                ? $"({Literal(slug)}, {Literal(GenreStandIns.AnimeGenre)}, {Literal(GenreStandIns.AnimeLanguage)})"
+                : throw new InvalidOperationException(
+                    $"composite slug '{slug}' has no SQL statement — teach {nameof(StandInTruthSqlTests)}.{nameof(CompositeValues)} its facts")));
 
     private static List<string> StandInValues() =>
         Values(StandInRows().Select(r =>
@@ -141,7 +169,8 @@ public class StandInTruthSqlTests
     private static string Literal(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
     private static string Template() =>
-        "-- BEGIN GENERATED genre-aliases\n-- END GENERATED genre-aliases\n-- BEGIN GENERATED genre-stand-ins\n-- END GENERATED genre-stand-ins";
+        "-- BEGIN GENERATED genre-aliases\n-- END GENERATED genre-aliases\n-- BEGIN GENERATED genre-composites\n-- END GENERATED genre-composites\n"
+        + "-- BEGIN GENERATED genre-stand-ins\n-- END GENERATED genre-stand-ins";
 
     private static string RepoRoot()
     {

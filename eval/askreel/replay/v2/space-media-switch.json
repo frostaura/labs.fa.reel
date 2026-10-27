@@ -1,0 +1,28 @@
+{
+  "id": "space-media-switch",
+  "scenario": "space-isolation-chain",
+  "provenance": "authored from the open-set scenario's media switch: the same topic as films, then as a series",
+  "account": { "filters": [] },
+  "titles": [
+    { "name": "Moon", "keywords": ["space"], "votes": 5000 },
+    { "name": "Solaris", "keywords": ["space"], "votes": 4900 },
+    { "name": "Ad Astra", "keywords": ["space"], "votes": 4800 },
+    { "name": "The Expanse", "keywords": ["space"], "media": "Show", "votes": 4700 },
+    { "name": "For All Mankind", "keywords": ["space"], "media": "Show", "votes": 4600 },
+    { "name": "Away", "keywords": ["space"], "media": "Show", "votes": 4500 }
+  ],
+  "turns": [
+    {
+      "message": "space movies about isolation and silence",
+      "plan": { "act": "NewRequest", "concepts": ["space"], "media": "Movies", "tools": ["SearchCatalog"] },
+      "verdicts": { "Moon": "Yes", "Solaris": "Yes", "Ad Astra": "Yes", "The Expanse": "Yes", "For All Mankind": "Yes", "Away": "Yes" },
+      "expect": { "mode": "Picks", "picks": ["Moon", "Solaris", "Ad Astra"] }
+    },
+    {
+      "message": "same but as a series",
+      "plan": { "act": "Refine", "media": "Shows", "tools": ["SearchCatalog"] },
+      "verdicts": { "Moon": "Yes", "Solaris": "Yes", "Ad Astra": "Yes", "The Expanse": "Yes", "For All Mankind": "Yes", "Away": "Yes" },
+      "expect": { "mode": "Picks", "picks": ["The Expanse", "For All Mankind", "Away"], "noRepeatTurns": [1] }
+    }
+  ]
+}

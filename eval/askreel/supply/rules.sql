@@ -14,8 +14,8 @@
 SELECT DISTINCT t."Id", x."Kind", x."Value"
   FROM "Titles" t
   CROSS JOIN LATERAL (
-        -- ExcludeGenre: one row per excluded genre the title carries — by its genre tags, an alias genre or a
-        -- stand-in keyword on a medium that cannot tag the genre (the arm of `_eligible.sql`, which explains
+        -- ExcludeGenre: one row per excluded genre the title carries — by its genre tags, an alias genre, a
+        -- composite (anime: animation in Japanese) or a stand-in keyword on a medium that cannot tag the genre (the arm of `_eligible.sql`, which explains
         -- the matching; the VALUES lists are generated from GenreStandIns by StandInTruthSqlTests).
         SELECT 'ExcludeGenre' AS "Kind", lower(btrim(f."Value")) AS "Value"
           FROM "ContentFilters" f
@@ -28,6 +28,12 @@ SELECT DISTINCT t."Id", x."Kind", x."Value"
                            -- END GENERATED genre-aliases
                            ) a (slug, genres)
                             WHERE a.slug = f."Value" AND a.genres && t."Genres")
+                OR EXISTS (SELECT 1 FROM (
+                           -- BEGIN GENERATED genre-composites
+                           VALUES ('anime', 'animation', 'ja')
+                           -- END GENERATED genre-composites
+                           ) c (slug, genre, language)
+                            WHERE c.slug = f."Value" AND c.genre = ANY (t."Genres") AND lower(t."Language") = c.language)
                 OR EXISTS (SELECT 1 FROM (
                            -- BEGIN GENERATED genre-stand-ins
                            VALUES ('anime', ARRAY['Movie', 'Show']::text[],

@@ -28,7 +28,11 @@
 //                      person pages and typeahead (reported only — those show what you have seen by design);
 //   coverage           a surface that errored or (suggestion surfaces) came back empty has NO data, and
 //                      the run exits 1 — an error is never scored as "0 leaks";
-//   copy claims        not measured yet (WS-7 task 9, the claims audit).
+//   false copy claims  the claims audit's false claims (eval/claims/claims.json, scripts/eval/claims.mjs) for the
+//                      tree the harness runs from, and any claim-shaped copy the register does not cover;
+//   uncitable clauses  templated whyThis clauses citing a contribution ExplanationTemplater.IsCitable rejects
+//                      (WS-5 IREV3S-01), re-checked against the card's stored contributions for the serving
+//                      artifact through eval/surfaces/citable-clauses.json;
 // Every copy metric scores the string the user READS, per rendering component (surfaces-score.mjs
 // `rendered`): the hero's hook before its whyThis, a rail card's lensClause before its whyThis, the
 // Watch-tonight pin's reason. The recording keeps every raw field so a replay can re-derive it.
@@ -41,6 +45,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { scoreSurfaces, compareSurfaces, surfaceGates } from "./surfaces-score.mjs";
 import { modelKeyFor } from "./guards.mjs";
+import { auditClaims } from "./claims.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
@@ -86,7 +91,9 @@ function render(rec, m) {
     `| Exclusion leaks (suggestion surfaces) | ${s.exclusionLeaks} |`, `| Cross-rail repeats (feed page) | ${s.crossRailRepeats} |`,
     `| Evidence share (anchored + Similar, n=${s.anchoredCards}) | ${fmt(s.evidenceShare)} |`, `| Random-pair cosine p90 (evidence bar) | ${fmt(s.randomCosineP90)} |`,
     `| Rendered why-lines hedging against their own pick | ${s.hedgingWhyLines} |`, `| Why-lines with non-Latin script | ${s.nonLatinWhyLines} |`,
-    `| Watched or rated titles on Saved / Watch tonight | ${s.lookupFootprint} |`, `| False copy claims | not measured yet (task 9) |`, "",
+    `| Watched or rated titles on Saved / Watch tonight | ${s.lookupFootprint} |`,
+    `| Why-lines with a clause IsCitable rejects (of whyThis lines checked; unscored) | ${s.uncitableWhyLines === null || s.uncitableWhyLines === undefined ? "not recorded (recording predates contributions)" : `${s.uncitableWhyLines} of ${s.citableChecked}; ${s.citableUnscored} without a stored score`} |`,
+    `| False copy claims (claims audit; of registered claims; unregistered) | ${s.falseCopyClaims === null || s.falseCopyClaims === undefined ? "not recorded (recording predates the claims audit)" : `${s.falseCopyClaims} of ${s.copyClaimsChecked}; ${s.unregisteredCopyClaims} unregistered`} |`, "",
     "## Per surface", "", "Copy is scored as rendered: the hero's hook, else its whyThis; a rail card's lensClause, else its whyThis; the Watch-tonight reason. \"Read from\" counts which field each scored line came from (a version-2 recording kept whyThis only).", "",
     "| Surface | Blocks | HTTP errors | Empty blocks | Cards | Read from | Stub why | Hedging | Non-Latin | Leaks | Anchored | Evidence pass | Watched or rated (lookup surfaces) |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"];
   const from = (r) => Object.entries(r ?? {}).map(([k, n]) => `${k} ${n}`).join(", ") || "—";
@@ -95,6 +102,8 @@ function render(rec, m) {
   if (leaks.length) L.push("", "## Leaks (first 20 per surface)", "", ...leaks.map((x) => `- ${x}`));
   if (m.repeats.length) L.push("", "## Cross-rail repeats", "", ...m.repeats.map((r) => `- ${r.name}: ${r.rows.join(", ")}`));
   if (m.hedges.length) L.push("", "## Hedging why-lines (first 40)", "", ...m.hedges.map((h) => `- ${h}`));
+  if (rec.claims?.falseFamilies?.length) L.push("", `## False copy claims (claims audit at ${rec.claims.tree.slice(0, 7)})`, "", ...rec.claims.falseFamilies.map((f) => `- ${f.id} (${f.owner}): ${f.claims} line(s)`));
+  if (m.uncitable?.length) L.push("", "## Why-lines citing a push IsCitable rejects (first 40)", "", ...m.uncitable.map((h) => `- ${h}`));
   L.push("", "## Jobs that ran during the harness", "", ...(rec.jobsDuringRun ? (rec.jobsDuringRun.length ? rec.jobsDuringRun.map((j) => `- ${j.kind} ${j.status} × ${j.count}`) : ["- none"]) : ["- not recorded in this recording (it predates job recording; see provenance.md beside it if present)"]));
   L.push("", "## Ledger delta", "", "| Provider | Model | Purpose | Calls | Prompt | Completion |", "|---|---|---|---|---|---|",
     ...(m.ledger ?? []).map((r) => `| ${r.provider} | ${r.model || "—"} | ${r.purpose || "—"} | ${r.calls} | ${r.promptTokens} | ${r.completionTokens} |`));
@@ -314,18 +323,35 @@ const p90 = sql(db, `select setseed(0.4242); with e as (${eligibleSql}), x as (s
   n as (select "Id", row_number() over () rn from x)
   select percentile_disc(0.9) within group (order by 1 - (ea."Embedding" <=> eb."Embedding"))
     from n a join n b on b.rn = a.rn + 2000 join "TitleEmbeddings" ea on ea."TitleId" = a."Id" join "TitleEmbeddings" eb on eb."TitleId" = b."Id"`, { account: accountId }).at(-1)?.[0];
+// The contributions each card's why-line was templated from (IsCitable check, WS-5 IREV3S-01): the stored
+// top contributions of the artifact serving the fetch, in the engine's order, as TitleScoreWriter wrote them.
+const contributions = {};
+if (ids.length && artifactAtStart[0]) {
+  for (const [tid, json] of sql(db, `select "TitleId", "ContributionsJson" from "TitleScores" where "AccountId" = :'account' and "ModelArtifactId" = '${artifactAtStart[0]}' and "TitleId" in (${inIds})`, { account: accountId })) {
+    contributions[tid] = JSON.parse(json).map((c) => [c.feature, Number(c.value)]);
+  }
+}
 // Every job that ran on the eval database during the harness (a Fresh build can chain retrains and
 // enrichment), so a surprising number can be traced to what else moved underneath it.
 const jobsDuringRun = sql(db, `select "Kind", "Status", count(*) from "SyncJobs" where "EnqueuedAt" >= '${new Date(started).toISOString()}' group by 1, 2 order by 1`)
   .map(([kind, status, n]) => ({ kind, status, count: Number(n) }));
 const names = Object.fromEntries(blocks.flatMap((bl) => bl.cards.map((c) => [c.titleId, c.name])));
 
+// The claims audit (task 9) of the tree the harness runs from: the false copy claims the register holds
+// are this run's "false copy claims". Recorded, so a replay re-scores without re-reading the tree.
+const audit = auditClaims(repo);
+const claims = {
+  tree: execFileSync("git", ["-C", repo, "rev-parse", "HEAD"]).toString().trim(),
+  claims: audit.claims, falseClaims: audit.falseClaims, unverifiedClaims: audit.unverifiedClaims, unregistered: audit.unregistered.length,
+  falseFamilies: audit.falseFamilies.map((f) => ({ id: f.id, owner: f.owner, claims: f.claims })),
+};
 const rec = {
-  kind: "surface-recording", version: 3, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch, digestSeed,
+  kind: "surface-recording", version: 4, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch, digestSeed,
   artifact: { input: artifactInput[0], id: artifactAtStart[0], version: artifactAtStart[1] ? Number(artifactAtStart[1]) : null, changedDuringFetch: artifactAtStart[0] !== artifactAtEnd[0] },
   startedAt: new Date(started).toISOString(), wallSeconds: Math.round((finished - started) / 1000), blocks, names,
   ledger: ledgerDelta, costUsd, exposuresWritten: exposuresAfter - exposuresBefore, jobsDuringRun,
-  facts: { eligible, seen, evidence, randomCosineP90: p90 === undefined || p90 === "" ? null : Number(p90) },
+  claims,
+  facts: { eligible, seen, evidence, contributions, randomCosineP90: p90 === undefined || p90 === "" ? null : Number(p90) },
 };
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, "recording.json"), JSON.stringify(rec));
