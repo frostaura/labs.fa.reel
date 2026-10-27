@@ -75,6 +75,14 @@ export interface AccountSettings {
   email?: string | null;
   /** Served RESOLVED (never null): how long an evening is, for the Saved shelf's pinned pick. */
   eveningBudgetMinutes?: number;
+  /**
+   * The IANA zone the account's day is counted in, AS STORED: null when never set. A PUT with an
+   * IANA id sets it, an empty string clears it back to UTC, and anything else is a 400
+   * `time_zone_invalid` that changes nothing.
+   */
+  timeZone?: string | null;
+  /** The zone actually in force (read-only): the stored one, or UTC when none is set. */
+  effectiveTimeZone?: string;
 }
 
 export const settingsApi = api.injectEndpoints({
