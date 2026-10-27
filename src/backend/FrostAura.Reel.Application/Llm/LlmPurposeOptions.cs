@@ -166,21 +166,22 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
         [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 370),
 
         // ── Ask Reel v2 (§4.11 stage budgets; R1-51) ──
-        // Plan: measured on luna at effort none on the eval slot, 2026-10-27 — 10 per-call ledger
-        // deltas across five acts (NewRequest, CritiqueSet, Refine, ItemQuestion, Chitchat) and query
-        // lengths from two words to thirty-three: 86–114 completion tokens, p50 96. Against WS-2's
-        // 43 earlier v2 calls (mean 93) the whole 53 had 0 truncations at the old 600. p99 is taken
-        // as the observed max because 10 samples have no tail to read; 114 x 1.5 = 171, and the
-        // schema's arrays are unbounded, so a many-constraint request is given the room a 10-sample
-        // tail cannot prove: 250. A length finish still retries once at 500, under the old ceiling.
+        // Each is p99 × 1.5 of per-call completion tokens on luna at effort none, on the eval slot,
+        // 2026-10-27, with every call 0 truncations; a length finish still retries once at 2×.
+        // Plan: 40 calls — 10 live opening turns (86–114) and 30 probe follow-ups (84–151, p50 99)
+        // planned with one to three earlier exchanges and their cards on screen, across critique,
+        // refine, item-question, new-request and chitchat messages of one word to five constraints —
+        // and WS-2's 43 live v2 calls averaged 93. 151 × 1.5 = 227, inside 250.
+        // Answer: 27 probe calls over the production fact sheet (TitleFacts) and thirty item questions,
+        // answerable and not, seen and unseen titles, "tell me everything" included: 22–107, p50 46
+        // (the 4 live calls ever made averaged 42). 107 × 1.5 = 161, rounded up to 170; its own
+        // two-sentence, 360-character cap discards anything past roughly 100 tokens anyway.
         // The judge uses the rerank-ask measurement, its closest shape (a satisfies verdict + fit +
-        // why per title), and moves with it; the 11 judge calls here averaged 304 tokens a call (per-turn
-        // means 228–395), inside even a one-title batch's 470. The answer is not yet measured (2 calls, 41 tokens each): its ceiling stays the
-        // §4.11 one, which its own 360-character cap (about 100 tokens with the envelope) already
-        // bounds; the golden run's ItemQuestion rows re-size it. ──
+        // why per title), and moves with it; 11 judge calls averaged 304 tokens a call (per-turn means
+        // 228–395), inside even a one-title batch's 470. ──
         [ApiUsagePurpose.AskPlan] = Search(maxTokens: 250, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
         [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 370),
-        [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 300, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
+        [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 170, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
 
         // ── Background writers ──
         // Cross-reference: a fixed allowance for the envelope (and any residual reasoning) plus a

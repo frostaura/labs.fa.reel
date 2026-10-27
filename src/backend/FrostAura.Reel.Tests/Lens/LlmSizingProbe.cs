@@ -7,7 +7,10 @@ using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Search.AskReel.Engine;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.CrossReference;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Lens;
@@ -57,6 +60,48 @@ public class LlmSizingProbe
         "a western with moral grey areas", "Korean thriller", "a film like Arrival", "short binge, one season only",
         "revenge film, gritty", "political thriller from the 70s", "time loop movie", "survival story at sea",
         "comedy with Simon Pegg", "something hopeful after a long week", "the second one, but darker",
+    ];
+
+    /// <summary>
+    /// Ask v2 plan follow-ups (R1-51): the message a person sends AFTER an answer is on screen. The
+    /// first sizing pass only ever planned a conversation's opening turn, so a critique, a refine or
+    /// an item question carried no earlier turns and no on-screen titles; these do. Every act, and
+    /// lengths from one word to a five-constraint request.
+    /// </summary>
+    private static readonly string[] PlanFollowUps =
+    [
+        "none of the above, something darker", "only ones from the 90s", "is the third one scary?",
+        "tell me more about T1.2", "thanks, that's great",
+        "actually, forget that — I want a feel-good animated film for the kids, under 90 minutes, no musicals, nothing sad, ideally released after 2015 and not Pixar",
+        "more like the first one", "no shows, only movies", "I've seen all of those",
+        "something with less violence but the same vibe", "who directed the second one?", "show me more",
+        "what about something by Denis Villeneuve instead?", "not that one, the one before it", "funnier, please",
+        "why did you pick the last one?", "hmm", "ok what about Korean ones", "any of these under two hours?",
+        "swap the horror ones for thrillers", "I loved T1.1, more like that",
+        "something my wife would like too, she hates subtitles",
+        "from the 70s or 80s, with Al Pacino or Robert De Niro, not gangster though, and not over 150 minutes",
+        "which of these is the most hopeful?", "you're useless", "what's the fourth one about?",
+        "start over: cosy British mysteries", "darker and slower, more like a novel", "hello?", "is T1.5 on Netflix?",
+    ];
+
+    /// <summary>
+    /// Ask v2 item questions (R1-51): what the answerer is asked about one title. Answerable from the
+    /// fact sheet, unanswerable from it (the prompt then says what it does know), and the two that
+    /// push hardest on length ("tell me everything", a compare-and-list) so the tail is measured.
+    /// </summary>
+    private static readonly string[] ItemQuestions =
+    [
+        "Is it scary?", "Who directed it?", "How long is it?", "Is it OK for a 12-year-old?",
+        "What's it about, without spoilers?", "Who's in it?", "Is it on Netflix?", "Does the dog die?",
+        "Have I seen this one already?", "Is it based on a true story?", "Is it more of a comedy or a drama?",
+        "Is it violent? I'm watching with my parents tonight and they hate gore, so tell me honestly",
+        "Is there a sequel?", "What year did it come out?", "Is it slow?", "Is it in English?",
+        "Would it suit a rainy Sunday afternoon?", "Is Tom Hardy in it?", "how many seasons", "Is it a remake?",
+        "What's the tone like — bleak, or hopeful?", "Does it have subtitles?", "Is it romantic at all?",
+        "Tell me everything you know about it",
+        "Compare it with the director's other films and list the main cast with their roles",
+        "Is the ending happy?", "Any sex scenes?", "What genre is it?", "Is it good?",
+        "Why did you show me this one, and what else is it like?",
     ];
 
     [Fact]
@@ -259,6 +304,68 @@ public class LlmSizingProbe
                 completion = result.CompletionTokens,
                 ms = clock.ElapsedMilliseconds,
             }));
+        }
+
+        // ── Ask v2 (R1-51). The plan: follow-up turns only — the opening turn was sized from live
+        // turns — with one or two earlier exchanges and their cards on screen under real handles.
+        await Run(ApiUsagePurpose.AskPlan, calls, i =>
+        {
+            var exchanges = (i % 3) + 1;
+            var presented = new List<PresentedRef>();
+            var turns = new List<ChatTurn>();
+            for (var t = exchanges; t >= 1; t--)
+            {
+                var cards = rows.Skip((i * 17) + (t * 9)).Take(6 + ((i + t) % 7)).ToList();
+                presented.AddRange(cards.Select((id, rank) =>
+                    new PresentedRef(id, new TurnHandle(t, rank + 1), titles[id].Name, titles[id].Year, titles[id].MediaType)));
+            }
+
+            for (var t = 1; t <= exchanges; t++)
+            {
+                var asked = t == 1 ? Queries[i % Queries.Length] : PlanFollowUps[(i + t) % PlanFollowUps.Length];
+                var lead = presented.First(p => p.Handle.Turn == t);
+                turns.Add(new ChatTurn("user", asked));
+                turns.Add(new ChatTurn(
+                    "assistant",
+                    string.Create(CultureInfo.InvariantCulture, $"Here are {presented.Count(p => p.Handle.Turn == t)} picks — {lead.Handle} {lead.Name} leads.")));
+            }
+
+            var state = new ConversationState(
+                exchanges,
+                new HardConstraints([new ConceptTerm(Queries[i % Queries.Length].Split(' ')[0], [], [])], [], null, null, MediaScope.Any),
+                new SoftPreferences(i % 2 == 0 ? ["dark"] : [], [], []),
+                i % 4 == 0 ? ["superheroes"] : [],
+                [],
+                [],
+                presented.OrderByDescending(p => p.Handle.Turn).ThenBy(p => p.Handle.Rank).ToList());
+            var input = new PlanInput(
+                PlanFollowUps[i % PlanFollowUps.Length], state, turns,
+                new StandingConditionsView(i % 2 == 0 ? "never horror; English only" : null), tasteSummary, MediaScope.Any);
+            return (OpenRouterAskPlanner.Messages(input), OpenRouterAskPlanner.Schema(), 0);
+        });
+
+        // The answer: the production fact sheet (TitleFacts) for a spread of titles — the shortlist's
+        // films and shows and some the account has rated, so "you have seen it" varies too.
+        if (only.Count == 0 || only.Contains(ApiUsagePurpose.AskAnswer))
+        {
+            var seenIds = await db.UserRatings.Where(r => r.AccountId == accountId)
+                .OrderBy(r => r.TitleId).Select(r => r.TitleId).Take(calls / 3).ToListAsync();
+            var answerIds = rows.Where((_, k) => k % 19 == 0).Take(calls - seenIds.Count).Concat(seenIds).ToList();
+            var titleFacts = new TitleFacts(db);
+            var sheets = new List<TitleFactSheet>();
+            foreach (var id in answerIds)
+            {
+                if (await titleFacts.GetAsync(accountId, id, CancellationToken.None) is { } sheet)
+                {
+                    sheets.Add(sheet);
+                }
+            }
+
+            await Run(ApiUsagePurpose.AskAnswer, calls, i => (
+                [LlmMessage.System(OpenRouterAskAnswerer.SystemPrompt),
+                    LlmMessage.User(OpenRouterAskAnswerer.UserPrompt(
+                        new AnswerInput(ItemQuestions[i % ItemQuestions.Length], sheets[i % sheets.Count])))],
+                OpenRouterAskAnswerer.Schema(), 0));
         }
 
         await Run(ApiUsagePurpose.TasteNarrative, calls, _ => (

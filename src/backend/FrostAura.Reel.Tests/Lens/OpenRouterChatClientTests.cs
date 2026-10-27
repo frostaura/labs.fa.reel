@@ -42,21 +42,38 @@ public class OpenRouterChatClientTests
         Assert.Equal(ReasoningEfforts.None, new LlmPurposeCatalog(Config()).For(purpose).ReasoningEffort);
 
     /// <summary>
-    /// Ask v2's ceilings (R1-51). The plan is sized from 10 per-call ledger deltas on luna at effort
-    /// none (86–114 completion tokens, every one a different act and query length) against a 53-call
-    /// mean of 93 with 0 truncations at the old 600: 250 is the observed max × 1.5 with the margin a
-    /// 10-sample tail needs, and a length finish still retries once at 500. The judge keeps the
-    /// rerank-ask measurement it shares a shape with. The answer is unmeasured (2 calls) and keeps the
-    /// ceiling its 360-character cap already bounds.
+    /// Ask v2's ceilings (R1-51), each the p99 × 1.5 of per-call measurements on luna at effort none.
+    /// Plan: 40 calls — 10 live opening turns and 30 probe follow-ups with one to three exchanges and
+    /// their cards on screen — 84–151 completion tokens, so 151 × 1.5 = 227 under 250. Answer: 27
+    /// probe calls over the production fact sheet and thirty item questions, the length-pushing ones
+    /// included — 22–107, so 107 × 1.5 = 161, rounded up to 170. The judge keeps the rerank-ask
+    /// measurement it shares a shape with.
     /// </summary>
     [Fact]
     public void Ask_v2_ceilings_are_the_measured_ones()
     {
         var catalog = new LlmPurposeCatalog(Config());
         Assert.Equal(250, catalog.For(ApiUsagePurpose.AskPlan).MaxTokens);
-        Assert.Equal(500, catalog.For(ApiUsagePurpose.AskPlan).MaxTokensFor(0) * 2);
         Assert.Equal(100 + (370 * 6), catalog.For(ApiUsagePurpose.AskJudge).MaxTokensFor(6));
-        Assert.Equal(300, catalog.For(ApiUsagePurpose.AskAnswer).MaxTokens);
+        Assert.Equal(170, catalog.For(ApiUsagePurpose.AskAnswer).MaxTokens);
+    }
+
+    /// <summary>
+    /// The margin a measured ceiling leaves is backed by the length retry: a <c>length</c> finish on
+    /// either Ask v2 purpose that writes text is sent again once at twice its ceiling, on the wire —
+    /// not merely computable as 2 × the ceiling. A purpose with <c>RetryOnLength</c> off sends once.
+    /// </summary>
+    [Theory]
+    [InlineData(ApiUsagePurpose.AskPlan, 250)]
+    [InlineData(ApiUsagePurpose.AskAnswer, 170)]
+    public async Task An_Ask_v2_length_finish_is_retried_on_the_wire_at_twice_its_ceiling(string purpose, int ceiling)
+    {
+        var handler = new Script(Ok("{\"a\":", finish: "length"), Ok("""{"a":1}"""));
+
+        var result = await Client(handler).CompleteAsync(Request(purpose), CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal([ceiling, ceiling * 2], handler.Bodies.Select(MaxTokensOf));
     }
 
     [Fact]
