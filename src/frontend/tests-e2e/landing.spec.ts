@@ -13,11 +13,16 @@ test.describe("landing on phones", () => {
       await page.goto("/");
       await expect(page.getByRole("button", { name: /sign in with trakt/i })).toBeVisible();
 
-      const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+      // Against the layout width, not innerWidth: WebKit draws a classic vertical scrollbar, so its
+      // content box is narrower than the window (310 of 320) and scrollWidth matches that, while
+      // Chromium's overlay scrollbar leaves the two equal. Overflow is scrollWidth past clientWidth.
+      const { scrollWidth, clientWidth, innerWidth } = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
         innerWidth: window.innerWidth,
       }));
-      expect(scrollWidth).toBe(innerWidth);
+      expect(scrollWidth).toBe(clientWidth);
+      expect(clientWidth).toBeLessThanOrEqual(innerWidth);
 
       // The pitch paragraph sits fully inside the viewport, left edge included.
       const pitch = page.getByText(/Link your Trakt profile; get live, explainable picks/);
