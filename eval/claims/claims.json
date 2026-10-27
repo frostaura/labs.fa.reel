@@ -1338,20 +1338,21 @@
       ]
     },
     {
-      "id": "day-turns-over-in-your-zone",
+      "id": "time-zone-card-shows-the-saved-zone",
       "owner": "WS-10B",
       "verdict": "true",
-      "assertion": "The account's day — today's picks and the day's Ask Reel allowance — turns over at midnight in the time zone set in Settings (UTC when none is set).",
-      "evidence": "FeedBuildPolicy.Decide and the anchor rotation key on AccountTimeZone.LocalDate, so a rebuild inside the account's day preserves tonight's picks and its midnight deals fresh ones (cb7639b, R1-16); AskTurnLimiter counts the day limit from the account-local midnight, and BudgetCalendar puts every per-account LLM ceiling on the same day (R1-14). An unset or unresolvable zone counts in UTC, which the card says.",
+      "assertion": "The Settings time-zone card says only that the zone is the one saved on the account: it shows the stored zone (or that none is set and UTC is in force), and a refused zone shows the server's own reason and stores nothing.",
+      "evidence": "TimeZoneCard reads GET /api/settings timeZone/effectiveTimeZone and claims nothing about what the zone changes (259f963, R1-17 follow-on). The day-turnover claim it used to make ('Reel counts your day in this zone…') is true on the merged trunk (R1-14 WS-1, R1-15 WS-8, R1-16 WS-5), but the card no longer says it; widening the copy again is WS-10B's call.",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/BuildFeedNeverEmptyTests.cs::Tonight_turns_over_at_the_accounts_midnight",
-        "src/backend/FrostAura.Reel.Tests/Auth/InboundLimitTests.cs::The_day_limit_resets_at_the_accounts_local_midnight",
-        "src/backend/FrostAura.Reel.Tests/Auth/AccountSettingsRulesTests.cs::A_zone_this_host_cannot_resolve_counts_in_UTC"
+        "src/frontend/src/components/settings/TimeZoneCard.test.tsx::claims nothing about what the zone changes, in any state",
+        "src/frontend/src/components/settings/TimeZoneCard.test.tsx::a chosen zone is shown as chosen, and a device elsewhere is offered quietly",
+        "src/frontend/src/components/settings/TimeZoneCard.test.tsx::a refused zone (400 time_zone_invalid) shows the server's reason, in danger tone, and changes nothing",
+        "src/frontend/tests-e2e/settings-time-zone.spec.ts::a refused zone shows the server's reason in danger tone and changes nothing"
       ],
       "claims": [
         {
           "file": "src/frontend/src/components/settings/TimeZoneCard.tsx",
-          "text": "Reel counts your day in this zone: today's picks and a day's Ask Reel allowance turn over at midnight here."
+          "text": "The time zone saved on your account. Choose the one you live in."
         }
       ]
     },
