@@ -167,15 +167,27 @@ test.describe("the footer clears the tab bar at the bottom of the page", () => {
               });
             })
             .toEqual({ footer: true, lines: true });
-          // And the licence line itself is the topmost thing at its own last row, not the bar.
+          // And the licence line itself is the topmost thing at its own last row, not the bar. Box and
+          // hit-test are read together, in a poll: the page can still settle (late cards, the pin's
+          // line) between one read and the next, and a box from before that hit-tests the wrong row.
+          // A real cover names itself here (the element hit), so a failure says what is on top.
           const line = footer.getByText("This product uses the TMDB API");
-          const box = await line.boundingBox();
-          if (!box) throw new Error("the licence line has no box");
-          const hit = await page.evaluate(
-            ({ x, y }) => !!document.elementFromPoint(x, y)?.closest("footer"),
-            { x: box.x + box.width / 2, y: box.y + box.height - 2 }
-          );
-          expect(hit, "the licence line's last row is under something").toBe(true);
+          await expect
+            .poll(
+              async () => {
+                await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+                const box = await line.boundingBox();
+                if (!box) return "the licence line has no box";
+                return page.evaluate(({ x, y }) => {
+                  const el = document.elementFromPoint(x, y);
+                  if (el?.closest("footer")) return "footer";
+                  const tagged = el?.closest("[data-testid]")?.getAttribute("data-testid");
+                  return `under ${el?.tagName.toLowerCase() ?? "nothing"}${tagged ? ` in ${tagged}` : ""} at y=${Math.round(y)}`;
+                }, { x: box.x + box.width / 2, y: box.y + box.height - 2 });
+              },
+              { message: "the licence line's last row is under something" }
+            )
+            .toBe("footer");
         });
       }
     });

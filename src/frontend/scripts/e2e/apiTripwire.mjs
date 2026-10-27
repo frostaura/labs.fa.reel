@@ -88,7 +88,19 @@ function forward(req, res, pathname) {
       answer.pipe(res);
     }
   );
-  upstream.on("error", () => record(req, res, pathname));
+  // Refused: the spec's mock server is gone (closed early, or a late call after its test ended), so
+  // nothing answered this call — record it. Any other failure (a reset, a hang-up) comes from a live
+  // mock server that took the call and dropped it on purpose, which is how a spec simulates the
+  // network going down (PH-12): its answer, not an unmocked call, so it is refused unrecorded.
+  upstream.on("error", (error) => {
+    if (error?.code === "ECONNREFUSED") {
+      record(req, res, pathname);
+      return;
+    }
+    req.resume();
+    if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" });
+    res.end();
+  });
   req.pipe(upstream);
 }
 

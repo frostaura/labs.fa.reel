@@ -113,6 +113,20 @@ describe("apiTripwire", () => {
     expect(recorded(logFile)).toEqual(["/api/saved"]);
   });
 
+  it("a call the live mock server drops on purpose is the spec's outage: refused, never recorded", async () => {
+    await new Promise<void>((resolve) => mock.close(() => resolve()));
+    mock = http.createServer((req) => {
+      req.resume();
+      req.socket.destroy(); // how service-worker.preview.spec simulates the network going down
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    const dropping = (mock.address() as AddressInfo).port;
+    await call(port, "PUT", "/__tripwire/forward", JSON.stringify({ target: `http://127.0.0.1:${dropping}` }));
+    expect((await call(port, "GET", "/api/saved")).status).toBe(502);
+    expect((await call(port, "GET", "/api/sync/status")).status).toBe(502);
+    expect(recorded(logFile)).toEqual([]);
+  });
+
   it("goes back to recording once the spec hands /api back", async () => {
     await call(port, "PUT", "/__tripwire/forward", JSON.stringify({ target: `http://127.0.0.1:${mockPort}` }));
     expect((await call(port, "DELETE", "/__tripwire/forward")).status).toBe(204);

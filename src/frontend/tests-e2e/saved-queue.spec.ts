@@ -460,6 +460,8 @@ test.describe("saved states", () => {
     await bootSaved(page);
     await mockJson(page, "**/api/settings/filters", { excludeGenres: ["horror"], languages: ["en"] });
     await mockJson(page, "**/api/search/filter-chips", { minTitles: 50, chips: [] });
+    // The editor holds its skeleton until its first cost answer (HREV1-D03), so opening it reads the meter.
+    await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
     await serveSaved(page, shelf(["onList"], [true]), { heldOutByRules: 2 });
     await page.goto("/saved");
     await expect(page.getByTestId("saved-held-out")).toContainText("2 saves are hidden by your conditions.");

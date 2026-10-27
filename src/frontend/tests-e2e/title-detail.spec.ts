@@ -369,6 +369,8 @@ test.describe("person page", () => {
 
   test("counts the credits the conditions hide and opens the conditions from that line", async ({ page }) => {
     await bootPerson(page, [credit(1), credit(2)], 3);
+    // The editor holds its skeleton until its first cost answer (HREV1-D03), so opening it reads the meter.
+    await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
     await expect(page.getByTestId("person-hidden")).toContainText("3 more of their titles are hidden by your conditions.");
     await page.getByTestId("person-hidden-change").click();
     await expect(page.getByTestId("conditions-editor")).toBeVisible();
