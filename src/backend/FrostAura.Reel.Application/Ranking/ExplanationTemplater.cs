@@ -368,7 +368,9 @@ public static partial class ExplanationTemplater
             ({ } sharedGenre, { } sharedTone) => Pick(id, seed,
                 $"{IndefiniteArticle(sharedGenre, capitalised: true)} {sharedGenre} pick with the same {sharedTone} streak as {anchor}",
                 $"Brings {anchor}'s {sharedTone} energy back to your {sharedGenre} lane",
-                $"Like {anchor}, it plays {sharedGenre} {sharedTone}"),
+                // "Brooding crime, just like Heat": the tone qualifies the genre. The old
+                // "Like Heat, it plays crime brooding" put an adjective after its noun (R1-21).
+                $"{Capitalised(sharedTone)} {sharedGenre}, just like {anchor}"),
             (null, { } sharedTone) => Pick(id, seed,
                 $"Carries the same {sharedTone} streak as {anchor}",
                 $"Shares {anchor}'s {sharedTone} tone",
@@ -452,8 +454,9 @@ public static partial class ExplanationTemplater
                 && PraisedCrowd(context.Title) is { } crowd
                 && crowd.Rating + offset is var adjusted && adjusted >= CrowdPraiseFloor =>
                 Pick(id, seed,
-                    string.Create(CultureInfo.InvariantCulture, $"holds a {adjusted:0.0} even on your harsher-than-the-crowd scale"),
-                    string.Create(CultureInfo.InvariantCulture, $"still a {adjusted:0.0} once the crowd's {crowd.Rating:0.0} is marked down to your scale")),
+                    // "an 8.0", "a 7.5": the article follows the number as it is read (R1-21).
+                    $"holds {Rated(adjusted)} even on your harsher-than-the-crowd scale",
+                    string.Create(CultureInfo.InvariantCulture, $"still {Rated(adjusted)} once the crowd's {crowd.Rating:0.0} is marked down to your scale")),
             "simLovedCentroid" or "simRecentCentroid" or "simTopLovedMax" or "simTopLovedMean" =>
                 Pick(id, seed,
                     "close in feel to the titles you love",
@@ -521,14 +524,25 @@ public static partial class ExplanationTemplater
 
     private static string Pretty(string slug) => slug.Replace('-', ' ');
 
+    /// <summary>A rating with its article, as a sentence reads it: "an 8.0", "a 7.5", "a 10.0".</summary>
+    private static string Rated(decimal rating)
+    {
+        var number = rating.ToString("0.0", CultureInfo.InvariantCulture);
+        return $"{IndefiniteArticle(number)} {number}";
+    }
+
+    private static string Capitalised(string word) =>
+        word.Length == 0 ? word : char.ToUpperInvariant(word[0]) + word[1..];
+
     /// <summary>
-    /// "a" or "an" for <paramref name="word"/>, by its first letter — "an action pick", "a thriller".
-    /// Letter-based on purpose: every word this templater puts after an article is a genre slug from
-    /// a closed vocabulary, and none of them starts with a silent consonant or a "you" sound.
+    /// "a" or "an" for <paramref name="word"/> — "an action pick", "a thriller", "an 8.0", "a 7.5".
+    /// A word is judged by its first letter: every word this templater puts after an article is a
+    /// genre slug from a closed vocabulary, and none of them starts with a silent consonant or a
+    /// "you" sound. A number is judged by how it is read aloud (<see cref="NumberTakesAn"/>).
     /// </summary>
     public static string IndefiniteArticle(string word, bool capitalised = false)
     {
-        var an = word.Length > 0 && "aeiouAEIOU".Contains(word[0]);
+        var an = word.Length > 0 && (char.IsAsciiDigit(word[0]) ? NumberTakesAn(word) : "aeiouAEIOU".Contains(word[0]));
         return (an, capitalised) switch
         {
             (true, true) => "An",
@@ -536,5 +550,22 @@ public static partial class ExplanationTemplater
             (false, true) => "A",
             _ => "a",
         };
+    }
+
+    /// <summary>
+    /// Whether a number written in digits is read with a vowel sound: everything read "eight…"
+    /// (8, 8.0, 80, 800, 8,000), and "eleven…"/"eighteen…" when those lead a group of thousands
+    /// (11, 18, 11,000, 18,500,000). "A 1.0", "a 7.5", "a 10.0" and "a 110" are consonant sounds.
+    /// </summary>
+    public static bool NumberTakesAn(string number)
+    {
+        var digits = new string(number.TakeWhile(c => char.IsAsciiDigit(c) || c == ',').Where(char.IsAsciiDigit).ToArray());
+        if (digits.Length == 0)
+        {
+            return false;
+        }
+
+        return digits[0] == '8'
+            || (digits.Length % 3 == 2 && (digits.StartsWith("11", StringComparison.Ordinal) || digits.StartsWith("18", StringComparison.Ordinal)));
     }
 }

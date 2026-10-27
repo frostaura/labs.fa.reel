@@ -72,6 +72,14 @@ public static partial class FeedWhyGuard
     private static partial Regex WrongArticleRegex();
 
     /// <summary>
+    /// "a" before a number read with a vowel sound, anywhere in the line — "Holds a 8.0", "still a
+    /// 11-year-old" (R1-21). Eight-anything, and 11 or 18 standing alone; "a 7.5", "a 10.0" and
+    /// "a 110" are right and are not matched.
+    /// </summary>
+    [GeneratedRegex(@"\b[Aa] (?:8|1[18](?![0-9]))")]
+    private static partial Regex WrongNumberArticleRegex();
+
+    /// <summary>
     /// "the anchor" — the rerank prompt's own word for the title a rail is anchored on, leaking
     /// into the user's copy. Seven of seven model lines on the one rail dealt in a live build said
     /// "the anchor's …". The card names the title; the user never named an anchor.
@@ -93,7 +101,8 @@ public static partial class FeedWhyGuard
     public static bool IsRetiredBoilerplate(string? why) => !string.IsNullOrWhiteSpace(why) && RetiredBoilerplateRegex().IsMatch(why);
 
     /// <summary>True when the line opens "A" + vowel.</summary>
-    public static bool HasWrongArticle(string? why) => !string.IsNullOrWhiteSpace(why) && WrongArticleRegex().IsMatch(why);
+    public static bool HasWrongArticle(string? why) =>
+        !string.IsNullOrWhiteSpace(why) && (WrongArticleRegex().IsMatch(why) || WrongNumberArticleRegex().IsMatch(why));
 
     /// <summary>
     /// True when the line hedges against its own pick — the softer cousin of an anti-recommendation
