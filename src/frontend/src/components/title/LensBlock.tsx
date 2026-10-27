@@ -192,7 +192,7 @@ export default function LensBlock({
         <div className="flex items-center gap-3">
           {data.source === "stale" && (
             <span className="fa-caption text-3" data-testid="lens-stale">
-              Written before your taste last moved
+              An older note
             </span>
           )}
           {data.source === "stale" && pendingNote && (

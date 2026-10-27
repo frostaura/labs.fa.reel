@@ -611,38 +611,58 @@
       ]
     },
     {
-      "id": "narrative-and-dna",
+      "id": "narrative-profile",
       "owner": "WS-1",
-      "verdict": "unverified",
-      "assertion": "The taste profile is rewritten only when taste has genuinely moved; DNA reads every rating with recent ones weighted a little more; a dismissal teaches a genre or tone only when the user says which; pockets come from 7+ ratings or rewatches and each feeds tonight's picks.",
-      "evidence": "BuildFeedJobHandler.EnqueueNarrativeIfProfileMovedAsync gates the rewrite on the profile hash; the DNA, dislike and pocket statements were not traced to their code inside this sweep.",
+      "verdict": "true",
+      "assertion": "The taste profile is rewritten when taste moves and whenever the user asks, from ratings, dismissals and rewatches; the panel says the taste has moved exactly when its fingerprint has, and a user's edit stands until they ask for a rewrite.",
+      "evidence": "R1-45 (WS-1 ccd521c, copy fixed at integration): the background rewrite waits for a fingerprint or crowd-band move; the user-regenerate job forces a rewrite on unmoved taste; the writer's prompt carries dismissals, preference tags and the pockets' unrated rewatches. The old lines ('only when your taste has genuinely moved', 'Turning your ratings into…') were false.",
       "tests": [
-        "src/frontend/src/components/dna/TastePockets.test.ts"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::The_only_narrative_rewrite_with_a_card_is_the_forced_one_and_it_spends_on_unmoved_taste",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::A_background_run_rewrites_the_profile_once_taste_has_moved",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::The_taste_profile_is_written_from_dismissals_as_well_as_ratings",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::The_profile_says_your_taste_has_moved_exactly_when_its_taste_fingerprint_has",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::A_user_edit_wins_and_survives_regeneration_until_they_ask_for_a_rewrite"
       ],
       "claims": [
         {
           "file": "src/frontend/src/lib/syncCopy.ts",
-          "text": "Rewritten only when your taste has genuinely moved"
+          "text": "Rewritten when your taste moves, and whenever you ask"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Turning your ratings, dismissals and rewatches into a description of what you like"
         },
         {
           "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
           "text": "your taste has moved since"
         },
         {
-          "file": "src/frontend/src/components/title/LensBlock.tsx",
-          "text": "Written before your taste last moved"
-        },
+          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+          "text": "what Reel believes about your taste"
+        }
+      ]
+    },
+    {
+      "id": "dna-page-sources",
+      "owner": "WS-1",
+      "verdict": "true",
+      "assertion": "The taste DNA page reads every rating with no cutoff and no recency weighting in its affinities; its headline stats come from watch history, its dislike panel from dismissals; a dismissal teaches a genre or tone only when its reason says which; pockets come from titles rated 7+ or watched twice, with shares that are cluster weight.",
+      "evidence": "R1-45 (WS-1 ac68645, ccd521c; copy fixed at integration): 'with recent ones counting a little more' dropped, 'read straight from your ratings' now names ratings, watches and dismissals, and the empty state names only the charts (an account with no ratings can still have a watch history).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::The_dna_headline_stats_are_read_from_watch_history_not_from_ratings",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::Every_rating_counts_whatever_its_age_and_the_dna_affinities_do_not_weight_recent_ones",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::A_dismissal_teaches_a_genre_or_a_tone_only_when_its_reason_says_which",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TastePocketClaimsTests.cs::Pockets_are_found_from_the_titles_rated_seven_or_more_or_watched_twice_and_shares_are_weight",
+        "src/frontend/src/components/dna/TastePockets.test.ts"
+      ],
+      "claims": [
         {
           "file": "src/frontend/src/pages/TasteDna.tsx",
           "text": "every title you've ever rated counts"
         },
         {
           "file": "src/frontend/src/pages/TasteDna.tsx",
-          "text": "Everything below is read straight from your ratings"
-        },
-        {
-          "file": "src/frontend/src/pages/TasteDna.tsx",
-          "text": "your taste DNA is built from the titles you've rated"
+          "text": "… Everything below comes from what you've rated, watched and dismissed, so none of it waits for the model."
         },
         {
           "file": "src/frontend/src/components/dna/DislikePanel.tsx",
@@ -655,14 +675,6 @@
         {
           "file": "src/frontend/src/lib/tastePockets.ts",
           "text": "% of your taste weight"
-        },
-        {
-          "file": "src/frontend/src/lib/syncCopy.ts",
-          "text": "Turning your ratings into a description of what you actually like"
-        },
-        {
-          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
-          "text": "what Reel believes about your taste"
         }
       ]
     },
@@ -864,12 +876,14 @@
       "evidence": "Founder-only (Lab route). Interleaving runs only once FD-4 is answered; whether the panel renders only while it runs was not established in this sweep.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/InterleavingIntegrationTests.cs",
-        "src/backend/FrostAura.Reel.Tests/CrossReference/CrossReferenceBacktestTests.cs"
+        "src/backend/FrostAura.Reel.Tests/CrossReference/CrossReferenceBacktestTests.cs",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/InterleavingIntegrationTests.cs::A_fresh_build_drafts_every_row_from_both_rankers_whatever_the_experiment_start",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/InterleavingIntegrationTests.cs::A_watch_or_an_eight_wins_the_row_and_a_seven_does_not"
       ],
       "claims": [
         {
           "file": "src/frontend/src/components/lab/InterleavePanel.tsx",
-          "text": "Every Fresh build drafts each row alternately from both rankers."
+          "text": "While it runs, every Fresh build drafts each of tonight's rows alternately from both rankers."
         },
         {
           "file": "src/frontend/src/components/lab/InterleavePanel.tsx",

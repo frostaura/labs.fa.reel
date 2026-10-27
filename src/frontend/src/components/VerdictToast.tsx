@@ -12,7 +12,7 @@ import { ToastPortal } from "./ui/toast-stack";
 const DISMISS_AFTER_MS = 9000;
 
 /**
- * The after-rating moment: "Reel said 8.4 · you said 5 — noted, that goes into tonight's retrain".
+ * The after-rating moment: "Reel said 8.4 · you said 5 — noted, that goes into your next retrain".
  *
  * Mounted ONCE, in the layout, and driven by the store — so every rating path raises it and none of
  * them has to know it exists. The copy itself lives in `lib/verdictCopy`, tested there, and this

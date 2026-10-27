@@ -424,7 +424,7 @@ export function questionFor(turns: ChatTurn[], index: number): string {
  *
  * R5-01. The anchor for the collision notice was "the newest assistant row", which is right on an
  * ordinary screen and wrong the moment a failed turn sits between the answer and what came after
- * it: "Your conditions permanently exclude comedy and romance" ended up annotating a sea-thriller
+ * it: "Your conditions exclude comedy and romance" ended up annotating a sea-thriller
  * question that collided with nothing, live, while a hard reload put it back under the romcom
  * reply. One answer, two accounts of which question it explains, a reload apart.
  *

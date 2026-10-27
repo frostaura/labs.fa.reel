@@ -90,7 +90,7 @@ export default function TasteDna() {
       <section className="fa-card px-6 py-8 text-center space-y-3" data-testid="dna-empty">
         <h1 className="text-2xl font-light text-fa-frost-bright">Your taste DNA</h1>
         <p className="fa-body text-fa-frost">
-          Nothing to read yet — your taste DNA is built from the titles you&apos;ve rated, and there are none so far.
+          Nothing to chart yet — the taste charts are built from the titles you&apos;ve rated, and there are none so far.
         </p>
         <Link to="/rate" className={`fa-button-primary inline-flex ${COARSE_TAP}`} data-testid="dna-empty-rate">
           Rate a few titles
@@ -137,8 +137,8 @@ export default function TasteDna() {
             {/* "rated", not "watched" — deliberately. Every title you have ever RATED feeds this,
                 with no cutoff; titles you watched without rating do not feed a feature yet, and the
                 copy must not claim them until they do. */}
-            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString("en-US")} of them, with recent
-            ones counting a little more · always yours, always free
+            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString("en-US")} of them · always
+            yours, always free
           </p>
         </div>
         <div className="shrink-0 text-right space-y-1">
@@ -155,7 +155,7 @@ export default function TasteDna() {
 
       {noModel && (
         <p className="fa-card px-4 py-3 fa-caption text-fa-frost" data-testid="dna-no-model">
-          {noModel} Everything below is read straight from your ratings, so none of it waits for the model.
+          {noModel} Everything below comes from what you&apos;ve rated, watched and dismissed, so none of it waits for the model.
         </p>
       )}
 

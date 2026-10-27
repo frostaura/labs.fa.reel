@@ -195,11 +195,8 @@ test("an accepted notifications enable is still on after a reload (the fixture r
 });
 
 test("a notifications enable the server refuses leaves them off in the browser too, so a reload still says off", async ({ page }) => {
-  // KNOWN DEFECT, change request CR-11 → WS-10B (PushOptIn.tsx is theirs): enable()'s catch never
-  // unsubscribes the browser subscription it just created, so the next visit reads "Turn off" while
-  // the server has no row and no digest can arrive. Remove this line when CR-11 lands — Playwright
-  // reports the test as an unexpected pass until then.
-  test.fail(true, "CR-11 → WS-10B: PushOptIn enable() leaves the browser subscribed after the server refuses");
+  // CR-11: enable()'s catch unsubscribes the browser subscription it just created, so a refused
+  // enable leaves no subscription behind and the next visit still reads "Turn on".
   const { serverRows, browserSubscribed } = await bootPushOff(page, 500);
   await page.goto("/settings");
   const toggle = page.getByTestId("push-toggle");

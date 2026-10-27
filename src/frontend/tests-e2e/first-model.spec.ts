@@ -164,7 +164,7 @@ test.describe("taste DNA with no model yet", () => {
     await page.goto("/dna");
 
     await expect(page.getByTestId("dna-no-model")).toHaveText(
-      `${WAIT_SENTENCE} Everything below is read straight from your ratings, so none of it waits for the model.`
+      `${WAIT_SENTENCE} Everything below comes from what you've rated, watched and dismissed, so none of it waits for the model.`
     );
     await expect(page.getByRole("heading", { name: "Genre fingerprint" })).toBeVisible();
     await expect(page.getByTestId("dna-error")).toHaveCount(0);

@@ -38,7 +38,7 @@ test.describe("entitlement gating", () => {
 
     await expect(page.getByTestId("hero-card")).toHaveCount(3);
     await expect(page.getByText(/more personalised rows on the full feed/i)).toBeVisible();
-    await expect(page.getByText(/paid feed unlocks every row/i)).toBeVisible();
+    await expect(page.getByText(/Paid adds every recommendation row/i)).toBeVisible();
   });
 
   test("free tier typing /lab lands on home — the model lab is a founder instrument", async ({ page }) => {

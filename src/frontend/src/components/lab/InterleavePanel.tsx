@@ -28,9 +28,9 @@ export default function InterleavePanel({ data }: { data: InterleaveSummary | un
             <Swords className="h-4 w-4 text-fa-frost" /> Interleaving — {data.policyA} vs {data.policyB}
           </h2>
           <p className="fa-caption text-fa-frost-dim mt-1">
-            Every Fresh build drafts each row alternately from both rankers. Whichever ranker's cards
-            you save, watch or rate 8+ wins that row. The only online instrument that works with one
-            user.
+            While it runs, every Fresh build drafts each of tonight's rows alternately from both rankers.
+            Whichever ranker's cards you save, watch or rate 8+ wins that row. The only online instrument
+            that works with one user.
           </p>
         </div>
         <span

@@ -59,6 +59,9 @@ export default function PushOptIn() {
   const enable = async () => {
     setFailure(null);
     setState("busy");
+    // The browser subscription this attempt made, so a server refusal can undo it: otherwise the
+    // page says "still off" while the browser stays subscribed and the next visit reads "Turn off".
+    let created: PushSubscription | null = null;
     try {
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
@@ -71,6 +74,7 @@ export default function PushOptIn() {
         userVisibleOnly: true,
         applicationServerKey: base64UrlToUint8Array(key),
       });
+      created = subscription;
       const json = subscription.toJSON();
       await subscribePush({
         endpoint: subscription.endpoint,
@@ -78,6 +82,7 @@ export default function PushOptIn() {
       }).unwrap();
       setState("on");
     } catch {
+      await created?.unsubscribe().catch(() => undefined);
       setFailure("Couldn't turn notifications on — they're still off. Try again in a moment.");
       setState("off");
     }

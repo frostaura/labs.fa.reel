@@ -157,23 +157,13 @@ async function picksTurn(page: Page, n = 1, base = 0) {
 }
 
 /**
- * The shell's own markup that fails on every route, not just this one — WS-9's, named with its
- * change request and excluded only until it lands. The account menu's trigger (Layout.tsx, 58b6340)
- * is named "Account menu, Test Founder" while its visible text is the avatar initial and the name,
- * "T" + "Test Founder", so axe's `label-content-name-mismatch` (serious) fails the whole page. CR to
- * WS-9: hide the initial from the name (aria-hidden, as WatchTonightCard does) or lead the label
- * with the visible text.
- */
-const SHELL_EXCLUSIONS = ['button[aria-label^="Account menu"]'];
-
-/**
  * Full axe rule set; the failing rules named with their first node. `exclude` is for a FOREIGN
  * component overlaying the page, named with the change request that owns it — never for Ask Reel's
  * own markup.
  */
 async function expectNoViolations(page: Page, state: string, exclude: string[] = []) {
   let builder = new AxeBuilder({ page });
-  for (const selector of [...exclude, ...SHELL_EXCLUSIONS]) builder = builder.exclude(selector);
+  for (const selector of exclude) builder = builder.exclude(selector);
   const { violations } = await builder.analyze();
   const named = violations.map((v) => `${v.id} (${v.impact}, ${v.nodes.length}): ${v.nodes[0]?.target.join(" ")} — ${v.nodes[0]?.failureSummary?.split("\n")[1]?.trim() ?? ""}`);
   expect(named, `axe on /search — ${state}`).toEqual([]);
@@ -221,11 +211,8 @@ test.describe("Ask Reel — axe reports 0 violations on /search", () => {
 
     await page.getByTestId("askreel-relax").click();
     await expect(page.getByTestId("genre-comedy-exclude")).toBeFocused();
-    // The editor is WS-10B's. Its condition summary renders the muted chip tone at 4.18:1 on the
-    // dialog surface (11 px needs 4.5:1) — change request to WS-10B (ConditionSummary TONE on
-    // dialog backgrounds). Excluded here, by name, until that lands; everything else in the dialog
-    // and on the page is held to zero.
-    await expectNoViolations(page, "the Conditions editor open on the comedy rule", ['[role="dialog"] [data-testid="conditions-summary"]']);
+    // The whole dialog, the condition summary included (R1-44 moved its muted tone to text-3), is held to zero.
+    await expectNoViolations(page, "the Conditions editor open on the comedy rule");
   });
 
   test("a refused turn says which limit and stays accessible", async ({ page }) => {

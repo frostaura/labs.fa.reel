@@ -84,8 +84,8 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
   narrative: {
     title: "Writing your taste profile",
     lines: [
-      "Turning your ratings into a description of what you actually like",
-      "Rewritten only when your taste has genuinely moved",
+      "Turning your ratings, dismissals and rewatches into a description of what you like",
+      "Rewritten when your taste moves, and whenever you ask",
     ],
   },
   lens: {

@@ -265,7 +265,7 @@ describe("an item question or a clarifying question never becomes the grid's row
       ],
       cards: [card(1), card(2)],
       mode: "Picks",
-      conflict: { message: "Your conditions permanently exclude comedy.", excludedGenres: ["Comedy"] },
+      conflict: { message: "Your conditions exclude comedy.", excludedGenres: ["Comedy"] },
     };
   }
 

@@ -412,7 +412,7 @@ describe("the additive conflict fields", () => {
 
   it("carries_excluded_keywords_beside_excluded_genres", async () => {
     const full = {
-      message: "Your conditions permanently exclude comedy and anime.",
+      message: "Your conditions exclude comedy and anime.",
       excludedGenres: ["comedy"],
       excludedKeywords: ["anime"],
       poolSize: 12,
@@ -421,7 +421,7 @@ describe("the additive conflict fields", () => {
     expect(await collect([frame("conflict", full)])).toEqual([{ event: "conflict", data: full }]);
 
     // The keyword-only shape, which is the one that had nothing to show before: no genre collides.
-    const keywordOnly = { message: "Your conditions permanently exclude anime.", excludedGenres: [], excludedKeywords: ["anime"] };
+    const keywordOnly = { message: "Your conditions exclude anime.", excludedGenres: [], excludedKeywords: ["anime"] };
     expect(await collect([frame("conflict", keywordOnly)])).toEqual([{ event: "conflict", data: keywordOnly }]);
   });
 

@@ -518,7 +518,7 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
 
     // `excludedGenres` and `excludedKeywords` together: the keyword half is the one a turn asking
     // for an avoid-keyword had no way to name at all, since no genre collides.
-    await askPushConflict(page, "Your conditions permanently exclude comedy and anime, so nothing you asked for there can appear.", {
+    await askPushConflict(page, "Your conditions exclude comedy and anime, so nothing you asked for there can appear.", {
       excludedGenres: ["comedy"],
       excludedKeywords: ["anime"],
       poolSize: 12,
@@ -659,14 +659,14 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
         excludedKeywords: [],
         minYear: 2000,
         maxYear: null,
-        message: "Your conditions permanently exclude comedy and romance, so this is the closest fit.",
+        message: "Your conditions exclude comedy and romance, so this is the closest fit.",
       },
     });
     await page.goto("/search");
 
     await expect(gridNames(page)).toHaveText(["Alpha Creek"]);
     const notice = page.getByTestId("askreel-conflict");
-    await expect(notice).toContainText("Your conditions permanently exclude comedy and romance");
+    await expect(notice).toContainText("Your conditions exclude comedy and romance");
     await expect(notice.getByTestId("askreel-conflict-terms")).toHaveText("Rules out comedy and romance.");
     // …and on the bubble it qualifies, which is the newest assistant row — the same row the
     // notice anchors under.
@@ -1015,7 +1015,7 @@ test.describe("Ask Reel — the collision notice stays with its answer", () => {
     await waitForAsk(page);
     await askPush(page, "conversation", { id: CONV, turnId: "turn-romcom", sequence: 1 });
     await askPush(page, "assistant-message", { text: "I can’t recommend a 90s romantic comedy.", conflict: true });
-    await askPushConflict(page, "Your conditions permanently exclude comedy and romance.", {
+    await askPushConflict(page, "Your conditions exclude comedy and romance.", {
       excludedGenres: ["comedy", "romance"],
     });
     await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
@@ -1039,7 +1039,7 @@ test.describe("Ask Reel — the collision notice stays with its answer", () => {
     await expect(page.getByTestId("askreel-kept-answer")).toBeVisible();
     const notice = page.getByTestId("askreel-conflict");
     await expect(notice).toHaveCount(1);
-    await expect(notice).toContainText("permanently exclude comedy and romance");
+    await expect(notice).toContainText("conditions exclude comedy and romance");
     await expect(notice.getByTestId("askreel-conflict-terms")).toHaveText("Rules out comedy and romance.");
 
     // …and it is under the answer's reply, not under the question that was stopped.
@@ -1060,7 +1060,7 @@ test.describe("Ask Reel — the collision notice stays with its answer", () => {
     await askPush(page, "done", { results: [], kept: 0, reason: "Nothing more on this one." });
     await askEnd(page);
     await expect(page.getByTestId("askreel-conflict")).toHaveCount(1);
-    await expect(page.getByTestId("askreel-conflict")).toContainText("permanently exclude comedy and romance");
+    await expect(page.getByTestId("askreel-conflict")).toContainText("conditions exclude comedy and romance");
     const stillUnderRomcom = await page.evaluate(() => {
       const reply = document.querySelector('[data-testid="askreel-reply"]');
       const n = document.querySelector('[data-testid="askreel-conflict"]');
@@ -1083,19 +1083,19 @@ test.describe("Ask Reel — the collision notice stays with its answer", () => {
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page, 2);
     await askPush(page, "conversation", { id: CONV, turnId: "turn-anime", sequence: 3 });
-    await askPushConflict(page, "Your conditions permanently exclude anime.", { excludedKeywords: ["anime"] });
+    await askPushConflict(page, "Your conditions exclude anime.", { excludedKeywords: ["anime"] });
     await page.getByTestId("askreel-stop").click();
 
     // Two notices, each with its own row: the answer keeps its account, the abandoned turn keeps its.
     const stopped = page.getByTestId("askreel-stopped");
-    await expect(stopped.getByTestId("askreel-conflict")).toContainText("permanently exclude anime");
+    await expect(stopped.getByTestId("askreel-conflict")).toContainText("conditions exclude anime");
     // The stopped card sits in the transcript now, under the turn it is about (chat UI v2), so the
     // answer's own notices are the ones OUTSIDE it.
     const inTranscript = page.locator(
       '[data-testid="askreel-transcript"] [data-testid="askreel-conflict"]:not([data-testid="askreel-stopped"] *)',
     );
     await expect(inTranscript).toHaveCount(1);
-    await expect(inTranscript).toContainText("permanently exclude comedy and romance");
+    await expect(inTranscript).toContainText("conditions exclude comedy and romance");
     await expect(inTranscript).not.toContainText("anime");
   });
 });
