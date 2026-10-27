@@ -203,6 +203,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("Tagline")
                         .HasColumnType("text");
 
+                    b.Property<long?>("TmdbCollectionId")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("TmdbId")
                         .HasColumnType("bigint");
 
@@ -2630,6 +2633,8 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                             b1.Property<bool>("OnboardingCompleted");
 
                             b1.Property<string>("SettingsPinHash");
+
+                            b1.Property<string>("TimeZone");
 
                             b1.HasKey("AccountId");
 

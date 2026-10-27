@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.AskReel.Engine;
@@ -1274,7 +1275,8 @@ public static class SearchEndpoints
                     posterPath = title.PosterPath,
                     genres = title.Genres,
                     similarity = c.Similarity,
-                    predictedRating = rescored.TryGetValue(c.TitleId, out var fresh) ? fresh : c.PredictedRating,
+                    predictedRating = rescored.TryGetValue(c.TitleId, out var fresh) ? ForYouBar.Shown(fresh)
+                        : c.PredictedRating is { } stored ? ForYouBar.Shown(stored) : (decimal?)null,
                     crowdRating = CrowdRating.For(title),
                     crowdVotes = CrowdRating.VotesFor(title),
                     // A fit is shown only where the model produced it. Rows older than FitSource carry

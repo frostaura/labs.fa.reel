@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Sync;
@@ -21,7 +22,7 @@ public static class SyncEndpoints
         // in SyncStatusQuery. Typed, so the build-time OpenAPI document carries the full schema
         // and the generated frontend types follow it.
         group.MapGet("/status", async (
-            IReelDbContext db, SyncStatusQuery statusQuery, IConfiguration configuration,
+            IReelDbContext db, SyncStatusQuery statusQuery, RetrainGate retrainGate,
             HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -32,8 +33,8 @@ public static class SyncEndpoints
 
             // Progress toward the next retrain, so a screen that asks for ratings can say what they
             // BUY: "7 more ratings and Reel retrains tonight". The same threshold the nightly
-            // reconcile's gate uses.
-            var retrainThreshold = configuration.GetValue("RETRAIN_MIN_NEW_RATINGS", 10);
+            // reconcile's gate uses, read from its single definition (R1-28).
+            var retrainThreshold = retrainGate.Threshold;
             var status = await statusQuery.GetAsync(account, retrainThreshold, DateTime.UtcNow, ct);
             return Results.Ok(status);
         })

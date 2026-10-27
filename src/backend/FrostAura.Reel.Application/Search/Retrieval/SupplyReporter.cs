@@ -394,8 +394,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             .GroupBy(s => s.TitleId)
             .ToDictionary(g => g.Key, g => g.First().PredictedRating);
 
-        bool Clears(decimal predicted) =>
-            floor is not { } bar || decimal.Round(predicted, 1, MidpointRounding.AwayFromZero) >= bar;
+        bool Clears(decimal predicted) => Ranking.ForYouBar.Clears(predicted, floor);
         var below = scored.Values.Count(p => !Clears(p));
         var shownClearing = scored.Count(s => shown.Contains(s.Key) && Clears(s.Value));
         return (below, eligibleIds.Count - scored.Count, shownClearing);

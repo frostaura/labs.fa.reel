@@ -59,6 +59,14 @@ public class Title
     /// <summary>TMDB popularity — the ranking key of the M2 popularity baseline.</summary>
     public decimal? TmdbPopularity { get; set; }
 
+    /// <summary>
+    /// The TMDB collection a film belongs to (<c>belongs_to_collection.id</c>, e.g. a franchise's
+    /// "Collection"), written on hydration. Null for a standalone film, for every show, and for a title
+    /// not hydrated since this column existed (M8, additive). It seeds the Similar rail's
+    /// collection-first pass (WS-5 task 10).
+    /// </summary>
+    public long? TmdbCollectionId { get; set; }
+
     public decimal? TmdbVoteAverage { get; set; }
 
     public int TmdbVoteCount { get; set; }

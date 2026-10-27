@@ -157,7 +157,7 @@ public sealed class SyncStatusQuery(
     /// <see cref="PipelineStage.NotEnoughRatings"/> existed, and still may until it writes the new
     /// stage itself. Reading it here means every reader agrees on one answer either way.
     /// </summary>
-    public async Task<(PipelineStage Stage, RatingsFloor? Floor)> ResolveStageAsync(
+    private async Task<(PipelineStage Stage, RatingsFloor? Floor)> ResolveStageAsync(
         Guid accountId, PipelineStage stored, ConnectionStatus connectionStatus, CancellationToken ct)
     {
         var candidate = stored == PipelineStage.NotEnoughRatings

@@ -138,6 +138,8 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
         title.PosterPath = details.PosterPath ?? title.PosterPath;
         title.BackdropPath = details.BackdropPath ?? title.BackdropPath;
         title.TmdbPopularity = details.Popularity;
+        // Only a film carries a collection; a details read that names none clears a stale one.
+        title.TmdbCollectionId = details.Collection?.Id;
         title.TmdbVoteAverage = details.VoteAverage;
         title.TmdbVoteCount = details.VoteCount;
         // Language — the only signal for discovery titles (Trakt sets it for library titles via

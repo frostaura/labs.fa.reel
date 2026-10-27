@@ -46,7 +46,7 @@ public sealed partial class LiveSearchExpansionService
 
         foreach (var id in sliceIds)
         {
-            await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
+            await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? Ranking.ForYouBar.Shown(p) : (decimal?)null });
         }
 
         var results = ordered

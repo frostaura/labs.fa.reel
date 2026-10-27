@@ -125,6 +125,5 @@ public static class AskReelGate
     /// a "6.0" bar. With no bar every card clears; with one, a card with no prediction does not.
     /// </summary>
     public static bool Clears(decimal? predicted, decimal floor) =>
-        floor <= 0m
-        || (predicted is { } p && decimal.Round(p, 1, MidpointRounding.AwayFromZero) >= floor);
+        floor <= 0m || (predicted is { } p && Ranking.ForYouBar.Clears(p, floor));
 }

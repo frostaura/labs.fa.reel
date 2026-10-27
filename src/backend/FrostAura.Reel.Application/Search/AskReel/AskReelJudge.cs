@@ -258,7 +258,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
                     foreach (var result in answered)
                     {
                         results[result.TitleId] = result;
-                        if (result.FitSource == ResultSource.Llm)
+                        if (result.Cacheable)
                         {
                             cache.Set(FitKey(salt, accountId, result.TitleId, qnorm, batchIds), result, FitTtl);
                         }

@@ -1080,7 +1080,7 @@ public sealed partial class LiveSearchExpansionService(
             posterPath = t.PosterPath,
             genres = t.Genres,
             similarity = similarity is { } s ? Math.Round(s, 2) : (double?)null,
-            predictedRating = predicted,
+            predictedRating = predicted is { } shownPredicted ? Ranking.ForYouBar.Shown(shownPredicted) : (decimal?)null,
             // The community number the personal prediction is read against — same resolver as the feed
             // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
             crowdRating = CrowdRating.For(t),

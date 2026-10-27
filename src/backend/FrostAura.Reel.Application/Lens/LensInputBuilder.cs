@@ -129,7 +129,7 @@ public sealed class LensInputBuilder(IReelDbContext db, RatingCalibrationService
                 cast,
                 title.Overview,
                 title.Keywords.Take(MaxKeywords).ToList(),
-                predicted.TryGetValue(id, out var p) ? Math.Round(p, 1) : null,
+                predicted.TryGetValue(id, out var p) ? Ranking.ForYouBar.Shown(p) : null,
                 error));
 
             // Exactly the names the prompt showed — the provenance check is then a verification

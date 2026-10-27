@@ -1219,7 +1219,7 @@ public sealed class AskReelEngine(
             posterPath = t.PosterPath,
             genres = t.Genres,
             similarity = c.Candidate?.Similarity is { } s ? Math.Round(s, 2) : (double?)null,
-            predictedRating = c.Predicted,
+            predictedRating = c.Predicted is { } shownPredicted ? Ranking.ForYouBar.Shown(shownPredicted) : (decimal?)null,
             crowdRating = CrowdRating.For(t),
             crowdVotes = CrowdRating.VotesFor(t),
             fit = c.Verdict.Judged && c.Verdict.Fit is { } f ? Math.Round(f, 2) : (double?)null,

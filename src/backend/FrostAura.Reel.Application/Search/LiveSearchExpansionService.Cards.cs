@@ -26,7 +26,7 @@ public sealed partial class LiveSearchExpansionService
         string? Why)
     {
         /// <summary>The fit, only where the MODEL produced it — a fallback number is never shown or stored.</summary>
-        public double? ModelFit => Verdict is { FitSource: ResultSource.Llm } v ? v.Fit : null;
+        public double? ModelFit => Verdict?.ModelFit;
 
         /// <summary>The model's request verdict, persisted form; null when unjudged.</summary>
         public string? SatisfiesWire =>
@@ -42,7 +42,7 @@ public sealed partial class LiveSearchExpansionService
     private static GatedCard Gate(
         Title title, double sim, decimal? predicted, RerankResult? verdict, double tagBoost, AskReelGate.Placement placement)
     {
-        var modelFit = verdict is { FitSource: ResultSource.Llm } v ? v.Fit : (double?)null;
+        var modelFit = verdict?.ModelFit;
         var blend = (sim * 0.32) + ((double)(predicted ?? 6m) / 10d * 0.23) + ((modelFit ?? 0d) * 0.35) + (tagBoost * 0.10);
         var why = verdict is { WhySource: ResultSource.Llm, Why: { Length: > 0 } w } ? AskReelText.StripMarkdown(w) : null;
         return new GatedCard(title, sim, predicted, verdict, blend, placement, Outside: false, why);
