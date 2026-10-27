@@ -122,6 +122,31 @@ export interface SyncStatus {
    * empty for everyone else. Typed here so the contract check holds; rendering is WS-9's.
    */
   alerts?: OperatorAlert[];
+  /**
+   * Per-purpose LLM call health from WS-1's one tally (WS-6, `llm_alarm`). Founder tier only; empty
+   * for everyone else. Typed here so the contract check holds; nothing renders it yet.
+   */
+  llmHealth?: LlmPurposeHealth[];
+}
+
+/** One model purpose's call health: lifetime counts plus the rolling window the alarm reads. */
+export interface LlmPurposeHealth {
+  purpose: string;
+  calls: number;
+  answered: number;
+  lengthCalls: number;
+  truncated: number;
+  fallbacks: number;
+  retries: number;
+  /** Calls refused before sending (counted under their outcome code, never in a rate). */
+  stops: number;
+  /** Every settled call by its closed outcome code (`answered`, `truncated`, `timed_out`, …). */
+  outcomes: Record<string, number>;
+  windowCalls: number;
+  windowLengthRate: number;
+  windowFallbackRate: number;
+  windowRetryRate: number;
+  alarming: boolean;
 }
 
 /** One raised operator alert. `code` is a closed vocabulary; unknown codes must be ignored. */
@@ -134,6 +159,8 @@ export interface OperatorAlert {
   count: number | null;
   threshold: number | null;
   kinds: { kind: string; count: number }[] | null;
+  /** The model purpose an `llm_alarm` names; absent on other codes. */
+  purpose?: string | null;
 }
 
 export const syncApi = api.injectEndpoints({
