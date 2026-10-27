@@ -135,6 +135,30 @@ test.describe("Ask Reel — WS-2 review round 1", () => {
     await expect(page.getByTestId("askreel-reply-unchecked")).toHaveText("some cards unchecked");
   });
 
+  test("a keyless reply over zero cards says it could not read the question, never that cards went unchecked", async ({ page }) => {
+    // PH-05: the keyless lexical path. No model, so the plan fell back (`plan`) and nothing judged
+    // anything (`no-model`) — and the keyword search found nothing new either. The reply carried
+    // "some cards unchecked" over a none-found answer with no card on the page at all.
+    await bootSearch(page);
+    await ask(page, "ninja movies");
+
+    await askPush(page, "assistant-message", {
+      text: "Ask Reel has no language model connected right now, so I can’t read requests the way I normally do. A plain keyword search for your words found nothing new either.",
+      conflict: false, degraded: true,
+    });
+    await askPush(page, "done", {
+      results: [], streamed: 0, kept: 0, droppedByFloor: 0, belowFloor: [], nearMiss: [], unchecked: [],
+      mode: "NoneFound", supply: null, degraded: ["plan", "no-model"],
+      reason: "nothing new matched", timingsMs: null, debug: null,
+    });
+    await askEnd(page);
+
+    await expect(page.getByTestId("askreel-none-found")).toBeVisible();
+    await expect(page.getByTestId("askreel-reply-degraded")).toHaveText("couldn’t read that fully");
+    await expect(page.getByTestId("askreel-reply-unchecked")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+  });
+
   test("a stream that closes without its done frame is a failure, never a spinner", async ({ page }) => {
     await bootSearch(page);
     await ask(page, "samurai films");

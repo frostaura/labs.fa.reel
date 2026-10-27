@@ -189,6 +189,7 @@ describe("v2 none-found, answer, clarify, degraded and plan", () => {
     const s = run([
       { type: "userTurn", message: "ninja movies", fresh: true },
       { type: "assistant", data: { text: "I couldn’t fully read that — searching for ninja as before." } },
+      { type: "picks", data: { cards: [card(1)] } },
       { type: "degraded", data: { what: ["plan", "judge:1/3"] } },
     ]);
     expect(s.turns.at(-1)).toMatchObject({ degraded: true, unchecked: true });
@@ -445,5 +446,95 @@ describe("a refused or failed turn says why (WS-8 CR-5)", () => {
     expect(waitPhrase(61)).toBe("in about 2 minutes");
     expect(waitPhrase(3600)).toBe("in about an hour");
     expect(waitPhrase(5 * 3600 + 1)).toBe("in about 6 hours");
+  });
+});
+
+describe("\"some cards unchecked\" sits only on a reply that showed cards (PH-05)", () => {
+  // The keyless lexical path: no model, so the plan fell back and nothing judged anything — and the
+  // keyword search found nothing new either. Zero cards on screen, so there is nothing unchecked.
+  const keyless: ChatAction[] = [
+    { type: "userTurn", message: "ninja movies", fresh: true },
+    { type: "assistant", data: { text: "Ask Reel has no language model connected right now.", degraded: true } },
+    { type: "degraded", data: { what: ["plan", "no-model"] } },
+  ];
+
+  it("a judge-degraded turn with zero cards keeps 'couldn't read that fully' and drops 'some cards unchecked'", () => {
+    const s = run([...keyless, { type: "done", data: done({ mode: "NoneFound", degraded: ["plan", "no-model"] }) }]);
+    expect(s.order).toEqual([]);
+    expect(s.turns.at(-1)).toMatchObject({ role: "assistant", degraded: true });
+    expect(s.turns.at(-1)?.unchecked).toBeUndefined();
+  });
+
+  it("the same turn with one card in its unchecked tray is marked", () => {
+    const s = run([
+      ...keyless,
+      { type: "done", data: done({ mode: "NoneFound", unchecked: [card(1)], degraded: ["plan", "no-model"] }) },
+    ]);
+    expect(s.turns.at(-1)).toMatchObject({ degraded: true, unchecked: true });
+  });
+
+  it("the same turn with one pick is marked", () => {
+    const s = run([...keyless, { type: "done", data: done({ results: [card(1)], degraded: ["plan", "no-model"] }) }]);
+    expect(s.turns.at(-1)).toMatchObject({ degraded: true, unchecked: true });
+  });
+
+  it("a judge frame before any card waits, and the cards that follow earn the mark at done", () => {
+    const early = run(keyless);
+    expect(early.turns.at(-1)?.unchecked).toBeUndefined();
+    const s = run([
+      ...keyless,
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "done", data: done({ results: [card(1)], degraded: ["plan", "no-model"] }) },
+    ]);
+    expect(s.turns.at(-1)).toMatchObject({ unchecked: true });
+  });
+
+  it("cards that streamed and then left in done take the mark with them", () => {
+    const mid = run([...keyless, { type: "picks", data: { cards: [card(1)] } }, { type: "degraded", data: { what: ["judge:1/1"] } }]);
+    expect(mid.turns.at(-1)).toMatchObject({ unchecked: true });
+    const s = run([
+      ...keyless,
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "degraded", data: { what: ["judge:1/1"] } },
+      { type: "done", data: done({ mode: "NoneFound", degraded: ["plan", "no-model", "judge:1/1"] }) },
+    ]);
+    expect(s.order).toEqual([]);
+    expect(s.turns.at(-1)?.unchecked).toBeUndefined();
+  });
+
+  it("a held previous answer's cards never earn this turn's reply the mark", () => {
+    const held = run([
+      ...answered("ninja movies", [card(1), card(2)]),
+      { type: "userTurn", message: "is the first one violent?", fresh: false },
+      { type: "answer", data: { text: "No language model is connected right now." } },
+      { type: "degraded", data: { what: ["no-model"] } },
+    ]);
+    expect(held.turns.at(-1)?.unchecked).toBeUndefined();
+    const s = run([
+      ...answered("ninja movies", [card(1), card(2)]),
+      { type: "userTurn", message: "is the first one violent?", fresh: false },
+      { type: "answer", data: { text: "No language model is connected right now." } },
+      { type: "done", data: done({ mode: "Answer", degraded: ["no-model"] }) },
+    ]);
+    expect(s.order).toEqual(["t1", "t2"]);
+    expect(s.turns.at(-1)?.unchecked).toBeUndefined();
+  });
+
+  it("a resumed judge-degraded row whose own cards came back empty carries no mark, as live", () => {
+    const rows = (cards: AskCard[] | undefined): ConversationPayload["turns"] => [
+      { sequence: 0, role: "user", text: "ninja movies", kind: "ask", status: "Completed" },
+      {
+        sequence: 1, role: "assistant", text: "Ask Reel has no language model connected right now.", kind: "ask",
+        status: "Completed", degraded: true, judgeDegraded: true, mode: "NoneFound",
+        ...(cards ? { cards, trays: { nearMiss: [], belowFloor: [], unchecked: [] } } : {}),
+      },
+    ];
+    expect(transcriptOf(rows([])).at(-1)).toMatchObject({ degraded: true });
+    expect(transcriptOf(rows([])).at(-1)?.unchecked).toBeUndefined();
+    // One field varied: a card on the row brings the mark back.
+    expect(transcriptOf(rows([card(1)])).at(-1)).toMatchObject({ degraded: true, unchecked: true });
+    // A row the server sent no cards for (older server, or older than the newest replayed answers)
+    // cannot be judged empty, so it keeps the server's word.
+    expect(transcriptOf(rows(undefined)).at(-1)).toMatchObject({ unchecked: true });
   });
 });

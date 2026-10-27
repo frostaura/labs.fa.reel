@@ -296,7 +296,10 @@ export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
             ? {
               role: "assistant", text: t.text,
               ...(t.degraded ? { degraded: true } : {}),
-              ...(t.judgeDegraded ? { unchecked: true } : {}),
+              // The live rule (`markTurnReply`): the pill needs a card under it. A row the server
+              // sent `cards` for and whose answer is empty showed none; a row with no `cards` at
+              // all cannot be judged, so it keeps the server's word.
+              ...(t.judgeDegraded && (!Array.isArray(t.cards) || answerHasCards(answer)) ? { unchecked: true } : {}),
             }
             : { role: t.role as "user" | "assistant", text: t.text };
       const placed = t.role === "assistant" && !row.failed && leavesGrid(t.mode) ? { ...row, besideGrid: true } : row;
@@ -342,17 +345,25 @@ export function mergeCards(cards: AskCard[], extra: AskCard[]): AskCard[] {
  * the model itself did not run. Only the reply BELOW the last question is touched: an earlier
  * answer's bubble describes an earlier turn, and a v2 `degraded` frame is about this one. With no
  * reply yet, nothing changes — the reducer re-applies the flags when the reply lands.
+ *
+ * "Some cards unchecked" is a sentence about cards, so it needs `cardsShown`: whether THIS turn has
+ * put any card on screen — picks or a tray. A keyless turn whose keyword search found nothing has
+ * `no-model` in its flags and zero cards, and the pill over its empty none-found card claimed
+ * cards that did not exist (PH-05). A judge flag over no cards takes a mark already given away
+ * again, because `done` is where a streamed card can still drop out of the answer.
  */
-export function markTurnReply(turns: ChatTurn[], flags: readonly string[]): ChatTurn[] {
+export function markTurnReply(turns: ChatTurn[], flags: readonly string[], cardsShown: boolean): ChatTurn[] {
   const plan = flags.includes("plan");
-  const unchecked = judgeDegraded(flags);
-  if (!plan && !unchecked) return turns;
+  const judge = judgeDegraded(flags);
+  if (!plan && !judge) return turns;
   const i = turns.length - 1;
   const row = turns[i];
   if (!row || row.role !== "assistant" || row.failed) return turns;
-  if ((!plan || row.degraded) && (!unchecked || row.unchecked)) return turns;
+  const unchecked = judge ? cardsShown : !!row.unchecked;
+  if ((!plan || row.degraded) && !!row.unchecked === unchecked) return turns;
   const next = turns.slice();
-  next[i] = { ...row, ...(plan ? { degraded: true } : {}), ...(unchecked ? { unchecked: true } : {}) };
+  const { unchecked: _was, ...rest } = row;
+  next[i] = { ...rest, ...(plan ? { degraded: true } : {}), ...(unchecked ? { unchecked: true } : {}) };
   return next;
 }
 
