@@ -1226,6 +1226,40 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV2-ASK-04: a plan call stuck on a slow route ("romantic comedies" planned in 7.6 s against a
+    /// p50 under 2 s) is sent once more, and the turn goes on with the first good plan; the hedge is
+    /// recorded in the stage timings. Varied: a plan that answers in time is sent once, unrecorded.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_plan_stuck_on_its_first_call_is_sent_once_more_and_the_turn_goes_on(bool firstHangs)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var planner = new StuckFirstPlanner(firstHangs, Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, _, emit) = Build(accountId, planner, new NameJudge(), planHedgeAfter: TimeSpan.FromMilliseconds(100));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(8), $"the turn waited {clock.Elapsed} on a stuck plan");
+        Assert.Equal(firstHangs ? 2 : 1, planner.Calls);
+        Assert.Equal(firstHangs, outcome.StageTimingsJson?.Contains(AskStageTimings.PlanHedge, StringComparison.Ordinal) ?? false);
+        if (firstHangs)
+        {
+            await planner.FirstCancelled.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    /// <summary>
     /// §4.6 acceptance: a recorded v1 conversation resumed under v2 repeats nothing — through the
     /// endpoint, with the state rebuilt from the turn record and written back beside it.
     /// </summary>
@@ -1436,7 +1470,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
         Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
         Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null,
-        IServiceScopeFactory? scopes = null, IMemoryCache? cache = null, IModelEngine? model = null)
+        IServiceScopeFactory? scopes = null, IMemoryCache? cache = null, IModelEngine? model = null, TimeSpan? planHedgeAfter = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -1453,7 +1487,10 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
             scopes ?? new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             cache, new ConceptEmbeddings(embeddings ?? new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
-            NullLogger<AskReelEngine>.Instance);
+            NullLogger<AskReelEngine>.Instance)
+        {
+            PlanHedgeAfter = planHedgeAfter ?? AskReelEngine.DefaultPlanHedgeAfter,
+        };
 
         var events = new List<(string, JsonElement)>();
         LiveSearchExpansionService.Emit emit = (name, payload) =>
@@ -1789,6 +1826,39 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>A planner whose answer is awaited — it can wait on something the turn should already have started.</summary>
+    /// <summary>Its first call hangs until cancelled (when told to); every other call answers <paramref name="plan"/>.</summary>
+    private sealed class StuckFirstPlanner(bool firstHangs, PlanResult plan) : IAskReelPlanner
+    {
+        private readonly TaskCompletionSource _firstCancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task FirstCancelled => _firstCancelled.Task;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "stuck-first-plan";
+
+        public async Task<PlanResult> PlanAsync(PlanInput input, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _calls) == 1 && firstHangs)
+            {
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    _firstCancelled.TrySetResult();
+                    throw;
+                }
+            }
+
+            return plan;
+        }
+    }
+
     private sealed class AwaitingPlanner(Func<PlanInput, Task<PlanResult>> script) : IAskReelPlanner
     {
         public bool IsAvailable => true;

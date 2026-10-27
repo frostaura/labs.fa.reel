@@ -89,6 +89,12 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: building the planner's context (taste summary, persona), inside <see cref="Plan"/>.</summary>
     public const string PlanContext = "plan.context";
 
+    /// <summary>
+    /// Ask Reel v2: when the plan call was sent a second time (<c>AskReelHedge</c>), measured from the
+    /// first call, inside <see cref="Plan"/>. Absent on a turn whose plan answered in time.
+    /// </summary>
+    public const string PlanHedge = "plan.hedge";
+
     /// <summary>Ask Reel v2: the account's conditions and the conversation's state, read before the plan.</summary>
     public const string Load = "load";
 
@@ -142,7 +148,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Load, Plan, PlanContext, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgePrep, Judge,
+            Load, Plan, PlanContext, PlanHedge, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgePrep, Judge,
             JudgeFirstBatch, JudgeSpeculative, Answer, Compose,
         ];
 

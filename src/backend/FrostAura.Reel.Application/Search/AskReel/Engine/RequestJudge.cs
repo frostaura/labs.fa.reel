@@ -39,11 +39,28 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
 
     public const int MaxConcurrent = 3;
 
-    public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(25);
+    /// <summary>
+    /// The judging stage's hard bound, from its start: a batch still out by then is a failed batch.
+    /// 12 s, not the 25 s it was (HREV2-ASK-04): with each batch hedged at <see cref="DefaultHedgeAfter"/>,
+    /// a batch that is still out at 12 s has had two slow routes, and waiting on it held a turn past
+    /// the 15 s p95 gate — the plan (about 3 s at its hedge) and retrieval (1–2 s) leave the judge
+    /// about 12 s inside it.
+    /// </summary>
+    public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(12);
+
+    /// <summary>
+    /// How long a batch's call may run before the same batch is sent once more and the first good
+    /// answer is used (<see cref="AskReelHedge"/>, HREV2-ASK-04). Above a healthy batch's p95 (live
+    /// batches return in 0.5–2.2 s), so only a call stuck on a slow route is hedged: one such batch
+    /// held the integrator's turn at 14.6 s while its siblings took about 2 s.
+    /// </summary>
+    public static readonly TimeSpan DefaultHedgeAfter = TimeSpan.FromSeconds(4);
 
     public static readonly TimeSpan VerdictTtl = TimeSpan.FromHours(6);
 
     internal TimeSpan StageDeadline { get; init; } = Deadline;
+
+    internal TimeSpan HedgeAfter { get; init; } = DefaultHedgeAfter;
 
     /// <summary>The batches <paramref name="titles"/> are judged in — membership only, retrieval order.</summary>
     public static IReadOnlyList<IReadOnlyList<Guid>> Batches(IReadOnlyList<Guid> titles)
@@ -146,7 +163,17 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
         {
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
             bounded.CancelAfter(StageDeadline);
-            var result = await model.JudgeBatchAsync(input with { Titles = Shuffle(batch, request) }, bounded.Token);
+
+            // Hedged like the turn's own batches: the turn's first batch WAITS for this call, so a
+            // slow route here is the first card's wait (HREV2-ASK-04).
+            var shuffled = input with { Titles = Shuffle(batch, request) };
+            var result = await AskReelHedge.RunAsync(
+                token => model.JudgeBatchAsync(shuffled, token),
+                r => !r.Failed,
+                HedgeAfter,
+                () => logger.LogInformation(
+                    "Ask Reel v2 judge: the early first batch passed {HedgeAfter} s; sending it once more.", HedgeAfter.TotalSeconds),
+                bounded.Token);
             foreach (var verdict in result.Verdicts.Where(v => v.Judged && batch.Any(t => t.TitleId == v.TitleId)))
             {
                 verdicts[verdict.TitleId] = verdict;
@@ -310,7 +337,15 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
 
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
             bounded.CancelAfter(remaining);
-            var result = await model.JudgeBatchAsync(input with { Titles = Shuffle(titles, request) }, bounded.Token);
+            var shuffled = input with { Titles = Shuffle(titles, request) };
+            var result = await AskReelHedge.RunAsync(
+                token => model.JudgeBatchAsync(shuffled, token),
+                r => !r.Failed,
+                HedgeAfter,
+                () => logger.LogInformation(
+                    "Ask Reel v2 judge batch {Batch} passed {HedgeAfter} s; sending it once more and taking the first answer.",
+                    index, HedgeAfter.TotalSeconds),
+                bounded.Token);
             foreach (var verdict in result.Verdicts.Where(v => v.Judged && titles.Any(u => u.TitleId == v.TitleId)))
             {
                 verdicts[verdict.TitleId] = verdict;

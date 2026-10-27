@@ -74,6 +74,15 @@ public sealed class AskReelEngine(
     /// <summary>How many candidates the executor asks retrieval for.</summary>
     public const int RetrievalWant = 40;
 
+    /// <summary>
+    /// How long the plan call may run before it is sent once more (<see cref="AskReelHedge"/>,
+    /// HREV2-ASK-04): above the plan's healthy p95 (1.2–2.2 s live), at the §4.11 plan target of 3 s.
+    /// </summary>
+    public static readonly TimeSpan DefaultPlanHedgeAfter = TimeSpan.FromSeconds(3);
+
+    /// <summary>The plan's hedge threshold; a test may shorten it.</summary>
+    internal TimeSpan PlanHedgeAfter { get; init; } = DefaultPlanHedgeAfter;
+
     /// <summary>The most TMDB-only titles one turn hydrates and admits (each is a TMDB round trip).</summary>
     public const int MaxProvisional = 6;
 
@@ -375,14 +384,22 @@ public sealed class AskReelEngine(
         turn.Persona = persona.Taste.Length <= 300 ? persona.Taste : persona.Taste[..300];
         turn.PersonaReady.TrySetResult(turn.Persona);
 
-        var plan = await planner.PlanAsync(
-            new PlanInput(
-                turn.Input.Message,
-                state,
-                turn.Input.History.TakeLast(6).ToList(),
-                new StandingConditionsView(AskReelStandingFilters.Describe(turn.Standing)),
-                tasteSummary,
-                mediaFilter),
+        var input = new PlanInput(
+            turn.Input.Message,
+            state,
+            turn.Input.History.TakeLast(6).ToList(),
+            new StandingConditionsView(AskReelStandingFilters.Describe(turn.Standing)),
+            tasteSummary,
+            mediaFilter);
+
+        // A plan stuck on a slow route is sent once more (HREV2-ASK-04): "romantic comedies" planned
+        // in 7.6 s against a p50 under 2 s. The hedge is recorded as the moment it was sent.
+        var planClock = Stopwatch.StartNew();
+        var plan = await AskReelHedge.RunAsync(
+            token => planner.PlanAsync(input, token),
+            p => p.Failure is null,
+            PlanHedgeAfter,
+            () => turn.Timings.Mark(AskStageTimings.PlanHedge, planClock.Elapsed.TotalMilliseconds),
             ct);
         turn.Calls.Add(plan.Meta);
         turn.Models["plan"] = plan.Meta.Model ?? planner.ModelId;

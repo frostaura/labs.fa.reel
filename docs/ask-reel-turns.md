@@ -557,6 +557,11 @@ uses it only to know which frames to expect.
 3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6** (the first
    **4**), at most **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and
    **emitted as it returns**. On a speculated topic the first batch may already be judged (above).
+   **Hedged and bounded** (HREV2-ASK-04): a batch call (the early one included) still out after
+   **4 s** is sent once more and the first good answer is used, the other cancelled; the stage has a
+   **12 s** deadline, after which a batch still out is a failed batch. The plan call is hedged the
+   same way after **3 s**, recorded as `plan.hedge` (when the second call was sent). A healthy turn
+   never hedges; both calls of a hedged one are on the usage ledger.
    **When more than 16 are retrieved and a bar is set, the ones the bar lets through go first**
    (HREV2-RET-01): every candidate is scored, and the bar-clearing ones take the judge's slots in
    retrieval order ahead of the rest — a title under the bar can only reach the floor tray, so judging
