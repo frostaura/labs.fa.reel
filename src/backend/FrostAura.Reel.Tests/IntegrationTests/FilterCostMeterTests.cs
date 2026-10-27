@@ -456,6 +456,48 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         }
     }
 
+    /// <summary>
+    /// R1-06: a title with no crowd rating from either source FAILS the floor on the serving path, so
+    /// it breaks the floor in the meter too. In SQL the raw reading is NULL for such a title, and
+    /// NOT (NULL &gt;= floor) is NULL, so the breach bit stayed clear and the meter counted every
+    /// unrated title as eligible — 3,706 against a SQL truth of 3,507 on the founder's rules. Each
+    /// way a title can be unrated is its own case: no TMDB average, a zero TMDB average (TMDB's "no
+    /// votes"), and a zero Trakt rating behind either.
+    /// </summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(0.0, null)]
+    [InlineData(null, 0.0)]
+    [InlineData(0.0, 0.0)]
+    public async Task An_unrated_title_breaks_the_crowd_floor_in_the_meter_as_it_does_in_eligibility(double? tmdb, double? trakt)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"unrated{Guid.NewGuid():N}"[..16];
+        var rated = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.TmdbVoteCount = 900; });
+        var traktOnly = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = null; t.TraktRating = 7.1m; });
+        var unrated = await SeedTitleAsync(t =>
+        {
+            t.Genres = [genre];
+            t.Year = 2016;
+            t.TmdbVoteAverage = (decimal?)tmdb;
+            t.TraktRating = (decimal?)trakt;
+        });
+
+        // Allow-listing a genre only these three carry keeps the counts to this test's own titles.
+        var rules = FilterRuleSet.Create(null, [genre], null, null, 6.0m, null, null);
+        Assert.Equal(new HashSet<Guid> { rated, traktOnly }, (await EligibleAsync(accountId, rules, [rated, traktOnly, unrated])).ToHashSet());
+
+        var report = await MeasureAsync(accountId, rules);
+        Assert.Equal(2, report.Eligible);
+        Assert.Equal(1, Marginal(report, FilterKind.MinCrowdRating, "6.0"));
+        Assert.Equal((await EligibleShrunkAsync(accountId, rules, [rated, traktOnly, unrated])).Count, report.EligibleUnderShrunkFloor);
+    }
+
     [Fact]
     public async Task Excluding_anime_removes_japanese_animation_on_both_paths()
     {

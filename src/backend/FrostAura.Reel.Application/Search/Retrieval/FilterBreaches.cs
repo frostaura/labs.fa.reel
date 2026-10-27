@@ -123,12 +123,13 @@ public static class FilterBreaches
             return Not(CrowdVotes.ShrunkAtLeast(value));
         }
 
-        Expression<Func<Title, bool>> passes = t =>
-            (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
-                ? t.TmdbVoteAverage
-                : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
-            >= value;
-        return Not(passes);
+        // Spelled as two-valued tests on purpose (R1-06). The resolved reading is NULL in SQL for a
+        // title with no rating, and NOT (NULL >= floor) is NULL, not true: a breach bit built from
+        // it stayed clear, so the meter counted every unrated title as clearing the floor. Each
+        // conjunct here is false (never NULL) when its rating is missing, so the breach is true.
+        return t => !((t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m && t.TmdbVoteAverage >= value)
+            || (!(t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m)
+                && t.TraktRating != null && t.TraktRating > 0m && t.TraktRating >= value));
     }
 
     /// <summary>The MinYear bound: a dated title released before it. An undated title passes.</summary>
