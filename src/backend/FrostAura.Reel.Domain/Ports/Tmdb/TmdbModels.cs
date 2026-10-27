@@ -53,7 +53,23 @@ public record TmdbTitleDetails(
     /// has no certification for the title at all; regions whose certification string is blank are
     /// dropped rather than stored as "".</para>
     /// </summary>
-    IReadOnlyDictionary<string, string>? CertificationsByRegion = null);
+    IReadOnlyDictionary<string, string>? CertificationsByRegion = null,
+    /// <summary>
+    /// The collection a MOVIE belongs to (<c>belongs_to_collection</c>: The Matrix → "The Matrix
+    /// Collection"), or null for a standalone film and for every show (TV details carry no such
+    /// field). Read from the same hydration call; the parts come from
+    /// <see cref="ITmdbClient.GetCollectionAsync"/>.
+    /// </summary>
+    TmdbCollectionRef? Collection = null);
+
+/// <summary>A TMDB collection a movie belongs to: its id and display name.</summary>
+public sealed record TmdbCollectionRef(long Id, string Name);
+
+/// <summary>
+/// A TMDB collection (<c>/collection/{id}</c>) with its parts — every film in it, the anchor included —
+/// in release order, undated (unreleased) parts last. Parts are movies.
+/// </summary>
+public sealed record TmdbCollection(long Id, string Name, IReadOnlyList<TmdbListItem> Parts);
 
 /// <summary>
 /// Resolves the language Reel stores for a title, because TMDB's <c>original_language</c> is not

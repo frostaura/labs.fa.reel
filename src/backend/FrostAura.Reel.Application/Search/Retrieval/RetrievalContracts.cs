@@ -328,4 +328,29 @@ public interface ISupplyReporter
     /// </summary>
     Task<SupplyReport> ReportAsync(
         Guid accountId, HardConstraints hard, IReadOnlyCollection<Guid> alreadyShown, CancellationToken ct);
+
+    /// <summary>
+    /// The supply as a surface that waives the account's include-genre rules counts it: a genre rail
+    /// (FD-6) passes <see cref="IncludeGenreRules.Waived"/>, so the N in "your conditions hide N" is
+    /// what the rail itself hides. Exclude-genre rules are never waived.
+    /// </summary>
+    Task<SupplyReport> ReportAsync(
+        Guid accountId,
+        HardConstraints hard,
+        IReadOnlyCollection<Guid> alreadyShown,
+        IncludeGenreRules includeGenre,
+        CancellationToken ct);
+}
+
+/// <summary>
+/// Whether a count applies the account's include-genre rules. Never persisted; a surface that waives
+/// them (genre rails, FD-6) says so explicitly.
+/// </summary>
+public enum IncludeGenreRules
+{
+    /// <summary>Every standing condition applies (Ask Reel, the feed's main grid).</summary>
+    Applied,
+
+    /// <summary>Include-genre rules are left out; exclude-genre and every other rule still apply.</summary>
+    Waived,
 }

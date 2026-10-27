@@ -54,6 +54,32 @@ public class TmdbClient(
         // content_ratings is the TV analogue of release_dates: a flat region → rating list.
         GetDetailsAsync($"tv/{tmdbId}?append_to_response=aggregate_credits,videos,keywords,content_ratings", ct);
 
+    /// <inheritdoc />
+    public async Task<TmdbCollection?> GetCollectionAsync(long collectionId, CancellationToken ct = default)
+    {
+        // Reconcile lane: the Similar rail reads collections in the background feed build, never on
+        // an interactive request's critical path.
+        using var response = await SendAsync($"collection/{collectionId}", RatePriority.Reconcile, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        var dto = await response.Content.ReadFromJsonAsync<CollectionDto>(JsonOptions, ct);
+        if (dto is null || dto.Id <= 0)
+        {
+            return null;
+        }
+
+        var parts = Project(dto.Parts, movies: true)
+            .OrderBy(p => p.ReleasedAt is null)
+            .ThenBy(p => p.ReleasedAt)
+            .ThenBy(p => p.Id)
+            .ToList();
+        return new TmdbCollection(dto.Id, dto.Name ?? string.Empty, parts);
+    }
+
     public async Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
         bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
     {
@@ -588,7 +614,10 @@ public class TmdbClient(
             dto.Title ?? dto.Name,
             ParseDate(dto.ReleaseDate ?? dto.FirstAirDate),
             (dto.Genres ?? []).Select(g => g.Id).ToArray(),
-            Certifications(dto));
+            Certifications(dto),
+            dto.BelongsToCollection is { Id: > 0 } collection
+                ? new TmdbCollectionRef(collection.Id, collection.Name ?? string.Empty)
+                : null);
     }
 
     /// <summary>
@@ -673,7 +702,13 @@ public class TmdbClient(
         // (release_dates.results[].release_dates[].certification, with a release TYPE per entry);
         // TV is flat (content_ratings.results[].rating).
         [property: JsonPropertyName("release_dates")] ReleaseDatesDto? ReleaseDates = null,
-        [property: JsonPropertyName("content_ratings")] ContentRatingsDto? ContentRatings = null);
+        [property: JsonPropertyName("content_ratings")] ContentRatingsDto? ContentRatings = null,
+        // Movies only; null for a standalone film.
+        [property: JsonPropertyName("belongs_to_collection")] CollectionRefDto? BelongsToCollection = null);
+
+    private sealed record CollectionRefDto(long Id, string? Name);
+
+    private sealed record CollectionDto(long Id, string? Name, ListResultDto[]? Parts);
 
     private sealed record GenreDto(int Id, string? Name);
 
