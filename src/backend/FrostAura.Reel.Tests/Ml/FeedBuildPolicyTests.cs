@@ -98,4 +98,24 @@ public class FeedBuildPolicyTests
         // page the user is looking at.
         Assert.False(FeedBuildPolicy.IsUserForced(FeedBuildPolicy.TrustPurgeReason));
     }
+
+    /// <summary>
+    /// R1-16 (ADD-22): the day is the account's. At +02:00, 23:00 and 01:30 UTC are one local day
+    /// (Preserve) while 21:30 and 22:30 UTC straddle local midnight (Fresh); with no zone the UTC day
+    /// decides, exactly as before the setting existed.
+    /// </summary>
+    [Theory]
+    [InlineData("Africa/Johannesburg", "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", FeedBuildMode.Preserve)]
+    [InlineData("Africa/Johannesburg", "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", FeedBuildMode.Fresh)]
+    [InlineData(null, "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", FeedBuildMode.Fresh)]
+    [InlineData(null, "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", FeedBuildMode.Preserve)]
+    [InlineData("Mars/Olympus_Mons", "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", FeedBuildMode.Preserve)]
+    [InlineData("America/Santiago", "2026-10-27T02:30:00Z", "2026-10-27T03:30:00Z", FeedBuildMode.Fresh)]
+    public void The_day_that_rolls_over_is_the_accounts_own(string? timeZone, string previous, string now, FeedBuildMode expected)
+    {
+        Assert.Equal(expected, FeedBuildPolicy.Decide(Utc(previous), Artifact, Artifact, "delta-sync", Utc(now), timeZone));
+    }
+
+    private static DateTime Utc(string iso) =>
+        DateTime.Parse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal);
 }

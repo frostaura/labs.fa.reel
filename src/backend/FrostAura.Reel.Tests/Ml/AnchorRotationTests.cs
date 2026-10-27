@@ -9,7 +9,7 @@ namespace FrostAura.Reel.Tests.Ml;
 /// top-10 is frozen, so the old selection (one drift slot + two fixed all-time slots) anchored on
 /// the same titles on every single build. The first fix rotated per BUILD, which over-corrected —
 /// delta sync polls every 5 minutes and the rows changed 3×/hour. The standing contract is
-/// day-granular: <see cref="AnchorRotation.OffsetFor"/> is constant within a UTC day and moves
+/// day-granular: <see cref="AnchorRotation.OffsetFor"/> is constant within the account's day and moves
 /// across days, and the hold-back set the handler passes is the previous DAY's anchors (or the
 /// superseded snapshot's, on a user-forced refresh). These tests pin the properties the selection
 /// has to hold — anchors move when the hold-back says they must, and they are a deterministic
@@ -149,5 +149,28 @@ public class AnchorRotationTests
         Assert.NotEqual(AnchorRotation.OffsetFor(today), AnchorRotation.OffsetFor(today.AddDays(1)));
         Assert.NotEqual(AnchorRotation.OffsetFor(today.AddDays(1)), AnchorRotation.OffsetFor(today.AddDays(2)));
         Assert.True(AnchorRotation.OffsetFor(today) >= 0, "the offset must stay non-negative for the modulo.");
+    }
+
+    /// <summary>
+    /// R1-16: the rotation offset turns over at the account's midnight. With no zone it is the UTC
+    /// day number the old tick arithmetic produced, so an account that set nothing rotates exactly as
+    /// before; at +02:00 it is constant from 22:00 UTC to 22:00 UTC.
+    /// </summary>
+    [Fact]
+    public void The_offset_follows_the_accounts_day()
+    {
+        var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (var hours = 0; hours < 24 * 400; hours += 7)
+        {
+            var instant = start.AddHours(hours);
+            var legacy = (int)((ulong)(instant.Ticks / TimeSpan.TicksPerDay) % int.MaxValue);
+            Assert.Equal(legacy, AnchorRotation.OffsetFor(instant));
+        }
+
+        var lateEvening = new DateTime(2026, 10, 26, 22, 0, 0, DateTimeKind.Utc); // 00:00 local, the 27th
+        const string Johannesburg = "Africa/Johannesburg";
+        Assert.Equal(AnchorRotation.OffsetFor(lateEvening, Johannesburg), AnchorRotation.OffsetFor(lateEvening.AddHours(3.5), Johannesburg));
+        Assert.NotEqual(AnchorRotation.OffsetFor(lateEvening.AddMinutes(-1), Johannesburg), AnchorRotation.OffsetFor(lateEvening, Johannesburg));
+        Assert.NotEqual(AnchorRotation.OffsetFor(lateEvening), AnchorRotation.OffsetFor(lateEvening.AddHours(3.5)));
     }
 }

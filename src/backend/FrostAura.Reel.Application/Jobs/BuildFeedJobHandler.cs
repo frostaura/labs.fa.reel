@@ -31,9 +31,9 @@ namespace FrostAura.Reel.Application.Jobs;
 /// is never in the request path — the feed endpoint reads the snapshot.
 ///
 /// Assembly honours the stable-"tonight" contract (FeedBuildPolicy): a background rebuild inside
-/// the same UTC day PRESERVES the Active snapshot's hero, anchors and rail members — and writes
-/// nothing at all when the result is identical — while a new day, a new model, or an explicit user
-/// action deals fresh rows. The job's TriggerReason is what tells those cases apart.
+/// the same day (the account's own, in its time zone: ADD-22) PRESERVES the Active snapshot's hero,
+/// anchors and rail members — and writes nothing at all when the result is identical — while a new
+/// day, a new model, or an explicit user action deals fresh rows. The job's TriggerReason is what tells those cases apart.
 /// </summary>
 public class BuildFeedJobHandler(
     IReelDbContext db,
@@ -78,7 +78,10 @@ public class BuildFeedJobHandler(
     // Optional on the same terms: a null budget means the enrichment enqueue is not gated on
     // today's extraction spend, which is what the hand-built test handlers were written against.
     // DI always supplies it (WS-4 CR-3: the enqueue gate is only complete when every caller passes it).
-    CatalogEnrichmentBudget? enrichmentBudget = null) : IJobHandler
+    CatalogEnrichmentBudget? enrichmentBudget = null,
+    // The build's clock. Optional on the same terms: null is the system clock, which is what every
+    // caller gets; a test passes a fixed instant to build either side of the account's midnight.
+    TimeProvider? clock = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -197,7 +200,7 @@ public class BuildFeedJobHandler(
         // keeping, and it was the one the old log line never made.
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var capture = new BuildCapture();
-        var now = DateTime.UtcNow;
+        var now = (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime;
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
@@ -220,8 +223,11 @@ public class BuildFeedJobHandler(
         // it runs: when it matches the fingerprint that produced the Active snapshot, the page cannot
         // differ, and the build records its no-op and stops. Remembered in process; a restart costs
         // one ordinary build. Never for a user-forced or trust-purge build, which are Fresh anyway.
-        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, DateOnly.FromDateTime(now), ct);
-        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, ct) is { } activeId)
+        // The account's own day (ADD-22): "tonight" and stable-within-day turn over at the account's
+        // midnight, not at UTC's — at +02:00 the UTC day re-dealt the picks at 02:00 local.
+        var timeZone = account.Settings.TimeZone;
+        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, AccountTimeZone.LocalDate(timeZone, now), ct);
+        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, timeZone, ct) is { } activeId)
         {
             await RecordUnchangedAsync(job, accountId, artifact.Id, activeId, now, stopwatch, ct);
             return;
@@ -243,7 +249,7 @@ public class BuildFeedJobHandler(
         await ReportProgressAsync(job, accountId, 10, "Scouting fresh candidates", ct);
         // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
         // the same replayability contract the row anchors hold.
-        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
+        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct, timeZone);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
@@ -565,7 +571,7 @@ public class BuildFeedJobHandler(
     /// produced it; null when anything differs, nothing is remembered, or the build would be Fresh.
     /// </summary>
     private async Task<Guid?> UnchangedSinceActiveAsync(
-        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, CancellationToken ct)
+        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, string? timeZone, CancellationToken ct)
     {
         if (!cache.TryGetValue<BuiltFrom>(InputsKey(accountId), out var built) || built is null || built.InputHash != inputHash)
         {
@@ -579,7 +585,7 @@ public class BuildFeedJobHandler(
             .FirstOrDefaultAsync(ct);
         return active is not null
             && active.Id == built.SnapshotId
-            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now) == FeedBuildMode.Preserve
+            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now, timeZone) == FeedBuildMode.Preserve
                 ? active.Id
                 : null;
     }
@@ -1110,8 +1116,8 @@ public class BuildFeedJobHandler(
         // ── Continuity inputs: what is on the page NOW, and what yesterday looked like ──────
         // All read BEFORE the supersede below. The Active snapshot is both the Preserve-mode
         // template (its hero and anchors ARE tonight's contract) and the no-op baseline; the newest
-        // snapshot from any EARLIER UTC day supplies the hold-back set that makes a new day rotate
-        // for real instead of re-dealing yesterday's rows.
+        // snapshot from any EARLIER day (the account's day) supplies the hold-back set that makes a
+        // new day rotate for real instead of re-dealing yesterday's rows.
         var previousSnapshot = await db.FeedSnapshots
             .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
             .OrderByDescending(s => s.GeneratedAt)
@@ -1136,8 +1142,9 @@ public class BuildFeedJobHandler(
         // day N while any other loved title is available. Empty for a first-ever build; possibly
         // empty for an account that rebuilt 7+ times today (pruning keeps only the last 7), which
         // degrades to ordinary rotation rather than failing.
+        var accountDayStart = AccountTimeZone.DayStartUtc(account.Settings.TimeZone, now);
         var previousDaySnapshotId = await db.FeedSnapshots
-            .Where(s => s.AccountId == account.Id && s.GeneratedAt < now.Date)
+            .Where(s => s.AccountId == account.Id && s.GeneratedAt < accountDayStart)
             .OrderByDescending(s => s.GeneratedAt)
             .Select(s => (Guid?)s.Id)
             .FirstOrDefaultAsync(ct);
@@ -1153,7 +1160,8 @@ public class BuildFeedJobHandler(
             .ToHashSet();
 
         var mode = FeedBuildPolicy.Decide(
-            previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now);
+            previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now,
+            account.Settings.TimeZone);
         capture.Mode = mode;
 
         // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
@@ -1172,7 +1180,7 @@ public class BuildFeedJobHandler(
 
         var anchorPool = taste.LovedAnchorPool.Where(anchorTitles.ContainsKey).ToList();
         var allTimeOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
-        var rotationOffset = AnchorRotation.OffsetFor(now);
+        var rotationOffset = AnchorRotation.OffsetFor(now, account.Settings.TimeZone);
 
         // Anchors are drawn first from the titles the user rated 9–10 (AnchorRotation's top tier).
         var topTierAnchors = anchorTitles.Keys

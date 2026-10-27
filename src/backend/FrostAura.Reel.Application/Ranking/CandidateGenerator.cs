@@ -97,8 +97,10 @@ public class CandidateGenerator(
     /// its inputs and a build can be replayed exactly from what the snapshot persisted — the same
     /// contract <see cref="AnchorRotation"/> holds for the row anchors.
     /// </param>
+    /// <param name="timeZoneId">The account's IANA zone, so the daily rotation turns at its midnight; null is UTC.</param>
     public async Task<PoolRefreshResult> RefreshPoolAsync(
-        Guid accountId, FeatureVectorBuilder.TasteState taste, string region, DateTime now, CancellationToken ct)
+        Guid accountId, FeatureVectorBuilder.TasteState taste, string region, DateTime now, CancellationToken ct,
+        string? timeZoneId = null)
     {
         var rules = await AccountDiscoveryRules.LoadAsync(db, accountId, ct);
 
@@ -123,7 +125,8 @@ public class CandidateGenerator(
         var consumed = await ConsumedSinceTrainingAsync(accountId, ct);
         var startPage = DiscoveryPaging.StartPage(consumed);
         var pages = DiscoveryPaging.PageCount(consumed);
-        var rotation = AnchorRotation.OffsetFor(now);
+        // The account's day (ADD-22), so the pool's daily rotation turns over with tonight's picks.
+        var rotation = AnchorRotation.OffsetFor(now, timeZoneId);
         var media = new MediaPlanner((double)taste.MovieRatedShare);
         var budget = new CallBudget(MaxTmdbCallsPerBuild);
         var batches = new List<(DiscoveryArm Arm, IReadOnlyList<TmdbListItem> Items)>();

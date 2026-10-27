@@ -373,6 +373,58 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.Equal(firstCount, secondCount);
     }
 
+    /// <summary>
+    /// R1-16 (task 14, ADD-22): "tonight" and stable-within-day follow the account's own zone. For a
+    /// +02:00 account the UTC day turns at 02:00 local, which used to re-deal tonight's picks in the
+    /// small hours of the same evening; the account's midnight is what re-deals them now. Two
+    /// timelines, each run for the +02:00 account and for one with no zone (UTC, the old behaviour):
+    /// across 00:00–02:00 UTC (one local day) the +02:00 page holds, and across local midnight
+    /// (one UTC day) it turns over.
+    /// </summary>
+    [Theory]
+    [InlineData("Africa/Johannesburg", "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", true)]
+    [InlineData(null, "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", false)]
+    [InlineData("Africa/Johannesburg", "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", false)]
+    [InlineData(null, "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", true)]
+    public async Task Tonight_turns_over_at_the_accounts_midnight(string? timeZone, string first, string second, bool sameSnapshot)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
+            account.Settings.TimeZone = timeZone;
+            await db.SaveChangesAsync();
+        }
+
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId, at: Instant(first));
+        var (firstActiveId, _) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        // The background poll, with nothing new: inside one of the account's days it must keep the
+        // page; across the account's midnight it must deal a new one.
+        await RunBuildAsync(accountId, "delta-sync", at: Instant(second));
+        var (secondActiveId, _) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        Assert.Equal(sameSnapshot, firstActiveId == secondActiveId);
+    }
+
+    private static DateTime Instant(string iso) =>
+        DateTime.Parse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal);
+
+    /// <summary>A clock stopped at one instant.</summary>
+    private sealed class FixedClock(DateTime utc) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(DateTime.SpecifyKind(utc, DateTimeKind.Utc));
+    }
+
     [Fact]
     public async Task Rating_a_hero_title_vacates_only_its_slot_and_keeps_the_rest_of_the_hero()
     {
@@ -1064,7 +1116,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
     private async Task RunBuildAsync(
         Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null,
-        IPipelineEventHub? events = null, Guid? persistedJobId = null)
+        IPipelineEventHub? events = null, Guid? persistedJobId = null, DateTime? at = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -1103,7 +1155,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             events ?? new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            NullLogger<BuildFeedJobHandler>.Instance);
+            NullLogger<BuildFeedJobHandler>.Instance,
+            clock: at is { } instant ? new FixedClock(instant) : null);
 
         // A persisted job is read through the handler's own context, as the runner hands it over.
         var job = persistedJobId is { } jobId
