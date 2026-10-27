@@ -107,7 +107,8 @@ public sealed class LogOperatorAlertSink(ILoggerFactory loggers) : IOperatorAler
 /// so the breaker's 15-minute probe cycle does not re-raise it.</item>
 /// <item><b>Job failures</b> — failed attempts in the last hour, per kind, at or above the threshold
 /// in total. Per kind, the larger of this process's attempt memory (which sees retried attempts)
-/// and the database's terminal failures (which survive a restart).</item>
+/// and the database's terminal failures (which survive a restart). Its <c>Since</c> is the earliest
+/// failure inside the window, from either source.</item>
 /// <item><b>LLM alarm</b> — a model purpose WS-1's call counters (<see cref="ILlmCallHealthReader"/>)
 /// mark as alarming: length-finish or fallback rate above 2% over its last 50 sent calls. One alert
 /// per purpose; it resolves when the window falls back under the line. The counters are in process,
@@ -267,11 +268,12 @@ public sealed class OperatorAlertMonitor(
         // Every account's jobs: the alert is about the system (J-11 system scope).
         using var system = scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
-        var terminal = await db.SyncJobs.AsNoTracking()
+        var terminalRows = await db.SyncJobs.AsNoTracking()
             .Where(j => j.Status == JobStatus.Failed && j.CompletedAt >= since && j.CompletedAt <= now)
             .GroupBy(j => j.Kind)
-            .Select(g => new { Kind = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.Kind, x => x.Count, ct);
+            .Select(g => new { Kind = g.Key, Count = g.Count(), First = g.Min(j => j.CompletedAt) })
+            .ToListAsync(ct);
+        var terminal = terminalRows.ToDictionary(x => x.Kind, x => x.Count);
         var attempts = metrics?.FailedAttemptsSince(since) ?? new Dictionary<JobKind, int>();
 
         var kinds = terminal.Keys.Union(attempts.Keys)
@@ -281,11 +283,18 @@ public sealed class OperatorAlertMonitor(
             .ThenBy(k => k.Kind.ToString(), StringComparer.Ordinal)
             .ToList();
         var total = kinds.Sum(k => k.Count);
-        return total < _options.JobFailuresPerHour
-            ? null
-            : new OperatorAlert(
-                OperatorAlertCodes.JobFailures, since, now, ReasonCode: null, Provider: null,
-                total, _options.JobFailuresPerHour, kinds);
+        if (total < _options.JobFailuresPerHour)
+        {
+            return null;
+        }
+
+        // When the failures began: the earliest one inside the window, from either source — never the
+        // window's own start, which would date the alert up to an hour early and move with every restart.
+        var firstTerminal = terminalRows.Min(x => x.First) ?? now;
+        var firstAttempt = metrics?.EarliestFailedAttemptSince(since) ?? now;
+        return new OperatorAlert(
+            OperatorAlertCodes.JobFailures, Earlier(firstTerminal, firstAttempt), now, ReasonCode: null, Provider: null,
+            total, _options.JobFailuresPerHour, kinds);
     }
 
     private static string Key(OperatorAlert alert) => alert.Code switch

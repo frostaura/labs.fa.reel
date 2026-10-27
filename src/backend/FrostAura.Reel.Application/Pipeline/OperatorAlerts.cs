@@ -33,7 +33,7 @@ public sealed record AlertKindCount(
 /// free text — so a client renders its own copy and nothing from a provider reaches a page.
 /// </summary>
 /// <param name="Code">One of <see cref="OperatorAlertCodes"/>.</param>
-/// <param name="Since">When the condition began: the breaker's opening, or the start of the hour in which failures crossed the threshold.</param>
+/// <param name="Since">When the condition began: the breaker's opening, or the earliest failed job attempt inside the hour that crossed the threshold.</param>
 /// <param name="RaisedAt">When this process first raised it.</param>
 /// <param name="ReasonCode">For <see cref="OperatorAlertCodes.ProviderRefused"/>: <c>unauthorized</c>, <c>payment_required</c> or <c>forbidden</c>.</param>
 /// <param name="Provider">For <see cref="OperatorAlertCodes.ProviderRefused"/>: the provider.</param>
