@@ -18,10 +18,10 @@ namespace FrostAura.Reel.Application.Ml;
 /// telling the model something new.</item>
 /// <item><see cref="Hashes.Inputs"/> — the labels plus what the catalogue says about the rated
 /// titles that the features actually read (attribute extractions, embedding source text, the crowd
-/// rating to one decimal and the vote count in log-tenths), the hyperparameters and the
-/// feature-schema version. A change here that leaves the labels alone is catalogue drift. A
-/// metadata refresh TIMESTAMP is not an input — it moved on every refresh whether or not anything
-/// the model reads changed.</item>
+/// rating to one decimal and the vote count in log-tenths), the hyperparameters, the
+/// feature-schema version and the training recipe (<see cref="TrainingRecipe"/>). A change here that
+/// leaves the labels alone is catalogue drift. A metadata refresh TIMESTAMP is not an input — it
+/// moved on every refresh whether or not anything the model reads changed.</item>
 /// </list>
 ///
 /// <para><b>Why raw inputs and not the feature matrix.</b> Several features are functions of the
@@ -96,6 +96,7 @@ public static class TrainingInputHash
         var inputHash = Sha256(
             [
                 Line("schema", FeatureSchema.Version),
+                Line("recipe", TrainingRecipe.Current),
                 Line("hyperparams", hyperparams),
                 Line("labels", labelHash),
                 .. catalogueLines,

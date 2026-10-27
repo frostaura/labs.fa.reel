@@ -1,0 +1,148 @@
+{
+  "purpose": "HREV2-RET-02 acceptance probe: per release decade with >= 50 ratings, the served titles' mean base prediction minus the account's mean rating, and its move under a +/-0.004 nudge of the decade pool. Base model only (no online head, calibration or demotion).",
+  "source": "reel_ws5",
+  "recipe": "out-of-fold-5",
+  "thresholds": {
+    "maxGap": 1.0,
+    "maxCliff": 0.5,
+    "nudge": 0.004
+  },
+  "arms": {
+    "activeArtifact": {
+      "version": 101,
+      "recipe": "leave-one-out, no rollups (unstamped)",
+      "decades": {
+        "1980": {
+          "ratedTitles": 59,
+          "meanRating": 7.051,
+          "servedTitles": 32,
+          "meanPrediction": 6.78,
+          "gap": -0.271,
+          "cliff": 0
+        },
+        "1990": {
+          "ratedTitles": 194,
+          "meanRating": 6.943,
+          "servedTitles": 61,
+          "meanPrediction": 6.886,
+          "gap": -0.057,
+          "cliff": 0.924
+        },
+        "2000": {
+          "ratedTitles": 449,
+          "meanRating": 7.256,
+          "servedTitles": 821,
+          "meanPrediction": 6.996,
+          "gap": -0.260,
+          "cliff": 1.927
+        },
+        "2010": {
+          "ratedTitles": 553,
+          "meanRating": 6.857,
+          "servedTitles": 1457,
+          "meanPrediction": 6.983,
+          "gap": 0.126,
+          "cliff": 1.828
+        },
+        "2020": {
+          "ratedTitles": 867,
+          "meanRating": 6.314,
+          "servedTitles": 949,
+          "meanPrediction": 6.063,
+          "gap": -0.251,
+          "cliff": 2.943
+        }
+      }
+    },
+    "outOfFold": {
+      "trainingRows": 2142,
+      "decades": {
+        "1980": {
+          "ratedTitles": 59,
+          "meanRating": 7.051,
+          "servedTitles": 32,
+          "meanPrediction": 6.623,
+          "gap": -0.428,
+          "cliff": 0
+        },
+        "1990": {
+          "ratedTitles": 194,
+          "meanRating": 6.943,
+          "servedTitles": 61,
+          "meanPrediction": 6.545,
+          "gap": -0.398,
+          "cliff": 0
+        },
+        "2000": {
+          "ratedTitles": 449,
+          "meanRating": 7.256,
+          "servedTitles": 821,
+          "meanPrediction": 6.849,
+          "gap": -0.407,
+          "cliff": 0
+        },
+        "2010": {
+          "ratedTitles": 553,
+          "meanRating": 6.857,
+          "servedTitles": 1457,
+          "meanPrediction": 6.572,
+          "gap": -0.286,
+          "cliff": 0
+        },
+        "2020": {
+          "ratedTitles": 867,
+          "meanRating": 6.314,
+          "servedTitles": 949,
+          "meanPrediction": 6.273,
+          "gap": -0.040,
+          "cliff": 0.007
+        }
+      }
+    },
+    "leaveOneOut": {
+      "trainingRows": 2142,
+      "decades": {
+        "1980": {
+          "ratedTitles": 59,
+          "meanRating": 7.051,
+          "servedTitles": 32,
+          "meanPrediction": 6.778,
+          "gap": -0.273,
+          "cliff": 0
+        },
+        "1990": {
+          "ratedTitles": 194,
+          "meanRating": 6.943,
+          "servedTitles": 61,
+          "meanPrediction": 6.93,
+          "gap": -0.013,
+          "cliff": 0.925
+        },
+        "2000": {
+          "ratedTitles": 449,
+          "meanRating": 7.256,
+          "servedTitles": 821,
+          "meanPrediction": 7.009,
+          "gap": -0.247,
+          "cliff": 2.001
+        },
+        "2010": {
+          "ratedTitles": 553,
+          "meanRating": 6.857,
+          "servedTitles": 1457,
+          "meanPrediction": 6.99,
+          "gap": 0.133,
+          "cliff": 1.86
+        },
+        "2020": {
+          "ratedTitles": 867,
+          "meanRating": 6.314,
+          "servedTitles": 949,
+          "meanPrediction": 6.065,
+          "gap": -0.249,
+          "cliff": 2.826
+        }
+      }
+    }
+  }
+}
