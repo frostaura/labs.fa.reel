@@ -77,10 +77,13 @@ public sealed class CatalogFollowThroughService(
                 if (result.QueuedHydration || result.QueuedEnrichment)
                 {
                     logger.LogInformation(
-                        "Catalogue follow-through queued: hydrate={Hydrate} (backlog {Backlog}, allowance {Used}/{Limit}), "
+                        "Catalogue follow-through queued: hydrate={Hydrate} (backlog {Backlog}, refresh due {RefreshDue}, "
+                        + "creator back-fill due {CreatorBackfillDue}, allowance {Used}/{Limit}), "
                         + "enrich={Enrich} (missing {MissingEmbedding} embedding / {MissingAttributes} attributes).",
                         result.QueuedHydration,
                         result.HydrationBacklog,
+                        result.RefreshDue,
+                        result.CreatorBackfillDue,
                         result.HydrationAllowance.Used,
                         result.HydrationAllowance.Limit,
                         result.QueuedEnrichment,

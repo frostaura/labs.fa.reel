@@ -10,13 +10,19 @@ namespace FrostAura.Reel.Application.Jobs;
 /// </summary>
 /// <param name="HydrationBacklog">Rows never hydrated.</param>
 /// <param name="RefreshDue">Hydrated rows due a metadata refresh (<see cref="Ingestion.MetadataRefreshPolicy.Due"/>).</param>
+/// <param name="CreatorBackfillDue">Shows hydrated before creators were stored (<see cref="Ingestion.CreatorBackfillPolicy.Due"/>).</param>
 public sealed record CatalogFollowThrough(
     int HydrationBacklog,
     DailyAllowance HydrationAllowance,
     bool QueuedHydration,
     bool QueuedEnrichment,
     EnrichmentBacklog Enrichment,
-    int RefreshDue = 0);
+    int RefreshDue = 0,
+    int CreatorBackfillDue = 0)
+{
+    /// <summary>Whether the global hydration job has anything to fetch: any one of its three backlogs.</summary>
+    public bool HasHydrationWork => HydrationBacklog > 0 || RefreshDue > 0 || CreatorBackfillDue > 0;
+}
 
 /// <summary>
 /// Keeps the two expensive stages behind the seed actually running.
@@ -100,8 +106,12 @@ public static class CatalogFollowThroughScheduler
         // The metadata refresh sweep (E-11) rides the same global job and the same daily ceiling:
         // a refresh is one TMDB call, exactly like a first hydration.
         var refreshDue = await Ingestion.MetadataRefreshPolicy.Due(db, now).CountAsync(ct);
+        // So does the one-off creator back-fill (HREV2-D-02), last in the job's order.
+        var creatorBackfillDue = await Ingestion.CreatorBackfillPolicy.Due(db, now).CountAsync(ct);
         var allowance = await hydration.AllowanceAsync(now, ct);
-        var queuedHydration = (backlog > 0 || refreshDue > 0)
+        var found = new CatalogFollowThrough(
+            backlog, allowance, false, false, new EnrichmentBacklog(0, 0, 0, null), refreshDue, creatorBackfillDue);
+        var queuedHydration = found.HasHydrationWork
             && allowance.HasHeadroom
             && await EnqueueHydrationAsync(db, now, ct);
 
@@ -116,6 +126,6 @@ public static class CatalogFollowThroughScheduler
             }
         }
 
-        return new CatalogFollowThrough(backlog, allowance, queuedHydration, queuedEnrichment, enrichment, refreshDue);
+        return found with { QueuedHydration = queuedHydration, QueuedEnrichment = queuedEnrichment, Enrichment = enrichment };
     }
 }
