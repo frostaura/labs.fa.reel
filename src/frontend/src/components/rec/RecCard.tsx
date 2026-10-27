@@ -49,6 +49,8 @@ export default function RecCard({ card }: { card: FeedCard }) {
             to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
             state={{ backgroundLocation: location }}
             className="after:absolute after:inset-0 after:content-[''] focus:outline-none"
+            // Explicit, so plain Tab reaches the card in WebKit too, as it does its actions (R1-42).
+            tabIndex={0}
             data-testid="rec-card-link"
           >
             {card.name}

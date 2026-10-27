@@ -214,6 +214,16 @@ test.describe("card quick actions", () => {
     await six.getByTestId("quick-save").click();
     await expect(six).toHaveCount(0);
     await expect(toast).toContainText("Saved “Pick 6” to your queue.");
+    // It sits in the shared toast column, with no transformed wrapper of its own (R1-42: the
+    // provider's "-translate-y-28" lift over the verdict died when the stack landed).
+    await expect(page.getByTestId("toast-stack").getByTestId("card-undo-toast")).toHaveCount(1);
+    expect(
+      await page.evaluate(() =>
+        Array.from(document.querySelectorAll<HTMLElement>("#root *")).filter(
+          (el) => getComputedStyle(el).position === "fixed" && getComputedStyle(el).zIndex === "60"
+        ).length
+      )
+    ).toBe(0);
     await page.getByTestId("card-undo-toast-undo").click();
     await expect(toast).toHaveCount(0);
     await expect(six).toHaveCount(1);
@@ -290,6 +300,12 @@ test.describe("card quick actions", () => {
     expect(nested).toBe(0);
 
     const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+    // Plain Tab in BOTH engines (R1-42): WebKit leaves links and buttons out of the Tab order unless
+    // they carry an explicit tabindex, which the card's link and actions now do. From the last
+    // action of one card, Tab lands on the next card's title link.
+    await six.getByTestId("quick-rate").focus();
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("rec-card").filter({ hasText: "Pick 7" }).getByTestId("rec-card-link")).toBeFocused();
     await six.getByTestId("rec-card-link").focus();
     // Tab order: the title link, then its actions — Not for me, Save, Rate.
     await page.keyboard.press("Tab");
