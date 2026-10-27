@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using Microsoft.EntityFrameworkCore;
@@ -579,7 +580,7 @@ public sealed class HybridRetriever(
     /// </summary>
     private Task<(SupplyReport Report, long ElapsedMs)>? StartScopedSupply(RetrievalQuery q, HardConstraints hard, CancellationToken ct)
     {
-        var scope = scopes.CreateScope();
+        var scope = PinnedScope(q.AccountId);
         if (scope.ServiceProvider.GetService<ISupplyReporter>() is not { } scoped)
         {
             scope.Dispose();
@@ -597,6 +598,19 @@ public sealed class HybridRetriever(
                 return (report, clock.ElapsedMilliseconds);
             }
         }
+    }
+
+    /// <summary>
+    /// A new DI scope pinned to the turn's account (R1-01, J-11). A fresh scope has a fresh, unpinned
+    /// <see cref="IAccountContext"/>; without the pin every account-scoped read on it (the account's
+    /// conditions, its seen titles) is an unscoped read — every tenant's rows under Warn, a refused
+    /// query under Throw. Pinned before anything is resolved from it.
+    /// </summary>
+    private IServiceScope PinnedScope(Guid accountId)
+    {
+        var scope = scopes.CreateScope();
+        scope.ServiceProvider.GetService<IAccountContext>()?.SetAccount(accountId);
+        return scope;
     }
 
     /// <summary>The supply report — the overlapped one when it was started, else counted now — with its own time recorded.</summary>
@@ -622,7 +636,7 @@ public sealed class HybridRetriever(
     {
         try
         {
-            using var scope = scopes.CreateScope();
+            using var scope = PinnedScope(q.AccountId);
             var arm = scope.ServiceProvider.GetRequiredService<TmdbDiscoveryArm>();
             var concepts = hard.Concepts.Select(c => ConceptResolver.Normalise(c.UserWords)).Where(w => w.Length > 0).Distinct().ToList();
             var genres = hard.Concepts.SelectMany(c => c.Genres).Distinct().ToList();
