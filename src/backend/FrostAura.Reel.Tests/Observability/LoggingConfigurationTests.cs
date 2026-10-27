@@ -10,7 +10,11 @@ namespace FrostAura.Reel.Tests.Observability;
 /// object per line with scopes, so every request's lines carry its RequestId and every job's lines
 /// its JobId. On 2026-10-22 Information-level EF command logging was 64k lines in one hour and
 /// rotated the evidence for two incidents away in under three days.
+///
+/// <para>Runs alone: one test swaps the process-wide <see cref="Console.Out"/> for a writer that
+/// stalls, which would stall every other test host's console logging while it ran.</para>
 /// </summary>
+[Collection(nameof(ConsoleOutCollection))]
 public class LoggingConfigurationTests
 {
     private static IConfiguration Load(params string[] files)
@@ -84,4 +88,84 @@ public class LoggingConfigurationTests
         Assert.False(json.JsonWriterOptions.Indented);
         Assert.False(string.IsNullOrEmpty(json.TimestampFormat));
     }
+
+    /// <summary>
+    /// The F+1 stall mechanism (WS-6 task 9). The console logger queues lines for a background
+    /// writer; when the queue is full its default is to make the logging thread WAIT. Under Docker
+    /// the writer is the container's stdout, and the default log driver blocks stdout when it cannot
+    /// keep up. EF Core logs every command it executes, inside SaveChanges' transaction, between
+    /// batches; a thread parked there leaves its transaction idle with its row locks held, where no
+    /// command timeout applies. The shipped configuration drops lines instead (the logger reports
+    /// how many it dropped), so a slow stdout can cost log lines but never a job or its locks.
+    /// </summary>
+    [Fact]
+    public void A_stalled_stdout_drops_lines_instead_of_blocking_the_thread_that_logs()
+    {
+        var shipped = Load("appsettings.json").GetSection("Logging:Console").Get<ConsoleLoggerOptions>()!;
+        Assert.Equal(ConsoleLoggerQueueFullMode.DropWrite, shipped.QueueFullMode);
+
+        // The shipped mode returns at once with stdout stalled; the framework default would park the caller.
+        Assert.True(LogsWithoutBlocking(mode: null), "the shipped configuration blocked a logging thread on a stalled stdout");
+        Assert.False(LogsWithoutBlocking(ConsoleLoggerQueueFullMode.Wait), "Wait mode no longer blocks: this test no longer shows the mechanism");
+    }
+
+    /// <summary>
+    /// Logs a burst through the shipped configuration (optionally overriding the full-queue mode)
+    /// while stdout accepts nothing, and says whether the burst returned within two seconds.
+    /// </summary>
+    private static bool LogsWithoutBlocking(ConsoleLoggerQueueFullMode? mode)
+    {
+        using var stdoutOpen = new ManualResetEventSlim(false);
+        var original = Console.Out;
+        Console.SetOut(new StalledWriter(stdoutOpen));
+        try
+        {
+            using var factory = LoggerFactory.Create(b => b
+                .AddConfiguration(Load("appsettings.json").GetSection("Logging"))
+                .AddConsole(o =>
+                {
+                    // A small queue so the burst fills it at once; the mode is the shipped one unless overridden.
+                    o.MaxQueueLength = 4;
+                    if (mode is { } m)
+                    {
+                        o.QueueFullMode = m;
+                    }
+                }));
+            var logger = factory.CreateLogger("FrostAura.Reel.Tests.Backpressure");
+            var burst = Task.Run(() =>
+            {
+                for (var i = 0; i < 64; i++)
+                {
+                    logger.LogInformation("Line {Index} while stdout is stalled.", i);
+                }
+            });
+            var returned = burst.Wait(TimeSpan.FromSeconds(2));
+
+            // Unstall stdout so the writer thread and any parked caller drain before the factory is disposed.
+            stdoutOpen.Set();
+            Assert.True(burst.Wait(TimeSpan.FromSeconds(10)), "the burst never finished after stdout reopened");
+            return returned;
+        }
+        finally
+        {
+            stdoutOpen.Set();
+            Console.SetOut(original);
+        }
+    }
+
+    /// <summary>A stdout that accepts nothing until it is opened.</summary>
+    private sealed class StalledWriter(ManualResetEventSlim open) : TextWriter
+    {
+        public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+
+        public override void Write(char value) => open.Wait();
+
+        public override void Write(string? value) => open.Wait();
+
+        public override void Write(char[] buffer, int index, int count) => open.Wait();
+    }
 }
+
+/// <summary>Tests that swap the process-wide <see cref="Console.Out"/> run with nothing else running.</summary>
+[CollectionDefinition(nameof(ConsoleOutCollection), DisableParallelization = true)]
+public sealed class ConsoleOutCollection;

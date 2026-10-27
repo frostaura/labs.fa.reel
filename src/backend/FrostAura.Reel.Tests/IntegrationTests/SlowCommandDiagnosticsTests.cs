@@ -14,6 +14,81 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("job-runner")]
 public sealed class SlowCommandDiagnosticsTests(JobRunnerDatabaseFixture fixture)
 {
+    /// <summary>
+    /// The other half of F+1: a transaction whose client is parked between statements (the stalled
+    /// builds parked on a full console-log queue inside SaveChanges) holds its row locks with no
+    /// statement running, so no command timeout ends it. With the session bound the server ends it
+    /// and the row is free; without it the row stays locked for as long as the client is parked.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_transaction_parked_between_statements_is_ended_by_the_server_and_frees_its_rows(bool bounded)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var jobId = Guid.NewGuid();
+        await using (var seed = fixture.CreateContext())
+        {
+            seed.SyncJobs.Add(new SyncJob { Id = jobId, Kind = JobKind.BuildFeed, Status = JobStatus.Running, EnqueuedAt = DateTime.UtcNow, AttemptCount = 1 });
+            await seed.SaveChangesAsync();
+        }
+
+        var settings = DatabaseSessionSettings.With(fixture.ConnectionString!, bounded ? TimeSpan.FromMilliseconds(500) : null);
+        await using var parked = new NpgsqlConnection(settings.ConnectionString);
+        await parked.OpenAsync();
+        await using var transaction = await parked.BeginTransactionAsync();
+        await using (var write = new NpgsqlCommand("""UPDATE "SyncJobs" SET "ProgressMessage" = 'parked' WHERE "Id" = @id""", parked, transaction))
+        {
+            write.Parameters.AddWithValue("id", jobId);
+            await write.ExecuteNonQueryAsync();
+        }
+
+        // The client is parked between statements; nothing is executing on its session.
+        await Task.Delay(TimeSpan.FromMilliseconds(1500));
+
+        await using var other = new NpgsqlConnection(fixture.ConnectionString);
+        await other.OpenAsync();
+        bool acquired;
+        try
+        {
+            await using var take = new NpgsqlCommand("""SELECT 1 FROM "SyncJobs" WHERE "Id" = @id FOR UPDATE NOWAIT""", other);
+            take.Parameters.AddWithValue("id", jobId);
+            await take.ExecuteScalarAsync();
+            acquired = true;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+        {
+            acquired = false;
+        }
+
+        Assert.Equal(bounded, acquired);
+        if (bounded)
+        {
+            // The parked transaction was rolled back with its session: its write never landed.
+            await using var read = new NpgsqlCommand("""SELECT "ProgressMessage" FROM "SyncJobs" WHERE "Id" = @id""", other);
+            read.Parameters.AddWithValue("id", jobId);
+            Assert.NotEqual("parked", await read.ExecuteScalarAsync() as string);
+        }
+    }
+
+    [Fact]
+    public void The_session_bound_is_a_minute_and_keeps_the_options_already_in_the_connection_string()
+    {
+        const string Raw = "Host=127.0.0.1;Port=5434;Database=x;Username=u;Password=p;Options=-c statement_timeout=0";
+
+        var settings = DatabaseSessionSettings.For(Raw);
+
+        Assert.Equal(TimeSpan.FromSeconds(60), settings.IdleInTransactionTimeout);
+        Assert.Equal(
+            "-c statement_timeout=0 -c idle_in_transaction_session_timeout=60000",
+            new NpgsqlConnectionStringBuilder(settings.ConnectionString).Options);
+        Assert.Equal(Raw, DatabaseSessionSettings.With(Raw, null).ConnectionString);
+    }
+
     [Fact]
     public async Task A_statement_waiting_on_a_lock_is_reported_with_its_job_and_its_blocker_while_it_waits_and_when_it_ends()
     {

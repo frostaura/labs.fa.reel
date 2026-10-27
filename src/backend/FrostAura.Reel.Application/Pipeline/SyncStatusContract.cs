@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 
@@ -116,6 +117,9 @@ public sealed record RatingsFloor(int UsableRatings, int Required);
 /// The v2 status payload. <c>alerts</c> (additive) carries the active operator alerts — job failures
 /// over the hourly threshold, a provider refusing calls — for Founder-tier accounts, and is empty
 /// for everyone else: they are about the system, not about the caller's own pipeline.
+/// <c>llmHealth</c> (additive) is the same split: WS-1's per-purpose model-call counters — calls,
+/// length finishes, fallbacks, retries and the 50-call alarm window — for Founder tier, empty
+/// otherwise. It is the tally <c>/api/observability/metrics</c> reports, not a second count.
 /// </summary>
 public sealed record SyncStatusResponse(
     int ContractVersion,
@@ -134,7 +138,8 @@ public sealed record SyncStatusResponse(
     ProviderHealthSnapshot ProviderHealth,
     DegradedReason? DegradedReason,
     RatingsFloor? NotEnoughRatings,
-    IReadOnlyList<OperatorAlert> Alerts)
+    IReadOnlyList<OperatorAlert> Alerts,
+    IReadOnlyList<LlmPurposeHealth> LlmHealth)
 {
     public const int CurrentContractVersion = 2;
 }

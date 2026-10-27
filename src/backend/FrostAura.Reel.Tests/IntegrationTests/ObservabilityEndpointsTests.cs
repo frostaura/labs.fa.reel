@@ -3,9 +3,8 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Search;
 using FrostAura.Reel.Domain.Sync;
-using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Persistence;
-using FrostAura.Reel.Infrastructure.Telemetry;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -179,11 +178,13 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
         await AddTurnAsync(stranger, now.AddMinutes(-10), 99_000, """{"interpret":99000}""", flags: "plan");
         await AddTurnAsync(accountId, now.AddDays(-3), 99_000, """{"interpret":99000}""", flags: "plan");
 
-        // Model calls are counted per purpose across the process; a purpose of this test's own.
+        // Model calls are counted per purpose across the process, by WS-1's one tally (the DI
+        // singleton every chat adapter records into); a purpose of this test's own.
         var purpose = $"probe-metrics-{Guid.NewGuid():N}";
-        LlmCallMetrics.Record(purpose, LlmResult(LlmCallFailure.Truncated));
-        LlmCallMetrics.Record(purpose, LlmResult(LlmCallFailure.TimedOut));
-        LlmCallMetrics.Record(purpose, LlmResult(failure: null));
+        var calls = api.Services.GetRequiredService<FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics>();
+        calls.Record(purpose, lengthFinishes: 2, attempts: 2, fallback: true);
+        calls.Record(purpose, lengthFinishes: 0, attempts: 3, fallback: true);
+        calls.Record(purpose, lengthFinishes: 0, attempts: 1, fallback: false);
 
         using (client)
         {
@@ -208,14 +209,31 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
 
             var llm = report.GetProperty("llm").EnumerateArray().Single(p => p.GetProperty("purpose").GetString() == purpose);
             Assert.Equal(3, llm.GetProperty("calls").GetInt64());
-            Assert.Equal(1, llm.GetProperty("answered").GetInt64());
-            Assert.Equal(1, llm.GetProperty("truncated").GetInt64());
+            Assert.Equal(1, llm.GetProperty("lengthCalls").GetInt64());
             Assert.Equal(2, llm.GetProperty("fallbacks").GetInt64());
-            Assert.Equal(1, llm.GetProperty("outcomes").GetProperty("timed_out").GetInt64());
+            Assert.Equal(3, llm.GetProperty("retries").GetInt64());
+            Assert.Equal(3, llm.GetProperty("windowCalls").GetInt32());
+            Assert.False(llm.GetProperty("alarming").GetBoolean());
 
             // Operator alerts are the Founder tier's; this caller is Free.
             Assert.Equal(0, report.GetProperty("alerts").GetArrayLength());
         }
+    }
+
+    [Fact]
+    public void Every_context_connection_carries_the_idle_in_transaction_bound()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        using var scope = api.Services.CreateScope();
+        var connectionString = scope.ServiceProvider.GetRequiredService<ReelDbContext>().Database.GetConnectionString();
+        Assert.Contains(
+            "idle_in_transaction_session_timeout=60000",
+            new Npgsql.NpgsqlConnectionStringBuilder(connectionString).Options,
+            StringComparison.Ordinal);
     }
 
     private static async Task<JsonElement> GetMetricsAsync(HttpClient client, int? hours = null)
@@ -247,9 +265,6 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
         });
         await db.SaveChangesAsync();
     }
-
-    private static LlmChatResult LlmResult(LlmCallFailure? failure) =>
-        new(null, failure, 200, failure == LlmCallFailure.Truncated ? "length" : "stop", 1, 100, 10, 10, null, "probe/model", null, null, TimeSpan.Zero);
 
     private async Task AddAsync(
         Guid accountId,

@@ -14,6 +14,13 @@ public static class OperatorAlertCodes
     /// <see cref="OperatorAlert.ReasonCode"/> says which (<c>payment_required</c> for a 402).
     /// </summary>
     public const string ProviderRefused = "provider_refused";
+
+    /// <summary>
+    /// A model purpose's length-finish or fallback rate is above WS-1's alarm line (2% over its
+    /// last 50 sent calls). <see cref="OperatorAlert.Purpose"/> names it, <see cref="OperatorAlert.ReasonCode"/>
+    /// says which rate (<c>length</c> or <c>fallback</c>), <see cref="OperatorAlert.Count"/> is the window's calls.
+    /// </summary>
+    public const string LlmAlarm = "llm_alarm";
 }
 
 /// <summary>One job kind's failed attempts inside the alert window.</summary>
@@ -33,6 +40,7 @@ public sealed record AlertKindCount(
 /// <param name="Count">For <see cref="OperatorAlertCodes.JobFailures"/>: failed attempts in the window.</param>
 /// <param name="Threshold">For <see cref="OperatorAlertCodes.JobFailures"/>: the hourly count that raises it.</param>
 /// <param name="Kinds">For <see cref="OperatorAlertCodes.JobFailures"/>: the count per job kind, largest first.</param>
+/// <remarks>For <see cref="OperatorAlertCodes.LlmAlarm"/>, <see cref="Purpose"/> names the model purpose.</remarks>
 public sealed record OperatorAlert(
     string Code,
     DateTime Since,
@@ -41,7 +49,11 @@ public sealed record OperatorAlert(
     [property: JsonConverter(typeof(JsonStringEnumConverter<ApiProvider>))] ApiProvider? Provider,
     int? Count,
     int? Threshold,
-    IReadOnlyList<AlertKindCount>? Kinds);
+    IReadOnlyList<AlertKindCount>? Kinds)
+{
+    /// <summary>For <see cref="OperatorAlertCodes.LlmAlarm"/>: the <c>ApiUsagePurpose</c> that is alarming.</summary>
+    public string? Purpose { get; init; }
+}
 
 /// <summary>
 /// The alerts active right now, as the process's alert monitor last evaluated them (once a minute).

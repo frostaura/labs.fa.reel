@@ -65,6 +65,53 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
     }
 
     [Fact]
+    public async Task A_model_purpose_over_the_alarm_line_raises_one_alert_naming_it_and_resolves_when_the_window_clears()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var sink = new RecordingSink();
+        using var calls = new FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics();
+        await using var services = Services(new SwitchableProviderHealthReader(), sink, llm: calls);
+        var monitor = services.GetRequiredService<OperatorAlertMonitor>();
+        var now = DateTime.UtcNow;
+
+        // 2 length finishes in a full 50-call window is 4%, above WS-1's 2% line.
+        for (var i = 0; i < 48; i++)
+        {
+            calls.Record("rerank", lengthFinishes: 0, attempts: 1, fallback: false);
+        }
+
+        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
+        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
+        // A healthy purpose beside it raises nothing.
+        calls.Record("lens", lengthFinishes: 0, attempts: 1, fallback: false);
+        await monitor.EvaluateAsync(now, CancellationToken.None);
+
+        var (raised, kind) = Assert.Single(sink.Deliveries);
+        Assert.Equal(OperatorAlertEvent.Raised, kind);
+        Assert.Equal(OperatorAlertCodes.LlmAlarm, raised.Code);
+        Assert.Equal("rerank", raised.Purpose);
+        Assert.Equal("length", raised.ReasonCode);
+        Assert.Equal(50, raised.Count);
+
+        // Still alarming a minute later: no second delivery.
+        await monitor.EvaluateAsync(now.AddMinutes(1), CancellationToken.None);
+        Assert.Single(sink.Deliveries);
+
+        for (var i = 0; i < 50; i++)
+        {
+            calls.Record("rerank", lengthFinishes: 0, attempts: 1, fallback: false);
+        }
+
+        await monitor.EvaluateAsync(now.AddMinutes(2), CancellationToken.None);
+        Assert.Equal(OperatorAlertEvent.Resolved, sink.Deliveries.Last().Event);
+        Assert.Empty(monitor.Current());
+    }
+
+    [Fact]
     public async Task A_purpose_breaker_is_not_an_operator_alert()
     {
         if (!await ResetAsync())
@@ -155,6 +202,14 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         await sink.DeliverAsync(failures, OperatorAlertEvent.Reminder, CancellationToken.None);
         var line = Assert.Single(lines);
         Assert.StartsWith("ALERT still active job_failures: 6 failed job attempt(s) in the hour, threshold 5 (EnrichCatalog 6)", line.Message, StringComparison.Ordinal);
+
+        lines.Clear();
+        var llm = new OperatorAlert(OperatorAlertCodes.LlmAlarm, Opened, Opened, "length", ApiProvider.OpenRouter, 50, null, null) { Purpose = "rerank" };
+        await sink.DeliverAsync(llm, OperatorAlertEvent.Raised, CancellationToken.None);
+        Assert.StartsWith(
+            "ALERT raised llm_alarm: model purpose rerank is above the length alarm line over its last 50 calls",
+            Assert.Single(lines).Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -169,18 +224,25 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         await using var db = fixture.CreateContext();
         var founder = await SeedAccountAsync(db, AccountTier.Founder);
         var free = await SeedAccountAsync(db, AccountTier.Free);
-        var query = new SyncStatusQuery(db, new UnmonitoredProviderHealthReader(), reader);
+        using var calls = new FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics();
+        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
+        var query = new SyncStatusQuery(db, new UnmonitoredProviderHealthReader(), reader, calls);
 
         var founderStatus = await query.GetAsync(founder, 10, DateTime.UtcNow, CancellationToken.None);
         var freeStatus = await query.GetAsync(free, 10, DateTime.UtcNow, CancellationToken.None);
 
         Assert.Equal("payment_required", Assert.Single(founderStatus.Alerts).ReasonCode);
         Assert.Empty(freeStatus.Alerts);
+        // The model-call counters are the operator's too: the same tally the metrics report reads.
+        var rerank = Assert.Single(founderStatus.LlmHealth);
+        Assert.Equal(("rerank", 1L, 1L), (rerank.Purpose, rerank.Calls, rerank.LengthCalls));
+        Assert.Empty(freeStatus.LlmHealth);
     }
 
     // ── Plumbing ───────────────────────────────────────────────────────────────────────────────
 
-    private ServiceProvider Services(IProviderHealthReader health, IOperatorAlertSink sink, ReelMetrics? metrics = null)
+    private ServiceProvider Services(
+        IProviderHealthReader health, IOperatorAlertSink sink, ReelMetrics? metrics = null, ILlmCallHealthReader? llm = null)
     {
         var services = new ServiceCollection();
         services.AddScoped<IAccountContext>(_ => new AccountContext(new UnscopedReadPolicy(UnscopedReadMode.Throw)));
@@ -188,6 +250,11 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         services.AddScoped<IReelDbContext>(sp => sp.GetRequiredService<ReelDbContext>());
         services.AddSingleton(health);
         services.AddSingleton(sink);
+        if (llm is not null)
+        {
+            services.AddSingleton(llm);
+        }
+
         services.AddSingleton<ILogger<OperatorAlertMonitor>>(NullLogger<OperatorAlertMonitor>.Instance);
         services.AddSingleton(sp => new OperatorAlertMonitor(
             sp.GetRequiredService<IServiceScopeFactory>(),

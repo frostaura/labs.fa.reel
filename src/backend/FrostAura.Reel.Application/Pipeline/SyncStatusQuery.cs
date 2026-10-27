@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
@@ -17,7 +18,11 @@ namespace FrostAura.Reel.Application.Pipeline;
 /// <para>Expects a context pinned to <paramref name="account"/>'s tenancy scope, as every request
 /// behind <c>RequireAccount</c> is; every query also filters by account explicitly.</para>
 /// </summary>
-public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader providerHealth, IOperatorAlertReader? alerts = null)
+public sealed class SyncStatusQuery(
+    IReelDbContext db,
+    IProviderHealthReader providerHealth,
+    IOperatorAlertReader? alerts = null,
+    ILlmCallHealthReader? llmHealth = null)
 {
     /// <summary>How far back an unrecovered failure is still reported.</summary>
     public static readonly TimeSpan FailureWindow = TimeSpan.FromDays(7);
@@ -69,10 +74,7 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             ? await db.UserRatings.CountAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, ct)
             : 0;
 
-        var unrecognised = await HoldsUnrecognisedStateAsync(accountId, storedStage, connection, ct);
-        var (effectiveStage, floor) = unrecognised
-            ? (storedStage, null)
-            : await ResolveStageAsync(accountId, storedStage, connectionStatus, ct);
+        var (effectiveStage, floor, unrecognised) = await StageAsync(accountId, storedStage, connection, ct);
         var health = providerHealth.Current();
         var failures = await LastFailuresAsync(accountId, storedStage, now, ct);
 
@@ -103,7 +105,45 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             ProviderHealth: health,
             DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health, unrecognised),
             NotEnoughRatings: floor,
-            Alerts: OperatorAlertsFor(account));
+            Alerts: OperatorAlertsFor(account),
+            LlmHealth: LlmHealthFor(account));
+    }
+
+    /// <summary>
+    /// WS-1's per-purpose model-call counters (the same tally the metrics report reads), for the
+    /// operator: Founder tier only, like the alerts; every other tier an empty list.
+    /// </summary>
+    private IReadOnlyList<LlmPurposeHealth> LlmHealthFor(Account account) =>
+        account.Tier == AccountTier.Founder && llmHealth is not null ? llmHealth.Snapshot() : [];
+
+    /// <summary>
+    /// The stage <c>/api/sync/status</c> reports for <paramref name="account"/> — the one every other
+    /// reader of "where is this account" must print (auth/me, auth/callback, dev/link; WS-8 CR-4), so
+    /// the shell and the status pill cannot disagree. It is <see cref="GetAsync"/>'s own reading, not
+    /// a copy: the connection read, the unrecognised-state check (a stage a newer image wrote reads
+    /// as the stored fallback, never as a cold-start park) and the ratings-floor reading.
+    /// </summary>
+    public async Task<PipelineStage> EffectiveStageAsync(Account account, CancellationToken ct)
+    {
+        var connection = await db.TraktConnections.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.AccountId == account.Id, ct);
+        var (stage, _, _) = await StageAsync(account.Id, account.PipelineStage, connection, ct);
+        return stage;
+    }
+
+    /// <summary>The effective stage, its ratings floor when it is the cold-start park, and whether the stored state is unrecognised.</summary>
+    private async Task<(PipelineStage Stage, RatingsFloor? Floor, bool Unrecognised)> StageAsync(
+        Guid accountId, PipelineStage storedStage, TraktConnection? connection, CancellationToken ct)
+    {
+        if (await HoldsUnrecognisedStateAsync(accountId, storedStage, connection, ct))
+        {
+            return (storedStage, null, true);
+        }
+
+        // No connection row is the same fact as a revoked one: nothing can sync (v1 semantics).
+        var (stage, floor) = await ResolveStageAsync(
+            accountId, storedStage, connection?.Status ?? ConnectionStatus.Revoked, ct);
+        return (stage, floor, false);
     }
 
     /// <summary>Operator alerts are the operator's: Founder tier sees them, every other tier an empty list.</summary>
