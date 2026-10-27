@@ -11,6 +11,11 @@ import { Button } from "../ui/button";
 
 interface Props {
   item: SavedQueueItem;
+  /**
+   * Why this is the pin: the server's `watchTonightReason` for its own pin, or the client's line for
+   * a pin "Not tonight" advanced to (`advancedPinLine`). Null draws no line.
+   */
+  reason: string | null;
   expectedAbsoluteError: number | null;
   /** Whether another candidate exists behind this one, so "Not tonight" is worth offering. */
   hasNext: boolean;
@@ -24,7 +29,7 @@ interface Props {
  * and no decision. Everything on it is there to make the decision, not to describe the title: what
  * it is, why it won, how long it runs, and where to press play.
  */
-export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext, onNotTonight }: Props) {
+export default function WatchTonightCard({ item, reason, expectedAbsoluteError, hasNext, onNotTonight }: Props) {
   const location = useLocation();
   // "Started watching" is CLIENT-SIDE ONLY and deliberately so. Recording watch intent server-side
   // would need either a new UserTitleReaction kind or a column on ManagedListItem, both of which are
@@ -87,9 +92,9 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
             </p>
           </div>
 
-          {item.watchTonightReason && (
+          {reason && (
             <p className="fa-caption text-fa-frost/80 leading-snug" data-testid="watch-tonight-reason">
-              {item.watchTonightReason}
+              {reason}
             </p>
           )}
 

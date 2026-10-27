@@ -38,8 +38,27 @@ describe("reachingLabel", () => {
 });
 
 describe("heroReachingNote", () => {
-  it("speaks up when every measured pick in the row is a reach", () => {
-    expect(heroReachingNote([reaching, reaching, reaching])).toBe("Nothing cleared your usual 7.5 bar tonight");
+  it("speaks up when every measured pick in the row is a reach, in Reel's own voice for Reel's bar", () => {
+    // HREV1-D01: the 7.5 is the product's hero bar, not a user setting. A founder whose only bar is
+    // "For you ≥ 6.0" was told "your usual 7.5 bar" — a setting he never made.
+    expect(heroReachingNote([reaching, reaching, reaching])).toBe("Nothing cleared my usual 7.5 bar tonight");
+    expect(heroReachingNote([reaching, reaching, reaching], 6.0)).toBe("Nothing cleared my usual 7.5 bar tonight");
+    expect(heroReachingNote([reaching, reaching, reaching], null)).toBe("Nothing cleared my usual 7.5 bar tonight");
+  });
+
+  it("says 'your' only when the bar the picks missed IS the account's own For-you minimum", () => {
+    const raised = { confidence: "reaching" as const, floorUsed: 8.5 };
+    expect(heroReachingNote([raised, raised], 8.5)).toBe("Nothing cleared your 8.5 bar tonight");
+    // A raised bar the client cannot attribute (no filters read yet, or a different minimum) is
+    // still spoken as Reel's — never as a setting the reader may not have made.
+    expect(heroReachingNote([raised, raised])).toBe("Nothing cleared my usual 8.5 bar tonight");
+    expect(heroReachingNote([raised, raised], 8.0)).toBe("Nothing cleared my usual 8.5 bar tonight");
+    // An account that saved exactly 7.5 did set that bar, so "your" is true of it too.
+    expect(heroReachingNote([reaching], 7.5)).toBe("Nothing cleared your 7.5 bar tonight");
+  });
+
+  it("never claims a bar is the reader's when the server sent none", () => {
+    expect(heroReachingNote([{ confidence: "reaching" }], 6.0)).toBe("Nothing cleared my usual bar tonight");
   });
 
   it("stays quiet when even one pick cleared the bar — that card's own label is enough", () => {

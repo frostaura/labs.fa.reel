@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, ListChecks, RotateCw } from "lucide-react";
-import { useGetSavedQuery, useUnsaveForLaterMutation } from "../store/api";
+import { useGetFiltersQuery, useGetSavedQuery, useUnsaveForLaterMutation } from "../store/api";
 import SavedSortControl from "../components/saved/SavedSortControl";
 import SavedQueueCard from "../components/saved/SavedQueueCard";
 import WatchTonightCard from "../components/saved/WatchTonightCard";
@@ -8,7 +8,7 @@ import PostWatchStrip from "../components/saved/PostWatchStrip";
 import PickConditionsButton from "../components/rec/PickConditionsButton";
 import { Button } from "../components/ui/button";
 import { formatRuntime } from "../lib/format";
-import { heldOutLine, MANAGED_LIST_TOOLTIP, pinnedPick, queueBelowPin, SAVED_INTRO, type SavedSort } from "../lib/savedQueue";
+import { advancedPinLine, heldOutLine, MANAGED_LIST_TOOLTIP, pinnedPick, queueBelowPin, SAVED_INTRO, type SavedSort } from "../lib/savedQueue";
 
 /**
  * The queue. Not a bookmark folder: an ordered answer to "what do I put on tonight", with the
@@ -53,6 +53,24 @@ export default function Saved() {
   const pinned = pinnedPick(items, budget, skipCount);
   const rest = queueBelowPin(items, pinned);
   const heldOut = heldOutLine(data?.heldOutByRules, items.length);
+  // The line on the pin (HREV1-D05). The server's own pin carries its reason; a pin "Not tonight"
+  // advanced to gets the client's, held to the same rule — under the bar, it says so first. The bar
+  // is the server's pin bar when it sends one; until then the account's For-you minimum, read only
+  // once the user has advanced (so a Saved visit that never skips adds no conditions read), and the
+  // line waits for it rather than flash an unqualified pick first.
+  const needsBar = skipCount > 0 && pinned != null && !pinned.watchTonightReason && data?.pinBar == null;
+  const { data: filters, isLoading: barLoading } = useGetFiltersQuery(undefined, { skip: !needsBar });
+  const pinReason = !pinned
+    ? null
+    : pinned.watchTonightReason
+      ? pinned.watchTonightReason
+      : skipCount > 0 && !(needsBar && barLoading)
+        ? advancedPinLine(pinned, {
+            bar: data?.pinBar ?? filters?.minPredictedRating ?? null,
+            expectedAbsoluteError: band,
+            eveningBudgetMinutes: budget,
+          })
+        : null;
   const candidateCount = items.filter(
     (i) => i.availableNow && i.predictedRating != null && i.runtimeMinutes != null && i.runtimeMinutes <= budget
   ).length;
@@ -152,6 +170,7 @@ export default function Saved() {
           {pinned ? (
             <WatchTonightCard
               item={pinned}
+              reason={pinReason}
               expectedAbsoluteError={band}
               hasNext={skipCount + 1 < candidateCount}
               onNotTonight={() => setSkipCount((n) => n + 1)}
@@ -182,7 +201,10 @@ export default function Saved() {
               <Button
                 variant="link"
                 onClick={() => setConditionsOpen(true)}
-                className="h-auto min-h-11 p-0 text-xs font-normal text-fa-frost underline underline-offset-2 [@media(pointer:fine)]:min-h-0"
+                // `coarse:min-h-11`, not `min-h-11`: the link variant carries `coarse:min-h-0` (WCAG's
+                // inline-text carve-out), which outranks a plain min-h-11 in the built CSS — this
+                // measured 101×16 on touch. Same modifier, so tailwind-merge drops the variant's (PH-07).
+                className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11"
                 data-testid="saved-held-out-change"
               >
                 Change conditions

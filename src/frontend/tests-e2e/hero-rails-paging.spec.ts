@@ -483,7 +483,7 @@ test.describe("leaving a rail while its request is out", () => {
     // The old hero's request is held and the page's time is paused, so nothing of the old hero can
     // fire before the switch, however slow the click.
     await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
-    await page.getByTestId("browse-filters").getByRole("button", { name: "Movies" }).click();
+    await page.getByTestId("browse-filters").getByRole("radio", { name: "Movies" }).click();
     const newHero = () => bodies.filter((b) => b.row === "hero" && b.mediaType === "movie");
     // The new hero has asked, so the old one is gone: its 503 lands on a retired rail.
     await expect.poll(() => newHero().length).toBeGreaterThanOrEqual(1);

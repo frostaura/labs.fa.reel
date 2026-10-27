@@ -206,7 +206,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
               }
             }}
             aria-label={`Not for me — ${name}`}
-            aria-haspopup="menu"
+            // The reason picker is a Radix popover (role="dialog"), not a menu (PH-04).
+            aria-haspopup="dialog"
             aria-expanded={reasonsOpen}
             title="Not for me — hold or right-click to say why"
             className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100 lg:opacity-100" : ""}`}
@@ -224,6 +225,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           side="right"
           collisionPadding={12}
           className="w-auto p-1.5"
+          // A named dialog (axe aria-dialog-name, PH-04): the overline is decoration under this name.
+          aria-label={`Why not ${name}?`}
           data-testid="quick-reason-picker"
         >
           <p className="fa-overline text-3 px-2 pb-1.5">why not?</p>
@@ -271,7 +274,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
               setRateOpen((open) => !open);
             }}
             aria-label={`Rate ${name}`}
-            aria-haspopup="menu"
+            // It opens the score picker, a Radix popover (role="dialog"), not a menu (PH-04).
+            aria-haspopup="dialog"
             aria-expanded={rateOpen}
             title="Rate it — you have seen this one"
             className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100 lg:opacity-100" : ""}`}
@@ -292,6 +296,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           side="bottom"
           collisionPadding={12}
           className="w-auto p-2"
+          aria-label={`Rate ${name} out of 10`}
           data-testid="quick-rate-picker"
         >
           <p className="fa-overline text-3 px-0.5 pb-1.5">your score out of 10</p>

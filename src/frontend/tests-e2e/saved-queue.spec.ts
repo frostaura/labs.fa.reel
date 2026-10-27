@@ -47,6 +47,13 @@ const PINNED = savedItem({
     "Highest-predicted thing in your queue that's on Netflix and fits tonight — 8.4 for you (±1.9), 1h 58m against your 2h 30m.",
 });
 
+
+/** The founder's conditions: the only bar is For you ≥ 6.0. */
+const FILTERS_FOR_YOU_6 = {
+  excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+  minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+};
+
 // streaming, 7.6, 1h32 → the runner-up "Not tonight" advances to
 const RUNNER_UP = savedItem({
   titleId: "00000000-0000-0000-0000-0000000000a2",
@@ -73,7 +80,11 @@ const TONIGHT_ORDER = [PINNED, RUNNER_UP, UNAVAILABLE];
 const PREDICTED_ORDER = [UNAVAILABLE, PINNED, RUNNER_UP];
 
 /** Records the `sort` each /api/saved request asked for and answers with that order. */
-async function mockSaved(page: Page): Promise<string[]> {
+async function mockSaved(
+  page: Page,
+  options: { runnerUpRating?: number; pinBar?: number } = {}
+): Promise<string[]> {
+  const runnerUp = { ...RUNNER_UP, predictedRating: options.runnerUpRating ?? RUNNER_UP.predictedRating };
   const sorts: string[] = [];
   await page.route(
     (url) => url.pathname === "/api/saved",
@@ -89,7 +100,8 @@ async function mockSaved(page: Page): Promise<string[]> {
           eveningBudgetMinutes: EVENING_BUDGET,
           expectedAbsoluteError: 1.9,
           unscoredRemaining: 0,
-          items: sort === "predicted" ? PREDICTED_ORDER : TONIGHT_ORDER,
+          ...(options.pinBar != null ? { pinBar: options.pinBar } : {}),
+          items: (sort === "predicted" ? PREDICTED_ORDER : TONIGHT_ORDER).map((i) => (i.titleId === runnerUp.titleId ? runnerUp : i)),
         }),
       });
     }
@@ -214,15 +226,48 @@ test.describe("saved queue", () => {
   test("'Not tonight' advances to the next candidate and then stops", async ({ page }) => {
     await bootSaved(page);
     await mockSaved(page);
+    await mockJson(page, "**/api/settings/filters", FILTERS_FOR_YOU_6);
     await page.goto("/saved");
     await expect(page.getByTestId("watch-tonight")).toContainText("Sicario");
 
     await page.getByTestId("not-tonight").click();
     await expect(page.getByTestId("watch-tonight")).toContainText("Coherence");
+    // The advanced pin carries a line of its own — an ordinal, not the server's verdict (HREV1-D05).
+    await expect(page.getByTestId("watch-tonight-reason")).toHaveText(
+      "Next-highest-predicted thing in your queue that's streaming now and fits tonight — 7.6 for you (±1.9), 1h 32m against your 2h 30m."
+    );
 
     // Two candidates, both declined: the shelf says so rather than re-offering the first.
     await expect(page.getByTestId("not-tonight")).toHaveCount(0);
   });
+
+  // HREV1-D05: one "Not tonight" pinned Seized at 5.0 — under the founder's For-you bar of 6.0 —
+  // under "WATCH TONIGHT" with no line. Varied twice: the account's minimum (no pin bar from the
+  // server), and the server's pin bar of 7.5 over a pick that clears the minimum but not that bar.
+  for (const { runnerUpRating, pinBar, expected } of [
+    { runnerUpRating: 5.0, pinBar: undefined, expected: "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.9), 1h 32m against your 2h 30m." },
+    { runnerUpRating: 7.0, pinBar: 7.5, expected: "Under 7.5 for you — the next thing in your queue that's streaming now and fits tonight: 7.0 for you (±1.9), 1h 32m against your 2h 30m." },
+  ]) {
+    test(`a pin 'Not tonight' advanced to under the bar says so first (${runnerUpRating} vs ${pinBar ?? "For you ≥ 6.0"})`, async ({ page }) => {
+      await bootSaved(page);
+      await mockSaved(page, { runnerUpRating, pinBar });
+      let filterReads = 0;
+      await page.route((u) => u.pathname === "/api/settings/filters", (route) => {
+        filterReads += 1;
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FILTERS_FOR_YOU_6) });
+      });
+      await page.goto("/saved");
+      await expect(page.getByTestId("watch-tonight-reason")).toContainText("Highest-predicted");
+      // A Saved visit that never skips adds no conditions read.
+      expect(filterReads).toBe(0);
+
+      await page.getByTestId("not-tonight").click();
+      await expect(page.getByTestId("watch-tonight")).toContainText("Coherence");
+      await expect(page.getByTestId("watch-tonight-reason")).toHaveText(expected);
+      // With the server's own pin bar, the client needs no conditions read at all.
+      if (pinBar != null) expect(filterReads).toBe(0);
+    });
+  }
 
   test("the post-watch prompt settles the promise and states the delta", async ({ page }) => {
     await bootSaved(page, [

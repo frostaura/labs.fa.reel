@@ -188,6 +188,78 @@ test.describe("title detail", () => {
     for (const text of await bars.allInnerTexts()) expect(text).not.toMatch(/[+−-]\d/);
   });
 
+  test("the walk's printed steps add up to the badge, and every bar points the way its step does (HREV1-D02, D06)", async ({ page }) => {
+    // The Girl in the Spider's Web's live shape: the walk said "−0.1 crowd rating" over a GREEN crowd
+    // bar, drew a "contrarian lens" push the walk never took, and its printed steps summed to 6.3
+    // under a "6.2 for you".
+    await bootTitle(page, {
+      prediction: {
+        predictedRating: 6.23,
+        scoredAt: "2026-10-25T10:00:00Z",
+        contributions: [
+          { feature: "contrarianLens", value: 0.9 },
+          { feature: "eraAffinity", value: 1.0 },
+          { feature: "traktRating", value: 0.079 },
+          { feature: "dislikedSimilarity", value: -0.6 },
+        ],
+        waterfall: {
+          baseline: 6.291,
+          baselineLabel: "where the model starts for you",
+          steps: [
+            { feature: "eraAffinity", value: 0.62 },
+            { feature: "directorAffinity", value: 0.18 },
+            { feature: "simLovedCentroid", value: 0.16 },
+            { feature: "traktRating", value: -0.078 },
+            { feature: "genreAffinity", value: -0.21 },
+            { feature: "dislikedSimilarity", value: -0.63 },
+            { feature: "otherFeatures", value: -0.103 },
+          ],
+        },
+      },
+    });
+    const walk = page.getByTestId("prediction-waterfall");
+    await expect(walk).toContainText("6.2 for you");
+    const tenths = (t: string) => Math.round(Number(t.replace("−", "-")) * 10);
+    const stepTexts = await walk.getByTestId("waterfall-step").allInnerTexts();
+    const sum = stepTexts.map((t) => tenths(t.match(/[+−]\d+\.\d/)![0])).reduce((a, b) => a + b, 0);
+    expect(63 + sum, `printed walk: ${stepTexts.join(" ")}`).toBe(62);
+
+    // Every walk step has exactly one bar, pointing the same way; no bar the walk did not take.
+    const steps = walk.getByTestId("waterfall-step");
+    const bars = page.getByTestId("contribution-bar");
+    await expect(bars).toHaveCount(await steps.count());
+    await expect(page.locator('[data-testid="contribution-bar"][data-feature="contrarianLens"]')).toHaveCount(0);
+    for (const step of await steps.all()) {
+      const feature = await step.getAttribute("data-feature");
+      const down = (await step.innerText()).includes("−");
+      await expect(page.locator(`[data-testid="contribution-bar"][data-feature="${feature}"]`)).toHaveAttribute("data-sign", down ? "down" : "up");
+    }
+    await expect(page.locator('[data-testid="contribution-bar"][data-feature="traktRating"]')).toHaveAttribute("data-sign", "down");
+  });
+
+  test("a failed where-to-watch read says so, with a retry, instead of vanishing (HREV1-D11)", async ({ page }) => {
+    await bootTitle(page);
+    // Registered after bootTitle's mock, so it wins: the first read fails as it did while TMDB was
+    // unreachable from the API, the retry succeeds.
+    let calls = 0;
+    await page.route((u) => u.pathname === "/api/titles/movie/2001/providers", async (route) => {
+      calls += 1;
+      if (calls === 1) return route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+      return route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ region: "US", attribution: "x", tmdbWatchPage: "https://www.themoviedb.org/movie/2001/watch",
+          providers: [{ provider: "Netflix", logoPath: null, kinds: ["Flatrate"], linkKind: "direct", url: "https://www.netflix.com/search?q=x", displayPriority: 1 }] }),
+      });
+    });
+    await page.reload();
+    const failed = page.getByTestId("where-to-watch-failed");
+    await expect(failed).toContainText("Couldn't load where to watch");
+    await expect(page.getByTestId("where-to-watch")).toHaveCount(0);
+    await page.getByTestId("where-to-watch-retry").click();
+    await expect(page.getByTestId("provider-chip")).toHaveCount(1);
+    await expect(failed).toHaveCount(0);
+  });
+
   // A deep-linked title has no feed or Saved read in the cache to borrow the band from, so it
   // carries its own (prediction.expectedAbsoluteError, change request to WS-5).
   test("a deep-linked title's chip carries the band the title payload sends", async ({ page }) => {

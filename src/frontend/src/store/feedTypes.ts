@@ -139,9 +139,24 @@ export interface MoreFeedRequest {
  * genuinely dry" signal (it already tried to deepen from TMDB) — distinct from a caught network
  * error, which the client must NOT treat as exhaustion.
  */
+/**
+ * What a short rail's supply looks like (FeedEndpoints' `RailSupply`, WS-5 task 9). Sent only when
+ * the page came up short of the asked limit, and today only for genre rails; null elsewhere.
+ */
+export interface RailSupply {
+  /** Titles a standing condition holds out of this rail — the N in "your conditions hide N". */
+  hiddenByConditions: number;
+  /** Titles no condition touches that the account has already seen. */
+  alreadySeen: number;
+  /** Unseen titles that pass and clear the floor (some may be on screen elsewhere). */
+  clearingFloor: number;
+}
+
 export interface MoreFeedResponse {
   items: FeedCard[];
   exhausted: boolean;
+  /** Present when the page came up short and the server counted why (see {@link RailSupply}). */
+  supply?: RailSupply | null;
 }
 
 export interface ContinueEntry {

@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
 import { mockHomeChrome } from "./home-chrome";
@@ -348,6 +349,33 @@ test.describe("card quick actions", () => {
     // Two rows of five: 6 sits directly under 1.
     expect(Math.abs(six2.x - one.x)).toBeLessThan(1);
     expect(six2.y).toBeGreaterThan(one.y);
+    await context.close();
+  });
+  test("both pickers are named dialogs behind triggers that say they open one (PH-04)", async ({ browser }) => {
+    // axe flagged the score and reason popovers as unnamed dialogs (aria-dialog-name, serious) on a
+    // phone, behind a trigger whose aria-haspopup promised a menu.
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    await bootHome(page);
+    const target = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+
+    const rate = target.getByTestId("quick-rate");
+    await expect(rate).toHaveAttribute("aria-haspopup", "dialog");
+    await rate.tap();
+    const ratePicker = page.getByRole("dialog", { name: "Rate Pick 6 out of 10" });
+    await expect(ratePicker).toBeVisible();
+    const rateScan = await new AxeBuilder({ page }).include('[data-testid="quick-rate-picker"]').analyze();
+    expect(rateScan.violations.map((v) => v.id)).toEqual([]);
+    await page.keyboard.press("Escape");
+    await expect(ratePicker).toHaveCount(0);
+
+    const notForMe = target.getByTestId("quick-not-interested");
+    await expect(notForMe).toHaveAttribute("aria-haspopup", "dialog");
+    await notForMe.click({ button: "right" });
+    const reasonPicker = page.getByRole("dialog", { name: "Why not Pick 6?" });
+    await expect(reasonPicker).toBeVisible();
+    const reasonScan = await new AxeBuilder({ page }).include('[data-testid="quick-reason-picker"]').analyze();
+    expect(reasonScan.violations.map((v) => v.id)).toEqual([]);
     await context.close();
   });
 });

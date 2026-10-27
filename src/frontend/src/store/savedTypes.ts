@@ -56,6 +56,13 @@ export interface SavedQueueResponse {
    * (WS-4). Optional: an older server sends every save and omits it.
    */
   heldOutByRules?: number;
+  /**
+   * The bar the pin is held to — `HeroConfidence.BarFor` of the account's minimum, the same bar the
+   * server's own `watchTonightReason` reads — so a pin "Not tonight" advanced to can say it is under
+   * it (HREV1-D05, change request to WS-4). Optional: until the server sends it, the client holds the
+   * advanced pin to the account's For-you minimum instead.
+   */
+  pinBar?: number | null;
   items: SavedQueueItem[];
 }
 

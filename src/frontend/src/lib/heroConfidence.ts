@@ -41,20 +41,39 @@ export function reachingLabel(card: Pick<FeedCard, "confidence" | "floorUsed">):
 }
 
 /**
- * The row-level admission, in the second person the feed's `degradedReason` copy already uses: shown
- * only when EVERY measured pick is a reach, because a row where four cleared the bar and one did not
- * is already answered by that one card's own label. It is a segment of Home's single status line
- * (FD-15), so it is one short clause, and when it shows the cards drop their own labels — the same
- * message five times over was the O-6 finding.
+ * The row-level admission: shown only when EVERY measured pick is a reach, because a row where four
+ * cleared the bar and one did not is already answered by that one card's own label. It is a segment
+ * of Home's single status line (FD-15), so it is one short clause, and when it shows the cards drop
+ * their own labels — the same message five times over was the O-6 finding.
+ *
+ * Whose bar it is decides the possessive (HREV1-D01). The bar is `HeroConfidence.BarFor` — the
+ * product's own 7.5, raised only by an account's higher "for you" minimum — so it is Reel's bar,
+ * spoken in Reel's voice like {@link reachingLabel}, UNLESS the bar the picks missed is exactly the
+ * account's own minimum (`accountMinimum`, from its saved conditions). Telling a founder whose only
+ * bar is 6.0 that nothing cleared "your usual 7.5" told him about a setting he never made.
  *
  * Cards with no confidence are ignored rather than counted as clearing it — the hero pages on past
  * the snapshot, and an unmeasured card arriving must not quietly retract a true statement about the
  * five picks the build actually chose.
  */
-export function heroReachingNote(cards: Pick<FeedCard, "confidence" | "floorUsed">[]): string | null {
+export function heroReachingNote(
+  cards: Pick<FeedCard, "confidence" | "floorUsed">[],
+  accountMinimum?: number | null
+): string | null {
   const measured = cards.filter((c) => c.confidence != null);
   if (measured.length === 0 || !measured.every(isReaching)) return null;
   const bar = measured.find((c) => c.floorUsed != null)?.floorUsed;
-  const barText = bar != null ? ` ${formatBar(bar)}` : "";
-  return `Nothing cleared your usual${barText} bar tonight`;
+  if (bar == null) return "Nothing cleared my usual bar tonight";
+  if (isAccountsOwnBar(bar, accountMinimum)) return `Nothing cleared your ${formatBar(bar)} bar tonight`;
+  return `Nothing cleared my usual ${formatBar(bar)} bar tonight`;
+}
+
+/**
+ * True when the bar is the account's own setting: its saved "for you" minimum, at the precision the
+ * bar is spoken. The server's bar is `max(product bar, account minimum)`, so equality means the
+ * account raised it there (or set exactly the product's own) — either way the reader made that
+ * setting, and "your" is true. Anything else, unknown included, is Reel's bar.
+ */
+function isAccountsOwnBar(bar: number, accountMinimum: number | null | undefined): boolean {
+  return accountMinimum != null && formatBar(accountMinimum) === formatBar(bar);
 }

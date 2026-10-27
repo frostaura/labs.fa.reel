@@ -37,7 +37,10 @@ export default function PickConditionsButton({
   const open = controlledOpen ?? ownOpen;
   const setOpen = onOpenChange ?? setOwnOpen;
   const { data: filters } = useGetFiltersQuery();
-  const activeCount = summaryChips(filters).length;
+  // Nothing counted until the real payload arrives: `summaryChips` of an absent payload normalises
+  // to the "English only" default, so the button used to say "1" for a moment on an account with
+  // none, then drop the badge — and its height with it (HREV1-D04).
+  const activeCount = filters ? summaryChips(filters).length : 0;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -49,7 +52,9 @@ export default function PickConditionsButton({
             className="h-auto min-h-11 gap-1.5 rounded-lg bg-fa-glass px-2.5 py-2 text-fa-frost [@media(pointer:fine)]:min-h-0 hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
           >
             <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
-            <span className="fa-overline">Conditions</span>
+            {/* As tall as the count badge, so the badge arriving with the conditions changes the
+                button's width only, never the height of the line it sits in. */}
+            <span className="fa-overline inline-flex h-4 items-center">Conditions</span>
             {/* Counts SAVED conditions only — the browse toggles are a per-device view filter this
                 dialog cannot edit, so counting them here would send the user in to look for a control
                 that is not there. The chip row therefore legitimately carries more chips than this
