@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "../store/generated/openapi";
-import type { JobFailure, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
+import type { JobFailure, LlmPurposeHealth, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import {
   ACTIVE_POLL_MS,
   AGED_FAILURE_MS,
@@ -440,7 +440,7 @@ describe("operator alerts (WS-6 `alerts`, Founder tier only)", () => {
     )!;
     expect(view).toMatchObject({ mode: "health", tone: "danger", label: "TMDB refusing Reel" });
     expect(view.lines[0]).toBe(
-      "A provider rejected Reel's credentials (401). Reel stopped calling TMDB 10m ago, for every account, until the key or the account is fixed."
+      "A provider rejected Reel's credentials (401). Reel stopped calling TMDB 10m ago for every account. It tries one call every 15 minutes and resumes when the key or the account is fixed."
     );
   });
 
@@ -477,6 +477,75 @@ describe("operator alerts (WS-6 `alerts`, Founder tier only)", () => {
     ]);
     expect(issues[1].detail).toBe("Job attempts are failing across every account. Most: A background job 3.");
     expect(JSON.stringify(issues)).not.toMatch(/disk_full|QuantumDefrag/);
+  });
+
+  describe("llm_alarm, by purpose (R1-10)", () => {
+    const llm = (overrides: Partial<OperatorAlert> = {}) =>
+      alert({ code: "llm_alarm", reasonCode: "length", provider: "OpenRouter", count: 50, threshold: null, kinds: null, purpose: "rerank-feed", ...overrides });
+    const health = (purpose: string, windowCalls: number, lengthRate: number, fallbackRate: number): LlmPurposeHealth => ({
+      purpose,
+      calls: 400,
+      answered: 390,
+      lengthCalls: 9,
+      truncated: 1,
+      fallbacks: 3,
+      retries: 12,
+      stops: 0,
+      outcomes: { answered: 390 },
+      windowCalls,
+      windowLengthRate: lengthRate,
+      windowFallbackRate: fallbackRate,
+      windowRetryRate: 0.1,
+      alarming: true,
+    });
+
+    it("names the feature and the exact count from llmHealth, as a warning", () => {
+      const view = pill(status({ alerts: [llm()], llmHealth: [health("lens", 50, 0.5, 0.5), health("rerank-feed", 50, 0.06, 0)] }))!;
+      expect(view).toMatchObject({ mode: "health", tone: "warn", label: "Model replies cut off", reconnect: false });
+      expect(view.lines[0]).toBe(
+        "Ranking your picks: 3 of its last 50 model calls ran into the reply-length limit, across every account (the alarm line is 2%)."
+      );
+    });
+
+    it("reads the fallback rate for a fallback alarm, not the length rate", () => {
+      const issues = healthIssues(
+        status({ alerts: [llm({ reasonCode: "fallback", purpose: "ask-plan" })], llmHealth: [health("ask-plan", 50, 0.5, 0.04)] }),
+        false
+      );
+      expect(issues.map((i) => [i.label, i.detail])).toEqual([
+        ["Model calls falling back", "Ask Reel: 2 of its last 50 model calls returned no usable answer and fell back, across every account (the alarm line is 2%)."],
+      ]);
+    });
+
+    it("without llmHealth for the purpose it states the line crossed, never a made-up count", () => {
+      for (const llmHealth of [undefined, [], [health("rerank-feed", 0, 0, 0)], [health("lens", 50, 0.1, 0)]]) {
+        const [issue] = healthIssues(status({ alerts: [llm()], llmHealth }), false);
+        expect(issue.detail).toBe(
+          "Ranking your picks: more than 2% of its last 50 model calls ran into the reply-length limit, across every account (the alarm line is 2%)."
+        );
+      }
+    });
+
+    it("an unknown purpose, an unknown rate and a missing count read as generic copy, never as identifiers", () => {
+      const [issue] = healthIssues(status({ alerts: [llm({ purpose: "probe-quantum", reasonCode: "latency", count: null })] }), false);
+      expect(issue).toMatchObject({ tone: "warn", label: "Model calls misbehaving" });
+      expect(issue.detail).toBe("Some model features: its recent model calls are above the 2% alarm line, across every account.");
+      expect(JSON.stringify(issue)).not.toMatch(/probe-quantum|latency/);
+    });
+
+    it("is never the 'can't name' alert, and two purposes the user calls by one name show once", () => {
+      const issues = healthIssues(
+        status({ alerts: [llm({ purpose: "search-agent" }), llm({ purpose: "rerank-ask" }), llm({ purpose: "lens" })] }),
+        false
+      );
+      expect(issues.map((i) => i.label)).toEqual(["Model replies cut off", "Model replies cut off"]);
+      expect(issues.map((i) => i.detail.split(":")[0])).toEqual(["Ask Reel", "Lenses"]);
+      expect(JSON.stringify(issues)).not.toMatch(/can't name/);
+    });
+
+    it("never outranks a sync the user started", () => {
+      expect(pill(status({ activeJob: job(), alerts: [llm()] }))).toMatchObject({ mode: "active", tone: "active" });
+    });
   });
 
   it("no alerts, an empty list or a v1 payload without the field raise nothing", () => {

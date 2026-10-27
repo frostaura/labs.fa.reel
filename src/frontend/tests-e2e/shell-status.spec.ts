@@ -121,6 +121,37 @@ test.describe("sync pill", () => {
     await expect(chip).toBeFocused();
   });
 
+  test("a model purpose over the alarm line names its feature and count, never the purpose id (R1-10)", async ({ page }) => {
+    const alert = (purpose: string) => ({
+      code: "llm_alarm",
+      since: new Date(Date.now() - 5 * 60_000).toISOString(),
+      raisedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      reasonCode: "length",
+      provider: "OpenRouter",
+      count: 50,
+      threshold: null,
+      kinds: null,
+      purpose,
+    });
+    const health = {
+      purpose: "taste-narrative", calls: 120, answered: 118, lengthCalls: 4, truncated: 1, fallbacks: 2, retries: 5, stops: 0,
+      outcomes: { answered: 118 }, windowCalls: 50, windowLengthRate: 0.08, windowFallbackRate: 0.02, windowRetryRate: 0.1, alarming: true,
+    };
+    await bootShell(page, syncStatus({ alerts: [alert("taste-narrative")], llmHealth: [health] }));
+    await page.goto("/home");
+
+    const chip = page.getByTestId("sync-health");
+    await expect(chip).toHaveAttribute("data-health", "warn");
+    await expect(page.getByTestId("sync-health-label")).toHaveText("Model replies cut off");
+    await chip.click();
+    const details = page.getByTestId("sync-tooltip");
+    await expect(details).toContainText(
+      "Your taste story: 4 of its last 50 model calls ran into the reply-length limit, across every account (the alarm line is 2%)."
+    );
+    await expect(details).not.toContainText("can't name");
+    await expect(details).not.toContainText("taste-narrative");
+  });
+
   test("the cross-reference pass is named, with no percentage and no count, and never quotes the job's text", async ({ page }) => {
     await bootShell(
       page,

@@ -118,13 +118,14 @@ export interface SyncStatus {
   notEnoughRatings: { usableRatings: number; required: number } | null;
   /**
    * Operator alerts (WS-6 task 6, FD-20 default destination): a provider-wide 401/402/403 breaker
-   * (`provider_refused`) or repeated job failures (`job_failures`). Founder tier only; absent or
+   * (`provider_refused`), repeated job failures (`job_failures`) or a model purpose over WS-1's
+   * alarm line (`llm_alarm`). Founder tier only; absent or
    * empty for everyone else. Typed here so the contract check holds; rendering is WS-9's.
    */
   alerts?: OperatorAlert[];
   /**
    * Per-purpose LLM call health from WS-1's one tally (WS-6, `llm_alarm`). Founder tier only; empty
-   * for everyone else. Typed here so the contract check holds; nothing renders it yet.
+   * for everyone else. The pill reads it for an `llm_alarm`'s exact count (syncPill.ts).
    */
   llmHealth?: LlmPurposeHealth[];
 }

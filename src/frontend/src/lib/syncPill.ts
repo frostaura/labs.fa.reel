@@ -1,4 +1,4 @@
-import type { JobFailure, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
+import type { JobFailure, LlmPurposeHealth, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import type { LiveProgress, SyncSummary } from "../store/syncSlice";
 import { relTime } from "./format";
 import {
@@ -160,6 +160,10 @@ const ALERT_KINDS_NAMED = 3;
  *     the alert adds nothing and is not repeated.
  *   - `job_failures` is a warning: a pattern across every account, not a failure of the founder's
  *     own work (those arrive as `lastFailures`).
+ *   - `llm_alarm` is a warning naming the feature by its purpose (R1-10): one model purpose's
+ *     length-finish or fallback rate is above WS-1's alarm line over its last 50 sent calls. The
+ *     calls are counted in process across every account. When `llmHealth` carries the purpose, the
+ *     detail gives the exact count; otherwise it states the line it crossed.
  *   - A code this build does not know reads as generic copy, never as the code (the backend's
  *     contract: "a client maps a code it does not know to generic copy").
  */
@@ -175,11 +179,14 @@ function operatorAlertIssues(status: SyncStatus): PillIssue[] {
       issues.push({
         tone: "danger",
         label: `${headline(name)} refusing Reel`,
-        detail: `${reasonCopy(alert.reasonCode)} Reel stopped calling ${name} ${relTime(alert.since)}, for every account, until the key or the account is fixed.`,
+        detail: `${reasonCopy(alert.reasonCode)} Reel stopped calling ${name} ${relTime(alert.since)} for every account. It tries one call every ${PROVIDER_PROBE_MINUTES} minutes and resumes when the key or the account is fixed.`,
         reconnect: false,
       });
     } else if (alert.code === "job_failures") {
       issues.push({ tone: "warn", label: "Jobs failing across Reel", detail: jobFailuresDetail(alert), reconnect: false });
+    } else if (alert.code === "llm_alarm") {
+      const issue = llmAlarmIssue(alert, status.llmHealth ?? []);
+      if (!issues.some((i) => i.label === issue.label && i.detail === issue.detail)) issues.push(issue);
     } else {
       issues.push({
         tone: "warn",
@@ -190,6 +197,49 @@ function operatorAlertIssues(status: SyncStatus): PillIssue[] {
     }
   }
   return issues;
+}
+
+/**
+ * The provider breaker's cool-off: a refused provider gets exactly one probe call after it, and an
+ * answer closes the breaker. Mirrors `ProviderHealthService.CoolOff` (a code constant, pinned by
+ * OpenRouterChatClientTests' probe tests); change one, change the other.
+ */
+export const PROVIDER_PROBE_MINUTES = 15;
+
+/** WS-1's alarm line: a rate strictly above 2% over a full window (`LlmPurposeHealth.AlarmRate`). */
+export const LLM_ALARM_LINE_PCT = 2;
+
+/** The rate an `llm_alarm` crossed, by its `reasonCode`, in words. Anything else reads generically. */
+const LLM_ALARM_COPY: Record<string, { label: string; verb: string }> = {
+  length: { label: "Model replies cut off", verb: "ran into the reply-length limit" },
+  fallback: { label: "Model calls falling back", verb: "returned no usable answer and fell back" },
+};
+
+function llmAlarmIssue(alert: OperatorAlert, health: readonly LlmPurposeHealth[]): PillIssue {
+  const feature = purposeCopy(alert.purpose);
+  const kind = (alert.reasonCode && LLM_ALARM_COPY[alert.reasonCode]) || null;
+  const entry = health.find((h) => h.purpose === alert.purpose && h.windowCalls > 0);
+  const window = entry?.windowCalls ?? alert.count;
+  const of = window != null ? `its last ${window.toLocaleString("en-US")} model calls` : "its recent model calls";
+  if (!kind) {
+    return {
+      tone: "warn",
+      label: "Model calls misbehaving",
+      detail: `${feature}: ${of} are above the ${LLM_ALARM_LINE_PCT}% alarm line, across every account.`,
+      reconnect: false,
+    };
+  }
+  const rate = entry ? (alert.reasonCode === "length" ? entry.windowLengthRate : entry.windowFallbackRate) : null;
+  const share =
+    entry && rate != null && Number.isFinite(rate)
+      ? `${Math.round(rate * entry.windowCalls).toLocaleString("en-US")} of ${of}`
+      : `more than ${LLM_ALARM_LINE_PCT}% of ${of}`;
+  return {
+    tone: "warn",
+    label: kind.label,
+    detail: `${feature}: ${share} ${kind.verb}, across every account (the alarm line is ${LLM_ALARM_LINE_PCT}%).`,
+    reconnect: false,
+  };
 }
 
 /** "the model provider" → "Model provider", for the start of a label. */
