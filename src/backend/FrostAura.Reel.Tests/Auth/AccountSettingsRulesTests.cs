@@ -82,6 +82,34 @@ public class AccountSettingsRulesTests
         Assert.Equal(new DateTime(2026, 10, 26, 0, 0, 0, DateTimeKind.Utc), AccountTimeZone.DayStartUtc(null, lateUtc));
     }
 
+    [Theory]
+    [InlineData("Africa/Johannesburg", "2026-10-27T22:00:00Z")]
+    [InlineData(null, "2026-10-27T00:00:00Z")]
+    [InlineData("Pacific/Kiritimati", "2026-10-27T10:00:00Z")]
+    public void The_next_day_starts_at_the_next_local_midnight(string? zone, string expected)
+    {
+        var lateUtc = new DateTime(2026, 10, 26, 23, 30, 0, DateTimeKind.Utc);
+
+        var next = AccountTimeZone.NextDayStartUtc(zone, lateUtc);
+
+        Assert.Equal(DateTime.Parse(expected, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal), next);
+        Assert.Equal(AccountTimeZone.LocalDate(zone, lateUtc).AddDays(1), AccountTimeZone.LocalDate(zone, next));
+    }
+
+    [Fact]
+    public void A_day_that_ends_in_a_skipped_midnight_hands_over_at_the_next_days_first_instant()
+    {
+        // America/Santiago springs forward at 00:00 on 6 September 2026: the 5th is 23 hours long
+        // for the turn window, and its successor starts at the first instant that exists.
+        var evening = new DateTime(2026, 9, 6, 2, 0, 0, DateTimeKind.Utc); // 22:00 on the 5th, -04:00
+
+        var next = AccountTimeZone.NextDayStartUtc("America/Santiago", evening);
+
+        Assert.Equal(AccountTimeZone.DayStartUtc("America/Santiago", next), next);
+        Assert.Equal(new DateOnly(2026, 9, 6), AccountTimeZone.LocalDate("America/Santiago", next));
+        Assert.True(next > evening && next - evening <= TimeSpan.FromHours(3));
+    }
+
     [Fact]
     public void A_zone_this_host_cannot_resolve_counts_in_UTC()
     {

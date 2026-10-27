@@ -5,9 +5,16 @@ using Microsoft.Extensions.Options;
 namespace FrostAura.Reel.Api.Security;
 
 /// <summary>
-/// The inbound Ask Reel turn limits, partitioned by account (FD-8, J-8): turns in flight, and turns
-/// STARTED in the last minute, hour and 24 hours. A refused request records nothing, so a client
-/// that keeps retrying into a limit does not push its own window further out.
+/// The inbound Ask Reel turn limits, partitioned by account (FD-8, J-8): turns in flight, turns
+/// STARTED in the last minute and hour (rolling), and turns started since the account's own local
+/// midnight. A refused request records nothing, so a client that keeps retrying into a limit does
+/// not push its own window further out.
+///
+/// <para><b>The day is a calendar day in the account's time zone</b> (R1-15, ADD-22), counted from
+/// <see cref="AccountTimeZone.DayStartUtc"/>, not a rolling 24 hours. The ledger's per-account Ask
+/// allowance (<c>IBudgetCalendar</c>) resets at that same local midnight, and the 429 says when the
+/// day's turns come back; a rolling window here would refuse with a wait that ends at a different
+/// moment from the plan allowance it fronts. An account with no zone counts the UTC day.</para>
 ///
 /// <para><b>Hand-rolled, not <c>System.Threading.RateLimiting</c>.</b> A chain of the framework's
 /// window limiters consumes a permit from every window it passes before a later one refuses, so a
@@ -24,7 +31,12 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
 {
     private static readonly TimeSpan Minute = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
-    private static readonly TimeSpan Day = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// How long a start is remembered: longer than any local day (at most 25 hours), whatever zone
+    /// the account switches to, and longer than the hour window.
+    /// </summary>
+    private static readonly TimeSpan Retention = TimeSpan.FromHours(26);
 
     /// <summary>What a turn in flight is told to wait: long enough for most turns to finish.</summary>
     internal static readonly TimeSpan InFlightRetryAfter = TimeSpan.FromSeconds(15);
@@ -43,9 +55,10 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
     /// <summary>
     /// Admits one turn for <paramref name="accountId"/> or says why not. An admitted turn holds an
     /// in-flight slot until the returned lease is disposed — at the end of the response, streaming
-    /// included.
+    /// included. <paramref name="timeZoneId"/> is the account's stored zone
+    /// (<c>AccountSettings.TimeZone</c>); null or unresolvable counts the UTC day.
     /// </summary>
-    public (IDisposable? Lease, Refusal? Refusal) TryStart(Guid accountId, AccountTier tier)
+    public (IDisposable? Lease, Refusal? Refusal) TryStart(Guid accountId, AccountTier tier, string? timeZoneId = null)
     {
         var limits = options.Value;
         var now = clock.GetUtcNow().UtcDateTime;
@@ -57,7 +70,7 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
                 logs[accountId] = log;
             }
 
-            while (log.Started.Count > 0 && now - log.Started.Peek() >= Day)
+            while (log.Started.Count > 0 && now - log.Started.Peek() >= Retention)
             {
                 log.Started.Dequeue();
             }
@@ -73,7 +86,7 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
 
             var refusal = Check(log, now, Minute, limits.PerMinute, "ask_rate_minute", "a minute")
                 ?? Check(log, now, Hour, limits.PerHour, "ask_rate_hour", "an hour")
-                ?? Check(log, now, Day, limits.PerDayFor(tier), "ask_rate_day", "a day");
+                ?? CheckDay(log, now, timeZoneId, limits.PerDayFor(tier));
             if (refusal is not null)
             {
                 return (null, refusal);
@@ -101,6 +114,23 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
             code,
             wait < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait,
             $"That's the most questions Reel answers in {per} ({limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}).");
+    }
+
+    /// <summary>The account's calendar day: every turn started since local midnight counts, and the day's turns come back at the next one.</summary>
+    private static Refusal? CheckDay(AccountLog log, DateTime now, string? timeZoneId, int limit)
+    {
+        var dayStart = AccountTimeZone.DayStartUtc(timeZoneId, now);
+        if (log.Started.Count(t => t >= dayStart) < limit)
+        {
+            return null;
+        }
+
+        var wait = AccountTimeZone.NextDayStartUtc(timeZoneId, now) - now;
+        return new Refusal(
+            StatusCodes.Status429TooManyRequests,
+            "ask_rate_day",
+            wait < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait,
+            $"That's the most questions Reel answers in a day ({limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}).");
     }
 
     private void Release(AccountLog log)

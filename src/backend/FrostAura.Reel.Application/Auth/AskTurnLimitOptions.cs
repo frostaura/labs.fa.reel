@@ -13,8 +13,12 @@ namespace FrostAura.Reel.Application.Auth;
 /// (6) is the acceptance line's: a seventh ask inside a minute is refused. The eval stack raises
 /// these for its own account only (§7 rule 1); nothing else should.</para>
 ///
-/// <para>Windows are rolling, not calendar: "100 a day" is 100 in any 24 hours, so a limit cannot
-/// be doubled by asking either side of midnight UTC.</para>
+/// <para>The minute and hour windows are rolling. The day is the account's calendar day, counted
+/// from midnight in its own time zone (<see cref="AccountTimeZone.DayStartUtc"/>; UTC when it has
+/// none), because the per-account Ask allowance in the ledger resets at that same midnight and the
+/// 429 must not promise turns back at a different moment from the allowance behind it (R1-15). The
+/// cost — 100 late in one day and 100 early in the next — is the same one the ledger's daily
+/// ceiling already accepts.</para>
 /// </summary>
 public sealed class AskTurnLimitOptions : ValidatedOptions
 {
@@ -39,7 +43,7 @@ public sealed class AskTurnLimitOptions : ValidatedOptions
 
     public int PerDayFree { get; private set; } = 10;
 
-    /// <summary>The rolling-24-hour limit for <paramref name="tier"/>; an unknown tier gets the Free limit.</summary>
+    /// <summary>The per-day limit for <paramref name="tier"/> (the account's local calendar day); an unknown tier gets the Free limit.</summary>
     public int PerDayFor(AccountTier tier) => tier switch
     {
         AccountTier.Founder => PerDayFounder,

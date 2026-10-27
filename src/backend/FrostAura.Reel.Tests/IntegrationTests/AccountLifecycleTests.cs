@@ -1,9 +1,12 @@
 using System.Reflection;
 using System.Text.Json;
+using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
@@ -129,6 +132,85 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
         Assert.Equal("Founder", second.RootElement.GetProperty("tier").GetString());
     }
 
+    /// <summary>
+    /// R1-02: the session payload is read as the account it answers for. Called on a request that
+    /// is not pinned (sign-in before the pin) it must not read unscoped — under Throw that is a 500
+    /// — and on one pinned to a different account (a stale cookie) it must not read through that
+    /// account's filter, which sees no connection and prints Degraded for an account the status poll
+    /// calls NotEnoughRatings.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_session_payload_is_read_as_the_account_it_returns_under_Throw(bool pinnedToAnotherAccount)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedLinkedAccountAsync($"payload-{Guid.NewGuid():N}", "Degraded");
+        var stale = await api.SeedAccountAsync($"payload-stale-{Guid.NewGuid():N}");
+        await using var host = ProductionHost(SignInTrakt.Create("unused"), founderSlugs: "someone-else");
+
+        using var scope = host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<IAccountContext>();
+        if (pinnedToAnotherAccount)
+        {
+            context.SetAccount(stale);
+        }
+
+        var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+        var account = await db.Accounts.IgnoreQueryFilters().AsNoTracking().SingleAsync(a => a.Id == accountId);
+
+        var payload = await account.ToSessionPayloadAsync(new DefaultHttpContext { RequestServices = scope.ServiceProvider }, CancellationToken.None);
+
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+        Assert.Equal("NotEnoughRatings", json.RootElement.GetProperty("pipelineStage").GetString());
+        Assert.Equal(accountId, context.AccountId);
+    }
+
+    /// <summary>
+    /// R1-02: sign-in, refresh-then-me, all under Throw, print the stage the status poll prints —
+    /// including a stage written by a newer image, which reads as the shared Degraded fallback, not
+    /// as the cold-start park a copied ratings-floor rule turned it into.
+    /// </summary>
+    [Theory]
+    [InlineData("Hibernating", "Degraded")]
+    [InlineData("Degraded", "NotEnoughRatings")]
+    [InlineData("FeedReady", "FeedReady")]
+    public async Task Sign_in_and_me_print_the_status_polls_stage_under_Throw(string storedStage, string expected)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var slug = $"stage-{Guid.NewGuid():N}"[..30];
+        await using var host = ProductionHost(SignInTrakt.Create(slug), founderSlugs: "someone-else");
+
+        // The first sign-in creates the account and its Active connection; then a stage is stored.
+        Assert.Equal(StatusCodes.Status200OK, (await CallbackAsync(host, cookie: null)).Status);
+        await using (var db = Db())
+        {
+            var id = await db.Accounts.Where(a => a.TraktUserSlug == slug).Select(a => a.Id).SingleAsync();
+            await db.Database.ExecuteSqlAsync($"""UPDATE "Accounts" SET "PipelineStage" = {storedStage} WHERE "Id" = {id}""");
+        }
+
+        var callback = await CallbackAsync(host, cookie: null);
+        Assert.Equal(expected, Stage(callback));
+
+        var refreshed = await EdgeSecurityTests.SendAsync(host, "POST", "/api/auth/refresh", cookie: $"reel_rt={RefreshCookie(callback)}");
+        var access = AccessCookie(refreshed);
+        var me = await EdgeSecurityTests.SendAsync(host, "GET", "/api/auth/me", access);
+        Assert.Equal(StatusCodes.Status200OK, me.Status);
+        Assert.Equal(expected, Stage(me));
+
+        var status = await EdgeSecurityTests.SendAsync(host, "GET", "/api/sync/status", access);
+        Assert.Equal(StatusCodes.Status200OK, status.Status);
+        Assert.Equal(expected, Stage(status));
+    }
+
     [Theory]
     [InlineData("{\"timeZone\":\"Mars/Olympus_Mons\"}")]
     [InlineData("{\"timeZone\":\"+02:00\"}")]
@@ -195,6 +277,94 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
         }
     }
 
+    /// <summary>
+    /// R1-15: a changed zone reaches the budget calendar on the next call, not up to
+    /// <see cref="BudgetCalendar.ZoneLifetime"/> later. The calendar here is the production one, fed by
+    /// a zone source that reads <c>AccountSettings.TimeZone</c>, at a fixed noon UTC — when Kiritimati
+    /// (+14:00) is already on the next date. PUTs that leave the zone as it is drop nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_changed_time_zone_reaches_the_budget_calendar_at_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var noon = new DateTimeOffset(2026, 10, 27, 12, 0, 0, TimeSpan.Zero);
+        var calendar = new ForgetCountingCalendar(noon);
+        await using var host = api.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IBudgetCalendar>();
+            services.AddSingleton<IBudgetCalendar>(sp =>
+            {
+                calendar.Attach(sp.GetRequiredService<IServiceScopeFactory>());
+                return calendar;
+            });
+        }));
+        var accountId = await api.SeedAccountAsync($"tz-calendar-{Guid.NewGuid():N}");
+        var cookie = await AccessCookieAsync(accountId);
+        var budgets = host.Services.GetRequiredService<IBudgetCalendar>();
+
+        // Cached as UTC by a ceiling check before the account had a zone.
+        Assert.Equal(new DateTime(2026, 10, 27), await budgets.TodayAsync(accountId, CancellationToken.None));
+
+        await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Pacific/Kiritimati\"}");
+        Assert.Equal(new DateTime(2026, 10, 28), await budgets.TodayAsync(accountId, CancellationToken.None));
+        Assert.Equal(1, calendar.Forgets);
+
+        // Another screen's PUT, and one re-sending the zone it already has, change no zone.
+        await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"region\":\"GB\"}");
+        await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Pacific/Kiritimati\"}");
+        Assert.Equal(1, calendar.Forgets);
+
+        // A refused zone changes nothing either; clearing it goes back to UTC at once.
+        await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Mars/Olympus_Mons\"}");
+        Assert.Equal(1, calendar.Forgets);
+        await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"\"}");
+        Assert.Equal(2, calendar.Forgets);
+        Assert.Equal(new DateTime(2026, 10, 27), await budgets.TodayAsync(accountId, CancellationToken.None));
+    }
+
+    /// <summary>The production <see cref="BudgetCalendar"/> at a fixed instant, counting <see cref="Forget"/>.</summary>
+    private sealed class ForgetCountingCalendar(DateTimeOffset now) : IBudgetCalendar
+    {
+        private BudgetCalendar inner = new(zones: null);
+        private int forgets;
+
+        public int Forgets => Volatile.Read(ref forgets);
+
+        public void Attach(IServiceScopeFactory scopes) => inner = new BudgetCalendar(new SettingsZones(scopes), new FixedClock(now));
+
+        public DateTime DayFor(Guid? accountId, string? purpose) => inner.DayFor(accountId, purpose);
+
+        public Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct) => inner.TodayAsync(accountId, ct);
+
+        public void Forget(Guid accountId)
+        {
+            Interlocked.Increment(ref forgets);
+            inner.Forget(accountId);
+        }
+    }
+
+    /// <summary>Reads the zone where WS-8's M7 stores it, <c>AccountSettings.TimeZone</c>.</summary>
+    private sealed class SettingsZones(IServiceScopeFactory scopes) : IAccountZoneSource
+    {
+        public async Task<string?> ZoneIdAsync(Guid accountId, CancellationToken ct)
+        {
+            using var scope = scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<ReelDbContext>().Accounts.IgnoreQueryFilters()
+                .Where(a => a.Id == accountId).Select(a => a.Settings.TimeZone).FirstOrDefaultAsync(ct);
+        }
+
+        public string? ZoneId(Guid accountId) => ZoneIdAsync(accountId, CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
     private WebApplicationFactory<Program> ProductionHost(ITraktClient trakt, string founderSlugs) =>
         api.WithWebHostBuilder(builder =>
         {
@@ -223,6 +393,37 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
         Assert.Equal(StatusCodes.Status200OK, answer.Status);
         var cookie = Assert.Single(answer.SetCookies, c => c.StartsWith("reel_rt=", StringComparison.Ordinal));
         return cookie["reel_rt=".Length..cookie.IndexOf(';', StringComparison.Ordinal)];
+    }
+
+    private static string? Stage(EdgeSecurityTests.Answer answer)
+    {
+        Assert.Equal(StatusCodes.Status200OK, answer.Status);
+        using var json = JsonDocument.Parse(answer.Body);
+        return json.RootElement.GetProperty("pipelineStage").GetString();
+    }
+
+    private static string AccessCookie(EdgeSecurityTests.Answer answer)
+    {
+        Assert.Equal(StatusCodes.Status200OK, answer.Status);
+        var cookie = Assert.Single(answer.SetCookies, c => c.StartsWith("reel_at=", StringComparison.Ordinal));
+        return cookie[..cookie.IndexOf(';', StringComparison.Ordinal)];
+    }
+
+    /// <summary>An account with an Active Trakt connection, no ratings, and <paramref name="storedStage"/> as stored text.</summary>
+    private async Task<Guid> SeedLinkedAccountAsync(string slug, string storedStage)
+    {
+        var accountId = await api.SeedAccountAsync(slug);
+        await using var db = Db();
+        db.TraktConnections.Add(new TraktConnection
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            ExpiresAt = DateTime.UtcNow.AddDays(30),
+            Status = ConnectionStatus.Active,
+        });
+        await db.SaveChangesAsync();
+        await db.Database.ExecuteSqlAsync($"""UPDATE "Accounts" SET "PipelineStage" = {storedStage} WHERE "Id" = {accountId}""");
+        return accountId;
     }
 
     private ReelDbContext Db() => api.Services.CreateScope().ServiceProvider.GetRequiredService<ReelDbContext>();

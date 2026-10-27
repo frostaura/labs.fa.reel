@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -149,6 +150,43 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         // Another account is its own partition.
         var other = await CookieAsync(await api.SeedAccountAsync($"edge-ask-2-{Guid.NewGuid():N}"));
         Assert.Equal(StatusCodes.Status400BadRequest, (await SendAsync(api, "POST", "/api/search/ask", other, body: "{\"query\": 7}")).Status);
+    }
+
+    /// <summary>
+    /// R1-15: the day limit is counted in the zone the account saved, so its 429 says the day's
+    /// turns come back at THAT midnight — the one the ledger's Ask allowance resets at. Kiritimati's
+    /// midnight is always ten hours from UTC's, so the two accounts' waits can never coincide.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Pacific/Kiritimati")]
+    [InlineData("America/Los_Angeles")]
+    public async Task The_day_limit_waits_for_the_accounts_own_midnight(string? zone)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        await using var host = api.WithWebHostBuilder(b => b.ConfigureAppConfiguration(c => c.AddInMemoryCollection(
+            new Dictionary<string, string?> { [AskTurnLimitOptions.PerDayFreeKey] = "1" })));
+        var cookie = await CookieAsync(await api.SeedAccountAsync($"edge-day-{Guid.NewGuid():N}"));
+        if (zone is not null)
+        {
+            var saved = await SendAsync(host, "PUT", "/api/settings", cookie, body: JsonSerializer.Serialize(new { timeZone = zone }));
+            Assert.Equal(StatusCodes.Status200OK, saved.Status);
+        }
+
+        Assert.Equal(StatusCodes.Status400BadRequest, (await SendAsync(host, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}")).Status);
+        var second = await SendAsync(host, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}");
+        var now = DateTime.UtcNow;
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, second.Status);
+        Assert.Equal("ask_rate_day", Code(second.Body));
+        var expected = (AccountTimeZone.NextDayStartUtc(zone, now) - now).TotalSeconds;
+        Assert.True(
+            int.TryParse(second.RetryAfter, out var seconds) && Math.Abs(seconds - expected) <= 5,
+            $"Retry-After was '{second.RetryAfter}'; midnight in {zone ?? "UTC"} is {expected:F0} s away.");
     }
 
     [Fact]
