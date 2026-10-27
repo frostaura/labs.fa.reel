@@ -405,7 +405,7 @@ public static partial class ExplanationTemplater
             "castAffinity" or "lovedCastCount" when Verified(context, CreditRole.Actor) is { } actor =>
                 Pick(id, seed,
                     string.Create(CultureInfo.InvariantCulture, $"you rate {actor.Name} {actor.Affinity:0.0} on average"),
-                    string.Create(CultureInfo.InvariantCulture, $"{actor.Name} is in this — a {actor.Affinity:0.0} for you on average"),
+                    string.Create(CultureInfo.InvariantCulture, $"{actor.Name} is in this — {Rated(actor.Affinity)} for you on average"),
                     string.Create(CultureInfo.InvariantCulture, $"stars {actor.Name}, whose work you rate {actor.Affinity:0.0}")),
             "directorAffinity" when Verified(context, CreditRole.Director) is { } director =>
                 Pick(id, seed,

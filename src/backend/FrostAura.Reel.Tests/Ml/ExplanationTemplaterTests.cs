@@ -324,6 +324,58 @@ public class ExplanationTemplaterTests
         Assert.False(FeedWhyGuard.HasWrongArticle(why));
     }
 
+    /// <summary>
+    /// The person clauses at every rating band a person can carry (R1-21 follow-up): an actor in the
+    /// eights is "an 8.2 for you on average", never "a 8.2" — and because the guard refuses "a 8.x",
+    /// a wrong article would not be a slip on the card but a blanked why-line. Every variant of every
+    /// role, alone and behind an anchor, must be a line the guard serves. The 7.x and 10.0 rows are
+    /// the controls that keep "a".
+    /// </summary>
+    [Theory]
+    [InlineData(8.2, "an 8.2")]
+    [InlineData(8.0, "an 8.0")]
+    [InlineData(8.96, "a 9.0")]
+    [InlineData(7.8, "a 7.8")]
+    [InlineData(10.0, "a 10.0")]
+    public void Every_person_clause_variant_reads_its_article_and_stays_servable(double affinity, string expected)
+    {
+        var rated = (decimal)affinity;
+        var persons = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
+        {
+            [CreditRole.Actor] = new("Tom Hardy", rated),
+            [CreditRole.Director] = new("Denis Villeneuve", rated),
+            [CreditRole.Writer] = new("Eric Roth", rated),
+        };
+
+        var castLines = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var feature in new[] { "castAffinity", "lovedCastCount", "directorAffinity", "writerAffinity" })
+        {
+            for (var i = 0; i < 12; i++)
+            {
+                foreach (var anchor in new[] { null, "Heat" })
+                {
+                    for (var seed = 0; seed <= 3; seed++)
+                    {
+                        var sentence = ExplanationTemplater.BuildSentence(Context(
+                            [(feature, 1.0f)], persons: persons,
+                            titleId: new Guid(i + 1, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0]),
+                            anchorName: anchor, sharedGenre: anchor is null ? null : "crime"), seed);
+
+                        Assert.False(FeedWhyGuard.HasWrongArticle(sentence), sentence);
+                        Assert.True(FeedWhyGuard.IsServable(sentence), sentence);
+                        if (feature == "castAffinity" && sentence.Contains("is in this", StringComparison.Ordinal))
+                        {
+                            castLines.Add(sentence);
+                        }
+                    }
+                }
+            }
+        }
+
+        Assert.NotEmpty(castLines); // the "is in this" variant was exercised, alone and anchored
+        Assert.All(castLines, l => Assert.Contains($"is in this — {expected} for you on average", l, StringComparison.Ordinal));
+    }
+
     private static Title WithCrowd(Title title, decimal rating, int votes)
     {
         title.TraktRating = rating;

@@ -9,7 +9,7 @@
         "directorAffinity",
         "writerAffinity"
       ],
-      "pattern": "\\b(?:you rate .+? \\d+\\.\\d on average|is in this — a \\d+\\.\\d for you on average|stars .+?, whose work you rate \\d+\\.\\d|directed by .+?, who you rate \\d+\\.\\d|directs — you rate them \\d+\\.\\d|written by .+?, who you rate \\d+\\.\\d)"
+      "pattern": "\\b(?:you rate .+? \\d+\\.\\d on average|is in this — an? \\d+\\.\\d for you on average|stars .+?, whose work you rate \\d+\\.\\d|directed by .+?, who you rate \\d+\\.\\d|directs — you rate them \\d+\\.\\d|written by .+?, who you rate \\d+\\.\\d)"
     },
     {
       "id": "genre-affinity",
@@ -75,51 +75,51 @@
   "samples": [
     {
       "feature": "castAffinity",
-      "text": "Stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "castAffinity",
-      "text": "You rate Rebecca Ferguson 7.8 on average."
+      "text": "You rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "castAffinity",
-      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 7.8 on average."
+      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "lovedCastCount",
-      "text": "You rate Rebecca Ferguson 7.8 on average."
+      "text": "You rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "lovedCastCount",
-      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 7.8 on average."
+      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "directorAffinity",
