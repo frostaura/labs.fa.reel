@@ -314,7 +314,8 @@ public static partial class LensGuards
 
         foreach (var field in ProseFields(note))
         {
-            if (SecondPersonVoice.LeaksThirdPerson(field))
+            // The viewer in the third person, not every pronoun: a lens's characters are "they".
+            if (SecondPersonVoice.SpeaksOfTheViewerInThirdPerson(field))
             {
                 return LensRejectionReasons.ThirdPerson;
             }
@@ -324,7 +325,7 @@ public static partial class LensGuards
                 return LensRejectionReasons.BannedOpener;
             }
 
-            if (NumberRegex().IsMatch(MaskTitles(field, titles)))
+            if (NumberRegex().IsMatch(MaskEras(MaskTitles(field, titles))))
             {
                 return LensRejectionReasons.RestatedNumber;
             }
@@ -459,6 +460,24 @@ public static partial class LensGuards
     /// Every proper noun the note mentions — the candidate set the provenance lookup resolves
     /// against the catalogue's own people.
     /// </summary>
+    /// <summary>
+    /// The candidate proper nouns in one piece of text — the same extraction the provenance check
+    /// runs on a note, for the text the prompt gave the writer (a title's overview).
+    /// </summary>
+    public static IReadOnlyCollection<string> CandidateNames(string? text)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            foreach (Match match in ProperNounRegex().Matches(text))
+            {
+                names.Add(match.Value.Trim());
+            }
+        }
+
+        return names;
+    }
+
     public static IReadOnlyCollection<string> CandidateNames(LensNote note)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -499,6 +518,15 @@ public static partial class LensGuards
     /// it. Longest titles first, so masking "Blade Runner 2049" cannot be pre-empted by an anchor
     /// called "Blade Runner".
     /// </summary>
+    /// <summary>
+    /// A decade ("1920s", "'90s", "80s") or a calendar year (1500–2099) masked out before the number
+    /// check: the premise's era is overview fact, and neither can be read as a 1–10 prediction.
+    /// </summary>
+    internal static string MaskEras(string field) => EraRegex().Replace(field, " ");
+
+    [GeneratedRegex(@"(?:\b(?:1[5-9]|20)\d0s\b|['’]\d0s\b|\b\d0s\b|\b(?:1[5-9]|20)\d{2}\b(?![.,]\d))")]
+    private static partial Regex EraRegex();
+
     internal static string MaskTitles(string field, IEnumerable<string> titles)
     {
         var masked = field;

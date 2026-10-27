@@ -66,6 +66,28 @@ public class NarrativeOutdatedTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    [Fact]
+    public async Task The_fact_sheet_behind_a_narrative_is_not_served()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // KILL-13 / WS-8 CR-7: GET /api/taste/narrative/facts was a founder-only read of the raw
+        // fact sheet with no client. It is gone; the narrative itself still reads.
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"narrative-facts-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await SeedNarrativeAsync(accountId, OpenRouterLensWriter.CurrentNarrativePromptVersion);
+
+            using var facts = await client.GetAsync("/api/taste/narrative/facts");
+            Assert.Equal(HttpStatusCode.NotFound, facts.StatusCode);
+            using var narrative = await client.GetAsync("/api/taste/narrative");
+            Assert.Equal(HttpStatusCode.OK, narrative.StatusCode);
+        }
+    }
+
     private async Task SeedNarrativeAsync(Guid accountId, int promptVersion)
     {
         using var scope = api.Services.CreateScope();

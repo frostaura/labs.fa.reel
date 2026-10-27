@@ -54,7 +54,7 @@ public sealed class LensInputBuilder(IReelDbContext db, RatingCalibrationService
 
         var credits = await db.TitleCredits
             .Where(c => ids.Contains(c.TitleId))
-            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.Role, c.CastOrder, p.Name })
+            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.Role, c.CastOrder, p.Name, c.CharacterName })
             .ToListAsync(ct);
         var creditsByTitle = credits
             .Where(c => !string.IsNullOrWhiteSpace(c.Name))
@@ -134,8 +134,14 @@ public sealed class LensInputBuilder(IReelDbContext db, RatingCalibrationService
 
             // Exactly the names the prompt showed — the provenance check is then a verification
             // that the model stayed inside what it was given, not a lookup against the whole catalogue.
+            // That includes the people and places the OVERVIEW names, and the credited characters:
+            // "David Dunn" in a lens on Glass is the overview's character, and the catalogue also
+            // holds a real person of that name, so without this the check refused sound copy as an
+            // invented credit (slot run, 2026-10-26).
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var name in titleCredits.Select(c => c.Name))
+            foreach (var name in titleCredits.Select(c => c.Name)
+                         .Concat(titleCredits.Select(c => c.CharacterName).OfType<string>().Where(n => n.Length > 0))
+                         .Concat(LensGuards.CandidateNames(title.Overview)))
             {
                 names.Add(name);
             }

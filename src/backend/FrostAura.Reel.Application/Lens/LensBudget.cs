@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Configuration;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
@@ -35,7 +36,8 @@ public sealed record LensAllowance(long CallsUsed, long CallsLimit, long TokensU
 /// under <c>lens-audit</c>, so auditing a prompt version cannot consume the allowance it is
 /// auditing.</para>
 /// </summary>
-public sealed class LensBudget(IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null)
+public sealed class LensBudget(
+    IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null, IBudgetCalendar? calendar = null)
 {
     /// <summary>Calls per account per day. A Fresh build spends at most 15 of these.</summary>
     public const int DefaultDailyCalls = 60;
@@ -54,7 +56,8 @@ public sealed class LensBudget(IReelDbContext db, IConfiguration configuration, 
     /// <summary>Today's spend against today's ceiling, for one account.</summary>
     public async Task<LensAllowance> AllowanceAsync(Guid accountId, CancellationToken ct)
     {
-        var today = DateTime.UtcNow.Date;
+        // The account's own day (task 12, ADD-22): the recorder stamps these rows with the same calendar.
+        var today = await (calendar ?? BudgetCalendar.Utc).TodayAsync(accountId, ct);
         // The ledger is not IAccountScoped — it is an operations table where AccountId is a
         // dimension, not ownership — so the account predicate is written out here rather than
         // arriving from a global filter.

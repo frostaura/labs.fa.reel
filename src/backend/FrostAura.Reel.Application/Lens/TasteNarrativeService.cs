@@ -188,12 +188,18 @@ public sealed class TasteNarrativeService(
     /// </summary>
     internal static string? Ungrounded(string text, TasteFacts factSheet)
     {
-        var grounded = factSheet.GroundedNames();
+        // Compared on the title-normalised form, so typography is not invention: the model writes
+        // "Finder’s Fee" with a curly apostrophe for the fact sheet's "Finder's Fee", or drops an
+        // accent, and the whole narrative used to be refused for it (slot run, 2026-10-26).
+        var grounded = factSheet.GroundedNames()
+            .Select(LensGuards.NormaliseTitle)
+            .Where(name => name.Length > 0)
+            .ToList();
         foreach (var candidate in ProperNouns(text))
         {
-            if (grounded.Any(name =>
-                    name.Contains(candidate, StringComparison.OrdinalIgnoreCase)
-                    || candidate.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            var key = LensGuards.NormaliseTitle(candidate);
+            if (key.Length > 0 && grounded.Any(name =>
+                    name.Contains(key, StringComparison.Ordinal) || key.Contains(name, StringComparison.Ordinal)))
             {
                 continue;
             }
