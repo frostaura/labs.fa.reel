@@ -37,12 +37,11 @@ public sealed class UnscopedReadPolicy(UnscopedReadMode mode, ILogger<UnscopedRe
     public const string ConfigurationKey = "Tenancy:UnscopedReads";
 
     /// <summary>
-    /// The mode a process runs in when nothing is configured: <see cref="UnscopedReadMode.Throw"/>,
-    /// fail closed (J-11, WS-6 task 7 step 3). A path that forgets to say whose data it touches is
-    /// refused where it runs, naming its call site, instead of silently reading every tenant.
-    /// <c>Tenancy__UnscopedReads=Warn</c> is the operator's way back while a path is threaded.
+    /// The mode a process runs in when nothing is configured. <see cref="UnscopedReadMode.Warn"/>
+    /// until every owner has threaded system scope through its own paths (WS-6 task 7, step 2);
+    /// the last step of the change is flipping this to <see cref="UnscopedReadMode.Throw"/>.
     /// </summary>
-    public const UnscopedReadMode DefaultMode = UnscopedReadMode.Throw;
+    public const UnscopedReadMode DefaultMode = UnscopedReadMode.Warn;
 
     /// <summary>How many distinct call sites are remembered and logged; a process past it has a census to read already.</summary>
     private const int SiteMemory = 512;
