@@ -16,6 +16,12 @@ namespace FrostAura.Reel.Api.Security;
 /// day's turns come back; a rolling window here would refuse with a wait that ends at a different
 /// moment from the plan allowance it fronts. An account with no zone counts the UTC day.</para>
 ///
+/// <para><b>A refused request is not a turn</b> (HREV1-PLAT-2). The limit is taken at the edge, before
+/// the handler has read the body, so a request the handler then refuses — a malformed body, a missing
+/// turn id, an unknown conversation — hands its start back with <see cref="Lease.Refund"/>. Without
+/// that, six malformed asks spent the minute's six turns and six of the hour's twenty although nothing
+/// had been answered. The in-flight slot still applies while the handler decides.</para>
+///
 /// <para><b>Hand-rolled, not <c>System.Threading.RateLimiting</c>.</b> A chain of the framework's
 /// window limiters consumes a permit from every window it passes before a later one refuses, so a
 /// turn refused by the daily limit would still have spent minute and hour permits — and its
@@ -58,7 +64,7 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
     /// included. <paramref name="timeZoneId"/> is the account's stored zone
     /// (<c>AccountSettings.TimeZone</c>); null or unresolvable counts the UTC day.
     /// </summary>
-    public (IDisposable? Lease, Refusal? Refusal) TryStart(Guid accountId, AccountTier tier, string? timeZoneId = null)
+    public (Lease? Lease, Refusal? Refusal) TryStart(Guid accountId, AccountTier tier, string? timeZoneId = null)
     {
         var limits = options.Value;
         var now = clock.GetUtcNow().UtcDateTime;
@@ -70,10 +76,7 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
                 logs[accountId] = log;
             }
 
-            while (log.Started.Count > 0 && now - log.Started.Peek() >= Retention)
-            {
-                log.Started.Dequeue();
-            }
+            log.Started.RemoveAll(t => now - t >= Retention);
 
             if (log.InFlight >= limits.Concurrent)
             {
@@ -92,9 +95,9 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
                 return (null, refusal);
             }
 
-            log.Started.Enqueue(now);
+            log.Started.Add(now);
             log.InFlight++;
-            return (new Lease(this, log), null);
+            return (new Lease(this, log, now), null);
         }
     }
 
@@ -141,16 +144,50 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
         }
     }
 
-    private sealed class AccountLog
+    private void Unstart(AccountLog log, DateTime started)
     {
-        public Queue<DateTime> Started { get; } = new();
+        lock (gate)
+        {
+            // Equal timestamps are interchangeable, so removing any one of them returns exactly one slot.
+            log.Started.Remove(started);
+        }
+    }
+
+    /// <summary>Started times, oldest first (appended in clock order under the lock).</summary>
+    internal sealed class AccountLog
+    {
+        public List<DateTime> Started { get; } = [];
 
         public int InFlight { get; set; }
     }
 
-    private sealed class Lease(AskTurnLimiter owner, AccountLog log) : IDisposable
+    /// <summary>
+    /// An admitted turn: holds its in-flight slot until disposed. <see cref="Refund"/> also hands back
+    /// the window slot it took, for a request the handler refused before answering anything.
+    /// </summary>
+    public sealed class Lease : IDisposable
     {
+        private readonly AskTurnLimiter owner;
+        private readonly AccountLog log;
+        private readonly DateTime started;
         private int disposed;
+        private int refunded;
+
+        internal Lease(AskTurnLimiter owner, AccountLog log, DateTime started)
+        {
+            this.owner = owner;
+            this.log = log;
+            this.started = started;
+        }
+
+        /// <summary>Uncounts this turn from every window. Once only; the in-flight slot is still released by Dispose.</summary>
+        public void Refund()
+        {
+            if (Interlocked.Exchange(ref refunded, 1) == 0)
+            {
+                owner.Unstart(log, started);
+            }
+        }
 
         public void Dispose()
         {

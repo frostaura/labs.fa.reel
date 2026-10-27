@@ -183,6 +183,32 @@ public class InboundLimitTests
         Assert.Contains(AskTurnLimitOptions.PerHourKey, problem, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// HREV1-PLAT-2: a turn the handler refuses as a request gives its window slot back, so six
+    /// malformed asks cannot spend the minute's six turns. Only the refunded start is returned —
+    /// the turn that was answered still counts.
+    /// </summary>
+    [Fact]
+    public void A_refunded_turn_gives_its_window_slot_back_and_an_answered_one_keeps_it()
+    {
+        var clock = new ManualClock();
+        var limiter = Limiter(clock, new() { [AskTurnLimitOptions.PerMinuteKey] = "2" });
+        var account = Guid.NewGuid();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var (refused, refusal) = limiter.TryStart(account, AccountTier.Paid);
+            Assert.Null(refusal);
+            refused!.Refund();
+            refused.Refund(); // idempotent: one refund returns one slot, never a second
+            refused.Dispose();
+        }
+
+        Assert.Null(Ask(limiter, account, AccountTier.Paid));
+        Assert.Null(Ask(limiter, account, AccountTier.Paid)); // the 2nd of PER_MINUTE=2
+        Assert.Equal("ask_rate_minute", Ask(limiter, account, AccountTier.Paid)?.Code);
+    }
+
     [Fact]
     public void Five_wrong_pins_lock_the_sixth_attempt_for_the_rest_of_the_window()
     {
@@ -192,20 +218,66 @@ public class InboundLimitTests
 
         for (var i = 0; i < PinAttemptLimiter.MaxFailures; i++)
         {
-            Assert.Null(pins.LockedFor(account));
-            pins.RecordFailure(account);
+            Fail(pins, account);
             clock.Now = clock.Now.AddMinutes(1);
         }
 
         // Five failures over minutes 0..4; now minute 5: locked until the first is 15 minutes old.
-        Assert.Equal(TimeSpan.FromMinutes(10), pins.LockedFor(account));
-        Assert.Null(pins.LockedFor(Guid.NewGuid()));
+        Assert.Equal(TimeSpan.FromMinutes(10), pins.TryBegin(account).LockedFor);
+        Assert.Null(pins.TryBegin(Guid.NewGuid()).LockedFor);
 
         clock.Now = clock.Now.AddMinutes(10);
-        Assert.Null(pins.LockedFor(account)); // the oldest aged out: one more try is allowed
+        Fail(pins, account); // the oldest aged out: one more try is allowed
+        Assert.NotNull(pins.TryBegin(account).LockedFor);
+    }
 
-        pins.RecordFailure(account);
-        Assert.NotNull(pins.LockedFor(account));
+    /// <summary>
+    /// HREV1-PLAT-1: an attempt is taken BEFORE its PIN is compared, so attempts still being hashed
+    /// count against the allowance. Five in flight and the sixth is refused although no failure has
+    /// been recorded yet; an attempt that ends without a verdict (the request was cancelled) gives
+    /// its place back and counts as nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void Attempts_in_flight_count_against_the_allowance_before_any_failure_is_recorded(int earlierFailures)
+    {
+        var clock = new ManualClock();
+        var pins = new PinAttemptLimiter(clock);
+        var account = Guid.NewGuid();
+        for (var i = 0; i < earlierFailures; i++)
+        {
+            Fail(pins, account);
+        }
+
+        var inFlight = new List<PinAttemptLimiter.Attempt>();
+        for (var i = 0; i < PinAttemptLimiter.MaxFailures - earlierFailures; i++)
+        {
+            var (attempt, locked) = pins.TryBegin(account);
+            Assert.Null(locked);
+            inFlight.Add(attempt!);
+        }
+
+        var (refused, wait) = pins.TryBegin(account);
+        Assert.Null(refused);
+        Assert.NotNull(wait);
+        Assert.Null(pins.TryBegin(Guid.NewGuid()).LockedFor); // another account is its own partition
+
+        inFlight[0].Dispose(); // cancelled before a verdict: the place comes back, nothing is counted
+        var (again, _) = pins.TryBegin(account);
+        Assert.NotNull(again);
+        inFlight[0] = again!;
+
+        foreach (var attempt in inFlight)
+        {
+            attempt.Failed();
+            attempt.Failed(); // a verdict is given once
+            attempt.Dispose();
+        }
+
+        // Exactly the allowance was spent: locked for the full window from the newest failures.
+        Assert.Equal(PinAttemptLimiter.Window, pins.TryBegin(account).LockedFor);
     }
 
     [Fact]
@@ -217,12 +289,26 @@ public class InboundLimitTests
 
         for (var i = 0; i < PinAttemptLimiter.MaxFailures - 1; i++)
         {
-            pins.RecordFailure(account);
+            Fail(pins, account);
         }
 
-        pins.RecordSuccess(account);
-        pins.RecordFailure(account);
+        using (var right = pins.TryBegin(account).Attempt!)
+        {
+            right.Succeeded();
+        }
 
-        Assert.Null(pins.LockedFor(account));
+        Fail(pins, account);
+
+        Assert.Null(pins.TryBegin(account).LockedFor);
+    }
+
+    private static void Fail(PinAttemptLimiter pins, Guid account)
+    {
+        var (attempt, locked) = pins.TryBegin(account);
+        Assert.Null(locked);
+        using (attempt!)
+        {
+            attempt!.Failed();
+        }
     }
 }

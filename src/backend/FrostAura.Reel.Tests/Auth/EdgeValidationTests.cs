@@ -7,6 +7,7 @@ using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Domain.Notifications;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Security;
+using FrostAura.Reel.Tests.Harness;
 using Microsoft.Extensions.Configuration;
 
 namespace FrostAura.Reel.Tests.Auth;
@@ -151,10 +152,44 @@ public class EdgeValidationTests
     public void The_health_commit_is_the_sha_after_the_plus(string? informational, string expected) =>
         Assert.Equal(expected, ReleaseInfo.Parse(informational));
 
+    /// <summary>
+    /// The SDK stamps SourceRevisionId from git on a local build; the image gets it from GIT_SHA. A
+    /// <c>git archive</c> build outside any checkout is given neither and says "unknown" rather than
+    /// failing the suite (HREV1-PLAT-6) — but whatever this build was stamped with, the API reports it.
+    /// </summary>
     [Fact]
-    public void A_developer_build_reports_the_checkout_commit()
+    public void A_build_reports_the_commit_it_was_stamped_with()
     {
-        // The SDK stamps SourceRevisionId from git on a local build; the image gets it from GIT_SHA.
-        Assert.Matches("^[0-9a-f]{40}$", ReleaseInfo.Commit);
+        Assert.Equal(BuildProvenance.StampedCommit, ReleaseInfo.Commit);
+        if (BuildProvenance.MustBeStamped)
+        {
+            Assert.Matches(BuildProvenance.FullSha, ReleaseInfo.Commit);
+        }
+        else
+        {
+            Assert.Equal("unknown", ReleaseInfo.Commit);
+        }
+    }
+
+    [Fact]
+    public void A_checkout_is_found_by_its_git_directory_or_a_worktrees_git_file()
+    {
+        var root = Directory.CreateTempSubdirectory("reel-provenance-");
+        try
+        {
+            var deep = Directory.CreateDirectory(Path.Combine(root.FullName, "a", "bin", "Release"));
+            Assert.False(BuildProvenance.FindCheckout(deep.FullName));
+
+            File.WriteAllText(Path.Combine(root.FullName, "a", ".git"), "gitdir: /elsewhere/worktrees/a");
+            Assert.True(BuildProvenance.FindCheckout(deep.FullName));
+
+            File.Delete(Path.Combine(root.FullName, "a", ".git"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, ".git"));
+            Assert.True(BuildProvenance.FindCheckout(deep.FullName));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 }
