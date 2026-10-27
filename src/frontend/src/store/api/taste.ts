@@ -65,6 +65,13 @@ export interface DislikesPayload {
   };
 }
 
+/**
+ * The first page of the dislike history, as `DislikePanel` asks for it. Shared so the Taste DNA page
+ * can wait on exactly the same cached read before it draws (HREV1-D03) — a different argument
+ * object would be a second request, not a peek at the first.
+ */
+export const DISLIKES_FIRST_PAGE = { offset: 0, limit: 20 } as const;
+
 export const tasteApi = api.injectEndpoints({
   // Vite HMR re-runs this module; let the re-injection replace the old definitions.
   overrideExisting: Boolean(import.meta.hot),

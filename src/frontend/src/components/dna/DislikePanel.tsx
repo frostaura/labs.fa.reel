@@ -5,6 +5,7 @@ import {
   useGetDislikesQuery,
   useUndoNotInterestedMutation,
   useUndropMutation,
+  DISLIKES_FIRST_PAGE,
   type DislikeEntry,
 } from "../../store/api";
 import LoadFailed from "../ui/load-failed";
@@ -13,7 +14,7 @@ import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
 import { Button } from "../ui/button";
 import { COARSE_TAP } from "../../lib/tapTarget";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = DISLIKES_FIRST_PAGE.limit;
 
 /** The picker's wire values, as stored: the panel says back what the user actually chose. */
 const REASON_LABEL: Record<string, string> = {
