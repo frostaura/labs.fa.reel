@@ -1,3 +1,5 @@
+using FrostAura.Reel.Domain.Tenancy;
+
 namespace FrostAura.Reel.Application.Ranking;
 
 /// <summary>
@@ -22,10 +24,10 @@ namespace FrostAura.Reel.Application.Ranking;
 /// build (minute-grained offset, previous build's anchors held back), which answered the founder's
 /// complaint by over-correcting: delta sync polls hot accounts every 5 minutes, every poll rebuilt
 /// the feed, and the rows the user was reading changed 3×/hour in QA. The standing contract is
-/// therefore <b>stable within a UTC day, guaranteed fresh across days</b> (FeedBuildPolicy owns the
+/// therefore <b>stable within the account's day, guaranteed fresh across days</b> (FeedBuildPolicy owns the
 /// build-mode half; user actions still change things immediately). Properties, both tested:
 /// <list type="bullet">
-/// <item><b>Different across days.</b> <see cref="OffsetFor"/> is constant inside a UTC day and
+/// <item><b>Different across days.</b> <see cref="OffsetFor"/> is constant inside the account's day and
 /// moves every day, and the caller holds back the PREVIOUS day's anchors (or, for a user-forced
 /// refresh, the superseded snapshot's), so a new day — or a manual refresh — cannot re-deal the
 /// rows it replaces while any unused loved title remains.</item>
@@ -38,12 +40,14 @@ public static class AnchorRotation
 {
     /// <summary>
     /// The rotation offset for a build, derived from the timestamp the snapshot will persist.
-    /// Days, not minutes or ticks: every build inside one UTC day reads the loved pool from the
-    /// same starting point (stability), consecutive days start somewhere else (freshness), and the
-    /// number stays legible and reproducible when replaying a build from its GeneratedAt.
+    /// Days, not minutes or ticks: every build inside one of the account's days reads the loved pool
+    /// from the same starting point (stability), consecutive days start somewhere else (freshness),
+    /// and the number stays legible and reproducible when replaying a build from its GeneratedAt
+    /// and the account's zone. The day is the account's own (<paramref name="timeZoneId"/>,
+    /// ADD-22); null counts in UTC, where the offset is the UTC day number exactly as before.
     /// </summary>
-    public static int OffsetFor(DateTime generatedAt) =>
-        (int)((ulong)(generatedAt.Ticks / TimeSpan.TicksPerDay) % int.MaxValue);
+    public static int OffsetFor(DateTime generatedAt, string? timeZoneId = null) =>
+        AccountTimeZone.LocalDate(timeZoneId, generatedAt).DayNumber % int.MaxValue;
 
     /// <summary>
     /// Picks up to <paramref name="count"/> anchor ids.

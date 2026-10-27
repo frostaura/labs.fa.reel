@@ -74,6 +74,14 @@ public class CitableClauseCatalogueTests
     }
 
     [Fact]
+    public void Every_rendered_sample_is_a_line_the_feed_guard_serves()
+    {
+        // The samples are the exact strings a card can carry. A sample the guard refuses (a "a 8.4"
+        // article slip, say) would reach the user as a blank why-line, not as the sentence catalogued here.
+        Assert.All(Samples(), s => Assert.True(FeedWhyGuard.IsServable(s.Text), s.Text));
+    }
+
+    [Fact]
     public void A_clause_left_out_of_the_catalogue_fails_rather_than_going_unchecked()
     {
         // The guard is the "single match" above: a phrasing no pattern reads is an empty match, which fails.
@@ -190,7 +198,8 @@ public class CitableClauseCatalogueTests
         };
         var people = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
         {
-            [CreditRole.Actor] = new("Rebecca Ferguson", 7.8m),
+            // In the eights, so the article the templater writes before the number is exercised: "an 8.4".
+            [CreditRole.Actor] = new("Rebecca Ferguson", 8.4m),
             [CreditRole.Director] = new("Denis Villeneuve", 8.2m),
             [CreditRole.Writer] = new("Eric Roth", 7.4m),
         };

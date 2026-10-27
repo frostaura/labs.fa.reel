@@ -9,7 +9,7 @@
         "directorAffinity",
         "writerAffinity"
       ],
-      "pattern": "\\b(?:you rate .+? \\d+\\.\\d on average|is in this — a \\d+\\.\\d for you on average|stars .+?, whose work you rate \\d+\\.\\d|directed by .+?, who you rate \\d+\\.\\d|directs — you rate them \\d+\\.\\d|written by .+?, who you rate \\d+\\.\\d)"
+      "pattern": "\\b(?:you rate .+? \\d+\\.\\d on average|is in this — an? \\d+\\.\\d for you on average|stars .+?, whose work you rate \\d+\\.\\d|directed by .+?, who you rate \\d+\\.\\d|directs — you rate them \\d+\\.\\d|written by .+?, who you rate \\d+\\.\\d)"
     },
     {
       "id": "genre-affinity",
@@ -75,51 +75,51 @@
   "samples": [
     {
       "feature": "castAffinity",
-      "text": "Stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "castAffinity",
-      "text": "You rate Rebecca Ferguson 7.8 on average."
+      "text": "You rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Like Heat, it plays crime brooding, and stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "castAffinity",
-      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 7.8 on average."
+      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "castAffinity",
-      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "lovedCastCount",
-      "text": "You rate Rebecca Ferguson 7.8 on average."
+      "text": "You rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Like Heat, it plays crime brooding, and stars Rebecca Ferguson, whose work you rate 7.8."
+      "text": "Brooding crime, just like Heat, and stars Rebecca Ferguson, whose work you rate 8.4."
     },
     {
       "feature": "lovedCastCount",
-      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 7.8 on average."
+      "text": "A crime pick with the same brooding streak as Heat, and you rate Rebecca Ferguson 8.4 on average."
     },
     {
       "feature": "lovedCastCount",
-      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — a 7.8 for you on average."
+      "text": "Brings Heat's brooding energy back to your crime lane, and Rebecca Ferguson is in this — an 8.4 for you on average."
     },
     {
       "feature": "directorAffinity",
@@ -135,7 +135,7 @@
     },
     {
       "feature": "directorAffinity",
-      "text": "Like Heat, it plays crime brooding, and Denis Villeneuve directs — you rate them 8.2."
+      "text": "Brooding crime, just like Heat, and Denis Villeneuve directs — you rate them 8.2."
     },
     {
       "feature": "directorAffinity",
@@ -155,7 +155,7 @@
     },
     {
       "feature": "writerAffinity",
-      "text": "Like Heat, it plays crime brooding, and written by Eric Roth, who you rate 7.4."
+      "text": "Brooding crime, just like Heat, and written by Eric Roth, who you rate 7.4."
     },
     {
       "feature": "writerAffinity",
@@ -179,7 +179,7 @@
     },
     {
       "feature": "userGenreAffinity",
-      "text": "Like Heat, it plays crime brooding, and built for your science fiction taste."
+      "text": "Brooding crime, just like Heat, and built for your science fiction taste."
     },
     {
       "feature": "userGenreAffinity",
@@ -199,7 +199,7 @@
     },
     {
       "feature": "genreDrift",
-      "text": "Like Heat, it plays crime brooding, and keeps your recent science fiction run going."
+      "text": "Brooding crime, just like Heat, and keeps your recent science fiction run going."
     },
     {
       "feature": "genreDrift",
@@ -219,7 +219,7 @@
     },
     {
       "feature": "traktRating",
-      "text": "Like Heat, it plays crime brooding, and rated 8.5 on TMDB by the crowd."
+      "text": "Brooding crime, just like Heat, and rated 8.5 on TMDB by the crowd."
     },
     {
       "feature": "traktRating",
@@ -239,7 +239,7 @@
     },
     {
       "feature": "releaseAgeLog",
-      "text": "Like Heat, it plays crime brooding, and just released."
+      "text": "Brooding crime, just like Heat, and just released."
     },
     {
       "feature": "releaseAgeLog",
@@ -251,23 +251,23 @@
     },
     {
       "feature": "contrarianAdjustedRating",
-      "text": "Still a 8.0 once the crowd's 8.5 is marked down to your scale."
+      "text": "Still an 8.0 once the crowd's 8.5 is marked down to your scale."
     },
     {
       "feature": "contrarianAdjustedRating",
-      "text": "Holds a 8.0 even on your harsher-than-the-crowd scale."
+      "text": "Holds an 8.0 even on your harsher-than-the-crowd scale."
     },
     {
       "feature": "contrarianAdjustedRating",
-      "text": "Like Heat, it plays crime brooding, and still a 8.0 once the crowd's 8.5 is marked down to your scale."
+      "text": "Brooding crime, just like Heat, and still an 8.0 once the crowd's 8.5 is marked down to your scale."
     },
     {
       "feature": "contrarianAdjustedRating",
-      "text": "A crime pick with the same brooding streak as Heat, and holds a 8.0 even on your harsher-than-the-crowd scale."
+      "text": "A crime pick with the same brooding streak as Heat, and holds an 8.0 even on your harsher-than-the-crowd scale."
     },
     {
       "feature": "contrarianAdjustedRating",
-      "text": "Brings Heat's brooding energy back to your crime lane, and still a 8.0 once the crowd's 8.5 is marked down to your scale."
+      "text": "Brings Heat's brooding energy back to your crime lane, and still an 8.0 once the crowd's 8.5 is marked down to your scale."
     },
     {
       "feature": "simLovedCentroid",
@@ -283,7 +283,7 @@
     },
     {
       "feature": "simLovedCentroid",
-      "text": "Like Heat, it plays crime brooding, and in the same lane as the titles you love."
+      "text": "Brooding crime, just like Heat, and in the same lane as the titles you love."
     },
     {
       "feature": "simLovedCentroid",
@@ -307,7 +307,7 @@
     },
     {
       "feature": "simRecentCentroid",
-      "text": "Like Heat, it plays crime brooding, and in the same lane as the titles you love."
+      "text": "Brooding crime, just like Heat, and in the same lane as the titles you love."
     },
     {
       "feature": "simRecentCentroid",
@@ -331,7 +331,7 @@
     },
     {
       "feature": "simTopLovedMax",
-      "text": "Like Heat, it plays crime brooding, and in the same lane as the titles you love."
+      "text": "Brooding crime, just like Heat, and in the same lane as the titles you love."
     },
     {
       "feature": "simTopLovedMax",
@@ -355,7 +355,7 @@
     },
     {
       "feature": "simTopLovedMean",
-      "text": "Like Heat, it plays crime brooding, and in the same lane as the titles you love."
+      "text": "Brooding crime, just like Heat, and in the same lane as the titles you love."
     },
     {
       "feature": "simTopLovedMean",
@@ -375,7 +375,7 @@
     },
     {
       "feature": "genre:science-fiction",
-      "text": "Like Heat, it plays crime brooding, and firmly in science fiction territory."
+      "text": "Brooding crime, just like Heat, and firmly in science fiction territory."
     },
     {
       "feature": "genre:science-fiction",
@@ -395,7 +395,7 @@
     },
     {
       "feature": "tone:brooding",
-      "text": "Like Heat, it plays crime brooding, and has that brooding streak."
+      "text": "Brooding crime, just like Heat, and has that brooding streak."
     },
     {
       "feature": "tone:brooding",
@@ -407,7 +407,7 @@
     },
     {
       "feature": null,
-      "text": "Like Heat, it plays crime brooding."
+      "text": "Brooding crime, just like Heat."
     },
     {
       "feature": null,

@@ -26,6 +26,14 @@ namespace FrostAura.Reel.Application.Ml;
 /// </remarks>
 public class FeatureVectorBuilder(IReelDbContext db)
 {
+    /// <summary>
+    /// Whether shows rated only season by season or episode by episode join the taste pools at their
+    /// rolled-up rating (task 12, N-8). Always on in the app; DI never sets it. It exists so the
+    /// offline ablation (<c>scripts/ml/show-rollup-ablation.sh</c>) can measure the rollup against
+    /// the same data and code with it off, instead of against a reverted commit nobody can re-run.
+    /// </summary>
+    public bool IncludeShowRollups { get; init; } = true;
+
     private const decimal LovedThreshold = 8m;
     private const int TopLovedCount = 10;
 
@@ -152,9 +160,12 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // media share read it; the loved anchors below do not (an anchor is a title rated whole).
         var wholeRated = titleRatings.Select(r => r.TitleId).ToHashSet();
         var explicitMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
-        titleRatings.AddRange(ShowRatingRollup
-            .Roll(await ShowRatingRollup.PartsAsync(db, accountId, asOf, ct), wholeRated, explicitMean)
-            .Select(r => new { r.TitleId, r.Rating, r.RatedAt, Rolled = true }));
+        if (IncludeShowRollups)
+        {
+            titleRatings.AddRange(ShowRatingRollup
+                .Roll(await ShowRatingRollup.PartsAsync(db, accountId, asOf, ct), wholeRated, explicitMean)
+                .Select(r => new { r.TitleId, r.Rating, r.RatedAt, Rolled = true }));
+        }
 
         var ratedTitleIds = titleRatings.Select(r => r.TitleId).Distinct().ToList();
         var ratedTitles = await db.Titles

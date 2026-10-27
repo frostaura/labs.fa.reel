@@ -138,6 +138,48 @@ public class TierGateTests(PostgresFixture fixture, ReelApiFactory api) : IClass
     }
 
     /// <summary>
+    /// R1-24 (WS-8 CR-B): the training trigger and the interleaving readout are gated at the ROUTE
+    /// by the shared founder gate, not by an inline tier comparison inside the handler. The answer a
+    /// non-founder gets is the gate's own ("tier not permitted"), and the trigger's handler never
+    /// runs for them: no Train job is queued. Both tiers below founder are asked.
+    /// </summary>
+    [Theory]
+    [InlineData(AccountTier.Free)]
+    [InlineData(AccountTier.Paid)]
+    public async Task The_training_trigger_and_the_interleave_readout_answer_through_the_founder_gate(AccountTier tier)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"tier-gate-route-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await SetTierAsync(accountId, tier);
+
+            using var train = await client.PostAsync("/api/metrics/model/train", null);
+            using var interleave = await client.GetAsync("/api/metrics/interleave");
+
+            foreach (var response in new[] { train, interleave })
+            {
+                Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+                var body = await response.Content.ReadFromJsonAsync<ErrorBody>();
+                Assert.Equal("tier not permitted", body!.Error);
+            }
+
+            using var scope = api.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            Assert.False(await db.SyncJobs.IgnoreQueryFilters().AnyAsync(j => j.AccountId == accountId && j.Kind == Domain.Sync.JobKind.Train));
+
+            await SetTierAsync(accountId, AccountTier.Founder);
+            using var founderTrain = await client.PostAsync("/api/metrics/model/train", null);
+            Assert.Equal(HttpStatusCode.Accepted, founderTrain.StatusCode);
+            Assert.True(await db.SyncJobs.IgnoreQueryFilters().AnyAsync(j => j.AccountId == accountId && j.Kind == Domain.Sync.JobKind.Train));
+        }
+    }
+
+    /// <summary>
     /// Writes the tier through the host's own context, with query filters ignored — the tier is
     /// read from the account ROW by every gate, precisely because billing changes it without the
     /// session cookie being reissued, so the same cookie must observe the new answer.

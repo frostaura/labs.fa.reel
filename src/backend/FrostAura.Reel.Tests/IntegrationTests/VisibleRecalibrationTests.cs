@@ -97,7 +97,9 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         Assert.Equal(generatedAt, Assert.IsType<DateTime>(frame.Data["generatedAt"]));
         var changed = Assert.IsType<List<Dictionary<string, object?>>>(frame.Data["changed"]);
         Assert.Equal(before.Count, changed.Count);
-        Assert.All(changed, c => Assert.Equal(before[(Guid)c["titleId"]!], (decimal)c["predictedRating"]!));
+        // The frame carries the number the badge shows (one decimal), as /api/feed now sends it (R1-04):
+        // the client patches the card in place with no rounding of its own.
+        Assert.All(changed, c => Assert.Equal(ForYouBar.Shown(before[(Guid)c["titleId"]!]), (decimal)c["predictedRating"]!));
 
         // No feed-ready: that frame invalidates the Feed tag and remounts every row, which is the
         // exact churn the stable-tonight contract exists to prevent.

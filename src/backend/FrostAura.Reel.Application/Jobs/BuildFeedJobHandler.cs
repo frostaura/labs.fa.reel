@@ -31,9 +31,9 @@ namespace FrostAura.Reel.Application.Jobs;
 /// is never in the request path — the feed endpoint reads the snapshot.
 ///
 /// Assembly honours the stable-"tonight" contract (FeedBuildPolicy): a background rebuild inside
-/// the same UTC day PRESERVES the Active snapshot's hero, anchors and rail members — and writes
-/// nothing at all when the result is identical — while a new day, a new model, or an explicit user
-/// action deals fresh rows. The job's TriggerReason is what tells those cases apart.
+/// the same day (the account's own, in its time zone: ADD-22) PRESERVES the Active snapshot's hero,
+/// anchors and rail members — and writes nothing at all when the result is identical — while a new
+/// day, a new model, or an explicit user action deals fresh rows. The job's TriggerReason is what tells those cases apart.
 /// </summary>
 public class BuildFeedJobHandler(
     IReelDbContext db,
@@ -78,7 +78,10 @@ public class BuildFeedJobHandler(
     // Optional on the same terms: a null budget means the enrichment enqueue is not gated on
     // today's extraction spend, which is what the hand-built test handlers were written against.
     // DI always supplies it (WS-4 CR-3: the enqueue gate is only complete when every caller passes it).
-    CatalogEnrichmentBudget? enrichmentBudget = null) : IJobHandler
+    CatalogEnrichmentBudget? enrichmentBudget = null,
+    // The build's clock. Optional on the same terms: null is the system clock, which is what every
+    // caller gets; a test passes a fixed instant to build either side of the account's midnight.
+    TimeProvider? clock = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -96,6 +99,9 @@ public class BuildFeedJobHandler(
     /// </summary>
     internal const int QualityReserve = 40;
     private const int HeroSize = 5;
+
+    /// <summary>The progress step shown while the pre-assembly fit pass is asking the model.</summary>
+    internal const string JudgingFitStep = "Judging fit for tonight's picks";
     // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
     // from this same bar, so a card can never be labelled against a threshold the build did not use.
     private const decimal HeroConfidenceFloor = Domain.Feed.HeroConfidence.Floor;
@@ -146,7 +152,6 @@ public class BuildFeedJobHandler(
     // job, not a request a user is staring at; the cache means successive builds converge to warm.
     private static readonly TimeSpan WhyPassBudget = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan WhyPassCeiling = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
     private const int RerankBatch = 9;
 
     // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────────
@@ -197,7 +202,7 @@ public class BuildFeedJobHandler(
         // keeping, and it was the one the old log line never made.
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var capture = new BuildCapture();
-        var now = DateTime.UtcNow;
+        var now = (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime;
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
@@ -220,8 +225,11 @@ public class BuildFeedJobHandler(
         // it runs: when it matches the fingerprint that produced the Active snapshot, the page cannot
         // differ, and the build records its no-op and stops. Remembered in process; a restart costs
         // one ordinary build. Never for a user-forced or trust-purge build, which are Fresh anyway.
-        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, DateOnly.FromDateTime(now), ct);
-        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, ct) is { } activeId)
+        // The account's own day (ADD-22): "tonight" and stable-within-day turn over at the account's
+        // midnight, not at UTC's — at +02:00 the UTC day re-dealt the picks at 02:00 local.
+        var timeZone = account.Settings.TimeZone;
+        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, AccountTimeZone.LocalDate(timeZone, now), ct);
+        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, timeZone, ct) is { } activeId)
         {
             await RecordUnchangedAsync(job, accountId, artifact.Id, activeId, now, stopwatch, ct);
             return;
@@ -237,19 +245,13 @@ public class BuildFeedJobHandler(
         // first pass on one scale and a final pass on another would be two different numbers for the
         // same title, and the shortlist cut-off would be taken on a scale nothing else uses.
         var calibrator = await calibration.GetAsync(accountId, ct);
-        var minPredictedRaw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == Domain.Filters.FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct);
-        var minPredicted = minPredictedRaw is not null
-            && decimal.TryParse(minPredictedRaw, System.Globalization.CultureInfo.InvariantCulture, out var floor)
-            ? Math.Clamp(floor, 0m, 10m) : 0m;
+        var minPredicted = await ForYouBar.ReadAsync(db, accountId, ct) ?? 0m;
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         await ReportProgressAsync(job, accountId, 10, "Scouting fresh candidates", ct);
         // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
         // the same replayability contract the row anchors hold.
-        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
+        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct, timeZone);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
@@ -571,7 +573,7 @@ public class BuildFeedJobHandler(
     /// produced it; null when anything differs, nothing is remembered, or the build would be Fresh.
     /// </summary>
     private async Task<Guid?> UnchangedSinceActiveAsync(
-        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, CancellationToken ct)
+        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, string? timeZone, CancellationToken ct)
     {
         if (!cache.TryGetValue<BuiltFrom>(InputsKey(accountId), out var built) || built is null || built.InputHash != inputHash)
         {
@@ -585,7 +587,7 @@ public class BuildFeedJobHandler(
             .FirstOrDefaultAsync(ct);
         return active is not null
             && active.Id == built.SnapshotId
-            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now) == FeedBuildMode.Preserve
+            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now, timeZone) == FeedBuildMode.Preserve
                 ? active.Id
                 : null;
     }
@@ -1018,7 +1020,7 @@ public class BuildFeedJobHandler(
             artifactId,
             candidates.Select(candidate => new TitleScoreWriter.Score(
                 candidate.Title.Id,
-                Math.Round(candidate.Predicted, 2),
+                DisplayRating(candidate),
                 TitleScoreWriter.SerializeContributions(candidate.Row.TopContributions))),
             now,
             ct);
@@ -1116,8 +1118,8 @@ public class BuildFeedJobHandler(
         // ── Continuity inputs: what is on the page NOW, and what yesterday looked like ──────
         // All read BEFORE the supersede below. The Active snapshot is both the Preserve-mode
         // template (its hero and anchors ARE tonight's contract) and the no-op baseline; the newest
-        // snapshot from any EARLIER UTC day supplies the hold-back set that makes a new day rotate
-        // for real instead of re-dealing yesterday's rows.
+        // snapshot from any EARLIER day (the account's day) supplies the hold-back set that makes a
+        // new day rotate for real instead of re-dealing yesterday's rows.
         var previousSnapshot = await db.FeedSnapshots
             .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
             .OrderByDescending(s => s.GeneratedAt)
@@ -1142,8 +1144,9 @@ public class BuildFeedJobHandler(
         // day N while any other loved title is available. Empty for a first-ever build; possibly
         // empty for an account that rebuilt 7+ times today (pruning keeps only the last 7), which
         // degrades to ordinary rotation rather than failing.
+        var accountDayStart = AccountTimeZone.DayStartUtc(account.Settings.TimeZone, now);
         var previousDaySnapshotId = await db.FeedSnapshots
-            .Where(s => s.AccountId == account.Id && s.GeneratedAt < now.Date)
+            .Where(s => s.AccountId == account.Id && s.GeneratedAt < accountDayStart)
             .OrderByDescending(s => s.GeneratedAt)
             .Select(s => (Guid?)s.Id)
             .FirstOrDefaultAsync(ct);
@@ -1159,7 +1162,8 @@ public class BuildFeedJobHandler(
             .ToHashSet();
 
         var mode = FeedBuildPolicy.Decide(
-            previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now);
+            previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now,
+            account.Settings.TimeZone);
         capture.Mode = mode;
 
         // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
@@ -1178,7 +1182,7 @@ public class BuildFeedJobHandler(
 
         var anchorPool = taste.LovedAnchorPool.Where(anchorTitles.ContainsKey).ToList();
         var allTimeOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
-        var rotationOffset = AnchorRotation.OffsetFor(now);
+        var rotationOffset = AnchorRotation.OffsetFor(now, account.Settings.TimeZone);
 
         // Anchors are drawn first from the titles the user rated 9–10 (AnchorRotation's top tier).
         var topTierAnchors = anchorTitles.Keys
@@ -1349,13 +1353,13 @@ public class BuildFeedJobHandler(
         // only produce an order it is not allowed to use — and would spend for the privilege.
         // Every verdict lands in the shared 6h fit cache, so the why pass below reads them back for
         // free and the pass costs the build ~5 calls in total rather than two passes' worth.
-        if (mode == FeedBuildMode.Fresh && capture.Progress is { } judging)
-        {
-            await judging(88, "Judging fit for tonight's picks");
-        }
-
+        // The "Judging fit" step is announced from inside the pass, at the moment it is about to call
+        // the model — never on a keyless build, an exhausted allowance or a fully cached slice, where
+        // no judging happens and the caption would describe work that is not being done (R1-11).
         var preAssemblyFits = mode == FeedBuildMode.Fresh
-            ? await JudgeFitBeforeAssemblyAsync(account.Id, taste, candidates, effectiveFloor, RankKey, ct)
+            ? await JudgeFitBeforeAssemblyAsync(
+                account.Id, taste, candidates, effectiveFloor, RankKey,
+                capture.Progress is { } judging ? () => judging(88, JudgingFitStep) : null, ct)
             : new Dictionary<Guid, double>();
         capture.JudgedBeforeAssembly = preAssemblyFits.Count;
 
@@ -1460,7 +1464,7 @@ public class BuildFeedJobHandler(
         static bool CrowdBacked(Candidate c) =>
             Domain.Feed.HeroConfidence.ClearsCrowdFloor(c.Title.MediaType, CrowdPrior.ShrunkScoreOf(c.Title));
         var heroPool = candidates
-            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null && CrowdBacked(c))
+            .Where(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)) && c.Title.PosterPath != null && CrowdBacked(c))
             .OrderByDescending(HeroKey)
             .ToList();
         // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
@@ -1481,13 +1485,13 @@ public class BuildFeedJobHandler(
                 FeedRowKind.Hero,
                 null,
                 [.. candidates
-                    .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                    .Where(c => c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
                     .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
                 HeroSize,
-                (c, chosen) => c.Predicted >= heroFloor && CrowdBacked(c)
+                (c, chosen) => ForYouBar.Clears(c.Predicted, heroFloor) && CrowdBacked(c)
                     && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
-                (c, _) => c.Predicted >= heroFloor && CrowdBacked(c),
-                (c, _) => c.Predicted >= heroFloor,
+                (c, _) => ForYouBar.Clears(c.Predicted, heroFloor) && CrowdBacked(c),
+                (c, _) => ForYouBar.Clears(c.Predicted, heroFloor),
                 (_, _) => true);
         }
         else if (mode == FeedBuildMode.Preserve)
@@ -1540,8 +1544,8 @@ public class BuildFeedJobHandler(
         {
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
-                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
+                .OrderByDescending(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)))
                 .ThenByDescending(CrowdBacked)
                 .ThenByDescending(HeroKey)
                 .Take(HeroSize - hero.Count));
@@ -1573,8 +1577,8 @@ public class BuildFeedJobHandler(
             // title the crowd floor would have kept out (measured: two sub-floor films entered the
             // hero this way on the first build with the floor).
             var heroSparePool = candidates
-                .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
+                .OrderByDescending(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)))
                 .ThenByDescending(CrowdBacked)
                 .ThenByDescending(HeroKey)
                 .ToList();
@@ -1652,9 +1656,9 @@ public class BuildFeedJobHandler(
         // reserve each later row's top-few candidates BEFORE the anchor fill so they survive. The
         // shared `used` set still guarantees no title repeats across the feed — reserved titles are
         // only WITHHELD from the greedy loved fill here, never pre-added, and remain free to place.
-        bool IsDeepCut(Candidate c) => c.Predicted >= Math.Max(6m, effectiveFloor)
+        bool IsDeepCut(Candidate c) => ForYouBar.Clears(c.Predicted, Math.Max(6m, effectiveFloor))
             && (c.Title.TmdbPopularity ?? 0m) < popThreshold;
-        bool IsNewForYou(Candidate c) => c.Predicted >= effectiveFloor
+        bool IsNewForYou(Candidate c) => ForYouBar.Clears(c.Predicted, effectiveFloor)
             && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900;
 
         var reserved = new HashSet<Guid>();
@@ -1824,7 +1828,7 @@ public class BuildFeedJobHandler(
                     // dealt, and their similarity to the anchor cannot have changed since.
                     if (candidatesById.TryGetValue(titleId, out var keptMember)
                         && !used.Contains(titleId)
-                        && keptMember.Predicted >= effectiveFloor)
+                        && ForYouBar.Clears(keptMember.Predicted, effectiveFloor))
                     {
                         members.Add(keptMember);
                     }
@@ -1836,7 +1840,7 @@ public class BuildFeedJobHandler(
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
                 var railPool = admittedPool
                     .Where(x => !used.Contains(x.Candidate.Title.Id) && !keptIds.Contains(x.Candidate.Title.Id)
-                        && !reserved.Contains(x.Candidate.Title.Id) && x.Candidate.Predicted >= effectiveFloor)
+                        && !reserved.Contains(x.Candidate.Title.Id) && ForYouBar.Clears(x.Candidate.Predicted, effectiveFloor))
                     .ToList();
 
                 // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
@@ -1867,7 +1871,7 @@ public class BuildFeedJobHandler(
             var inRadius = admissions.Count(a => radiusFloor is { } rf && a.Value.Similarity is { } sim && sim >= rf);
             anchorTrace.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{anchor.Name}: radius {radiusFloor:0.000}, {pulledNeighbours} eligible neighbours pulled, {inRadius} inside the radius, {admittedPool.Count} with shared evidence, {admittedPool.Count(x => x.Candidate.Predicted >= effectiveFloor)} at the {effectiveFloor:0.0} floor, {members.Count} dealt"));
+                $"{anchor.Name}: radius {radiusFloor:0.000}, {pulledNeighbours} eligible neighbours pulled, {inRadius} inside the radius, {admittedPool.Count} with shared evidence, {admittedPool.Count(x => ForYouBar.Clears(x.Candidate.Predicted, effectiveFloor))} at the {effectiveFloor:0.0} floor, {members.Count} dealt"));
             if (members.Count < RowMinMembers)
             {
                 capture.AnchorsPassedOver++;
@@ -1974,7 +1978,7 @@ public class BuildFeedJobHandler(
         // placed anywhere on this feed, so a swap can never seat a card another rail already shows.
         var heroSpares = heroPool
             .Concat(candidates
-                .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                .Where(c => c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
                 .OrderByDescending(HeroKey))
             .Where(c => !used.Contains(c.Title.Id))
             .DistinctBy(c => c.Title.Id)
@@ -2239,7 +2243,7 @@ public class BuildFeedJobHandler(
     /// </summary>
     private async Task<Dictionary<Guid, double>> JudgeFitBeforeAssemblyAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, IReadOnlyList<Candidate> candidates,
-        decimal effectiveFloor, Func<Candidate, decimal> rankKey, CancellationToken ct)
+        decimal effectiveFloor, Func<Candidate, decimal> rankKey, Func<Task>? announce, CancellationToken ct)
     {
         var fits = new Dictionary<Guid, double>();
         if (!agent.IsAvailable || candidates.Count == 0)
@@ -2251,7 +2255,7 @@ public class BuildFeedJobHandler(
         // therefore the honest way to spend a bounded number of calls on the titles most likely to
         // reach the page.
         var slice = candidates
-            .Where(c => c.Predicted >= effectiveFloor)
+            .Where(c => ForYouBar.Clears(c.Predicted, effectiveFloor))
             .OrderByDescending(rankKey)
             .ThenBy(c => c.Title.Id)
             .Take(PreAssemblyFitCandidates)
@@ -2272,9 +2276,9 @@ public class BuildFeedJobHandler(
             // a cached stub fit is the predicted rating divided by ten, and ranking on it would
             // count the prediction twice under a label that says the model judged the title.
             if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(FeedFitSalt, accountId, candidate.Title.Id, rowKey), out var hit)
-                && hit is { FitSource: ResultSource.Llm })
+                && hit?.ModelFit is { } cachedFit)
             {
-                fits[candidate.Title.Id] = hit.Fit;
+                fits[candidate.Title.Id] = cachedFit;
             }
             else
             {
@@ -2294,6 +2298,12 @@ public class BuildFeedJobHandler(
         if (!await HasBackgroundRerankHeadroomAsync(accountId, "pre-assembly fit pass", ct))
         {
             return fits;
+        }
+
+        // Only now is the model about to be asked, so only now is the step true to show.
+        if (announce is not null)
+        {
+            await announce();
         }
 
         try
@@ -2316,7 +2326,7 @@ public class BuildFeedJobHandler(
                 {
                     // A fallback verdict is not a verdict: never debiased, never cached, never ranked
                     // on. The title simply stays unjudged — the documented NeutralFit path.
-                    if (raw.FitSource != ResultSource.Llm)
+                    if (raw.ModelFit is not { } modelFit)
                     {
                         continue;
                     }
@@ -2326,12 +2336,15 @@ public class BuildFeedJobHandler(
                     // sense of how well a long-running panel show "fits" someone is contaminated by
                     // how many people watch it, and this pass now decides the hero.
                     var adjusted = byTitleId.TryGetValue(raw.TitleId, out var scored)
-                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, scored.Title.Genres, persona.Taste) }
+                        ? raw with { Fit = UnscriptedFormats.Adjust(modelFit, scored.Title.Genres, persona.Taste) }
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
-                    fits[result.TitleId] = result.Fit;
+                    FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result);
+                    if (result.ModelFit is { } judged)
+                    {
+                        fits[result.TitleId] = judged;
+                    }
                 }
             });
 
@@ -2416,15 +2429,14 @@ public class BuildFeedJobHandler(
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
             var cachedHit = cache.TryGetValue<RerankResult>(
                 FeedPaginator.FitKey(FeedFitSalt, accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
-            var cachedFit = cachedHit && hit!.FitSource == ResultSource.Llm;
-            if (cachedFit && item.Row == FeedRowKind.Hero)
+            if (cachedHit && hit!.ModelFit is { } cachedFit)
             {
-                heroFits[item.Candidate.Title.Id] = hit!.Fit;
-            }
+                if (item.Row == FeedRowKind.Hero)
+                {
+                    heroFits[item.Candidate.Title.Id] = cachedFit;
+                }
 
-            if (cachedFit)
-            {
-                item.LlmFit = (decimal)hit!.Fit;
+                item.LlmFit = (decimal)cachedFit;
             }
 
             if (cachedHit && ModelWhy(hit) is { } cachedWhy)
@@ -2664,8 +2676,8 @@ public class BuildFeedJobHandler(
             item.Replace(replacement, heroContext(replacement));
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
-                cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
-                item.LlmFit = (decimal)verdict.Fit;
+                FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict);
+                item.LlmFit = verdict.ModelFit is { } swappedFit ? (decimal)swappedFit : null;
                 if (ModelWhy(verdict) is { } why)
                 {
                     item.WhyThis = why;
@@ -2740,7 +2752,7 @@ public class BuildFeedJobHandler(
                     // A fallback FIT is the stub's predicted/10: never debiased, cached, logged as a
                     // fit or allowed to swap a hero. A model fit with a fallback WHY (the voice guard
                     // rejected only the sentence) is still a real fit and is kept.
-                    if (raw.FitSource != ResultSource.Llm)
+                    if (raw.ModelFit is not { } modelFit)
                     {
                         continue;
                     }
@@ -2749,19 +2761,22 @@ public class BuildFeedJobHandler(
                     // against reach" instruction — see UnscriptedFormats for why it is conditional
                     // on the account's own narrative and therefore revocable by editing it.
                     var adjusted = byTitleId.TryGetValue(raw.TitleId, out var candidate)
-                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, candidate.Candidate.Title.Genres, persona.Taste) }
+                        ? raw with { Fit = UnscriptedFormats.Adjust(modelFit, candidate.Candidate.Title.Genres, persona.Taste) }
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
-                    if (isHeroRail)
+                    FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result);
+                    if (result.ModelFit is { } judged)
                     {
-                        heroFits[result.TitleId] = result.Fit;
-                    }
+                        if (isHeroRail)
+                        {
+                            heroFits[result.TitleId] = judged;
+                        }
 
-                    if (byTitleId.TryGetValue(result.TitleId, out var scored))
-                    {
-                        scored.LlmFit = (decimal)result.Fit;
+                        if (byTitleId.TryGetValue(result.TitleId, out var scored))
+                        {
+                            scored.LlmFit = (decimal)judged;
+                        }
                     }
 
                     if (ModelWhy(result) is { } why && byTitleId.TryGetValue(result.TitleId, out var item))
@@ -2833,7 +2848,7 @@ public class BuildFeedJobHandler(
     /// no migration.
     /// </para>
     /// </summary>
-    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
+    private static decimal DisplayRating(Candidate candidate) => ShownRating.Stored(candidate.Predicted);
 
     /// <summary>
     /// The RANKING score behind the card — predicted × the taste prior × the crowd term × freshness

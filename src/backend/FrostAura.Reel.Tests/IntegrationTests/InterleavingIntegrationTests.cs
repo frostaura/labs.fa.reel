@@ -384,6 +384,136 @@ public class InterleavingIntegrationTests(PostgresFixture fixture)
         }
     }
 
+    /// <summary>
+    /// R1-48, the Lab panel's "Whichever ranker's cards you save, watch or rate 8+ wins that row":
+    /// the summary test above earns credit with saves only. Here a watch and an 8 each win their
+    /// slate, and a 7 earns nothing, so its slate is a tie.
+    /// </summary>
+    [Fact]
+    public async Task A_watch_or_an_eight_wins_the_row_and_a_seven_does_not()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedEligibleTitlesAsync(6);
+        List<Guid> titles;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            titles = await db.Titles.OrderBy(t => t.Id).Select(t => t.Id).Take(6).ToListAsync();
+        }
+
+        var served = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            for (var slate = 0; slate < 3; slate++)
+            {
+                var group = Guid.NewGuid();
+                db.ExposureEvents.Add(NewExposure(accountId, titles[slate * 2], group, CalibratedModelPolicy.Id, served.AddDays(slate), 0));
+                db.ExposureEvents.Add(NewExposure(accountId, titles[(slate * 2) + 1], group, PopularityBaselinePolicy.Id, served.AddDays(slate), 1));
+            }
+
+            // Slate 0: A's card watched. Slate 1: B's card rated 8. Slate 2: A's card rated 7.
+            db.WatchedTitles.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titles[0],
+                Plays = 1,
+                LastWatchedAt = served.AddHours(20),
+                IsFullyWatched = true,
+                FirstSyncedAt = served.AddHours(21),
+                UpdatedAt = served.AddHours(21),
+            });
+            db.UserRatings.Add(NewRating(accountId, titles[3], 8, served.AddDays(1).AddHours(3)));
+            db.UserRatings.Add(NewRating(accountId, titles[4], 7, served.AddDays(2).AddHours(3)));
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var summary = await new InterleaveSummaryQuery(db, On)
+                .ComputeAsync(accountId, served.AddDays(4), CancellationToken.None);
+
+            Assert.Equal(3, summary.Slates);
+            Assert.Equal(1, summary.WinsA);
+            Assert.Equal(1, summary.WinsB);
+            Assert.Equal(1, summary.Ties);
+        }
+    }
+
+    /// <summary>
+    /// R1-48, "Every Fresh build drafts each row alternately from both rankers": while the switch is
+    /// on, the draft does not wait for INTERLEAVE_SINCE — a start set in the future still drafts every
+    /// card of a Fresh build (those slates simply do not count yet). Each row is its own slate, and
+    /// each slate of two or more cards holds both rankers.
+    /// </summary>
+    [Fact]
+    public async Task A_fresh_build_drafts_every_row_from_both_rankers_whatever_the_experiment_start()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(120);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId, new InterleaveOptions
+        {
+            Enabled = true,
+            PolicyA = CalibratedModelPolicy.Id,
+            PolicyB = PopularityBaselinePolicy.Id,
+            Since = DateTime.UtcNow.AddDays(7),
+        });
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshotId = await ActiveSnapshotIdAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshotId).ToListAsync();
+        var exposures = await db.ExposureEvents
+            .Where(e => e.AccountId == accountId && e.FeedSnapshotId == snapshotId)
+            .ToDictionaryAsync(e => e.TitleId);
+
+        Assert.NotEmpty(items);
+        Assert.Contains(items.GroupBy(i => (i.Row, i.AnchorTitleId)), row => row.Count() >= 3); // alternation is tested, not implied by two cards
+        foreach (var row in items.GroupBy(i => (i.Row, i.AnchorTitleId)))
+        {
+            var policies = row.Select(i => exposures[i.TitleId].PolicyId).ToList();
+            Assert.All(policies, Assert.NotNull);
+            Assert.Single(row.Select(i => exposures[i.TitleId].InterleaveGroup).Distinct());
+            if (row.Count() >= 2)
+            {
+                Assert.Equal(2, policies.Distinct().Count());
+            }
+
+            // "Alternately" (R1-48): in the order the row is served, the rankers take turns — no two
+            // neighbouring cards come from the same ranker, so the counts differ by at most one.
+            var served = row.OrderBy(i => i.Rank).Select(i => exposures[i.TitleId].PolicyId).ToList();
+            for (var i = 1; i < served.Count; i++)
+            {
+                Assert.True(
+                    served[i] != served[i - 1],
+                    $"row {row.Key.Row}: cards {i - 1} and {i} both came from {served[i]} ({string.Join(", ", served)})");
+            }
+        }
+    }
+
+    private static UserRating NewRating(Guid accountId, Guid titleId, short rating, DateTime at) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = accountId,
+        TitleId = titleId,
+        SubjectType = RatingSubjectType.Movie,
+        Rating = rating,
+        RatedAt = at,
+        FirstRatedAt = at,
+        SyncedAt = at,
+    };
+
     [Fact]
     public void The_experiment_start_is_read_invariant_and_in_utc()
     {

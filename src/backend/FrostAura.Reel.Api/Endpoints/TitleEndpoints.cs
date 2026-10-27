@@ -110,7 +110,7 @@ public static class TitleEndpoints
             ITmdbClient tmdb, CandidateGenerator candidateGenerator, TitleHydrator hydrator,
             ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, FeatureVectorBuilder featureBuilder,
             DislikeSignal dislikes, Application.Lens.LensService lens, TasteFactsBuilder tasteFacts,
-            IMemoryCache cache, CancellationToken ct) =>
+            RatingCalibrationService calibration, IMemoryCache cache, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -255,8 +255,14 @@ public static class TitleEndpoints
                 writers = cast.Where(c => c.role == "Writer").Select(c => new { c.personId, c.name, c.profilePath, c.userRating }).Take(4),
                 prediction = score is null ? null : new
                 {
-                    // Served ratings are uniformly 1dp at the response edge (stored precision is 2dp).
-                    predictedRating = Math.Round(score.PredictedRating, 1),
+                    // The badge's one decimal (stored precision is 2 dp), by the rule every surface
+                    // and every bar uses — ForYouBar.Shown — so a deep-linked title reads the digit
+                    // the feed card for it reads.
+                    predictedRating = ForYouBar.Shown(score.PredictedRating),
+                    // The measured band (FD-4's default: every displayed number carries it), from the
+                    // same calibrator and at the same rounding as /api/feed, so the title page and
+                    // the card say the same "± 1.1". Null until the closed loop has pairs.
+                    expectedAbsoluteError = await ExpectedAbsoluteErrorAsync(calibration, accountId, ct),
                     contributions,
                     scoredAt = score.ScoredAt,
                     // Additive steps in rating points that sum to the prediction; null when the walk
@@ -275,6 +281,18 @@ public static class TitleEndpoints
                 },
             });
         });
+    }
+
+    /// <summary>
+    /// What a displayed prediction has typically been off by for this account, at one decimal; null
+    /// before any prediction has met a rating. The one definition the feed (<c>FeedEndpoints</c>)
+    /// and the title page share.
+    /// </summary>
+    internal static async Task<double?> ExpectedAbsoluteErrorAsync(
+        RatingCalibrationService calibration, Guid accountId, CancellationToken ct)
+    {
+        var calibrator = await calibration.GetAsync(accountId, ct);
+        return calibrator.PairCount == 0 ? null : Math.Round(calibrator.ExpectedAbsoluteError, 1);
     }
 
     /// <summary>

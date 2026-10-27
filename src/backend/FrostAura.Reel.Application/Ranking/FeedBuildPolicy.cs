@@ -1,9 +1,11 @@
+using FrostAura.Reel.Domain.Tenancy;
+
 namespace FrostAura.Reel.Application.Ranking;
 
 /// <summary>How a feed build treats what is already on the page.</summary>
 public enum FeedBuildMode
 {
-    /// <summary>Deal a new feed: first build, new UTC day, new model, or a user-forced refresh.</summary>
+    /// <summary>Deal a new feed: first build, a new day for the account, new model, or a user-forced refresh.</summary>
     Fresh,
 
     /// <summary>Keep tonight's contract: reuse the Active snapshot's hero and anchors, refill only
@@ -19,7 +21,7 @@ public enum FeedBuildMode
 /// (2026-08-07: "those never seem to change") demanded guaranteed rotation; the AnchorRotation fix
 /// then over-corrected — delta sync polls hot accounts every 5 minutes, each poll rebuilt the feed,
 /// and the hero changed 3×/hour in QA. The contract that satisfies both: the feed is <b>stable
-/// within a UTC day</b> and <b>guaranteed fresh across days</b>, while explicit user actions
+/// within the account's own day</b> and <b>guaranteed fresh across days</b>, while explicit user actions
 /// (reacting to a title, a manual refresh, a filter change) still change things immediately —
 /// reactions vacate their own slots inside a Preserve build, refresh/filters force a Fresh one.
 /// </summary>
@@ -46,20 +48,25 @@ public static class FeedBuildPolicy
         triggerReason is ManualRefreshReason or FiltersChangedReason;
 
     /// <summary>
-    /// Fresh when there is nothing to preserve (no previous Active snapshot), when the UTC day
+    /// Fresh when there is nothing to preserve (no previous Active snapshot), when the account's day
     /// rolled over (the daily rotation guarantee), when the model changed (its opinion of every
     /// candidate changed with it), or when the user forced it. Preserve otherwise — which is what a
     /// 5-minute delta-sync poll lands on, keeping tonight's picks put.
+    ///
+    /// <para>The day is the account's own (<paramref name="timeZoneId"/>, ADD-22): at +02:00 a UTC
+    /// day turned over at 02:00 local, re-dealing tonight's picks in the middle of an evening. Null
+    /// (an account that set no zone) counts in UTC, which is the behaviour before the setting.</para>
     /// </summary>
     public static FeedBuildMode Decide(
         DateTime? previousGeneratedAtUtc,
         Guid? previousModelArtifactId,
         Guid currentModelArtifactId,
         string? triggerReason,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        string? timeZoneId = null)
     {
         if (previousGeneratedAtUtc is null
-            || previousGeneratedAtUtc.Value.Date != nowUtc.Date
+            || AccountTimeZone.LocalDate(timeZoneId, previousGeneratedAtUtc.Value) != AccountTimeZone.LocalDate(timeZoneId, nowUtc)
             || previousModelArtifactId != currentModelArtifactId
             || IsUserForced(triggerReason)
             || triggerReason == TrustPurgeReason)

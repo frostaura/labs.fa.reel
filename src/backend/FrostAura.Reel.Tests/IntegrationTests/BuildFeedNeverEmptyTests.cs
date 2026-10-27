@@ -132,8 +132,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.True(third.ShortlistCount > 0);
     }
 
-    [Fact]
-    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published()
+    /// <summary>
+    /// Also R1-11: "Judging fit for tonight's picks" is shown only on a build that is asking the model.
+    /// It used to be published on every Fresh build, keyless ones included, where nothing is judged.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published(bool modelAvailable)
     {
         if (!Fixture.Available)
         {
@@ -164,10 +170,12 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         }
 
         var hub = new RowReadingHub(Fixture, jobId);
-        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId);
+        var agent = new CannedWhyAgent();
+        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId, agent: modelAvailable ? agent : new UnavailableSearchAgent());
 
         Assert.Contains(hub.Frames, f => f.Published == "Writing why-lines");
-        Assert.Contains(hub.Frames, f => f.Published == "Judging fit for tonight's picks");
+        Assert.Equal(modelAvailable, hub.Frames.Any(f => f.Published == "Judging fit for tonight's picks"));
+        Assert.Equal(modelAvailable, agent.RerankCalls > 0);
         Assert.All(hub.Frames, f => Assert.Equal(f.Published, f.OnRow));
     }
 
@@ -248,6 +256,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         var sample = exposures.First(e => heroTitleIds.Contains(e.TitleId));
         var card = items.Single(i => i.TitleId == sample.TitleId);
         Assert.True(Math.Abs(sample.PredictedRating - card.PredictedRating) <= 0.05m);
+
+        // R1-04: the title page reads TitleScores and the feed reads FeedItems. One build writes both,
+        // so every card's number is the title's stored score exactly — not a half-to-even twin of it.
+        var titleIds = items.Select(i => i.TitleId).ToList();
+        var scores = await db.TitleScores
+            .Where(s => s.AccountId == accountId && s.ModelArtifactId == snapshot.ModelArtifactId && titleIds.Contains(s.TitleId))
+            .ToDictionaryAsync(s => s.TitleId, s => s.PredictedRating);
+        Assert.All(items, i => Assert.Equal(i.PredictedRating, scores[i.TitleId]));
     }
 
     [Fact]
@@ -371,6 +387,58 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
         Assert.Equal(firstActiveId, secondActiveId);
         Assert.Equal(firstCount, secondCount);
+    }
+
+    /// <summary>
+    /// R1-16 (task 14, ADD-22): "tonight" and stable-within-day follow the account's own zone. For a
+    /// +02:00 account the UTC day turns at 02:00 local, which used to re-deal tonight's picks in the
+    /// small hours of the same evening; the account's midnight is what re-deals them now. Two
+    /// timelines, each run for the +02:00 account and for one with no zone (UTC, the old behaviour):
+    /// across 00:00–02:00 UTC (one local day) the +02:00 page holds, and across local midnight
+    /// (one UTC day) it turns over.
+    /// </summary>
+    [Theory]
+    [InlineData("Africa/Johannesburg", "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", true)]
+    [InlineData(null, "2026-10-26T23:00:00Z", "2026-10-27T01:30:00Z", false)]
+    [InlineData("Africa/Johannesburg", "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", false)]
+    [InlineData(null, "2026-10-26T21:30:00Z", "2026-10-26T22:30:00Z", true)]
+    public async Task Tonight_turns_over_at_the_accounts_midnight(string? timeZone, string first, string second, bool sameSnapshot)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
+            account.Settings.TimeZone = timeZone;
+            await db.SaveChangesAsync();
+        }
+
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId, at: Instant(first));
+        var (firstActiveId, _) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        // The background poll, with nothing new: inside one of the account's days it must keep the
+        // page; across the account's midnight it must deal a new one.
+        await RunBuildAsync(accountId, "delta-sync", at: Instant(second));
+        var (secondActiveId, _) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        Assert.Equal(sameSnapshot, firstActiveId == secondActiveId);
+    }
+
+    private static DateTime Instant(string iso) =>
+        DateTime.Parse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal);
+
+    /// <summary>A clock stopped at one instant.</summary>
+    private sealed class FixedClock(DateTime utc) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(DateTime.SpecifyKind(utc, DateTimeKind.Utc));
     }
 
     [Fact]
@@ -1064,7 +1132,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
     private async Task RunBuildAsync(
         Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null,
-        IPipelineEventHub? events = null, Guid? persistedJobId = null)
+        IPipelineEventHub? events = null, Guid? persistedJobId = null, DateTime? at = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -1103,7 +1171,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             events ?? new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            NullLogger<BuildFeedJobHandler>.Instance);
+            NullLogger<BuildFeedJobHandler>.Instance,
+            clock: at is { } instant ? new FixedClock(instant) : null);
 
         // A persisted job is read through the handler's own context, as the runner hands it over.
         var job = persistedJobId is { } jobId

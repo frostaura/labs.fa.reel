@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -37,9 +38,14 @@ public static class TitleScoreWriter
 {
     /// <summary>One score to write.</summary>
     /// <param name="TitleId">The scored title.</param>
-    /// <param name="PredictedRating">The displayed prediction, already at its stored resolution (2 dp).</param>
+    /// <param name="PredictedRating">The displayed prediction. Stored at <see cref="ShownRating.Stored"/>
+    /// whatever resolution it arrives at, so every writer stores a midpoint the same way (R1-04).</param>
     /// <param name="ContributionsJson">The top contributions as a json array.</param>
-    public readonly record struct Score(Guid TitleId, decimal PredictedRating, string ContributionsJson);
+    public readonly record struct Score(Guid TitleId, decimal PredictedRating, string ContributionsJson)
+    {
+        /// <summary>The prediction at its stored resolution: 2 dp, half away from zero.</summary>
+        public decimal PredictedRating { get; } = ShownRating.Stored(PredictedRating);
+    }
 
     /// <summary>
     /// The persisted shape of a score's top contributions — <c>[{"feature":…,"value":…}]</c>, values

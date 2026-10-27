@@ -230,6 +230,161 @@ public class ExplanationTemplaterTests
         }
     }
 
+    // ── Grammar (R1-21, 2026-10-27) ──────────────────────────────────────────────────────────
+    // The catalogue showed "Holds a 8.0", "Still a 8.0" and "Like Heat, it plays crime brooding".
+
+    [Theory]
+    [InlineData("8.0", "an")]
+    [InlineData("8.5", "an")]
+    [InlineData("80", "an")]
+    [InlineData("800", "an")]
+    [InlineData("11", "an")]
+    [InlineData("18", "an")]
+    [InlineData("11,000", "an")]
+    [InlineData("18500000", "an")]
+    [InlineData("7.5", "a")]
+    [InlineData("1.0", "a")]
+    [InlineData("10.0", "a")]
+    [InlineData("110", "a")]
+    [InlineData("1,100", "a")]
+    [InlineData("action", "an")]
+    [InlineData("thriller", "a")]
+    public void The_article_follows_how_the_word_or_number_is_read(string word, string article)
+    {
+        Assert.Equal(article, ExplanationTemplater.IndefiniteArticle(word));
+    }
+
+    /// <summary>
+    /// The contrarian clause quotes the reader-scale number with the article it is read with: a crowd
+    /// of 9.0 marked down by 0.5 is "an 8.5", a crowd of 8.0 marked down is "a 7.3". Both phrasings,
+    /// every variant the seed and title can pick, and the guard agrees with the sentence.
+    /// </summary>
+    [Theory]
+    [InlineData(9.0, 50_000, "an 8.")]
+    [InlineData(8.0, 400, "a 7.")]
+    public void The_contrarian_clause_reads_an_eight_and_a_seven(double crowd, int votes, string expected)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < 8; i++)
+        {
+            for (var seed = 0; seed <= 3; seed++)
+            {
+                var context = Context([("contrarianAdjustedRating", 1.0f)], titleId: new Guid(i + 1, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0]));
+                context = context with { Title = WithCrowd(context.Title, (decimal)crowd, votes) };
+                var sentence = ExplanationTemplater.BuildSentence(context, seed);
+                Assert.Contains(expected, sentence, StringComparison.Ordinal);
+                Assert.False(FeedWhyGuard.HasWrongArticle(sentence), sentence);
+                seen.Add(sentence[..5]);
+            }
+        }
+
+        Assert.Equal(2, seen.Count); // both phrasings ("Holds", "Still") were exercised
+    }
+
+    /// <summary>
+    /// The anchored shared-genre-and-tone line reads as English in every variant: the tone qualifies
+    /// the genre ("Brooding crime, just like Heat") instead of trailing it ("it plays crime brooding").
+    /// </summary>
+    [Fact]
+    public void The_anchor_line_puts_the_tone_before_the_genre()
+    {
+        var lines = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < 12; i++)
+        {
+            for (var seed = 0; seed <= 3; seed++)
+            {
+                lines.Add(ExplanationTemplater.BuildSentence(
+                    Context([("simLovedCentroid", 0.9f)], titleId: new Guid(i + 1, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0]),
+                        anchorName: "Heat", sharedGenre: "crime", tone: "brooding"),
+                    seed));
+            }
+        }
+
+        Assert.DoesNotContain(lines, l => l.Contains("it plays", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.StartsWith("Brooding crime, just like Heat", StringComparison.Ordinal));
+        Assert.All(lines, l => Assert.False(FeedWhyGuard.HasWrongArticle(l), l));
+    }
+
+    [Theory]
+    [InlineData("Holds a 8.0 even on your harsher-than-the-crowd scale.")]
+    [InlineData("Brooding crime, just like Heat, and still a 8.5 once the crowd's 9.0 is marked down to your scale.")]
+    [InlineData("A 11-part miniseries in the lane you love.")]
+    public void A_persisted_a_before_an_eight_is_refused(string why)
+    {
+        Assert.True(FeedWhyGuard.HasWrongArticle(why));
+        Assert.False(FeedWhyGuard.IsServable(why));
+    }
+
+    [Theory]
+    [InlineData("Holds a 7.5 even on your harsher-than-the-crowd scale.")]
+    [InlineData("Still a 10.0 once the crowd's 10.0 is marked down to your scale.")]
+    [InlineData("A 110-minute heist, and you rate Tony Gilroy 8.1.")]
+    public void A_before_a_consonant_sounding_number_is_kept(string why)
+    {
+        Assert.False(FeedWhyGuard.HasWrongArticle(why));
+    }
+
+    /// <summary>
+    /// The person clauses at every rating band a person can carry (R1-21 follow-up): an actor in the
+    /// eights is "an 8.2 for you on average", never "a 8.2" — and because the guard refuses "a 8.x",
+    /// a wrong article would not be a slip on the card but a blanked why-line. Every variant of every
+    /// role, alone and behind an anchor, must be a line the guard serves. The 7.x and 10.0 rows are
+    /// the controls that keep "a".
+    /// </summary>
+    [Theory]
+    [InlineData(8.2, "an 8.2")]
+    [InlineData(8.0, "an 8.0")]
+    [InlineData(8.96, "a 9.0")]
+    [InlineData(7.8, "a 7.8")]
+    [InlineData(10.0, "a 10.0")]
+    public void Every_person_clause_variant_reads_its_article_and_stays_servable(double affinity, string expected)
+    {
+        var rated = (decimal)affinity;
+        var persons = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
+        {
+            [CreditRole.Actor] = new("Tom Hardy", rated),
+            [CreditRole.Director] = new("Denis Villeneuve", rated),
+            [CreditRole.Writer] = new("Eric Roth", rated),
+        };
+
+        var castLines = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var feature in new[] { "castAffinity", "lovedCastCount", "directorAffinity", "writerAffinity" })
+        {
+            for (var i = 0; i < 12; i++)
+            {
+                foreach (var anchor in new[] { null, "Heat" })
+                {
+                    for (var seed = 0; seed <= 3; seed++)
+                    {
+                        var sentence = ExplanationTemplater.BuildSentence(Context(
+                            [(feature, 1.0f)], persons: persons,
+                            titleId: new Guid(i + 1, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0]),
+                            anchorName: anchor, sharedGenre: anchor is null ? null : "crime"), seed);
+
+                        Assert.False(FeedWhyGuard.HasWrongArticle(sentence), sentence);
+                        Assert.True(FeedWhyGuard.IsServable(sentence), sentence);
+                        if (feature == "castAffinity" && sentence.Contains("is in this", StringComparison.Ordinal))
+                        {
+                            castLines.Add(sentence);
+                        }
+                    }
+                }
+            }
+        }
+
+        Assert.NotEmpty(castLines); // the "is in this" variant was exercised, alone and anchored
+        Assert.All(castLines, l => Assert.Contains($"is in this — {expected} for you on average", l, StringComparison.Ordinal));
+    }
+
+    private static Title WithCrowd(Title title, decimal rating, int votes)
+    {
+        title.TraktRating = rating;
+        title.TraktVotes = votes;
+        title.TmdbVoteAverage = rating;
+        title.TmdbVoteCount = votes;
+        return title;
+    }
+
     // ── No stub, ever (IREV1-SYS-05 / IR1S-01, 2026-10-26) ───────────────────────────────────
     // The generic sentence came back on 16 of 169 keyless why-lines: 12 alone, and 4 spliced after an
     // anchor clause as "…, and Strong fit with your taste profile." with its capital S mid-sentence.

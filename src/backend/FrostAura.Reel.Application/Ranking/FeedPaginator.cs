@@ -170,6 +170,24 @@ public sealed class FeedPaginator(
     private const int RerankBatch = 9;
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
+    /// <summary>
+    /// The one way a fit verdict enters the shared fit cache, for the paginator and the feed build
+    /// alike: only a verdict the MODEL gave (<see cref="RerankResult.Cacheable"/>). A fallback's fit
+    /// is the stub's predicted/10 and its sentence is empty; cached, it would replay one failed batch
+    /// for six hours under a label that says the model judged the title (WS-1 task 4: fallbacks are
+    /// never cached). Returns whether it was stored.
+    /// </summary>
+    internal static bool CacheFit(IMemoryCache cache, string key, RerankResult result)
+    {
+        if (!result.Cacheable)
+        {
+            return false;
+        }
+
+        cache.Set(key, result, FitTtl);
+        return true;
+    }
+
     // Preference-tag re-rank nudge (mirrors the feed build): a title whose plot embedding is close to
     // a declared preference tag lifts by at most +10% on top of the model's rating — enough to sharpen
     // paging order toward stated taste, never enough to float a weak prediction over a strong one.
@@ -219,7 +237,7 @@ public sealed class FeedPaginator(
             entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
             return await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
         }) ?? await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
-        var minPredicted = await MinPredictedAsync(account.Id, ct);
+        var minPredicted = await ForYouBar.ReadAsync(db, account.Id, ct) ?? 0m;
         var exclude = req.ExcludeTitleIds.ToList();
         // Online residual head for this artifact, loaded once and added to every window score below.
         var residual = await residualModel.LoadAsync(account.Id, artifact, ct);
@@ -262,7 +280,7 @@ public sealed class FeedPaginator(
         }
 
         var windowMs = clock.ElapsedMilliseconds;
-        var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
+        var scored = all.Where(s => ForYouBar.Clears(s.Predicted, minPredicted)).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
         // count. A high predicted-rating floor can gut a window that looked full: the old gate saw a
@@ -302,22 +320,15 @@ public sealed class FeedPaginator(
                 cache.Remove(windowKey);
                 all = await ScoreWindowAsync(
                     artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
-                scored = all.Where(s => s.Predicted >= minPredicted).ToList();
+                scored = all.Where(s => ForYouBar.Clears(s.Predicted, minPredicted)).ToList();
             }
         }
 
-        // The floor is soft, exactly as in the feed build and in Ask Reel: when the window holds
-        // real candidates but none clear the account's MinPredictedRating, serving nothing tells the
-        // user the reel ended when it has not. Fall back to the best of what this lane actually has
-        // rather than reporting a false exhaustion.
-        if (scored.Count == 0 && all.Count > 0)
-        {
-            logger.LogInformation(
-                "Feed page relaxed the {Floor} predicted-rating floor for {Row}: none of {Count} candidates cleared it.",
-                minPredicted, RowKey(req), all.Count);
-            scored = all;
-        }
-
+        // The bar holds on a paged rail exactly as it does on tonight's picks (FD-4's default: a card
+        // under the user's own "for you" bar never reaches a main grid). This used to fall back to
+        // the best of the lane when nothing cleared it, which served "load more" cards under the bar
+        // on every rail the build itself had held to it. A lane with nothing above the bar has
+        // genuinely run out of what the user asked to see; it was already deepened above.
         if (scored.Count == 0)
         {
             return [];
@@ -504,7 +515,7 @@ public sealed class FeedPaginator(
             // card is no longer the one surface that logs zeros for a decomposition it actually had.
             items.Add(new ScoredFeedItem(
                 c.Scored.Title,
-                Math.Round(c.Scored.Predicted, 2),
+                Domain.Feed.ShownRating.Stored(c.Scored.Predicted),
                 why,
                 IsReleased(c.Scored.Title, now),
                 source,
@@ -512,7 +523,7 @@ public sealed class FeedPaginator(
                 CalibrationDelta: c.Scored.CalibrationDelta,
                 ResidualApplied: c.Scored.BaseScore - (decimal)c.Scored.Row.Score,
                 DemotionApplied: c.Scored.BaseScore + c.Scored.CalibrationDelta - c.Scored.Predicted,
-                LlmFit: c.Fit is { FitSource: ResultSource.Llm } fit ? (decimal)fit.Fit : null,
+                LlmFit: c.Fit?.ModelFit is { } modelFit ? (decimal)modelFit : null,
                 Evidence: evidence.GetValueOrDefault(c.Scored.Title.Id)));
         }
 
@@ -553,7 +564,7 @@ public sealed class FeedPaginator(
         foreach (var s in pool)
         {
             if (cache.TryGetValue<RerankResult>(FitKey(fitSalt, account.Id, s.Title.Id, rowKey), out var hit)
-                && hit is { FitSource: ResultSource.Llm })
+                && hit?.ModelFit is not null)
             {
                 fitById[s.Title.Id] = hit;
             }
@@ -639,13 +650,13 @@ public sealed class FeedPaginator(
                         // A fallback fit is the stub's predicted/10. Blending it in counts the
                         // prediction twice under a model label, and caching it would replay the
                         // failure for six hours — so it is neither used nor cached.
-                        if (r.FitSource != ResultSource.Llm)
+                        if (r.ModelFit is null)
                         {
                             continue;
                         }
 
                         fitById[r.TitleId] = r;
-                        cache.Set(FitKey(fitSalt, account.Id, r.TitleId, rowKey), r, FitTtl);
+                        CacheFit(cache, FitKey(fitSalt, account.Id, r.TitleId, rowKey), r);
                     }
                 });
 
@@ -675,7 +686,7 @@ public sealed class FeedPaginator(
                 // The crowd term rides the model side for the same reason: it is part of the snapshot
                 // build's RankKey, so page 2 of a rail has to be ordered by it too.
                 var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) * CrowdPrior.FactorFor(s.Title) / 10d;
-                var blend = fit is null ? modelNorm : (0.6 * modelNorm) + (0.4 * fit.Fit);
+                var blend = fit?.ModelFit is { } modelFit ? (0.6 * modelNorm) + (0.4 * modelFit) : modelNorm;
                 return (Scored: s, Fit: fit, Blend: blend);
             })
             .OrderByDescending(x => x.Blend)
@@ -724,10 +735,12 @@ public sealed class FeedPaginator(
                 {
                     var results = await scopedAgent.RerankBatchAsync(
                         batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
-                    foreach (var r in results.Where(r => r.FitSource == ResultSource.Llm))
+                    foreach (var r in results)
                     {
-                        cache.Set(FitKey(fitSalt, accountId, r.TitleId, rowKey), r, FitTtl);
-                        cached++;
+                        if (CacheFit(cache, FitKey(fitSalt, accountId, r.TitleId, rowKey), r))
+                        {
+                            cached++;
+                        }
                     }
                 });
 
@@ -1229,7 +1242,7 @@ public sealed class FeedPaginator(
                     var threshold = ordered.Count > 0
                         ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
                     return scored
-                        .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
+                        .Where(s => ForYouBar.Clears(s.Predicted, 6m) && (s.Title.TmdbPopularity ?? 0m) <= threshold)
                         .OrderByDescending(s => (double)s.Predicted * Weight(s.Title))
                         .ToList();
                 }
@@ -1386,19 +1399,10 @@ public sealed class FeedPaginator(
             artifactId,
             taken.Select(s => new TitleScoreWriter.Score(
                 s.Title.Id,
-                Math.Round(s.Predicted, 2),
+                Domain.Feed.ShownRating.Stored(s.Predicted),
                 TitleScoreWriter.SerializeContributions(s.Row.TopContributions))),
             now,
             ct);
-    }
-
-    private async Task<decimal> MinPredictedAsync(Guid accountId, CancellationToken ct)
-    {
-        var raw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value).FirstOrDefaultAsync(ct);
-        return raw is not null && decimal.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, out var floor)
-            ? Math.Clamp(floor, 0m, 10m) : 0m;
     }
 
     private static IEnumerable<string> TopGenres(FeatureVectorBuilder.TasteState taste) =>
