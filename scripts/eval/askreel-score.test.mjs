@@ -205,6 +205,49 @@ test("grounding: a reply naming a catalogue title that is not on screen is a vio
   assert.equal(evaluateTurn({ expect: {} }, prose, 0, [prose], g).groundingViolations, 0);
 });
 
+// HREV1-ASK-04 / HREV1-RET-03: the two h1 grounding violations were scorer artefacts, not WS-2 defects.
+test("grounding: a name shared with a card on screen this turn or earlier is grounded, whichever twin the catalogue also holds", () => {
+  // psych-thriller-tell-more (h1-smoke-v2): T1 picked Joy Ride (2001); T2's reply is about it. The
+  // catalogue's Joy Ride (2023) was never shown, and the reply cannot say which of two equal names it meant.
+  const t1 = turn("a psychological thriller", [card(A, "Joy Ride")]);
+  const t2 = turn("tell me more about the first one", [], { mode: "Answer", reply: "Joy Ride is a 2001 mystery thriller about three young people on a road trip." });
+  const named = { [t2.turnId]: [{ titleId: A, name: "Joy Ride" }, { titleId: D, name: "Joy Ride" }] };
+  const r = evaluateTurn({ expect: {} }, t2, 1, [t1, t2], facts({ named }));
+  assert.equal(r.groundingViolations, 0, r.groundingDetail.join("; "));
+  // Vary the fixture: the 2001 film never on screen. The reply names one off-screen title, counted once.
+  const t1b = turn("a psychological thriller", [card(B, "Bravo")]);
+  const off = evaluateTurn({ expect: {} }, t2, 1, [t1b, t2], facts({ named }));
+  assert.equal(off.groundingViolations, 1);
+  assert.deepEqual(off.groundingDetail, ["reply names Joy Ride, not on screen"]);
+  // Vary the fixture: the twin is on screen only in a LATER turn — not yet on screen when the reply ran.
+  const t3 = turn("more like it", [card(A, "Joy Ride")]);
+  assert.equal(evaluateTurn({ expect: {} }, t2, 1, [t1b, t2, t3], facts({ named })).groundingViolations, 1);
+});
+
+test("grounding: a catalogue name inside a longer on-screen title is not a citation of it (whole names, longest match)", () => {
+  // samurai-films (h1-smoke-v2b): the reply names Blade of the 47 Ronin from the under-bar tray; 47 Ronin
+  // (2013) and The 47 are only substrings of that name.
+  const reply = "Under your 6.0 bar: Blade of the 47 Ronin and Tornado — shown below.";
+  const t = turn("samurai films", [], { mode: "NoneFound", reply, belowFloor: [card(A, "Blade of the 47 Ronin"), card(B, "Tornado")] });
+  const named = { [t.turnId]: [{ titleId: C, name: "The 47" }, { titleId: D, name: "47 Ronin" }, { titleId: A, name: "Blade of the 47 Ronin" }] };
+  const r = evaluateTurn({ expect: {} }, t, 0, [t], facts({ named }));
+  assert.equal(r.groundingViolations, 0, r.groundingDetail.join("; "));
+  // Vary the fixture: the reply ALSO names 47 Ronin on its own. That stand-alone mention is a violation.
+  const both = { ...t, reply: `${reply} 47 Ronin is another option.` };
+  const r2 = evaluateTurn({ expect: {} }, both, 0, [both], facts({ named }));
+  assert.deepEqual(r2.groundingDetail, ["reply names 47 Ronin, not on screen"]);
+  // Vary the fixture: Blade of the 47 Ronin not on screen. The longest name is the one cited, once.
+  const bare = { ...t, belowFloor: [card(B, "Tornado")] };
+  const r3 = evaluateTurn({ expect: {} }, bare, 0, [bare], facts({ named }));
+  assert.deepEqual(r3.groundingDetail, ["reply names Blade of the 47 Ronin, not on screen"]);
+  // A name that only begins a longer word is not that title: "The Keyboard Man" does not name The Key.
+  const word = turn("films", [card(A, "Alpha")], { reply: "The Keyboard Man is not in the catalogue, but Alpha is." });
+  assert.equal(evaluateTurn({ expect: {} }, word, 0, [word], facts({ named: { [word.turnId]: [{ titleId: D, name: "The Key" }] } })).groundingViolations, 0);
+  // A typographic apostrophe in the reply still names the catalogue title with a straight one.
+  const curly = turn("films", [card(A, "Alpha")], { reply: "Try Ocean’s Eleven instead." });
+  assert.equal(evaluateTurn({ expect: {} }, curly, 0, [curly], facts({ named: { [curly.turnId]: [{ titleId: D, name: "Ocean's Eleven" }] } })).groundingViolations, 1);
+});
+
 test("gates: latency is gated only at concurrency ≤ 2 with every build slot held", () => {
   const rec = (concurrency, buildSlotsHeld) => ({ label: "x", concurrency, buildSlotsHeld, ledger: [], scenarios: [{ id: "s", categories: ["facet"], turns: [turn("q", [card(A, "Alpha")], { totalMs: 60000, firstCardMs: 20000 })] }], facts: facts() });
   const scenarios = [{ id: "s", categories: ["facet"], turns: [{ query: "q", expect: {} }] }];

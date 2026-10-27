@@ -109,6 +109,51 @@ function referencedTitles(turn, earlierTurns) {
   return null;
 }
 
+// Case-preserving fold for finding a title's name in a reply: typographic quotes to straight ones, and
+// runs of whitespace to one space, so "Ocean’s Eleven" names Ocean's Eleven.
+const fold = (s) => (s ?? "").normalize("NFKC").replace(/[‘’`]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim();
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+// Every [start, end) where `name` occurs in `text` as a whole name: not inside a longer word ("The Key" is
+// not in "The Keyboard Man").
+function nameSpans(text, name) {
+  const spans = [];
+  if (!name) return spans;
+  for (let i = text.indexOf(name); i !== -1; i = text.indexOf(name, i + 1)) {
+    const before = i > 0 ? text[i - 1] : "";
+    const after = text[i + name.length] ?? "";
+    if (!WORD_CHAR.test(before) && !WORD_CHAR.test(after)) spans.push([i, i + name.length]);
+  }
+  return spans;
+}
+
+// Catalogue titles a reply names that were not on screen this turn or earlier (HREV1-ASK-04, HREV1-RET-03).
+// A name counts as grounded when ANY card shown so far carries that normalised name: the reply cannot say
+// which of two equal names it meant (Joy Ride 2001 shown, Joy Ride 2023 not). A name counts as cited only
+// as a whole name, with its own capitalisation, and only where no longer cited name covers that mention —
+// "Blade of the 47 Ronin" cites that film, not 47 Ronin. A name of common words alone is prose: "the other
+// one" and "in and out" are not the films The Other and In and Out. One name counts once.
+function namedOffScreen(t, index, scenarioTurns, candidates) {
+  const reply = fold(t.reply);
+  if (!reply || candidates.length === 0) return [];
+  const shownSoFar = scenarioTurns.slice(0, index + 1).flatMap((x) => [...(x.cards ?? []), ...(x.belowFloor ?? []), ...(x.nearMiss ?? []), ...(x.unchecked ?? [])]);
+  const shownIds = new Set(shownSoFar.map((c) => c.titleId));
+  const shownNames = new Set(shownSoFar.map((c) => norm(c.name)).filter(Boolean));
+  const userText = norm(scenarioTurns.slice(0, index + 1).map((x) => x.query).join(" "));
+  const names = [...new Set([...candidates.map((n) => fold(n.name)), ...shownSoFar.map((c) => fold(c.name))].filter(Boolean))];
+  const spans = new Map(names.map((n) => [n, nameSpans(reply, n)]));
+  const covered = (name, [s, e]) => names.some((o) => o.length > name.length && spans.get(o).some(([s2, e2]) => s2 <= s && e <= e2));
+  const cited = (name) => spans.get(name).some((span) => !covered(name, span));
+  const counted = new Set();
+  return candidates.filter((n) => {
+    const key = norm(n.name);
+    if (!key || counted.has(key) || shownIds.has(n.titleId) || shownNames.has(key) || userText.includes(key)) return false;
+    if (n.name.toLowerCase().split(/\s+/).every((w) => COMMON_WORDS.has(w.replace(/[^\p{L}]/gu, "")))) return false;
+    if (!cited(fold(n.name))) return false;
+    counted.add(key);
+    return true;
+  });
+}
+
 // opts.actObservable: the engine emits an act (v2). v1 emits none, so act is "no data" for v1 rather
 // than a property of turn position. opts.turnCapMs: what a failed or unrun turn costs in latency.
 export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
@@ -206,12 +251,7 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
 
   // Grounding: invented explanations shown as model output, and replies naming titles not on screen.
   const stubWhys = picks.filter((c) => c.why && STUB_WHY.test(c.why.trim()));
-  const earlierCards = new Set(scenarioTurns.slice(0, index + 1).flatMap((x) => [...(x.cards ?? []), ...(x.belowFloor ?? []), ...(x.nearMiss ?? []), ...(x.unchecked ?? [])].map((c) => c.titleId)));
-  const userText = norm(scenarioTurns.slice(0, index + 1).map((x) => x.query).join(" "));
-  // A title counts as named only when it appears with its own capitalisation and is not made of common
-  // words alone — "the other one" and "in and out" are prose, not the films The Other and In and Out.
-  const namedOff = (facts.named?.[t.turnId] ?? []).filter((n) => !earlierCards.has(n.titleId) && !userText.includes(norm(n.name))
-    && (t.reply ?? "").includes(n.name) && !n.name.toLowerCase().split(/\s+/).every((w) => COMMON_WORDS.has(w.replace(/[^\p{L}]/gu, ""))));
+  const namedOff = namedOffScreen(t, index, scenarioTurns, facts.named?.[t.turnId] ?? []);
   r.groundingViolations = stubWhys.length + namedOff.length;
   r.groundingDetail = [...stubWhys.map((c) => `stub why on ${c.name}`), ...namedOff.map((n) => `reply names ${n.name}, not on screen`)];
   r.hedgingWhys = picks.filter((c) => c.why && HEDGE_WHY.test(c.why)).map((c) => `${c.name}: ${c.why}`);
