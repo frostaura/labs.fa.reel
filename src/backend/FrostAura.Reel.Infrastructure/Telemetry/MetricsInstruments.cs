@@ -84,6 +84,21 @@ public sealed class ReelMetrics : IDisposable
             .GroupBy(f => f.Kind)
             .ToDictionary(g => g.Key, g => g.Count());
 
+    /// <summary>The earliest failed attempt at or after <paramref name="since"/> in this process's memory, or null.</summary>
+    public DateTime? EarliestFailedAttemptSince(DateTime since)
+    {
+        DateTime? earliest = null;
+        foreach (var (at, _) in _recentFailures)
+        {
+            if (at >= since && (earliest is null || at < earliest))
+            {
+                earliest = at;
+            }
+        }
+
+        return earliest;
+    }
+
     /// <summary>Records a failed attempt at a given time. Internal for tests that need a past attempt.</summary>
     internal void RememberFailure(DateTime at, JobKind kind)
     {

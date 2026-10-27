@@ -145,7 +145,7 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         var metrics = new ReelMetrics();
         await using var services = Services(new SwitchableProviderHealthReader(), sink, metrics);
         var monitor = services.GetRequiredService<OperatorAlertMonitor>();
-        var now = DateTime.UtcNow;
+        var now = WholeSecond(DateTime.UtcNow);
 
         // Three terminal failures this hour, one last hour (outside the window).
         await AddFailedAsync(JobKind.CrossReference, now.AddMinutes(-50));
@@ -169,6 +169,63 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         Assert.Equal(
             [(JobKind.CrossReference, 2), (JobKind.DeltaSync, 2), (JobKind.EnrichCatalog, 1)],
             alert.Kinds!.Select(k => (k.Kind, k.Count)).ToArray());
+        // Since is when the failures in the window began (the earliest one), not the window's start.
+        Assert.Equal(now.AddMinutes(-50), alert.Since);
+    }
+
+    [Fact]
+    public async Task Job_failures_since_is_the_earliest_attempt_in_memory_when_it_precedes_every_terminal_failure()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var sink = new RecordingSink();
+        var metrics = new ReelMetrics();
+        await using var services = Services(new SwitchableProviderHealthReader(), sink, metrics);
+        var now = WholeSecond(DateTime.UtcNow);
+
+        // A retried attempt 40 minutes ago that the database does not show; the terminal failures came later.
+        metrics.RememberFailure(now.AddMinutes(-40), JobKind.DeltaSync);
+        metrics.RememberFailure(now.AddMinutes(-90), JobKind.DeltaSync); // outside the window
+        await AddFailedAsync(JobKind.EnrichCatalog, now.AddMinutes(-30));
+        await AddFailedAsync(JobKind.EnrichCatalog, now.AddMinutes(-25));
+        await AddFailedAsync(JobKind.CrossReference, now.AddMinutes(-15));
+        await AddFailedAsync(JobKind.CrossReference, now.AddMinutes(-2));
+
+        await services.GetRequiredService<OperatorAlertMonitor>().EvaluateAsync(now, CancellationToken.None);
+
+        var (alert, _) = Assert.Single(sink.Deliveries);
+        Assert.Equal(5, alert.Count);
+        Assert.Equal(now.AddMinutes(-40), alert.Since);
+    }
+
+    [Fact]
+    public async Task After_a_restart_job_failures_since_is_the_earliest_terminal_failure_not_an_hour_before_the_restart()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var sink = new RecordingSink();
+        // A fresh process: no attempt memory, only the database's terminal failures.
+        await using var services = Services(new SwitchableProviderHealthReader(), sink, new ReelMetrics());
+        var now = WholeSecond(DateTime.UtcNow);
+        for (var minutesAgo = 33; minutesAgo > 0; minutesAgo -= 6)
+        {
+            await AddFailedAsync(JobKind.EnrichCatalog, now.AddMinutes(-minutesAgo));
+        }
+
+        await AddFailedAsync(JobKind.EnrichCatalog, now.AddMinutes(-61)); // outside the window
+
+        await services.GetRequiredService<OperatorAlertMonitor>().EvaluateAsync(now, CancellationToken.None);
+
+        var (alert, _) = Assert.Single(sink.Deliveries);
+        Assert.Equal(6, alert.Count);
+        Assert.Equal(now.AddMinutes(-33), alert.Since);
+        Assert.Equal(now.AddMinutes(-33), Assert.Single(services.GetRequiredService<OperatorAlertMonitor>().Current()).Since);
     }
 
     [Fact]
@@ -263,6 +320,9 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
             metrics));
         return services.BuildServiceProvider(validateScopes: true);
     }
+
+    /// <summary>Postgres keeps microseconds; a whole-second clock lets a stored time compare exactly.</summary>
+    private static DateTime WholeSecond(DateTime at) => new(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
 
     private static ProviderHealthSnapshot Down(string reason, DateTime since) =>
         new(ProviderHealthState.Down, since, [
