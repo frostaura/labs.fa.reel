@@ -335,6 +335,10 @@ test.describe("title detail states", () => {
     await mockJson(page, "**/api/titles/movie/1001/providers", {
       region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/1001/watch", providers: [],
     });
+    // The recovered page reads the lens too; answered "none" like bootTitle does, never the dev server.
+    await mockJson(page, "**/api/titles/movie/1001/lens", {
+      source: "none", lens: null, hook: null, caution: null, anchors: [], mood: null, whenToWatch: null, generatedAt: null,
+    });
     let calls = 0;
     await page.route(
       (u) => u.pathname === "/api/titles/movie/1001",
