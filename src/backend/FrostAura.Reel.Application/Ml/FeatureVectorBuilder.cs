@@ -144,8 +144,17 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var titleRatings = await db.UserRatings
             .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
                 && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
-            .Select(r => new { r.TitleId, r.Rating, r.RatedAt })
+            .Select(r => new { r.TitleId, r.Rating, r.RatedAt, Rolled = false })
             .ToListAsync(ct);
+
+        // A show rated only season by season or episode by episode joins the pools at its rolled-up
+        // show-level rating (task 12, N-8): genre, decade, person and contrarian affinities and the
+        // media share read it; the loved anchors below do not (an anchor is a title rated whole).
+        var wholeRated = titleRatings.Select(r => r.TitleId).ToHashSet();
+        var explicitMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
+        titleRatings.AddRange(ShowRatingRollup
+            .Roll(await ShowRatingRollup.PartsAsync(db, accountId, asOf, ct), wholeRated, explicitMean)
+            .Select(r => new { r.TitleId, r.Rating, r.RatedAt, Rolled = true }));
 
         var ratedTitleIds = titleRatings.Select(r => r.TitleId).Distinct().ToList();
         var ratedTitles = await db.Titles
@@ -262,7 +271,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
         // Loved set for embedding similarity features (centroids tolerate missing embeddings).
         var topLoved = titleRatings
-            .Where(r => r.Rating >= LovedThreshold)
+            .Where(r => r.Rating >= LovedThreshold && !r.Rolled)
             .OrderByDescending(r => r.Rating)
             .ThenByDescending(r => r.RatedAt)
             .Select(r => r.TitleId)
@@ -276,7 +285,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // ordering lets a recently-loved 8 outrank a decade-old 10, and it is deterministic (a pure
         // function of the ratings and asOf), so a build is reproducible from its own timestamp.
         var lovedAnchorPool = titleRatings
-            .Where(r => r.Rating >= LovedThreshold)
+            .Where(r => r.Rating >= LovedThreshold && !r.Rolled)
             .GroupBy(r => r.TitleId)
             .Select(g => g.OrderByDescending(r => r.Rating).ThenByDescending(r => r.RatedAt).First())
             .OrderByDescending(r => r.Rating * TasteMath.RecencyWeight(r.RatedAt, asOf))

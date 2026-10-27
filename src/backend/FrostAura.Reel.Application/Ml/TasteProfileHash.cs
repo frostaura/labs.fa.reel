@@ -41,6 +41,10 @@ public sealed record TasteFingerprint(string Components, string Hash);
 /// only affordable because the generated prose never states the predicted rating — the number is
 /// rendered from the score at serve time, beside the copy, not inside it.</para>
 ///
+/// <para><b>And the crowd stance</b> (<see cref="ContrarianFact.Stance"/>): the narrative states
+/// which side of the ±0.3 band the reader sits on, so crossing it must re-key the copy even when the
+/// coarse contrarian component has not moved (WS-1 CR-3).</para>
+///
 /// <para><b>What IS in it that an obvious version of this would miss:</b> the dislike-centroid
 /// version. The lens's honest-reservation line is grounded in the account's declined titles, so a
 /// note written before a dismissal must not survive it — otherwise the product tells you that you
@@ -102,6 +106,12 @@ public static class TasteProfileHash
         }
 
         components.Add(("c", Band("c", contrarian.Overall, ContrarianStep, previous)));
+
+        // The crowd stance, unquantised: the narrative states it ("with the crowd", "harsher than
+        // the crowd") and Taste DNA prints it beside the text, so crossing ContrarianFact.Band is a
+        // change in what the copy says even when the 0.5 hysteresis above holds (-0.35 -> -0.2
+        // stays "c=-0.5"). No hysteresis here on purpose: the copy must match the tile it sits by.
+        components.Add(("cs", contrarian.Stance().ToString()));
         foreach (var offset in contrarian.ByGenre.OrderBy(o => o.Genre, StringComparer.Ordinal))
         {
             components.Add(($"c:{offset.Genre}", Band($"c:{offset.Genre}", offset.Offset, ContrarianStep, previous)));

@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Sync;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
@@ -78,7 +79,7 @@ public sealed class NightlyReconcileService(
 
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = CreateSystemScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 var managedList = scope.ServiceProvider.GetRequiredService<ManagedListReconciler>();
                 // The gate is shared with DeltaSyncJobHandler's post-sync message on purpose: the
@@ -265,7 +266,7 @@ public sealed class NightlyReconcileService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             var findings = await UntrustedSnapshotSweep.FindAsync(db, ct);
             if (findings.Count == 0)
@@ -309,7 +310,7 @@ public sealed class NightlyReconcileService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
 
             // IgnoreQueryFilters — the mismatched rows are exactly the ones the filter hides.
@@ -391,7 +392,7 @@ public sealed class NightlyReconcileService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             var extractor = scope.ServiceProvider.GetRequiredService<ITitleAttributeExtractor>();
             var cap = EnrichCatalogJobHandler.MaxTitlesPerRun(configuration);
@@ -456,7 +457,7 @@ public sealed class NightlyReconcileService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             var pruned = await SearchConversationRetention.SweepAsync(db, configuration, DateTime.UtcNow, ct);
             if (pruned > 0)
@@ -470,6 +471,19 @@ public sealed class NightlyReconcileService(
         {
             logger.LogError(ex, "Ask Reel conversation retention failed; the next nightly pass retries it.");
         }
+    }
+
+    /// <summary>
+    /// A DI scope in system scope (J-11, WS-5 task 15). Every pass here sweeps every account on
+    /// purpose — the active-connection list, the per-account enqueues, the artifact and snapshot
+    /// sweeps — so it says so rather than relying on unscoped reads staying permitted. The handle
+    /// ends with the scope, because the scope owns the account context it was opened on.
+    /// </summary>
+    private IServiceScope CreateSystemScope()
+    {
+        var scope = scopeFactory.CreateScope();
+        scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
+        return scope;
     }
 
     private static async Task<bool> SaveToleratingUniqueRaceAsync(ReelDbContext db, CancellationToken ct)

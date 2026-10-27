@@ -81,8 +81,10 @@ public class FeedCrowdRefillTests(PostgresFixture fixture, ReelApiFactory api) :
 
             // The pool the refill reads, every prediction set against its crowd: by prediction alone
             // the disliked title leads and the well-voted, liked one is last; by the build's key
-            // (prediction × the crowd term) the order is exactly reversed. The two-vote 10.0 and the
-            // no-crowd title share a prediction, so only the shrunk crowd can separate them.
+            // (prediction × the crowd's score and volume terms) the liked one leads, the disliked one
+            // follows it on its 5,000 votes, and the two-vote 10.0 and the no-crowd title — a tie on
+            // prediction — fall behind both on the little that stands behind them, the shrunk score
+            // alone separating the two.
             (Title Title, decimal Predicted) Candidate(string name, decimal? rating, int votes, decimal predicted) =>
                 (NewTitle(name, rating, votes), predicted);
             var pool = new[]
@@ -106,9 +108,10 @@ public class FeedCrowdRefillTests(PostgresFixture fixture, ReelApiFactory api) :
                 });
             }
 
-            // The fixture holds, checked rather than assumed: the crowd term reverses the model.
+            // The fixture holds, checked rather than assumed: well-voted-liked, then well-voted-disliked,
+            // then the two-vote 10.0, then no crowd.
             var keys = pool.Select(c => (double)c.Predicted * CrowdPrior.FactorFor(c.Title)).ToList();
-            Assert.True(keys[0] > keys[1] && keys[1] > keys[2] && keys[2] > keys[3], string.Join(", ", keys));
+            Assert.True(keys[0] > keys[3] && keys[3] > keys[1] && keys[1] > keys[2], string.Join(", ", keys));
 
             await db.SaveChangesAsync();
             kept = heroTitles[2].Id;
@@ -122,15 +125,15 @@ public class FeedCrowdRefillTests(PostgresFixture fixture, ReelApiFactory api) :
         var served = hero.Select(c => c.GetProperty("titleId").GetGuid()).ToList();
 
         // The kept card holds its seat, and the two refilled seats go to the crowd term's top two in
-        // its order — not to the two highest predictions (the disliked title and a tie behind it).
-        Assert.Equal([kept, wellVoted, fewVotes], served);
-        Assert.DoesNotContain(disliked, served);
+        // its order — not to the two highest predictions in theirs (the disliked title, then a tie).
+        Assert.Equal([kept, wellVoted, disliked], served);
+        Assert.DoesNotContain(fewVotes, served);
         Assert.DoesNotContain(noCrowd, served);
 
         // The refill reorders and never rewrites: each card shows its persisted prediction.
         var shown = hero.ToDictionary(c => c.GetProperty("titleId").GetGuid(), c => c.GetProperty("predictedRating").GetDecimal());
         Assert.Equal(7.00m, shown[wellVoted]);
-        Assert.Equal(7.10m, shown[fewVotes]);
+        Assert.Equal(7.30m, shown[disliked]);
     }
 
     private static Title NewTitle(string name, decimal? tmdbRating, int tmdbVotes) => new()

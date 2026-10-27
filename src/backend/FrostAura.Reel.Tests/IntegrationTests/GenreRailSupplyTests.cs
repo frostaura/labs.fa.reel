@@ -31,11 +31,14 @@ public class GenreRailSupplyTests(PostgresFixture fixture)
         await SeedTitleAsync(genre, "en", 2012, seenBy: accountId);  // already seen
         await SeedTitleAsync(genre, "en", 1985);                     // held out by the year condition
         await SeedTitleAsync(genre, "en", 1979);                     // held out by the year condition
+        // Named after the genre but not OF it: the rail's genre is the slug, never a word in a title's
+        // name (WS-3 CR-6), so this is no part of the rail's supply.
+        await SeedTitleAsync($"{genre}x", "en", 1981, name: $"{genre} 1981");
         await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
 
         await using var db = Context(accountId);
         var supply = await FeedEndpoints.GenreRailSupplyAsync(
-            db, new SupplyReporter(db, new EligibilityQueryBuilder(db)), accountId, genre, mediaType: null, CancellationToken.None);
+            db, new SupplyReporter(db, new EligibilityQueryBuilder(db)), accountId, genre, mediaType: null, shown: [], CancellationToken.None);
 
         Assert.NotNull(supply);
         Assert.Equal(2, supply!.HiddenByConditions);
@@ -57,7 +60,7 @@ public class GenreRailSupplyTests(PostgresFixture fixture)
 
         await using var db = Context(accountId);
         Assert.Null(await FeedEndpoints.GenreRailSupplyAsync(
-            db, new SupplyReporter(db, new EligibilityQueryBuilder(db)), accountId, genre, mediaType: null, CancellationToken.None));
+            db, new SupplyReporter(db, new EligibilityQueryBuilder(db)), accountId, genre, mediaType: null, shown: [], CancellationToken.None));
     }
 
     private Infrastructure.Persistence.ReelDbContext Context(Guid accountId)
@@ -90,7 +93,7 @@ public class GenreRailSupplyTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedTitleAsync(string genre, string language, int year, Guid? seenBy = null)
+    private async Task SeedTitleAsync(string genre, string language, int year, Guid? seenBy = null, string? name = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -99,7 +102,7 @@ public class GenreRailSupplyTests(PostgresFixture fixture)
             MediaType = MediaType.Movie,
             TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = string.Empty,
-            Name = $"{genre} {year}",
+            Name = name ?? $"{genre} {year}",
             Language = language,
             PosterPath = "/p.jpg",
             Genres = [genre],

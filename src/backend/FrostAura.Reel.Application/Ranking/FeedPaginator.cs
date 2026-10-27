@@ -111,7 +111,8 @@ public sealed class FeedPaginator(
     CrossReference.RerankBudget rerankBudget,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger,
-    IServiceScopeFactory? scopeFactory = null)
+    IServiceScopeFactory? scopeFactory = null,
+    Search.Retrieval.KeywordNeighbours? keywordNeighbours = null)
 {
     /// <summary>
     /// Pages whose cold curation pass is running off the request right now, keyed by account and
@@ -548,9 +549,10 @@ public sealed class FeedPaginator(
         // row says Fallback (attempted, failed) rather than Templater (never asked) for those.
         var attempted = new HashSet<Guid>();
         var uncached = new List<RerankInput>();
+        var fitSalt = agent.CacheSalt(ApiUsagePurpose.RerankPage);
         foreach (var s in pool)
         {
-            if (cache.TryGetValue<RerankResult>(FitKey(account.Id, s.Title.Id, rowKey), out var hit)
+            if (cache.TryGetValue<RerankResult>(FitKey(fitSalt, account.Id, s.Title.Id, rowKey), out var hit)
                 && hit is { FitSource: ResultSource.Llm })
             {
                 fitById[s.Title.Id] = hit;
@@ -643,7 +645,7 @@ public sealed class FeedPaginator(
                         }
 
                         fitById[r.TitleId] = r;
-                        cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
+                        cache.Set(FitKey(fitSalt, account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
                 });
 
@@ -717,13 +719,14 @@ public sealed class FeedPaginator(
                 }
 
                 var cached = 0;
+                var fitSalt = scopedAgent.CacheSalt(ApiUsagePurpose.RerankPage);
                 await loop.RunAsync(inputs, async (batch, batchCt) =>
                 {
                     var results = await scopedAgent.RerankBatchAsync(
                         batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
                     foreach (var r in results.Where(r => r.FitSource == ResultSource.Llm))
                     {
-                        cache.Set(FitKey(accountId, r.TitleId, rowKey), r, FitTtl);
+                        cache.Set(FitKey(fitSalt, accountId, r.TitleId, rowKey), r, FitTtl);
                         cached++;
                     }
                 });
@@ -741,6 +744,30 @@ public sealed class FeedPaginator(
                 CurationInFlight.TryRemove(key, out _);
             }
         });
+    }
+
+    /// <summary>
+    /// The Similar keyword arm through <see cref="Search.Retrieval.KeywordNeighbours"/>: the anchor's
+    /// most specific eligible neighbours by shared keyword and theme, best first, narrowed to the rail's
+    /// lane (medium, renderable card, page exclusions) and the maturity ceiling.
+    /// </summary>
+    private async Task<IReadOnlyList<Title>> KeywordNeighbourWindowAsync(
+        Account account, Guid anchorId, Func<IQueryable<Title>, IQueryable<Title>> lane,
+        IReadOnlyCollection<Guid> exclude, CancellationToken ct)
+    {
+        var neighbours = await keywordNeighbours!.ForAsync(account.Id, anchorId, KeywordArmCount * 2, exclude, ct);
+        if (neighbours.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = neighbours.Select(n => n.TitleId).ToList();
+        var titles = await lane(db.Titles.Where(t => ids.Contains(t.Id))).ToListAsync(ct);
+        var rank = ids.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
+        return [.. titles
+            .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
+            .OrderBy(t => rank[t.Id])
+            .Take(KeywordArmCount)];
     }
 
     private static List<Scored> WithoutExcluded(IReadOnlyList<Scored> window, IReadOnlyCollection<Guid> excluded)
@@ -806,7 +833,23 @@ public sealed class FeedPaginator(
         _ => "titles personalised to your taste",
     };
 
-    internal static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
+    /// <summary>
+    /// The key one feed fit verdict is cached under, built by <see cref="RerankCacheKey.For"/> like
+    /// every other re-rank cache (WS-1 CR-3): <paramref name="salt"/> is the agent's
+    /// <see cref="ISearchAgent.CacheSalt"/> for the purpose that wrote the verdict, so a verdict from
+    /// another model, effort, prompt or result format misses instead of serving. The build
+    /// (<c>RerankFeed</c>) and this paginator (<c>RerankPage</c>) still share an entry exactly when
+    /// their salts agree, which they do while both purposes run the same model, effort and prompt.
+    /// <para>The candidate set is <see cref="PooledVerdict"/> on purpose: a feed verdict is one per
+    /// (row, title), pooled across the batches it was judged in (the build caches the position-debiased
+    /// mean), and the lookup happens before any batch exists. Keying it on one batch would make every
+    /// later page a miss and re-spend the family ceiling for the same judgement.</para>
+    /// </summary>
+    internal static string FitKey(string salt, Guid accountId, Guid titleId, string rowKey) =>
+        RerankCacheKey.For("feedfit", salt, accountId, titleId, rowKey, PooledVerdict);
+
+    /// <summary>The candidate set a pooled feed verdict is keyed on: none, because it is not one batch's.</summary>
+    private static readonly Guid[] PooledVerdict = [];
 
     /// <summary>The active browse-filter medium as an enum, or null for "all". Anything unrecognised
     /// (including "all") maps to null so the window and deepen stay both-media.</summary>
@@ -954,14 +997,18 @@ public sealed class FeedPaginator(
                     count: WindowPopCount + WindowAnnCount,
                     account.Settings.MaturityCeiling, budget.Token));
 
-                // The keyword arm: titles sharing a distinctive keyword with the anchor, nearest
-                // first — the ones the evidence gate can actually admit — offered beside the plot
-                // neighbourhood rather than only when it happens to contain them.
-                var keywords = anchor.Keywords.Where(AnchorRowGate.IsDistinctiveKeyword).ToList();
+                // The keyword arm: titles sharing specific evidence with the anchor — the ones the
+                // evidence gate can actually admit — offered beside the plot neighbourhood rather
+                // than only when it happens to contain them. WS-3's KeywordNeighbours seeds it (WS-3
+                // CR-6): keywords AND themes, scored by how specific the shared label is, so two
+                // films sharing "heist" and "safecracker" lead two sharing "based on novel or book".
+                // Without it (a test-built paginator), the distinctive-keyword ANN arm.
                 var seen = window.Select(t => t.Id).ToHashSet();
-                window.AddRange((await candidateRetriever.RetrieveSharingKeywordsAsync(
-                        account.Id, anchorEmbedding, keywords, lane, KeywordArmCount,
-                        account.Settings.MaturityCeiling, budget.Token))
+                window.AddRange((keywordNeighbours is not null
+                        ? await KeywordNeighbourWindowAsync(account, anchorId, lane, exclude, budget.Token)
+                        : await candidateRetriever.RetrieveSharingKeywordsAsync(
+                            account.Id, anchorEmbedding, anchor.Keywords.Where(AnchorRowGate.IsDistinctiveKeyword).ToList(),
+                            lane, KeywordArmCount, account.Settings.MaturityCeiling, budget.Token))
                     .Where(t => seen.Add(t.Id)));
             }
             catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)

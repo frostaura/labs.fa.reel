@@ -98,13 +98,20 @@ public static class FeedEndpoints
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, CrossReferenceFactors crossReference, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, CrossReferenceFactors crossReference, LensService lens, TasteFactsBuilder tasteFacts, RatingCalibrationService calibration, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
             {
                 return Results.Unauthorized();
             }
+
+            // The measured band behind every "for you" number on the page (FD-4 default): what a
+            // displayed prediction has typically been off by against the ratings this account went on
+            // to give — the same calibrator, and so the same "± 1.1", the Saved queue shows. Null until
+            // the closed loop has pairs: an unmeasured band is not a band.
+            var calibrator = await calibration.GetAsync(account.Id, ct);
+            double? expectedAbsoluteError = calibrator.PairCount == 0 ? null : Math.Round(calibrator.ExpectedAbsoluteError, 1);
 
             var snapshot = await db.FeedSnapshots
                 .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
@@ -117,6 +124,7 @@ public static class FeedEndpoints
                     hero = Array.Empty<object>(),
                     rows = Array.Empty<object>(),
                     degradedReason = (string?)null,
+                    expectedAbsoluteError,
                 });
             }
 
@@ -142,6 +150,41 @@ public static class FeedEndpoints
             // smallest footprint that still captures every refilled card.
             var refilled = new List<ExposureCard>();
             var excludedTitleIds = await eligibility.InteractedTitleIdsAsync(account.Id, snapshotTitleIds, ct);
+
+            // The same holds for a content rule or a "for you" bar saved after the build (XM-03,
+            // XM-07): the snapshot was dealt under yesterday's rules, and "airtight on every channel"
+            // includes the minutes before the rebuild the save queued. Rules and the maturity ceiling
+            // are read from EligibilityQueryBuilder like the footprint; the bar is the build's own raw
+            // comparison (ForYouBar.Clears), so a card the build would not deal now is not served.
+            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
+                .Select(f => f.Value)
+                .FirstOrDefaultAsync(ct));
+            var forYouBar = minPredicted ?? 0m;
+            var allowedByRules = (await eligibility.ContentFilteredTitles(account.Id)
+                    .Where(t => snapshotTitleIds.Contains(t.Id))
+                    .Select(t => t.Id)
+                    .ToListAsync(ct))
+                .ToHashSet();
+            var ruledOut = items
+                .Where(x => !allowedByRules.Contains(x.Title.Id)
+                    || !EligibilityQueryBuilder.PassesMaturity(x.Title, account.Settings.MaturityCeiling))
+                .Select(x => x.Title.Id)
+                .ToHashSet();
+            var underBar = items
+                .Where(x => !ruledOut.Contains(x.Title.Id) && !ForYouBar.Clears(x.Item.PredictedRating, forYouBar))
+                .Select(x => x.Title.Id)
+                .ToHashSet();
+            excludedTitleIds = [.. excludedTitleIds, .. ruledOut, .. underBar];
+
+            // A reason written while the bar still relaxed describes cards this read no longer serves.
+            var degradedReason = ForYouBar.IsRetiredRelaxation(snapshot.DegradedReason) ? null : snapshot.DegradedReason;
+            if (underBar.Count > 0)
+            {
+                var heldBack = ForYouBar.HeldBackOnRead(forYouBar, underBar.Count);
+                degradedReason = degradedReason is null ? heldBack : $"{degradedReason} {heldBack}";
+            }
+
             if (excludedTitleIds.Count > 0)
             {
                 // Rows shrink when a since-interacted title is dropped, leaving gaps until the next
@@ -173,6 +216,7 @@ public static class FeedEndpoints
                         where s.AccountId == account.Id && s.ModelArtifactId == snapshot.ModelArtifactId
                             && t.TmdbId != null && t.PosterPath != null
                             && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
+                            && (forYouBar <= 0m || s.PredictedRating >= forYouBar)
                         orderby s.PredictedRating descending
                         select new { s.PredictedRating, s.ContributionsJson, Title = t })
                         .Take((needed * 6) + 20)
@@ -341,12 +385,9 @@ public static class FeedEndpoints
                         .Take(3).Select(x => new CardProvider(x.Name, x.LogoPath)).ToList());
 
             // The bar the build required of the hero, re-derived here from the same shared constant.
-            // The build relaxes it silently when nothing clears it — on live data that is the normal
-            // case, not an edge — so the card has to be able to say which side of it a pick sits on.
-            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
-                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
-                .Select(f => f.Value)
-                .FirstOrDefaultAsync(ct));
+            // The never-blank backfill reaches below it when nothing clears it — on live data that is
+            // the normal case, not an edge — so the card has to be able to say which side of it a
+            // pick sits on.
             var heroBar = HeroConfidence.BarFor(minPredicted);
 
             // Lens copy for the whole page in one query. READ ONLY — this path never generates:
@@ -461,7 +502,8 @@ public static class FeedEndpoints
                     lockedRowCount,
                     // Why this build is not literally what the settings asked for (null when it is).
                     // A blank feed must always arrive with the reason attached.
-                    snapshot.DegradedReason,
+                    degradedReason,
+                    expectedAbsoluteError,
                 });
             }
 
@@ -512,7 +554,8 @@ public static class FeedEndpoints
                 hero,
                 rows,
                 lockedRowCount = 0,
-                snapshot.DegradedReason,
+                degradedReason,
+                expectedAbsoluteError,
             });
         });
 
@@ -774,7 +817,7 @@ public static class FeedEndpoints
             // eligibility builder that serves the titles — and only when the rail is short.
             var railIsShort = cards.Count < limit;
             var railSupply = railIsShort && context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(body.Genre)
-                ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, ct)
+                ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, [.. cards.Select(c => c.TitleId)], ct)
                 : null;
             return Results.Ok(new { items = cards, exhausted = cards.Count == 0, supply = railSupply });
         });
@@ -850,7 +893,8 @@ public static class FeedEndpoints
     /// so the number would overstate what the conditions hide on this rail.
     /// </summary>
     internal static async Task<RailSupply?> GenreRailSupplyAsync(
-        IReelDbContext db, ISupplyReporter supply, Guid accountId, string genre, string? mediaType, CancellationToken ct)
+        IReelDbContext db, ISupplyReporter supply, Guid accountId, string genre, string? mediaType,
+        IReadOnlyCollection<Guid> shown, CancellationToken ct)
     {
         var waivesIncludeGenre = await db.ContentFilters
             .AnyAsync(f => f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre, ct);
@@ -865,8 +909,10 @@ public static class FeedEndpoints
             "show" => MediaScope.Shows,
             _ => MediaScope.Any,
         };
-        var report = await supply.ReportAsync(
-            accountId, new HardConstraints([new ConceptTerm(genre, [], [genre])], [], null, null, media), ct);
+        // WS-3's rail form (CR-6): the genre as the slug alone — its aliases, the anime composite and
+        // the TV stand-ins, never a title whose NAME contains the word — with the rail's own cards
+        // counted as shown rather than as supply still to come.
+        var report = await supply.ForGenreRailAsync(accountId, genre, media, shown, ct);
         return new RailSupply(report.ExcludedByConditions, report.AlreadySeen, report.ClearingFloor);
     }
 
