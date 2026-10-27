@@ -201,6 +201,51 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Contains(events, e => e.Event == "phase" && e.Data.ToString().Contains("Reading your conditions", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// R1-30, through the engine: a planner that names NO handle for "more like the second one" (what
+    /// the live planner did five times in six) still searches near the newest answer's second card —
+    /// the plan frame names T1.2, the state carries that title as the reference, and it is not shown
+    /// again. Varied: "the last one" lands on the newest answer's last card.
+    /// </summary>
+    [Theory]
+    [InlineData("more like the second one", 1)]
+    [InlineData("more like the last one", 2)]
+    public async Task A_pointer_the_planner_left_unresolved_still_searches_near_the_card_it_names(string message, int index)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 6));
+        var presented = ids.Take(3).Select((id, i) => new PresentedCard(1, i + 1, id, $"V2 Yes {i}", 2010, MediaType.Movie)).ToList();
+        var conversationId = await SeedConversationAsync(
+            accountId,
+            ConversationState.Empty with
+            {
+                Version = 1,
+                Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])] },
+            });
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.Refine));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(
+            Input(message) with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = ids.Take(3).ToList() },
+            accountId, emit, CancellationToken.None);
+
+        var expected = presented[index];
+        var plan = Assert.Single(events, e => e.Event == "plan").Data;
+        Assert.Equal([$"T1.{index + 1}"], plan.GetProperty("references").EnumerateArray().Select(r => r.GetString()));
+        var state = ConversationStateJson.Read(outcome.ConversationStateJson);
+        Assert.NotNull(state);
+        Assert.Contains(expected.TitleId, state.Soft.ReferenceTitleIds);
+        Assert.DoesNotContain(
+            events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray()),
+            c => c.GetProperty("titleId").GetGuid() == expected.TitleId);
+    }
+
     /// <summary>Task 4: "how many X are left?" is the supply tool — counts only, no cards, no judge.</summary>
     [Fact]
     public async Task A_how_many_question_is_answered_from_the_supply_with_no_cards()

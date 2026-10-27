@@ -147,6 +147,40 @@ public class AskReelV2UnitTests
         Assert.Equal(["heist"], clean.Delta.Concepts);
     }
 
+    /// <summary>
+    /// R1-30: "more like the second one" resolved once in six live runs — the planner, at effort none,
+    /// mostly returned no reference at all, and the turn then searched the topic instead. The rank a
+    /// pointer names is in the user's words, so the server guarantees it: a missing reference is filled
+    /// from the newest answer, and a reference at the wrong rank is moved to the named rank in the
+    /// answer the model chose. Which answer an "earlier" pointer means stays the model's call.
+    /// </summary>
+    [Theory]
+    [InlineData("more like the second one", TurnAct.Refine, "", "T2.2")]
+    [InlineData("More like the SECOND one!", TurnAct.Refine, "", "T2.2")]
+    [InlineData("is the first one violent?", TurnAct.ItemQuestion, "", "T2.1")]
+    [InlineData("less dark than the third film", TurnAct.CritiqueItem, "", "T2.3")]
+    [InlineData("more like the last one", TurnAct.Refine, "", "T2.3")]
+    [InlineData("more like #3", TurnAct.Refine, "", "T2.3")]
+    [InlineData("more like the second one", TurnAct.Refine, "T2.1", "T2.2")]
+    [InlineData("more like the second one", TurnAct.Refine, "T1.1", "T1.2")]
+    [InlineData("more like the second one you showed me first time round", TurnAct.Refine, "T1.2", "T1.2")]
+    [InlineData("more like the second one you showed me first time round", TurnAct.Refine, "", "")]
+    [InlineData("more like the fourth one", TurnAct.Refine, "", "")]
+    [InlineData("thanks, the second one was great", TurnAct.Chitchat, "", "")]
+    [InlineData("the second one sounds fun, now find me heist movies", TurnAct.NewRequest, "", "")]
+    [InlineData("more like the first and the third one", TurnAct.Refine, "T2.1,T2.3", "T2.1,T2.3")]
+    [InlineData("more heist movies", TurnAct.Refine, "", "")]
+    public void A_pointer_the_planner_missed_or_misranked_resolves_to_the_rank_the_user_named(
+        string message, TurnAct act, string modelReferences, string expected)
+    {
+        var state = Shown((A, 2, 1), (B, 2, 2), (C, 2, 3), (Guid.NewGuid(), 1, 1), (Guid.NewGuid(), 1, 2), (Guid.NewGuid(), 1, 3));
+        var given = modelReferences.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(h => TurnHandle.Parse(h)!.Value).ToArray();
+
+        var clean = PlanSanitizer.Clean(Plan(act, null, given), message, state, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(expected, string.Join(",", clean.References.Select(r => r.ToString())));
+    }
+
     [Fact]
     public void The_acceptance_follow_up_keeps_ninja_as_a_concept_not_a_negation()
     {
