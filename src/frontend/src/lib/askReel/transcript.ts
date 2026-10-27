@@ -445,6 +445,33 @@ export function answerRowIndex(turns: ChatTurn[]): number {
 }
 
 /**
+ * The mode a resume restores for a thread that has NO search answer at all — the newest reply's,
+ * when that reply answered beside the grid; null in every other case.
+ *
+ * R1-49. The server replays the newest search and skips an item question or a clarifying question
+ * (`SearchTurnMode.LeavesGrid`), so a v2 thread that only ever said "hi", or asked about a title by
+ * name, resumes with no block, `mode: null` and `lastCardsAt: null` — exactly the shape of a thread
+ * that predates stored results. It was rendered as one: "Transcript only — this thread predates
+ * saved results. Ask again to bring it back." under a reply that was the whole answer, offering to
+ * bring back cards that were never owed. Restoring the reply's own mode puts the page in the state
+ * the live screen was in when that turn finished.
+ *
+ * Only a COMPLETED newest reply counts: a failed or pending tail is what `resumedTail` describes.
+ */
+export function besideGridOnlyMode(rows: ConversationPayload["turns"]): string | null {
+  const searched = rows.some(
+    (t) => t.role === "assistant" && t.status === "Completed" && (t.kind ?? "ask") === "ask" && !leavesGrid(t.mode),
+  );
+  if (searched) return null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const t = rows[i];
+    if (t.role !== "assistant") continue;
+    return t.status === "Completed" && leavesGrid(t.mode) ? (t.mode ?? null) : null;
+  }
+  return null;
+}
+
+/**
  * What became of a resumed thread's LAST turn, when it was not a completed answer.
  *
  * SB-03: the resume payload has carried `turns[].status` all along and `transcriptOf` dropped it on

@@ -1,6 +1,6 @@
 import { floorPartition, type ChatStatus } from "../../lib/askReel/reducer";
 import { failureCopy, floorHeldBack, footnote, formatFloor, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage } from "../../lib/askReel/copy";
-import { answerRowIndex } from "../../lib/askReel/transcript";
+import { answerRowIndex, leavesGrid } from "../../lib/askReel/transcript";
 import { pageRefusalMessage } from "../../lib/askReel/paging";
 import { skeletonCount, type AskReelChat } from "../../lib/askReel/useAskReelChat";
 import type { AskCard } from "../../lib/askReelStream";
@@ -131,6 +131,10 @@ function announce(status: ChatStatus, mode: string | null, refusal: string | nul
   // An honest "nothing left" is announced as one, not as "No matches": the reply beside it gives
   // the counts, and the none-found card the relaxations (WS-2 task 3).
   if (status === "done" && mode === "NoneFound" && picks === 0) return "Nothing left that matches — Reel’s reply says why.";
+  // A reply that answered beside an EMPTY grid — small talk, a title asked about by name, a question
+  // back — is not a search, and "No matches for that one." would announce one that never ran (the
+  // R1-04 screen, said aloud). The reply itself is already read out by the transcript's polite log.
+  if (status === "done" && leavesGrid(mode) && picks === 0 && outside === 0) return "";
   if (status === "done") return pickSummary(picks, outside);
   // F6-15: a resumed landing is announced as the seam shows it.
   if (status === "resumed") return resumeAnnouncement(picks, outside);

@@ -2,7 +2,7 @@ import { AskStreamError, isCard, isFailedDone, isKnockout, judgeDegraded, type A
 import { excludedTerms } from "./copy";
 import { answeredQuestion, pageIsExhausted, resumedPageTarget, wasPaged, type PageRefusal } from "./paging";
 import {
-  answerRowIndex, lastTurnOutcome, leavesGrid, lastUserQuery, markTurnReply, mergeCards, resumedConflict, stoppedTranscript,
+  answerRowIndex, besideGridOnlyMode, lastTurnOutcome, leavesGrid, lastUserQuery, markTurnReply, mergeCards, resumedConflict, stoppedTranscript,
   transcriptOf, type ChatTurn, type ConversationPayload, type ResumedTail, type TurnAnswer,
 } from "./transcript";
 
@@ -815,7 +815,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         belowFloor: tray,
         nearMiss: (p.nearMiss ?? gridRowAnswer?.nearMiss ?? []).filter(isCard),
         unchecked: (p.unchecked ?? gridRowAnswer?.unchecked ?? []).filter(isCard),
-        mode: p.mode ?? gridRowAnswer?.mode ?? null,
+        // …and a thread with no search in it at all takes its newest reply's mode, so an item question
+        // or a clarifying question resumes as the reply it was rather than as "transcript only".
+        mode: p.mode ?? gridRowAnswer?.mode ?? besideGridOnlyMode(p.turns),
         // Not on the resume payload: the supply is not stored. The none-found reply restored above
         // still carries every count in words.
         knockouts: [],
