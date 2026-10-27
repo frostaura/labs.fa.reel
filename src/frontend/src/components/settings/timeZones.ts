@@ -1,13 +1,13 @@
 /**
  * The account time zone, for the Settings card (R1-17).
  *
- * The server stores an IANA id (`Africa/Johannesburg`) and counts the account's day in it; an
- * account that never chose one is counted in UTC. `GET /api/settings` serves both the stored value
+ * The server stores an IANA id (`Africa/Johannesburg`); an account that never chose one reads as
+ * UTC. Nothing counts the account's day in it yet (see TimeZoneCard), so the card claims no effect. `GET /api/settings` serves both the stored value
  * (`timeZone`, null when never set) and the one in force (`effectiveTimeZone`), so this card can tell
  * "you chose UTC" from "nobody chose", and offer the browser's own zone to the second.
  */
 
-/** The zone an account with no setting is counted in (the server's `AccountTimeZone.Default`). */
+/** The zone an account with no setting reads as (the server's `AccountTimeZone.Default`). */
 export const DEFAULT_TIME_ZONE = "UTC";
 
 /** The stored and in-force zones, as `GET /api/settings` serves them (absent from an older server). */

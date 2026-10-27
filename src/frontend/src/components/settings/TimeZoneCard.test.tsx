@@ -8,7 +8,7 @@ import { axeViolations } from "../../test/axe";
 
 /**
  * The Settings time-zone card (R1-17): the server could store a zone, but nothing on screen could
- * set one, so every account was counted in UTC. Fixtures vary one field at a time: the stored zone
+ * set one. Fixtures vary one field at a time: the stored zone
  * (none, chosen, the device's), the device's zone, and the PUT's answer (200, 400, 500).
  */
 const ORIGIN = "http://localhost";
@@ -68,7 +68,7 @@ describe("TimeZoneCard", () => {
     stubDevice("Africa/Johannesburg");
     const { container } = await renderCard({ timeZone: null, effectiveTimeZone: "UTC" });
 
-    expect(screen.getByTestId("time-zone-current").textContent).toBe("Not set — Reel is counting your day in UTC.");
+    expect(screen.getByTestId("time-zone-current").textContent).toBe("Not set — your account's zone is UTC until you choose one.");
     const use = screen.getByTestId("time-zone-use-device");
     expect(use.textContent).toBe("Use this device's zone — Africa / Johannesburg");
 
@@ -77,7 +77,7 @@ describe("TimeZoneCard", () => {
     expect(puts).toEqual([{ timeZone: "Africa/Johannesburg" }]);
     // The stored settings come back into the read, so the card now reports the choice.
     await waitFor(() =>
-      expect(screen.getByTestId("time-zone-current").textContent).toMatch(/^Counting your day in Africa \/ Johannesburg \(GMT\+2\)\.$/),
+      expect(screen.getByTestId("time-zone-current").textContent).toMatch(/^Your zone: Africa \/ Johannesburg \(GMT\+2\)\.$/),
     );
     expect(screen.queryByTestId("time-zone-use-device")).toBeNull();
     expect(await axeViolations(container)).toEqual([]);
@@ -87,7 +87,7 @@ describe("TimeZoneCard", () => {
     stubDevice("Europe/London");
     await renderCard({ timeZone: "Africa/Johannesburg", effectiveTimeZone: "Africa/Johannesburg" });
 
-    expect(screen.getByTestId("time-zone-current").textContent).toMatch(/^Counting your day in Africa \/ Johannesburg/);
+    expect(screen.getByTestId("time-zone-current").textContent).toMatch(/^Your zone: Africa \/ Johannesburg/);
     expect((screen.getByTestId("time-zone-select") as HTMLInputElement).value).toBe("Africa / Johannesburg");
     expect(screen.getByTestId("time-zone-use-device").textContent).toBe("Use this device's zone — Europe / London");
   });
@@ -119,6 +119,29 @@ describe("TimeZoneCard", () => {
 
     await waitFor(() => expect(puts).toEqual([{ timeZone: zone }]));
     await waitFor(() => expect(screen.getByTestId("time-zone-save-status").textContent).toBe("Saved."));
+  });
+
+  /**
+   * R1-17 follow-on: nothing reads the stored zone yet — the Ask allowance's day (BudgetCalendar)
+   * and the feed's day are both still UTC days — so the card may say only that the zone is saved.
+   * No sentence about picks, allowances, midnight or Reel "counting" a day in it, whichever state the
+   * card is in: never set, chosen, or just saved (the confirmed-before-refetch path).
+   */
+  it("claims nothing about what the zone changes, in any state", async () => {
+    const unpromised = /picks|allowance|midnight|counting|counts your day|turns? over|ask reel/i;
+
+    stubDevice("Africa/Johannesburg");
+    await renderCard({ timeZone: null, effectiveTimeZone: "UTC" });
+    expect(screen.getByTestId("settings-time-zone").textContent).not.toMatch(unpromised);
+    fireEvent.click(screen.getByTestId("time-zone-use-device"));
+    await waitFor(() => expect(screen.getByTestId("time-zone-save-status").textContent).toBe("Saved."));
+    expect(screen.getByTestId("settings-time-zone").textContent).not.toMatch(unpromised);
+    cleanup();
+
+    stubDevice("Europe/London");
+    await renderCard({ timeZone: "America/New_York", effectiveTimeZone: "America/New_York" });
+    expect(screen.getByTestId("time-zone-current").textContent).toMatch(/^Your zone: America \/ New York \(GMT-[45]\)\.$/);
+    expect(screen.getByTestId("settings-time-zone").textContent).not.toMatch(unpromised);
   });
 
   it("a refused zone (400 time_zone_invalid) shows the server's reason, in danger tone, and changes nothing", async () => {

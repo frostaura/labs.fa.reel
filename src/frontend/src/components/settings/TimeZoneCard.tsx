@@ -21,9 +21,13 @@ const keyOf = (id: string) => id;
 const render = (id: string) => ({ text: timeZoneName(id), note: timeZoneOffset(id) ?? undefined });
 
 /**
- * The account's time zone (R1-17): the zone Reel counts the account's day in. The server has stored
- * one since ADD-22, but nothing on screen could set it, so every account was counted in UTC — and
- * "today" turned over at 02:00 for the founder at +2, mid-evening in the Americas.
+ * The account's time zone (R1-17). The server has stored one since ADD-22, but nothing on screen
+ * could set it.
+ *
+ * The copy says only that the zone is saved. Nothing reads it yet: the Ask allowance's day and the
+ * feed's day are both still UTC days (R1-14/R1-16), so a sentence about picks or allowances turning
+ * over in this zone would be a false claim. Widen the copy in the same change that lands the first
+ * consumer, with its test and a claims-register entry.
  *
  * Shows the zone in force, and says when nobody chose it. Offers this device's zone in one tap when
  * it differs (a new account, or a traveller), and any IANA zone through the searchable picker. A
@@ -77,7 +81,7 @@ export default function TimeZoneCard() {
         Time zone
       </h2>
       <p className="fa-caption text-3">
-        Reel counts your day in this zone: today&apos;s picks and a day&apos;s Ask Reel allowance turn over at midnight here.
+        The time zone saved on your account. Choose the one you live in.
       </p>
 
       {isError && !settings ? (
@@ -88,8 +92,8 @@ export default function TimeZoneCard() {
         <>
           <p className="fa-body text-fa-frost" data-testid="time-zone-current">
             {chosen
-              ? `Counting your day in ${timeZoneLabel(inForce)}.`
-              : `Not set — Reel is counting your day in ${timeZoneLabel(inForce)}.`}
+              ? `Your zone: ${timeZoneLabel(inForce)}.`
+              : `Not set — your account's zone is ${timeZoneLabel(inForce)} until you choose one.`}
           </p>
           {suggestion && (
             <Button

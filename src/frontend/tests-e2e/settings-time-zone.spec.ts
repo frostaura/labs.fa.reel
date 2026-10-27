@@ -4,8 +4,8 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
 import { mockFilterChips } from "./filterChips.fixture";
 
 /**
- * The account time zone on Settings (R1-17). The server stores an IANA zone and counts the account's
- * day in it, but nothing on screen could set one, so every account was counted in UTC.
+ * The account time zone on Settings (R1-17). The server stores an IANA zone, but nothing on screen
+ * could set one. Nothing reads it yet either, so the card claims no effect of it (see UNPROMISED).
  *
  * What these pin, against a mocked API in a browser whose own zone is emulated: an account that
  * never chose is told so and offered this device's zone; any zone can be searched and picked; the
@@ -63,6 +63,12 @@ async function boot(page: Page, stored: Stored, onPut?: (route: Route, body: { t
   return puts;
 }
 
+/**
+ * What the card must not claim (R1-17 follow-on): the Ask allowance's day and the feed's day are still
+ * UTC days, so no sentence may say picks or allowances turn over in the chosen zone.
+ */
+const UNPROMISED = /picks|allowance|midnight|counting|counts your day|turns? over|ask reel/i;
+
 async function axeOnCard(page: Page) {
   const result = await new AxeBuilder({ page }).include('[data-testid="settings-time-zone"]').analyze();
   return result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
@@ -74,7 +80,7 @@ test.describe("time zone, on a device in Johannesburg", () => {
   test("an account that never chose is told so, and one tap stores this device's zone", async ({ page }) => {
     const puts = await boot(page, { timeZone: null, effectiveTimeZone: "UTC" });
 
-    await expect(page.getByTestId("time-zone-current")).toHaveText("Not set — Reel is counting your day in UTC.");
+    await expect(page.getByTestId("time-zone-current")).toHaveText("Not set — your account's zone is UTC until you choose one.");
     expect(await axeOnCard(page)).toEqual([]);
 
     const use = page.getByTestId("time-zone-use-device");
@@ -84,9 +90,11 @@ test.describe("time zone, on a device in Johannesburg", () => {
     await expect(page.getByTestId("time-zone-save-status")).toHaveText("Saved.");
     await expect(page.getByTestId("time-zone-save-status")).toHaveAttribute("data-tone", "success");
     expect(puts).toEqual([{ timeZone: "Africa/Johannesburg" }]);
-    await expect(page.getByTestId("time-zone-current")).toHaveText("Counting your day in Africa / Johannesburg (GMT+2).");
+    await expect(page.getByTestId("time-zone-current")).toHaveText("Your zone: Africa / Johannesburg (GMT+2).");
     await expect(page.getByTestId("time-zone-use-device")).toHaveCount(0);
     await expect(page.getByTestId("time-zone-select")).toHaveValue("Africa / Johannesburg");
+    // R1-17 follow-on: nothing reads the zone yet, so the card claims no effect of it.
+    await expect(page.getByTestId("settings-time-zone")).not.toContainText(UNPROMISED);
     expect(await axeOnCard(page)).toEqual([]);
   });
 
@@ -104,7 +112,7 @@ test.describe("time zone, on a device in Johannesburg", () => {
 
     await expect(page.getByTestId("time-zone-save-status")).toHaveText("Saved.");
     expect(puts).toEqual([{ timeZone: "America/New_York" }]);
-    await expect(page.getByTestId("time-zone-current")).toContainText("Counting your day in America / New York (GMT-");
+    await expect(page.getByTestId("time-zone-current")).toContainText("Your zone: America / New York (GMT-");
     // The device is elsewhere now, so its zone is offered back — quietly.
     await expect(page.getByTestId("time-zone-use-device")).toHaveText("Use this device's zone — Africa / Johannesburg");
   });
@@ -126,7 +134,7 @@ test.describe("time zone, on a device in Johannesburg", () => {
     await expect(status).toHaveAttribute("role", "alert");
     await expect(page.getByTestId("time-zone-save-status-retry")).toHaveCount(0);
     expect(puts).toHaveLength(1);
-    await expect(page.getByTestId("time-zone-current")).toHaveText("Not set — Reel is counting your day in UTC.");
+    await expect(page.getByTestId("time-zone-current")).toHaveText("Not set — your account's zone is UTC until you choose one.");
     expect(await axeOnCard(page)).toEqual([]);
 
     // A failure is not a toast: it is still up 10 s later.
@@ -157,7 +165,7 @@ test.describe("time zone, on a device in Johannesburg", () => {
     await expect(error).toContainText("Couldn't load your time zone.");
     fail = false;
     await error.getByRole("button").click();
-    await expect(page.getByTestId("time-zone-current")).toHaveText("Counting your day in Africa / Johannesburg (GMT+2).");
+    await expect(page.getByTestId("time-zone-current")).toHaveText("Your zone: Africa / Johannesburg (GMT+2).");
   });
 });
 
@@ -167,8 +175,9 @@ test.describe("time zone, on a device in London", () => {
   test("a chosen zone stays chosen; the device's differing zone is offered, not applied", async ({ page }) => {
     const puts = await boot(page, { timeZone: "Africa/Johannesburg", effectiveTimeZone: "Africa/Johannesburg" });
 
-    await expect(page.getByTestId("time-zone-current")).toHaveText("Counting your day in Africa / Johannesburg (GMT+2).");
+    await expect(page.getByTestId("time-zone-current")).toHaveText("Your zone: Africa / Johannesburg (GMT+2).");
     await expect(page.getByTestId("time-zone-use-device")).toHaveText("Use this device's zone — Europe / London");
+    await expect(page.getByTestId("settings-time-zone")).not.toContainText(UNPROMISED);
     await page.waitForTimeout(300);
     expect(puts).toEqual([]);
   });
