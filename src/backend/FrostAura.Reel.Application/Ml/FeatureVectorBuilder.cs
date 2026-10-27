@@ -28,7 +28,9 @@ namespace FrostAura.Reel.Application.Ml;
 /// <para><b>For the rating-mean pools the subtraction is a whole fold, not one rating.</b> Taking
 /// only a row's own rating out of a large pool leaves a value that orders the pool's rows exactly
 /// opposite to their labels, which the trees learned to read back (HREV2-RET-02). See
-/// <see cref="FoldPools"/>. The embedding features keep the per-title exclusion.</para>
+/// <see cref="FoldPools"/>. The embedding features keep the per-title exclusion. An artifact trained
+/// before that recipe learned from leave-one-out rows, and is served its rated titles that way until
+/// it is retrained (<see cref="OutOfFoldPools"/>).</para>
 /// </remarks>
 public class FeatureVectorBuilder(IReelDbContext db)
 {
@@ -51,20 +53,33 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
     /// <summary>
     /// Whether a rated title's rating-mean pools exclude its whole fold (<see cref="FoldPools"/>) or
-    /// only its own rating. Always on in the app; it exists so the offline ablation can measure
-    /// out-of-fold pools against the leave-one-out they replaced on the same data and code.
+    /// only its own rating (leave-one-out). An unrated candidate excludes nothing either way.
+    /// <list type="bullet">
+    /// <item><b>Null (DI's default) — follow the account's Active artifact</b>, exactly as
+    /// <see cref="IncludeShowRollups"/> does: out-of-fold only if its <see cref="TrainingRecipe"/>
+    /// trained that way (<see cref="TrainingRecipe.UsesOutOfFoldPools"/>), and as the current recipe
+    /// when there is no artifact yet. HREV2-RET-02: an unstamped artifact trained on leave-one-out
+    /// rows and handed out-of-fold ones put Boss Level, rated 7, at 2.0.</item>
+    /// <item><b>Training</b> (<see cref="ForTraining"/>) — <see cref="TrainingRecipe.OutOfFoldPools"/>.</item>
+    /// <item><b>Explicit either way</b> — the offline ablation, which measures out-of-fold pools against
+    /// the leave-one-out they replaced on the same data and code.</item>
+    /// </list>
     /// </summary>
-    public bool OutOfFoldPools { get; init; } = true;
+    public bool? OutOfFoldPools { get; init; }
 
     /// <summary>
-    /// This builder as training must use it: the current <see cref="TrainingRecipe"/>'s rollups
-    /// rather than whatever the soon-to-be-replaced Active artifact was trained with. An explicit
-    /// setting (the ablation's) is kept.
+    /// This builder as training must use it: the current <see cref="TrainingRecipe"/> — its rollups
+    /// and its pools — rather than whatever the soon-to-be-replaced Active artifact was trained with.
+    /// An explicit setting (the ablation's) is kept.
     /// </summary>
     public FeatureVectorBuilder ForTraining() =>
-        IncludeShowRollups is null
-            ? new FeatureVectorBuilder(db) { IncludeShowRollups = TrainingRecipe.ShowRollups, OutOfFoldPools = OutOfFoldPools }
-            : this;
+        IncludeShowRollups is not null && OutOfFoldPools is not null
+            ? this
+            : new FeatureVectorBuilder(db)
+            {
+                IncludeShowRollups = IncludeShowRollups ?? TrainingRecipe.ShowRollups,
+                OutOfFoldPools = OutOfFoldPools ?? TrainingRecipe.OutOfFoldPools,
+            };
 
     /// <summary>
     /// How many folds the rating-mean pools are split into for a RATED title's own vector
@@ -175,8 +190,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlyDictionary<(Guid PersonId, CreditRole Role), List<short>>? PersonRoleRatings = null,
         /// <summary>
         /// The rating-mean pools split by <see cref="TrainingFold"/>, so a rated title's vector can
-        /// take its WHOLE fold out of every pool rather than its own rating alone. Null only where a
-        /// caller built a state by hand; <see cref="Build"/> then falls back to leave-one-out.
+        /// take its WHOLE fold out of every pool rather than its own rating alone. Null when the
+        /// recipe is leave-one-out (<see cref="OutOfFoldPools"/>: an Active artifact trained that way,
+        /// or the ablation's other arm) or a caller built the state by hand; <see cref="Build"/> then
+        /// takes out the row's own rating alone.
         /// </summary>
         FoldPools? Folds = null,
         /// <summary>
@@ -231,7 +248,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // media share read it; the loved anchors below do not (an anchor is a title rated whole).
         var wholeRated = titleRatings.Select(r => r.TitleId).ToHashSet();
         var explicitMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
-        if (IncludeShowRollups ?? await ActiveArtifactUsesShowRollupsAsync(accountId, ct))
+        var (includeShowRollups, outOfFoldPools) = await RecipeAsync(accountId, ct);
+        if (includeShowRollups)
         {
             titleRatings.AddRange(ShowRatingRollup
                 .Roll(await ShowRatingRollup.PartsAsync(db, accountId, asOf, ct), wholeRated, explicitMean)
@@ -537,7 +555,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
             notInterestedCentroid,
             movieRatedShare,
             personRoleRatings,
-            OutOfFoldPools ? new FoldPools(foldOverall, foldGenre, foldDecade, foldPerson, foldContrarian, foldGenreContrarian) : null,
+            outOfFoldPools ? new FoldPools(foldOverall, foldGenre, foldDecade, foldPerson, foldContrarian, foldGenreContrarian) : null,
             personRoleTitles.ToDictionary(kv => kv.Key, kv => (IReadOnlyDictionary<Guid, short>)kv.Value));
 
         static void Add<TKey>(Dictionary<TKey, (int Count, decimal Sum)> pool, TKey key, decimal value)
@@ -549,18 +567,26 @@ public class FeatureVectorBuilder(IReelDbContext db)
     }
 
     /// <summary>
-    /// Whether the account's Active artifact was trained with show rollups in its taste pools; with no
-    /// artifact at all, whether the current recipe has them, because the first one will be trained on
-    /// it (see <see cref="IncludeShowRollups"/>).
+    /// The recipe this taste state is built with: each explicit setting as set, and each null one as
+    /// the account's Active artifact was trained — with no artifact at all, as the current recipe,
+    /// because the first one will be trained on it (see <see cref="IncludeShowRollups"/> and
+    /// <see cref="OutOfFoldPools"/>). The artifact is read once, and only when something follows it.
     /// </summary>
-    private async Task<bool> ActiveArtifactUsesShowRollupsAsync(Guid accountId, CancellationToken ct)
+    private async Task<(bool ShowRollups, bool OutOfFoldPools)> RecipeAsync(Guid accountId, CancellationToken ct)
     {
+        if (IncludeShowRollups is { } rollups && OutOfFoldPools is { } outOfFold)
+        {
+            return (rollups, outOfFold);
+        }
+
         var active = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
             .OrderByDescending(a => a.Version)
             .Select(a => new { a.FeatureSchemaJson })
             .FirstOrDefaultAsync(ct);
-        return active is null ? TrainingRecipe.ShowRollups : TrainingRecipe.UsesShowRollups(active.FeatureSchemaJson);
+        return (
+            IncludeShowRollups ?? (active is null ? TrainingRecipe.ShowRollups : TrainingRecipe.UsesShowRollups(active.FeatureSchemaJson)),
+            OutOfFoldPools ?? (active is null ? TrainingRecipe.OutOfFoldPools : TrainingRecipe.UsesOutOfFoldPools(active.FeatureSchemaJson)));
     }
 
     /// <summary>

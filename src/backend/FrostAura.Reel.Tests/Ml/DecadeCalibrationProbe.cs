@@ -30,7 +30,11 @@ namespace FrostAura.Reel.Tests.Ml;
 /// The leave-one-out arm is trained and reported beside it for contrast, never asserted. The stored
 /// Active artifact is scored too, through the serving builder (which follows that artifact's
 /// <see cref="TrainingRecipe"/>), and held to the level check: it is what the account sees until the
-/// recipe retrain replaces it.
+/// recipe retrain replaces it. It is also scored on every title the account has RATED, as the title
+/// page scores them, and held to <see cref="MaxRatedMae"/> against those ratings: those are its own
+/// training rows, so a served description that matches how it was trained reproduces them closely
+/// (v101 with leave-one-out rows: MAE 0.02), and one that does not is off by points (out-of-fold
+/// rows: MAE 2.33, Boss Level rated 7 shown 2.0).
 ///
 /// <para>Opt-in: nothing runs unless <c>REEL_DECADE_PROBE_CONNECTION_STRING</c> is set. It only reads
 /// (the model lives in memory), refuses the live Postgres, and costs no paid calls. Writes its
@@ -44,6 +48,7 @@ public class DecadeCalibrationProbe
     public const decimal MaxDecadeGap = 1.0m;
     public const float PoolNudge = 0.004f;
     public const double MaxCliff = 0.5d;
+    public const double MaxRatedMae = 1.0d;
 
     [Fact]
     [Trait("Category", "OfflineEval")]
@@ -108,11 +113,13 @@ public class DecadeCalibrationProbe
             var engine = new FastTreeModelEngine();
             var taste = await serving.BuildTasteStateAsync(accountId, now, CancellationToken.None);
             var vectors = await serving.BuildAsync(taste, served, now, CancellationToken.None);
+            var ratedVectors = await serving.BuildAsync(taste, [.. ratedIds], now, CancellationToken.None);
             arms["activeArtifact"] = new JsonObject
             {
                 ["version"] = active.Version,
                 ["recipe"] = TrainingRecipe.ReadFrom(active.FeatureSchemaJson) ?? "leave-one-out, no rollups (unstamped)",
                 ["decades"] = Decades(engine, active.ArtifactBytes, vectors, assertCliff: false, label: $"active v{active.Version}"),
+                ["ratedTitles"] = Rated(engine, active.ArtifactBytes, ratedVectors, $"active v{active.Version}"),
             };
         }
         foreach (var outOfFold in new[] { true, false })
@@ -134,6 +141,39 @@ public class DecadeCalibrationProbe
                     ? Decades(engine, model.ArtifactBytes, vectors, assertCliff: true, label: "retrained")
                     : Decades(engine, model.ArtifactBytes, vectors, assertCliff: null, label: "leave-one-out"),
             };
+        }
+
+        // Every rated title scored as the title page scores it, against its own rating; overall and
+        // per well-rated decade. Asserted: these are the artifact's training rows.
+        JsonObject Rated(FastTreeModelEngine engine, byte[] artifact, Dictionary<Guid, float[]> vectors, string label)
+        {
+            var rows = labels.Where(l => vectors.ContainsKey(l.TitleId)).ToList();
+            var predicted = engine.Score(artifact, [.. rows.Select(l => vectors[l.TitleId])]);
+            var errors = rows.Select((l, i) => (l.TitleId, Error: Math.Abs(predicted[i] - l.Rating))).ToList();
+
+            JsonObject Summary(IReadOnlyCollection<(Guid TitleId, float Error)> set) => new()
+            {
+                ["titles"] = set.Count,
+                ["mae"] = set.Count == 0 ? 0 : Math.Round(set.Average(e => (double)e.Error), 3),
+                ["offByMoreThan3"] = set.Count(e => e.Error > 3f),
+            };
+
+            var mae = errors.Count == 0 ? 0d : errors.Average(e => (double)e.Error);
+            if (mae > MaxRatedMae)
+            {
+                failures.Add($"{label}: MAE {mae:F2} over the {errors.Count} titles it was trained on");
+            }
+
+            var result = Summary(errors);
+            var byDecade = new JsonObject();
+            foreach (var decade in ratedByDecade.Keys.Order())
+            {
+                byDecade[decade.ToString(System.Globalization.CultureInfo.InvariantCulture)] = Summary(
+                    [.. errors.Where(e => years.GetValueOrDefault(e.TitleId) is { } y && y / 10 * 10 == decade)]);
+            }
+
+            result["decades"] = byDecade;
+            return result;
         }
 
         // assertCliff: true = level and cliff are asserted, false = level only, null = report only.
@@ -186,10 +226,10 @@ public class DecadeCalibrationProbe
 
         var report = new JsonObject
         {
-            ["purpose"] = "HREV2-RET-02 acceptance probe: per release decade with >= 50 ratings, the served titles' mean base prediction minus the account's mean rating, and its move under a +/-0.004 nudge of the decade pool. Base model only (no online head, calibration or demotion).",
+            ["purpose"] = "HREV2-RET-02 acceptance probe: per release decade with >= 50 ratings, the served titles' mean base prediction minus the account's mean rating, and its move under a +/-0.004 nudge of the decade pool; and the Active artifact on every rated title, served as the title page serves it, against the rating. Base model only (no online head, calibration or demotion).",
             ["source"] = new Npgsql.NpgsqlConnectionStringBuilder(connection).Database,
             ["recipe"] = TrainingRecipe.Current,
-            ["thresholds"] = new JsonObject { ["maxGap"] = MaxDecadeGap, ["maxCliff"] = MaxCliff, ["nudge"] = PoolNudge },
+            ["thresholds"] = new JsonObject { ["maxGap"] = MaxDecadeGap, ["maxCliff"] = MaxCliff, ["nudge"] = PoolNudge, ["maxRatedMae"] = MaxRatedMae },
             ["arms"] = arms,
         };
         var path = Environment.GetEnvironmentVariable("REEL_DECADE_PROBE_OUT") is { Length: > 0 } outPath

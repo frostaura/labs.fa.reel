@@ -1,8 +1,13 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -102,14 +107,156 @@ public class OutOfFoldPoolsTests(PostgresFixture fixture)
         Assert.True(ordered[0] > ordered[^1], "leave-one-out: the lowest-rated row reads the highest pool value");
     }
 
+    /// <summary>
+    /// HREV2-RET-02, the rated-title half. A rated title is described the way the model scoring it
+    /// learned to read one: an artifact trained before the recipe stamp (or on any recipe that is not
+    /// out-of-fold) learned from leave-one-out rows, and fed out-of-fold rows instead it put Boss
+    /// Level, rated 7, at 2.0 (MAE 2.33 over the founder's 2,142 rated titles, against 0.02 on the
+    /// rows it was trained on). Training always uses the current recipe, whatever the outgoing
+    /// artifact had — literal <c>true</c> below, so turning training back to leave-one-out is red.
+    /// The fixture varies the role, decade and rating spread per row.
+    /// </summary>
+    [Theory]
+    [InlineData(null, false, true, CreditRole.Actor, 2021, 0)] // no artifact yet: its first one is the current recipe
+    [InlineData("""{"version": 5}""", false, false, CreditRole.Director, 2022, 2)] // unstamped: leave-one-out
+    [InlineData("""{"version": 5}""", false, false, CreditRole.Writer, 1996, 5)]
+    [InlineData("""{"version": 5, "pools": "leave-one-out"}""", false, false, CreditRole.Actor, 2014, 1)] // not out-of-fold
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5"}""", false, true, CreditRole.Director, 2023, 4)]
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5+show-rollups"}""", false, true, CreditRole.Actor, 2008, 3)]
+    [InlineData("""{"version": 5}""", true, true, CreditRole.Writer, 2020, 6)] // training: the current recipe
+    [InlineData(null, true, true, CreditRole.Director, 1979, 7)]
+    public async Task A_rated_title_is_described_the_way_the_active_artifact_was_trained_to_read_it(
+        string? activeSchemaJson, bool forTraining, bool expectOutOfFold, CreditRole role, int year, int ratingShift)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titles) = await SeedPoolAsync(role, year, $"recipe-{ratingShift}", ratingShift, rated: 24);
+        if (activeSchemaJson is not null)
+        {
+            await SeedArtifactAsync(accountId, activeSchemaJson);
+        }
+
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var db = fixture.CreateContext(scoped);
+        var now = DateTime.UtcNow;
+
+        // The builders DI hands out: serving (nothing set), and training (ForTraining()).
+        var builder = forTraining ? new FeatureVectorBuilder(db).ForTraining() : new FeatureVectorBuilder(db);
+        var taste = await builder.BuildTasteStateAsync(accountId, now, CancellationToken.None);
+        var vectors = await builder.BuildAsync(taste, [.. titles.Keys], now, CancellationToken.None);
+        Assert.Equal(expectOutOfFold, taste.Folds is not null);
+
+        var expected = await BuildAsync(accountId, [.. titles.Keys], includeRollups: false, outOfFold: expectOutOfFold, asOf: now);
+        var other = await BuildAsync(accountId, [.. titles.Keys], includeRollups: false, outOfFold: !expectOutOfFold, asOf: now);
+        var decade = Array.IndexOf(FeatureSchema.Scalars, "decadeAffinity");
+        Assert.All(titles.Keys, id => Assert.Equal(expected[id], vectors[id]));
+        Assert.True(
+            titles.Keys.Count(id => Math.Abs(other[id][decade] - vectors[id][decade]) > 1e-4f) >= titles.Count / 2,
+            "the two recipes describe this pool alike; the fixture cannot tell them apart");
+    }
+
+    /// <summary>
+    /// The same, end to end through the on-demand scorer the title page uses: the vector a rated
+    /// title is scored with under an unstamped Active artifact is the leave-one-out row it was trained
+    /// on, and under an out-of-fold artifact the out-of-fold row.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"version": 5}""", false, CreditRole.Actor, 2021, 2)]
+    [InlineData("""{"version": 5}""", false, CreditRole.Director, 1993, 5)]
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5"}""", true, CreditRole.Writer, 2022, 1)]
+    public async Task The_on_demand_scorer_scores_a_rated_title_with_the_artifacts_own_recipe(
+        string activeSchemaJson, bool expectOutOfFold, CreditRole role, int year, int ratingShift)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titles) = await SeedPoolAsync(role, year, $"on-demand-{ratingShift}", ratingShift, rated: 24);
+        await SeedArtifactAsync(accountId, activeSchemaJson);
+        var ids = titles.Keys.ToList();
+
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var db = fixture.CreateContext(scoped);
+        var engine = new CapturingEngine();
+        var featureBuilder = new FeatureVectorBuilder(db);
+        var scorer = new OnDemandScorer(
+            db, featureBuilder, engine,
+            new OnlineResidualModel(db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance),
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+            new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
+        var now = DateTime.UtcNow;
+        var scored = await scorer.ScoreAsync(accountId, ids, now, CancellationToken.None);
+        Assert.Equal(ids.Count, scored.Count);
+
+        var expected = await BuildAsync(accountId, ids, includeRollups: false, outOfFold: expectOutOfFold, asOf: now);
+        var other = await BuildAsync(accountId, ids, includeRollups: false, outOfFold: !expectOutOfFold, asOf: now);
+        var decade = Array.IndexOf(FeatureSchema.Scalars, "decadeAffinity");
+        var rows = engine.Scored;
+        Assert.Equal(ids.Count, rows.Count);
+        for (var i = 0; i < ids.Count; i++)
+        {
+            Assert.Equal(expected[ids[i]], rows[i]);
+        }
+
+        Assert.True(
+            Enumerable.Range(0, ids.Count).Count(i => Math.Abs(other[ids[i]][decade] - rows[i][decade]) > 1e-4f) >= ids.Count / 2,
+            "the two recipes describe this pool alike; the fixture cannot tell them apart");
+    }
+
+    private async Task SeedArtifactAsync(Guid accountId, string featureSchemaJson)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ModelArtifacts.Add(new ModelArtifact
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Version = 1,
+            Algo = "FastTree",
+            ArtifactBytes = [1],
+            FeatureSchemaJson = featureSchemaJson,
+            TrainingRunId = Guid.NewGuid(),
+            Status = ArtifactStatus.Active,
+            TrainedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Scores every row 6.5 and keeps the vectors it was asked to score, in order.</summary>
+    private sealed class CapturingEngine : IModelEngine
+    {
+        public List<float[]> Scored { get; } = [];
+
+        public TrainedModel Train(TrainingMatrix matrix, string hyperparamsJson) => throw new NotSupportedException();
+
+        public float[] Score(byte[] artifactBytes, float[][] features) => [.. features.Select(_ => 6.5f)];
+
+        public float[] ScoreCached(Guid modelKey, byte[] artifactBytes, float[][] features) => Score(artifactBytes, features);
+
+        public ScoredRow[] ScoreWithContributions(byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5)
+        {
+            Scored.AddRange(features.Select(f => (float[])f.Clone()));
+            return [.. features.Select(_ => new ScoredRow(6.5f, []))];
+        }
+
+        public ScoredRow[] ScoreWithContributionsCached(
+            Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5) =>
+            ScoreWithContributions(artifactBytes, features, featureNames, topK);
+    }
+
     private async Task<Dictionary<Guid, float[]>> BuildAsync(
-        Guid accountId, IReadOnlyCollection<Guid> titleIds, bool? includeRollups, bool outOfFold = true)
+        Guid accountId, IReadOnlyCollection<Guid> titleIds, bool? includeRollups, bool outOfFold = true, DateTime? asOf = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         await using var db = fixture.CreateContext(scoped);
         var builder = new FeatureVectorBuilder(db) { IncludeShowRollups = includeRollups, OutOfFoldPools = outOfFold };
-        var now = DateTime.UtcNow;
+        var now = asOf ?? DateTime.UtcNow;
         var taste = await builder.BuildTasteStateAsync(accountId, now, CancellationToken.None);
         return await builder.BuildAsync(taste, titleIds, now, CancellationToken.None);
     }
