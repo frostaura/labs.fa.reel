@@ -8,7 +8,8 @@ import { mockFilterChips } from "./filterChips.fixture";
  * case here is a variant the owning surface's own spec did not cover; the covered ones are named
  * in the WS-9 report for the claims register:
  *   - a NotInterested revoke (taste-dna-dislikes.spec.ts) → here, a Dropped revoke;
- *   - a failed notifications ENABLE (settings-errors.spec.ts) → here, a failed DISABLE;
+ *   - a failed notifications ENABLE (settings-errors.spec.ts, copy only) → here, a failed DISABLE,
+ *     and the refused enable again with a browser that remembers its subscription across a reload;
  *   - a 423 on an account with no PIN (settings-errors.spec.ts) → here, an unlock that lapses
  *     mid-edit on a PIN account, where the draft must survive the lock screen;
  *   - a refused checkout with the server's reason (settings-errors.spec.ts) → here, a checkout
@@ -118,6 +119,101 @@ test("a failed notifications disable says they are still on, and the toggle stil
   await expect(toggle).toContainText("Turn off");
   // The browser kept its subscription, so the server's row was left alone too.
   expect(serverUnsubscribes).toBe(0);
+});
+
+/**
+ * Settings with push supported, permission granted and NO subscription yet. The browser's
+ * subscription lives in sessionStorage, so it outlives a reload the way a real one does:
+ * subscribe() creates it, unsubscribe() drops it, getSubscription() reports what is there. The
+ * settings-errors enable case keeps getSubscription() at null forever, which is how it could pass
+ * while a refused enable left the browser subscribed.
+ */
+async function bootPushOff(page: Page, subscribeStatus: 200 | 500) {
+  await page.addInitScript(() => {
+    const KEY = "e2e-browser-push-subscription";
+    const subscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/e2e",
+      toJSON: () => ({ keys: { p256dh: "p", auth: "a" } }),
+      unsubscribe: async () => {
+        sessionStorage.removeItem(KEY);
+        return true;
+      },
+    };
+    const registration = {
+      pushManager: {
+        getSubscription: async () => (sessionStorage.getItem(KEY) ? subscription : null),
+        subscribe: async () => {
+          sessionStorage.setItem(KEY, "1");
+          return subscription;
+        },
+      },
+    };
+    Object.defineProperty(window, "PushManager", { value: function PushManager() {}, configurable: true });
+    Object.defineProperty(window, "Notification", {
+      value: { permission: "granted", requestPermission: async () => "granted" },
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "serviceWorker", {
+      value: { getRegistration: async () => registration, getRegistrations: async () => [], ready: Promise.resolve(registration) },
+      configurable: true,
+    });
+  });
+  await shell(page);
+  await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150 });
+  await mockJson(page, "**/api/preferences/tags", []);
+  await mockJson(page, "**/api/push/vapid-public-key", { key: "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U" });
+  // The server's rows, keyed by endpoint: a POST it accepts adds one, a DELETE removes it.
+  const serverRows = new Set<string>();
+  await page.route(
+    (u) => u.pathname === "/api/push/subscribe",
+    async (route) => {
+      const { endpoint } = route.request().postDataJSON() as { endpoint: string };
+      if (route.request().method() === "DELETE") {
+        serverRows.delete(endpoint);
+        return route.fulfill({ status: 204, body: "" });
+      }
+      if (subscribeStatus === 200) serverRows.add(endpoint);
+      return route.fulfill({ status: subscribeStatus, contentType: "application/json", body: subscribeStatus === 200 ? '{"ok":true}' : "{}" });
+    }
+  );
+  const browserSubscribed = () => page.evaluate(() => sessionStorage.getItem("e2e-browser-push-subscription") !== null);
+  return { serverRows, browserSubscribed };
+}
+
+test("an accepted notifications enable is still on after a reload (the fixture remembers the browser half)", async ({ page }) => {
+  const { serverRows, browserSubscribed } = await bootPushOff(page, 200);
+  await page.goto("/settings");
+  const toggle = page.getByTestId("push-toggle");
+  await expect(toggle).toContainText("Turn on");
+  await toggle.click();
+  await expect(toggle).toContainText("Turn off");
+  expect(serverRows.size).toBe(1);
+  expect(await browserSubscribed()).toBe(true);
+
+  await page.reload();
+  await expect(page.getByTestId("push-toggle")).toContainText("Turn off");
+});
+
+test("a notifications enable the server refuses leaves them off in the browser too, so a reload still says off", async ({ page }) => {
+  // KNOWN DEFECT, change request CR-11 → WS-10B (PushOptIn.tsx is theirs): enable()'s catch never
+  // unsubscribes the browser subscription it just created, so the next visit reads "Turn off" while
+  // the server has no row and no digest can arrive. Remove this line when CR-11 lands — Playwright
+  // reports the test as an unexpected pass until then.
+  test.fail(true, "CR-11 → WS-10B: PushOptIn enable() leaves the browser subscribed after the server refuses");
+  const { serverRows, browserSubscribed } = await bootPushOff(page, 500);
+  await page.goto("/settings");
+  const toggle = page.getByTestId("push-toggle");
+  await expect(toggle).toContainText("Turn on");
+  await toggle.click();
+  await expect(page.getByTestId("push-failure")).toHaveText("Couldn't turn notifications on — they're still off. Try again in a moment.");
+  await expect(toggle).toContainText("Turn on");
+  expect(serverRows.size).toBe(0);
+  // "Still off" has to be true of the browser as well as of the server.
+  expect(await browserSubscribed()).toBe(false);
+
+  await page.reload();
+  await expect(page.getByTestId("push-toggle")).toContainText("Turn on");
+  await expect(page.getByTestId("push-failure")).toHaveCount(0);
 });
 
 const FILTERS = {
