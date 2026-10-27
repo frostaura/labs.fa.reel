@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { divergingBars, genreBarGeometry, LARGEST_BAR_PCT, meanMarkerPct, MIN_SCALE } from "./tasteDna";
+import {
+  divergingBars,
+  driftChartLabel,
+  genreBarGeometry,
+  histogramChartLabel,
+  LARGEST_BAR_PCT,
+  meanMarkerPct,
+  MIN_SCALE,
+} from "./tasteDna";
 
 /**
  * Regression for "the genre fingerprint lies below the midpoint". The old width was
@@ -118,5 +126,67 @@ describe("divergingBars (the page's charts, P1 G-12)", () => {
       expect(bar.leftPct).toBeGreaterThanOrEqual(0);
       expect(bar.leftPct + bar.widthPct).toBeLessThanOrEqual(100);
     }
+  });
+});
+
+/**
+ * PH2-02: the drift and histogram charts are drawn as SVG with no text a screen reader can reach, so
+ * each one is a single `role="img"` named by these sentences. They have to carry the chart's actual
+ * numbers — a name like "Taste drift chart" tells a listener only that something is there.
+ */
+describe("driftChartLabel", () => {
+  const drift = [
+    { year: 2019, shares: { drama: 0.3, thriller: 0.1 } },
+    { year: 2021, shares: { drama: 0.28, thriller: 0.14 } },
+    { year: 2024, shares: { drama: 0.251, thriller: 0.18 } },
+  ];
+
+  it("names the years it spans and each genre's first and last share", () => {
+    expect(driftChartLabel(drift, ["drama", "thriller"])).toBe(
+      "Taste drift, 2019 to 2024, as a share of your loved ratings: drama 30% to 25%, thriller 10% to 18%."
+    );
+  });
+
+  it("follows the genres it is given, in their order, and spells a hyphenated genre as the legend does", () => {
+    const other = [
+      { year: 2010, shares: { "science-fiction": 0.05, drama: 0.4 } },
+      { year: 2012, shares: { "science-fiction": 0.12, drama: 0.38 } },
+    ];
+    expect(driftChartLabel(other, ["science-fiction", "drama"])).toBe(
+      "Taste drift, 2010 to 2012, as a share of your loved ratings: science fiction 5% to 12%, drama 40% to 38%."
+    );
+  });
+
+  it("says a missing share is unknown rather than inventing a zero", () => {
+    const gappy: { year: number; shares: Record<string, number> }[] = [
+      { year: 2020, shares: { drama: 0.3 } },
+      { year: 2022, shares: { drama: 0.2, horror: 0.1 } },
+    ];
+    expect(driftChartLabel(gappy, ["drama", "horror"])).toBe(
+      "Taste drift, 2020 to 2022, as a share of your loved ratings: drama 30% to 20%, horror unknown to 10%."
+    );
+  });
+});
+
+describe("histogramChartLabel", () => {
+  it("reads every bar, lowest score first, with the mean", () => {
+    const histogram = [
+      { rating: 8, count: 300 },
+      { rating: 3, count: 1 },
+      { rating: 7, count: 210 },
+    ];
+    expect(histogramChartLabel(histogram, 6.84)).toBe(
+      "How you rate, ratings given at each score: 3, 1 rating; 7, 210 ratings; 8, 300 ratings. Your mean is 6.8."
+    );
+  });
+
+  it("follows the data rather than a fixed sentence", () => {
+    expect(histogramChartLabel([{ rating: 10, count: 2 }], 9.42)).toBe(
+      "How you rate, ratings given at each score: 10, 2 ratings. Your mean is 9.4."
+    );
+  });
+
+  it("says when there is nothing to read", () => {
+    expect(histogramChartLabel([], 0)).toBe("How you rate: no ratings yet.");
   });
 });

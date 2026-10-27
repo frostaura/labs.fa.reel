@@ -1,4 +1,4 @@
-import type { AccuracyPayload } from "../store/api";
+import type { AccuracyPayload, CalibrationBucket } from "../store/api";
 
 /**
  * The words on the track record. Pure, so they can be tested without a DOM — the repo has no
@@ -131,4 +131,21 @@ export function singleWindowNote(windows: AccuracyPayload["windows"]): string | 
   return only.key === "all"
     ? `All ${calls}.`
     : `All ${calls} fall in the last ${WINDOW_LABELS[only.key]}, so a longer window would show the same.`;
+}
+
+/**
+ * What the calibration chart says, in words (PH2-02). The chart is SVG with Recharts'
+ * `accessibilityLayer` off — it made the chart an unnamed `role="application"` in the tab order — so
+ * its numbers reach a screen reader only as the name of the `role="img"` that wraps it. Reads the
+ * same bands the page draws (those with outcomes), and an em-dash where a band has no mean.
+ */
+export function calibrationChartLabel(bands: CalibrationBucket[]): string {
+  const drawn = bands.filter((b) => b.n > 0);
+  if (drawn.length === 0) return "Where the number lands: no bands yet.";
+  const parts = drawn.map(
+    (b) =>
+      `${b.low.toFixed(0)} to ${b.high.toFixed(0)}, Reel said ${num(b.meanPredicted, 1)}, you said ${num(b.meanActual, 1)}, ` +
+      `from ${b.n} ${b.n === 1 ? "rating" : "ratings"}`
+  );
+  return `Where the number lands, Reel's average prediction against your average rating in each band: ${parts.join("; ")}.`;
 }

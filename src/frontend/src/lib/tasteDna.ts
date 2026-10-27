@@ -140,3 +140,36 @@ export function divergingBars(affinities: number[], userMean: number): Diverging
     }),
   };
 }
+
+/**
+ * ── What the two Recharts charts say, in words (PH2-02) ─────────────────────────────────────────
+ *
+ * The drift and histogram charts are SVG with `accessibilityLayer` off (it made each one an unnamed
+ * `role="application"` in the tab order), so a screen reader reaches their numbers only through the
+ * name of the `role="img"` that wraps them. These sentences are that name. They read the chart's own
+ * data, never a fixed caption, and a share the payload does not carry reads "unknown" rather than a
+ * zero the chart never drew.
+ */
+
+const asPercent = (share: number | undefined) =>
+  share == null || !Number.isFinite(share) ? "unknown" : `${Math.round(share * 100)}%`;
+
+/** "Taste drift, 2019 to 2024, as a share of your loved ratings: drama 30% to 25%, …". */
+export function driftChartLabel(drift: { year: number; shares: Record<string, number> }[], genres: string[]): string {
+  if (drift.length === 0) return "Taste drift: no years to compare yet.";
+  const first = drift[0];
+  const last = drift[drift.length - 1];
+  const lines = genres.map(
+    (genre) => `${genre.replace("-", " ")} ${asPercent(first.shares[genre])} to ${asPercent(last.shares[genre])}`
+  );
+  return `Taste drift, ${first.year} to ${last.year}, as a share of your loved ratings: ${lines.join(", ")}.`;
+}
+
+/** "How you rate, ratings given at each score: 3, 1 rating; 8, 300 ratings. Your mean is 6.8." */
+export function histogramChartLabel(histogram: { rating: number; count: number }[], userMean: number): string {
+  if (histogram.length === 0) return "How you rate: no ratings yet.";
+  const bars = [...histogram]
+    .sort((a, b) => a.rating - b.rating)
+    .map((bar) => `${bar.rating}, ${bar.count} ${bar.count === 1 ? "rating" : "ratings"}`);
+  return `How you rate, ratings given at each score: ${bars.join("; ")}. Your mean is ${userMean.toFixed(1)}.`;
+}
