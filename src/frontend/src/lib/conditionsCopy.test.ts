@@ -14,9 +14,13 @@ describe("CONDITIONS_SCOPE_COPY", () => {
     expect(CONDITIONS_SCOPE_COPY).not.toMatch(/only partly/i);
   });
 
-  it("names top-bar search as governed, and says hidden matches are counted rather than shown", () => {
+  // The claims register (eval/claims/claims.json, family conditions-scope) pins the sentence to this
+  // test by name. "Counted, not shown" holds for both typeahead legs only once the global leg also
+  // holds the maturity ceiling (WS-3, R1-07); until that merges the register marks the family false.
+  it("says the top-bar lookup hides what the conditions rule out and counts it", () => {
     expect(CONDITIONS_SCOPE_COPY).toContain("the hero, every row, Ask Reel and top-bar search");
     expect(CONDITIONS_SCOPE_COPY).toContain("counted, not shown");
+    expect(CONDITIONS_SCOPE_COPY).not.toMatch(/\bcan show\b|\bmay show\b/i);
   });
 
   it("names the two things the lookup deliberately does differently", () => {

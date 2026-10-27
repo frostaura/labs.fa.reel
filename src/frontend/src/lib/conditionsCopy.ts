@@ -17,7 +17,9 @@
  *   your conditions exclude" (IR1S-06's fix): true until WS-3's tiered lookup (trust-v1 task 10,
  *   FD-5's default) — both legs now hide what the conditions rule out and count it on a
  *   "N matches hidden by your conditions" line, so "can show titles your conditions exclude" became
- *   the false half.
+ *   the false half. One rule lagged: the global leg let an over-ceiling title through under
+ *   "beyond your catalogue" until WS-3's R1-07 fix (the maturity ceiling in both legs), so the
+ *   claims register holds this sentence false until that fix is merged.
  *
  * What the lookup still does differently is by design and stable, so it is named: it finds titles
  * you have already seen (it badges them) and it does not apply the "for you" minimum (a name lookup
