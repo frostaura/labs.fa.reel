@@ -65,7 +65,7 @@ public class ContributionDetailsTests(PostgresFixture fixture)
         Assert.Equal(actorId, person.PersonId);
         Assert.Equal("Verified Actor", person.Name);
         Assert.Equal(2, person.TitleCount);
-        Assert.Equal(Math.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1), person.YourAverage);
+        Assert.Equal(decimal.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1, MidpointRounding.AwayFromZero), person.YourAverage);
 
         // directorAffinity: one rating is below the verification bar — the feature is absent, not empty.
         Assert.DoesNotContain(details, d => d.Feature == "directorAffinity");
@@ -74,7 +74,7 @@ public class ContributionDetailsTests(PostgresFixture fixture)
         // note. Invariant culture on the expectation too — the note is built invariant on purpose
         // (the dev machine's en_ZA locale would render "8,5"), and the test must not undo that.
         var decade = Assert.Single(details, d => d.Feature == "decadeAffinity");
-        var expected = Math.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1);
+        var expected = decimal.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1, MidpointRounding.AwayFromZero);
         Assert.Equal(
             string.Create(CultureInfo.InvariantCulture, $"you average {expected:0.0} for 1980s titles"),
             decade.Note);

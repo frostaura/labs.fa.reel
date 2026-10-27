@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Blend;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
@@ -9,7 +10,7 @@ public static class BlendEndpoints
 {
     /// <summary>
     /// A joint pick: the shared card fields plus both personal predictions. <c>Joint</c> is
-    /// min(<c>ForYou</c>, <c>ForThem</c>) — the ordering key. All three rounded to 1dp at
+    /// min(<c>ForYou</c>, <c>ForThem</c>) — the ordering key. All three at 1dp (<see cref="Shown"/>) at
     /// this edge, like every other rating the API serves.
     /// </summary>
     public record BlendCard(
@@ -20,6 +21,12 @@ public static class BlendEndpoints
         decimal ForYou, decimal ForThem, decimal Joint);
 
     private const int PickCount = 20;
+
+    /// <summary>
+    /// A Blend prediction as its badge reads it: the same number the feed and the title page show for
+    /// that stored score (R1-04 — a stored 7.25 read "7.2" here and "7.3" on the feed).
+    /// </summary>
+    public static decimal Shown(decimal stored) => ShownRating.Of(stored);
 
     public static void MapBlendEndpoints(this IEndpointRouteBuilder app)
     {
@@ -75,7 +82,7 @@ public static class BlendEndpoints
                     title.PosterPath, title.BackdropPath, title.Genres,
                     crowd, crowdVotes, isReleased,
                     providers.GetValueOrDefault(title.Id, []),
-                    Math.Round(pick.ForYou, 1), Math.Round(pick.ForThem, 1), Math.Round(pick.Joint, 1));
+                    Shown(pick.ForYou), Shown(pick.ForThem), Shown(pick.Joint));
             }).ToList();
 
             return Results.Ok(new { ownerName = owner.DisplayName, items = cards });

@@ -114,6 +114,13 @@ public static class ContributionDetails
         return (bars, details);
     }
 
+    /// <summary>
+    /// An average at the one decimal the user reads, rounded the way the why-line prints the same
+    /// number (<c>{Affinity:0.0}</c>, half away from zero): a shrunk 8.25 is "8.3" in both places,
+    /// where half-to-even put "8.2" in the breakdown beside a why-line saying "8.3".
+    /// </summary>
+    public static decimal OneDecimal(decimal average) => decimal.Round(average, 1, MidpointRounding.AwayFromZero);
+
     /// <summary>One verified person behind a person-affinity bar. Averages are 1dp at the response edge.</summary>
     public sealed record PersonDetail(Guid PersonId, string Name, decimal YourAverage, int TitleCount);
 
@@ -137,7 +144,7 @@ public static class ContributionDetails
             var decade = year / 10 * 10;
             if (taste.DecadeRatings.TryGetValue(decade, out var ratings) && ratings.Count > 0)
             {
-                var average = Math.Round(TasteMath.ShrunkenMean(ratings, taste.UserMean), 1);
+                var average = OneDecimal(TasteMath.ShrunkenMean(ratings, taste.UserMean));
                 details.Add(new Detail(
                     "decadeAffinity",
                     Note: string.Create(CultureInfo.InvariantCulture, $"you average {average:0.0} for {decade}s titles")));
@@ -156,7 +163,7 @@ public static class ContributionDetails
                 .OrderByDescending(e => e.Average)
                 .ThenBy(e => e.Name, StringComparer.Ordinal)
                 .Take(MaxPeoplePerFeature)
-                .Select(e => new PersonDetail(e.PersonId, e.Name, Math.Round(e.Average, 1), e.TitleCount))
+                .Select(e => new PersonDetail(e.PersonId, e.Name, OneDecimal(e.Average), e.TitleCount))
                 .ToList();
             if (people.Count > 0)
             {

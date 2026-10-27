@@ -1020,7 +1020,7 @@ public class BuildFeedJobHandler(
             artifactId,
             candidates.Select(candidate => new TitleScoreWriter.Score(
                 candidate.Title.Id,
-                Math.Round(candidate.Predicted, 2),
+                DisplayRating(candidate),
                 TitleScoreWriter.SerializeContributions(candidate.Row.TopContributions))),
             now,
             ct);

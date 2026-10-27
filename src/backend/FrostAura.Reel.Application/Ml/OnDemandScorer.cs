@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using Microsoft.EntityFrameworkCore;
@@ -94,10 +95,7 @@ public sealed class OnDemandScorer(
         {
             var titleId = orderedIds[i];
             var adjusted = scored[i].Score + OnlineResidualModel.Residual(residual, vectors[titleId]);
-            var predicted = Math.Round((decimal)calibrator.Calibrate(adjusted), 2);
-            predicted = Math.Round(
-                DislikeSignal.ApplyDemotion(predicted, demotions.GetValueOrDefault(titleId)), 2);
-            result[titleId] = predicted;
+            result[titleId] = Predicted(calibrator.Calibrate(adjusted), demotions.GetValueOrDefault(titleId));
         }
 
         // An upsert, not load-then-insert: a title opened while the paginator is scoring it raced
@@ -120,8 +118,21 @@ public sealed class OnDemandScorer(
     /// <summary>How many single features the waterfall names; the rest are one "other features" step.</summary>
     public const int WaterfallFeatureSteps = 6;
 
-    /// <summary>The largest gap allowed between the walk's end and the number on the page (both 1dp).</summary>
-    private const decimal LandingTolerance = 0.05m;
+    /// <summary>
+    /// The prediction a title is stored with, from the calibrated score and the dislike demotion. The
+    /// same arithmetic, in the same order, as the feed build and the paginator: the demotion applies to
+    /// the unrounded calibrated score, and the result is rounded once (R1-04 — the old two-step
+    /// half-to-even rounding stored a calibrated 7.345 as 7.34, a "7.3", where the feed showed "7.4").
+    /// </summary>
+    public static decimal Predicted(double calibrated, double demotion) =>
+        ShownRating.Stored(DislikeSignal.ApplyDemotion((decimal)calibrated, demotion));
+
+    /// <summary>
+    /// Whether the waterfall's walk ends on the number the page shows: both sides as the badge reads
+    /// them, so a walk ending at 7.25 lands on a stored 7.26 (both "7.3").
+    /// </summary>
+    public static bool LandsOnTheBadge(decimal walkEnd, decimal shownPrediction) =>
+        ShownRating.Of(walkEnd) == ShownRating.Of(shownPrediction);
 
     /// <summary>
     /// The shown prediction as a walk from the model's starting point (F-25): the model's own start,
@@ -160,9 +171,9 @@ public sealed class OnDemandScorer(
         // The same arithmetic as ScoreAsync, kept step by step.
         var score = (double)explained.Score;
         var adjusted = score + OnlineResidualModel.Residual(residual, vector);
-        var calibrated = Math.Round((decimal)calibrator.Calibrate(adjusted), 2);
-        var final = Math.Round(DislikeSignal.ApplyDemotion(calibrated, demotion), 2);
-        if (Math.Abs(Math.Round(final, 1) - Math.Round(shownPrediction, 1)) > LandingTolerance)
+        var calibrated = calibrator.Calibrate(adjusted);
+        var final = Predicted(calibrated, demotion);
+        if (!LandsOnTheBadge(final, shownPrediction))
         {
             return null;
         }
@@ -173,8 +184,8 @@ public sealed class OnDemandScorer(
         var rest = explained.TopContributions.Skip(WaterfallFeatureSteps).Sum(c => (double)c.Contribution);
         AddIfAny(steps, PredictionWaterfall.OtherFeatures, rest);
         AddIfAny(steps, PredictionWaterfall.RecentRatingsCorrection, adjusted - score);
-        AddIfAny(steps, PredictionWaterfall.Calibration, (double)calibrated - adjusted);
-        AddIfAny(steps, PredictionWaterfall.DislikedSimilarity, (double)(final - calibrated));
+        AddIfAny(steps, PredictionWaterfall.Calibration, calibrated - adjusted);
+        AddIfAny(steps, PredictionWaterfall.DislikedSimilarity, (double)final - calibrated);
 
         // The model's start is the score less every feature's push; it is taken as the number less
         // every rounded step, which is the same value to within the 3dp rounding, so the walk sums to

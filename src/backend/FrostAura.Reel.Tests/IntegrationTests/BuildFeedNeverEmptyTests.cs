@@ -256,6 +256,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         var sample = exposures.First(e => heroTitleIds.Contains(e.TitleId));
         var card = items.Single(i => i.TitleId == sample.TitleId);
         Assert.True(Math.Abs(sample.PredictedRating - card.PredictedRating) <= 0.05m);
+
+        // R1-04: the title page reads TitleScores and the feed reads FeedItems. One build writes both,
+        // so every card's number is the title's stored score exactly — not a half-to-even twin of it.
+        var titleIds = items.Select(i => i.TitleId).ToList();
+        var scores = await db.TitleScores
+            .Where(s => s.AccountId == accountId && s.ModelArtifactId == snapshot.ModelArtifactId && titleIds.Contains(s.TitleId))
+            .ToDictionaryAsync(s => s.TitleId, s => s.PredictedRating);
+        Assert.All(items, i => Assert.Equal(i.PredictedRating, scores[i.TitleId]));
     }
 
     [Fact]
