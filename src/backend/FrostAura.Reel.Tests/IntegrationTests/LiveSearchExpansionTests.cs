@@ -78,32 +78,48 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.Contains(events, e => e.Event == "done");
     }
 
-    // Was quarantined alongside the sibling above and shared its cause exactly: the person-credit
-    // rows carried no OriginalLanguage, so both films were dropped by the English-only default
-    // before they could be badged. See that test's note; the fake now carries "en".
-    [Fact]
-    public async Task A_director_query_returns_the_filmography_including_watched_titles()
+    /// <summary>
+    /// HREV2-ASK-03 (FD-3's default): a person query is a suggestion surface, so it offers only the
+    /// credits the account has NOT seen — v1, the engine an unflagged deploy serves, offered Dune: Part
+    /// Two, Arrival, Sicario and Prisoners, all watched, as picks for "Denis Villeneuve films". The
+    /// reply counts the seen credits and names none. Varied over how the title was seen: a watch, a
+    /// rating with no watch row, and both credits seen (an honest none-found, no cards).
+    /// </summary>
+    /// <remarks>
+    /// The person-credit rows carry OriginalLanguage "en": without it both films were dropped by the
+    /// English-only default before they could be shown (the cause of this test's old quarantine).
+    /// </remarks>
+    [Theory]
+    [InlineData("watch", false)]
+    [InlineData("rating", false)]
+    [InlineData("watch", true)]
+    public async Task A_director_query_offers_only_unseen_credits_and_counts_the_seen_ones(string seenBy, bool bothSeen)
     {
         if (!Fixture.Available)
         {
             return;
         }
 
+        // Ids of this case's own: the catalogue is shared across the cases, and a TMDB id is unique per medium.
+        var inception = Random.Shared.NextInt64(1_000_000_000, 2_000_000_000);
+        var tenet = inception + 1;
         var accountId = await SeedAccountAsync();
-        // Inception is already watched — a director filmography is a lookup, so it must STILL appear,
-        // badged seen (unlike a vibe search, which excludes watched titles).
-        await SeedSeenTitleAsync(accountId, tmdbId: 27205, name: "Inception");
+        await SeedSeenTitleAsync(accountId, tmdbId: inception, name: "Inception", seenBy);
+        if (bothSeen)
+        {
+            await SeedSeenTitleAsync(accountId, tmdbId: tenet, name: "Tenet", seenBy);
+        }
 
         var tmdb = new FakeTmdbClient
         {
             PersonResult = new TmdbPerson(525, "Christopher Nolan", "Directing"),
             PersonCredits =
             [
-                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
-                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
+                new(inception, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
+                new(tenet, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
             ],
         };
-        var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director));
+        var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director), "Christopher Nolan made Inception and Tenet.");
         var (service, events) = BuildService(accountId, tmdb, out var emit, agent);
 
         await service.StreamAsync("show me all movies Christopher Nolan directs", region: "US", emit, CancellationToken.None);
@@ -111,16 +127,25 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.True(tmdb.PersonCreditFetches > 0, "the director query must route through person credits, not keyword/title search");
 
         var done = Assert.Single(events, e => e.Event == "done");
-        var results = done.Data.GetProperty("results").EnumerateArray().ToList();
-        var names = results.Select(r => r.GetProperty("name").GetString()).ToList();
-        Assert.Contains("Inception", names);
-        Assert.Contains("Tenet", names); // both his films
-
-        // The watched one is badged seen; the unseen one is not.
-        var inception = results.Single(r => r.GetProperty("name").GetString() == "Inception");
-        Assert.True(inception.GetProperty("seen").GetBoolean());
-        var tenet = results.Single(r => r.GetProperty("name").GetString() == "Tenet");
-        Assert.False(tenet.GetProperty("seen").GetBoolean());
+        var shown = events.Where(e => e.Event is "candidate" or "candidate-scored" or "picks" or "tray" or "done")
+            .Select(e => e.Data.ToString())
+            .ToList();
+        Assert.DoesNotContain(shown, frame => frame.Contains("Inception", StringComparison.Ordinal));
+        var reply = string.Concat(events.Where(e => e.Event == "assistant-message").Select(e => e.Data.GetProperty("text").GetString()));
+        Assert.DoesNotContain("Inception", reply, StringComparison.Ordinal);
+        if (bothSeen)
+        {
+            Assert.Equal("NoneFound", done.Data.GetProperty("mode").GetString());
+            Assert.Empty(done.Data.GetProperty("results").EnumerateArray());
+            Assert.DoesNotContain(shown, frame => frame.Contains("Tenet", StringComparison.Ordinal));
+            Assert.DoesNotContain("Tenet", reply, StringComparison.Ordinal);
+        }
+        else
+        {
+            var names = done.Data.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("name").GetString()).ToList();
+            Assert.Equal(["Tenet"], names);
+            Assert.Equal("You've seen 1 title directed by Christopher Nolan; here is one you haven't.", reply);
+        }
     }
 
     [Fact]
@@ -351,7 +376,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     /// <summary>A canned agent that resolves a turn straight to a named-person intent (no LLM).</summary>
-    private sealed class FakePersonAgent(PersonQuery person) : ISearchAgent
+    private sealed class FakePersonAgent(PersonQuery person, string? reply = null) : ISearchAgent
     {
         public bool IsAvailable => true;
 
@@ -360,7 +385,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         public Task<AgentReply> InterpretAsync(
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
-                $"Here are films {person.Role} {person.Name}.",
+                reply ?? $"Here are films {person.Role} {person.Name}.",
                 new SearchIntent([], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
@@ -465,7 +490,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedSeenTitleAsync(Guid accountId, long tmdbId, string name)
+    /// <summary>A title the account has seen — watched (the default) or only rated (<paramref name="seenBy"/> "rating").</summary>
+    private async Task SeedSeenTitleAsync(Guid accountId, long tmdbId, string name, string seenBy = "watch")
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -479,17 +505,34 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
             CreatedAt = DateTime.UtcNow,
         };
         db.Add(title);
-        db.WatchedTitles.Add(new WatchedTitle
+        if (seenBy == "rating")
         {
-            Id = Guid.NewGuid(),
-            AccountId = accountId,
-            TitleId = title.Id,
-            Plays = 1,
-            IsFullyWatched = true,
-            LastWatchedAt = DateTime.UtcNow,
-            FirstSyncedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-        });
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = 8,
+                RatedAt = DateTime.UtcNow,
+                FirstRatedAt = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            db.WatchedTitles.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                Plays = 1,
+                IsFullyWatched = true,
+                LastWatchedAt = DateTime.UtcNow,
+                FirstSyncedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+        }
+
         await db.SaveChangesAsync();
     }
 

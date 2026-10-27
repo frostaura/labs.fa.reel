@@ -359,8 +359,8 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
 
     /// <summary>
     /// R1-11: the resume says "since" only of cards the account acted on AFTER the answer was given.
-    /// A person query shows seen titles, so a resumed answer can lose cards rated years before it;
-    /// the server counts those apart (<c>removedEarlier</c>), by the rating's own date, a watch Reel
+    /// An answer recorded before HREV2-ASK-03 (when a person query still showed seen titles) can lose
+    /// cards rated years before it; the server counts those apart (<c>removedEarlier</c>), by the rating's own date, a watch Reel
     /// synced before the answer, or a save made before it. Varied across the interaction kinds,
     /// because each carries its time in a different column.
     /// </summary>

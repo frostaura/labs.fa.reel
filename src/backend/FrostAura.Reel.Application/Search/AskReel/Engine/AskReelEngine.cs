@@ -644,7 +644,8 @@ public sealed class AskReelEngine(
     /// </summary>
     internal static string SupplyAnswer(SupplyReport report, HardConstraints hard)
     {
-        var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords + " " : string.Empty;
+        // The shelf the supply was counted over — every concept and the person, never the first concept alone (HREV2-ASK-01).
+        var topic = AskReelTopic.Shelf(hard) is { } shelf ? shelf + " " : string.Empty;
         var barred = report.PredictedFloor is > 0m;
         var left = Math.Max(0, barred ? report.Offerable : report.Eligible - report.AlreadyShown);
         var noun = (hard.Media, left == 1) switch
@@ -703,7 +704,8 @@ public sealed class AskReelEngine(
 
         var query = QueryFor(turn, next);
         var exclude = query.Exclude.ToHashSet();
-        var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
+        // Named by every constraint the supply intersects, so a count and its label describe one shelf (HREV2-ASK-01).
+        var topic = AskReelTopic.Shelf(hard);
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
 
         await WarmMoodAsync(turn, hard, soft, ct);
@@ -729,7 +731,8 @@ public sealed class AskReelEngine(
         }
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
-        var candidates = Judgeable(retrieval, titles, exclude, next);
+        var (candidates, scored) = await JudgeOrderAsync(
+            turn, () => scorer, Judgeable(retrieval, titles, exclude, next), turn.Timings, ct);
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
@@ -746,13 +749,13 @@ public sealed class AskReelEngine(
         int? personSeen = null;
         if (personOnly)
         {
-            var predictions = await ScoreAsync(turn, judgedSlice, ct);
+            var predictions = scored ?? await ScoreAsync(turn, judgedSlice, ct);
             personSeen = await SeenCreditsAsync(accountId, hard.People, hard.Media, ct);
             await PlacePersonCreditsAsync(turn, plan, judgedSlice, titles, predictions, hard.People[0]);
         }
         else if (!judgeModel.IsAvailable)
         {
-            var predictions = await ScoreAsync(turn, judgedSlice, ct);
+            var predictions = scored ?? await ScoreAsync(turn, judgedSlice, ct);
             // No model to judge with: what was found is shown as found, unchecked, never as a pick.
             if (!turn.Degraded.Contains(SearchTurnDegraded.NoModel))
             {
@@ -769,7 +772,7 @@ public sealed class AskReelEngine(
         }
         else
         {
-            await JudgeAsync(turn, next, judgedSlice, titles, ct);
+            await JudgeAsync(turn, next, judgedSlice, titles, ct, scored);
             if (turn.Timings.Has(AskStageTimings.RetrieveSpeculative)
                 && turn.Speculative?.Judging is { IsCompletedSuccessfully: true, Result: { } early })
             {
@@ -1018,7 +1021,11 @@ public sealed class AskReelEngine(
             var scopedDb = services.GetRequiredService<IReelDbContext>();
             var ids = result.Candidates.Select(c => c.TitleId).ToList();
             var titles = await scopedDb.Titles.AsNoTracking().Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
-            var slice = Judgeable(result, titles, query.Exclude.ToHashSet(), next).Take(RequestJudge.MaxJudged).ToList();
+            // Ordered exactly as the turn will order it, or the early batch is spent on titles the turn
+            // then judges after the bar-clearing ones — or never (HREV2-RET-01).
+            var (ordered, _) = await JudgeOrderAsync(
+                turn, services.GetRequiredService<OnDemandScorer>, Judgeable(result, titles, query.Exclude.ToHashSet(), next), null, ct);
+            var slice = ordered.Take(RequestJudge.MaxJudged).ToList();
             if (slice.Count == 0)
             {
                 return null;
@@ -1051,6 +1058,49 @@ public sealed class AskReelEngine(
             .Where(c => !next.UserNegations.Any(n => Trips(titles[c.TitleId], n)))
             .ToList();
     }
+
+    /// <summary>
+    /// The order the judge takes the candidates in: retrieval's, except that when there are more of
+    /// them than it rules on and the account has a bar, the ones the bar lets through go first —
+    /// stably, so equal footing keeps retrieval's order. Returns the predictions it scored, so the
+    /// turn places its verdicts on the same numbers; null when it scored nothing.
+    ///
+    /// <para><b>Why (HREV2-RET-01, IREV2-SYS-01 carried to v2).</b> The judge rules on the first
+    /// <see cref="RequestJudge.MaxJudged"/> titles. Retrieval's order says nothing about which of
+    /// them can become a pick, and a title under the bar can only ever reach the floor tray: "scary
+    /// horror films" spent all sixteen judgements on titles under the bar and answered none-found
+    /// while Dead Silence (7.5) and Lake Mungo (7.4) cleared it and were never judged; "heist movies"
+    /// spent six of sixteen on Heist 88 (2.3) and The Order (1.3). Under the cap every candidate is
+    /// judged anyway, so nothing is scored early.</para>
+    ///
+    /// <para>Timed as <see cref="AskStageTimings.Score"/> on <paramref name="timings"/> — null from the
+    /// speculation, which runs beside the turn and may not touch its (unsynchronised) timings. The
+    /// scorer is resolved only when it is needed.</para>
+    /// </summary>
+    private static async Task<(List<Candidate> Ordered, IReadOnlyDictionary<Guid, decimal>? Scored)> JudgeOrderAsync(
+        Turn turn, Func<OnDemandScorer> scoring, List<Candidate> candidates, AskStageTimings? timings, CancellationToken ct)
+    {
+        if (turn.Floor <= 0m || candidates.Count <= RequestJudge.MaxJudged)
+        {
+            return (candidates, null);
+        }
+
+        IReadOnlyDictionary<Guid, decimal> predicted;
+        using (timings?.Stage(AskStageTimings.Score))
+        {
+            predicted = await scoring().ScoreAsync(turn.AccountId, candidates.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
+        }
+
+        return (OrderForJudge(candidates, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, turn.Floor)), predicted);
+    }
+
+    /// <summary>The candidates the bar lets through, then the rest — each in retrieval order.</summary>
+    internal static List<Candidate> OrderForJudge(IReadOnlyList<Candidate> candidates, Func<Guid, bool> clearsBar) =>
+        [.. candidates
+            .Select((c, index) => (c, index))
+            .OrderBy(p => clearsBar(p.c.TitleId) ? 0 : 1)
+            .ThenBy(p => p.index)
+            .Select(p => p.c)];
 
     /// <summary>
     /// The plan's retrieval: the speculative one when it asked for exactly this query, else a fresh
@@ -1250,7 +1300,8 @@ public sealed class AskReelEngine(
         ConversationState next,
         IReadOnlyList<Candidate> slice,
         IReadOnlyDictionary<Guid, Title> titles,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyDictionary<Guid, decimal>? ordered = null)
     {
         if (slice.Count == 0)
         {
@@ -1281,6 +1332,12 @@ public sealed class AskReelEngine(
         var scoring = TimedScoreAsync();
         async Task<IReadOnlyDictionary<Guid, decimal>> TimedScoreAsync()
         {
+            // Already scored, over every candidate, to choose which ones are judged (HREV2-RET-01).
+            if (ordered is not null)
+            {
+                return ordered;
+            }
+
             var clock = Stopwatch.StartNew();
             var scored = await scorer.ScoreAsync(turn.AccountId, slice.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
             scoreMs = clock.Elapsed.TotalMilliseconds;

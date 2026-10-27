@@ -16,23 +16,29 @@ namespace FrostAura.Reel.Application.Search;
 public sealed partial class LiveSearchExpansionService
 {
     /// <summary>
-    /// Streams a person's filmography: chronological (newest first), already-watched entries kept
-    /// and badged, the top slice scored for the predicted-rating badge — but never re-ordered or
-    /// culled by LLM fit, because the user asked for the WHOLE list, not a recommendation.
+    /// Streams a person's unseen credits: chronological (newest first), the top slice scored for the
+    /// predicted-rating badge — but never re-ordered or culled by LLM fit, because the user asked for
+    /// the person's work, not a recommendation.
+    ///
+    /// <para><b>Unseen only (FD-3's default, HREV2-ASK-03).</b> The caller reads the credits through
+    /// the account's full eligibility, so a seen, rated, saved or declined title never arrives here; a
+    /// seen one that somehow did is dropped rather than badged, because a person query is a
+    /// suggestion surface and the lock forbids seen titles on every one. The reply counts the seen
+    /// credits (<see cref="PersonReply"/>) and names none of them.</para>
     /// </summary>
     private async Task<TurnOutcome> StreamFilmographyAsync(
         Guid accountId, string? assistantText, SearchIntent intent, List<Title> eligible,
         FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
-        var ordered = eligible
+        var newestFirst = eligible
             .OrderByDescending(t => t.ReleasedAt ?? t.FirstAiredAt ?? DateTime.MinValue)
             .Take(PersonReturnCount)
             .ToList();
-
-        var seenIds = await SeenTitleIdsAsync(accountId, ordered.Select(t => t.Id).ToList(), ct);
+        var seenIds = await SeenTitleIdsAsync(accountId, newestFirst.Select(t => t.Id).ToList(), ct);
+        var ordered = newestFirst.Where(t => !seenIds.Contains(t.Id)).ToList();
         foreach (var t in ordered)
         {
-            await emit("candidate", Card(t, similarity: null, predicted: null, seen: seenIds.Contains(t.Id)));
+            await emit("candidate", Card(t, similarity: null, predicted: null, seen: false));
         }
 
         // Score the top slice for the badge (no re-rank — the order is the filmography).
@@ -52,7 +58,7 @@ public sealed partial class LiveSearchExpansionService
         var results = ordered
             .Select(t => Card(t, similarity: null,
                 predicted: scores.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
-                seen: seenIds.Contains(t.Id)))
+                seen: false))
             .ToList();
 
         var who = intent.People is { Count: > 0 } ? intent.People[0] : null;
@@ -81,7 +87,60 @@ public sealed partial class LiveSearchExpansionService
         return TurnOutcome.Answered(assistantText, reason, stored);
     }
 
-    /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>
+    /// <summary>
+    /// How many of a person's discovered credits the account has seen (watched or rated), counted over
+    /// the credits the request could otherwise show — inside the account's content rules, its maturity
+    /// ceiling and the request's media and years — so the reply's "you've seen N" is about the same
+    /// shelf as the titles under it.
+    /// </summary>
+    private async Task<int> SeenCreditCountAsync(
+        Guid accountId, IReadOnlyList<Guid> discovered, SearchIntent pass, string? maturityCeiling, CancellationToken ct)
+    {
+        if (discovered.Count == 0)
+        {
+            return 0;
+        }
+
+        var credited = (await eligibility.ContentFilteredTitles(accountId)
+                .Where(t => discovered.Contains(t.Id))
+                .ToListAsync(ct))
+            .Where(t => EligibilityQueryBuilder.PassesMaturity(t, maturityCeiling))
+            .Where(t => MatchesMedia(t, pass.MediaTypes))
+            .Where(t => MatchesYear(t, pass))
+            .Select(t => t.Id)
+            .ToList();
+        return (await SeenTitleIdsAsync(accountId, credited, ct)).Count;
+    }
+
+    /// <summary>
+    /// The person reply, counts only (FD-3): "You've seen 9 movies directed by Christopher Nolan; here
+    /// are 3 you haven't." — the v2 composer's sentence, so both engines say the same thing.
+    /// </summary>
+    internal static string PersonReply(PersonQuery person, int unseen, int seen, IReadOnlyList<MediaType> media)
+    {
+        ArgumentNullException.ThrowIfNull(person);
+        var credit = person.Role switch
+        {
+            PersonRole.Director => $"directed by {person.Name}",
+            PersonRole.Cast => $"starring {person.Name}",
+            _ => $"with {person.Name}",
+        };
+        var noun = (media.Distinct().ToList(), seen == 1) switch
+        {
+            ([MediaType.Movie], true) => "movie",
+            ([MediaType.Movie], false) => "movies",
+            ([MediaType.Show], true) => "show",
+            ([MediaType.Show], false) => "shows",
+            (_, true) => "title",
+            _ => "titles",
+        };
+        var here = unseen == 1 ? "is one" : FormattableString.Invariant($"are {unseen}");
+        return seen > 0
+            ? FormattableString.Invariant($"You've seen {seen} {noun} {credit}; here {here} you haven't.")
+            : $"Here {here} {credit} you haven't seen.";
+    }
+
+    /// <summary>The subset of the given title ids the account has watched or rated.</summary>
     private async Task<HashSet<Guid>> SeenTitleIdsAsync(Guid accountId, IReadOnlyList<Guid> titleIds, CancellationToken ct)
     {
         var watched = await db.WatchedTitles

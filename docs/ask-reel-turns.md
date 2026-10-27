@@ -141,7 +141,14 @@ COUNTS and the reply NAMES is the subset the user said — in this message, else
 earlier asks, newest first. When the user's words anchor none of them, the whole list is the topic
 and the reply names every keyword it counted ("swordplay or warrior movies"). A request with a named
 topic never widens past it: one discovery pass, no popularity last resort (§4.8); mood and genre
-requests still widen, keeping their genres on every rung.
+requests still widen, keeping their genres on every rung. Neither does a person request: a person
+whose every credit is seen is an honest none-found.
+
+**The shelf is named whole** (HREV2-ASK-01). The supply counts the AND of every hard concept and
+every person, so the reply, the phase line and the "how many are left" answer name all of them, in
+the order they were intersected — "romantic comedy movies", "Liam Neeson thriller movies" — never
+the first concept alone. A concept that restates another (two words for the same genre, or a word
+already inside a kept phrase) is named once (`AskReelTopic.Shelf`).
 
 **`mode: "Clarify"`** when the message points at a card by position ("the second one", "the last
 one", "#3") and no answer in the conversation shows that many cards (R1-04). It is answered before any
@@ -179,7 +186,7 @@ A **replay** (the same `clientTurnId` again) emits the same grammar — `convers
 carrying **every key a live `done` carries**, plus four a live turn cannot state: `replayed: true`,
 `removed` (how many stored cards the eligibility re-filter dropped since), `removedEarlier` (how many
 of those the account had already rated, watched, saved or dismissed when the answer was given — a
-person query shows seen titles, so the client says "since" only of the rest), and `failed` /
+person query showed seen titles before HREV2-ASK-03, so the client says "since" only of the rest), and `failed` /
 `failureCode` when the stored turn was a failure. `timingsMs` and `debug` are present and `null`,
 under the same founder gating as a live turn: one event name, one shape, always. A replay makes zero
 model calls, writes zero rows and writes **no exposures**.
@@ -550,6 +557,11 @@ uses it only to know which frames to expect.
 3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6** (the first
    **4**), at most **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and
    **emitted as it returns**. On a speculated topic the first batch may already be judged (above).
+   **When more than 16 are retrieved and a bar is set, the ones the bar lets through go first**
+   (HREV2-RET-01): every candidate is scored, and the bar-clearing ones take the judge's slots in
+   retrieval order ahead of the rest — a title under the bar can only reach the floor tray, so judging
+   it ahead of one that clears spent a pick's slot on the tray. The speculation's early batch is
+   chosen in the same order. Under 16, nothing is scored early.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
@@ -629,7 +641,9 @@ Negations come only from the user's words; standing conditions are never written
 **People and seen titles (FD-3, lock-compliant default):** a person request returns only titles the
 account has not seen; the reply counts the seen ones and never names them. A person's credits are
 their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to
-the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`.
+the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`. The v1 engine holds to the
+same default (HREV2-ASK-03): its person path reads the account's full eligibility, and its reply is
+the composer's counted sentence, not the model's, which was written before any credit was looked up.
 
 ### Pre-v2 conversations
 
