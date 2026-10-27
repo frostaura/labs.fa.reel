@@ -102,9 +102,9 @@ public static class MatrixCells
         var controlSaw = Shown(world, control, cell.Surface, violator.Id, trays: true);
         var guardedSaw = Shown(world, guarded, cell.Surface, violator.Id, trays: true);
 
-        // A film with a horror stand-in keyword is not a horror film (films have the genre id), so it
-        // must stay wherever the control shows it.
-        if (cell.Exclusion == "genre-standin" && cell.Media == MediaType.Movie)
+        // A film with a horror stand-in keyword, or a romance overview, is not a horror or romance film
+        // (films have the genre id), so it must stay wherever the control shows it.
+        if (cell.Exclusion is "genre-standin" or "genre-overview" && cell.Media == MediaType.Movie)
         {
             return !controlSaw
                 ? (Verdict.Unexercised, $"{control} never showed {violator.Name} on {cell.Surface}")
@@ -249,7 +249,7 @@ public static class MatrixCells
         var violator = rule ? world.Violators[($"saved-{kind}", cell.Media)] : world.Violators[(kind, cell.Media)];
         var controlSaw = world.Seen[controlLabel][cell.Surface].Contains(violator.Id);
         var guardedSaw = world.Seen[guardedPin][cell.Surface].Contains(violator.Id);
-        if (cell.Exclusion == "genre-standin" && cell.Media == MediaType.Movie)
+        if (cell.Exclusion is "genre-standin" or "genre-overview" && cell.Media == MediaType.Movie)
         {
             return !controlSaw
                 ? (Verdict.Unexercised, $"{controlLabel} never showed {violator.Name}")

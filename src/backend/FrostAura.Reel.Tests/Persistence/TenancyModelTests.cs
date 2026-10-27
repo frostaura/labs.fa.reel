@@ -75,6 +75,24 @@ public class TenancyModelTests
     }
 
     [Fact]
+    public void ExternalApiUsage_is_deliberately_unscoped_and_filtered_by_hand_where_it_is_read()
+    {
+        // ExternalApiUsage carries an AccountId (nullable: system rows belong to no tenant) but is
+        // the operations ledger global monitoring reads, so it is deliberately NOT IAccountScoped and
+        // has no query filter. Every reader that serves it to an account filters by hand: today that is
+        // MetricsEndpoints' apiUsage block, which shows a non-founder only its own rows (HREV1-PLAT-3,
+        // pinned by MetricsPipelineUsageTenancyTests). A new reader must do the same (WS-5 CR-WS6).
+        Assert.False(typeof(IAccountScoped).IsAssignableFrom(typeof(ExternalApiUsage)));
+
+        using var db = CreateContext();
+        var usage = db.Model.FindEntityType(typeof(ExternalApiUsage));
+
+        Assert.NotNull(usage);
+        Assert.Empty(usage.GetDeclaredQueryFilters());
+        Assert.True(usage.FindProperty(nameof(ExternalApiUsage.AccountId))!.IsNullable);
+    }
+
+    [Fact]
     public void Model_builds_with_all_expected_tables()
     {
         using var db = CreateContext();

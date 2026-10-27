@@ -1195,12 +1195,14 @@
       "owner": "WS-5",
       "verdict": "true",
       "assertion": "The For-you bar holds on the feed at build and at read: a short page says how many titles cleared it and that nothing under it is shown, and a bar raised after the build says how many of tonight's picks it now holds back; the hero says it is reaching only for a measured card; deep cuts and new-for-you rows are what they are named.",
-      "evidence": "ForYouBar.Clears is the one comparison the build and the read path use; the build no longer relaxes the bar (XM-07 closed by WS-5), ShortReason states the shortfall, and HeldBackOnRead covers a bar saved after the build. The bar is the 'for you' minimum in the Settings conditions editor. heroConfidence states a shortfall only for a measured card.",
+      "evidence": "ForYouBar.Clears is the one comparison the build and the read path use; the build no longer relaxes the bar (XM-07 closed by WS-5), ShortReason states the shortfall, and HeldBackOnRead covers a bar saved after the build. The bar is the 'for you' minimum in the Settings conditions editor. heroConfidence states a shortfall only for a measured card. The bar the row note names is the product's 7.5, raised only by the account's own For-you minimum; it says “your” only when the bar equals that saved minimum at badge precision, and “my usual” otherwise (HREV1-D01). When the stored picks fail to load, Home says so and that the hero is paging live picks from the ranker, with no “ranked for you” stamp (HREV1-D12).",
       "tests": [
         "src/frontend/src/lib/heroConfidence.test.ts::is true only for a pick the server measured and found short",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeedLateRulesTests.cs::A_short_page_names_the_bar_instead_of_relaxing_it",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeedLateRulesTests.cs::A_rule_and_a_bar_saved_after_the_build_hold_on_the_next_read",
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv",
+        "src/frontend/src/lib/heroConfidence.test.ts::says 'your' only when the bar the picks missed IS the account's own For-you minimum",
+        "src/frontend/tests-e2e/hero-honesty.spec.ts::a failed snapshot read says so above the live picks it falls back to, and Retry lands the snapshot (HREV1-D12)"
       ],
       "claims": [
         {
@@ -1210,10 +1212,6 @@
         {
           "file": "src/frontend/src/lib/heroConfidence.ts",
           "text": "Reaching a bit — nothing cleared my usual bar tonight"
-        },
-        {
-          "file": "src/frontend/src/lib/heroConfidence.ts",
-          "text": "Nothing cleared your usual… bar tonight"
         },
         {
           "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
@@ -1254,6 +1252,22 @@
         {
           "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
           "text": "Your ≥… “for you” bar holds back … of tonight's picks; nothing under it is shown. Lower it in Settings to see more."
+        },
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Nothing cleared my usual bar tonight"
+        },
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Nothing cleared your … bar tonight"
+        },
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Nothing cleared my usual … bar tonight"
+        },
+        {
+          "file": "src/frontend/src/pages/Home.tsx",
+          "text": "Couldn't load tonight's picks — showing live picks instead ·"
         }
       ]
     },
@@ -1262,11 +1276,13 @@
       "owner": "WS-4",
       "verdict": "true",
       "assertion": "Saved sorts streaming-now first, then best for you, then shortest; the pin is the best available title that fits tonight, and says so when nothing reaches the bar.",
-      "evidence": "SavedQueue sort and WatchTonight selection; the pin's reason owns up to the bar (R1-18).",
+      "evidence": "SavedQueue sort and WatchTonight selection; the pin's reason owns up to the bar (R1-18). A pin 'Not tonight' advanced to carries its own line (advancedPinLine): under the bar it leads with the shortfall, otherwise it claims only an ordinal (next-highest), and it never calls the evening budget the user's, because the served budget may be the default (HREV1-D05, D10).",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/Saved/SavedQueueTests.cs::Tonight_puts_available_first_then_best_then_shortest",
         "src/backend/FrostAura.Reel.Tests/Saved/SavedQueueTests.cs::Watch_tonight_takes_the_best_available_title_that_fits_the_budget",
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::The_watch_tonight_reason_names_no_provider_the_card_hides_and_owns_up_to_the_bar"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::The_watch_tonight_reason_names_no_provider_the_card_hides_and_owns_up_to_the_bar",
+        "src/frontend/src/lib/savedQueue.test.ts::leads with the shortfall when the pick is under the bar",
+        "src/frontend/src/lib/savedQueue.test.ts::never calls the evening budget 'yours' — the served budget may be the default (HREV1-D10)"
       ],
       "claims": [
         {
@@ -1312,6 +1328,18 @@
         {
           "file": "src/backend/FrostAura.Reel.Application/Saved/SavedQueue.cs",
           "text": "The only thing in your queue that's … and fits tonight is under"
+        },
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "… for you…, … inside a … evening."
+        },
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Under … for you — the next thing in your queue that's streaming now and fits tonight: …"
+        },
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Next-highest-predicted thing in your queue that's streaming now and fits tonight — …"
         }
       ]
     },
@@ -1387,6 +1415,23 @@
           "text": "cast & crew you know from your ratings"
         }
       ]
+    },
+    {
+      "id": "short-rails-say-why",
+      "owner": "WS-10A",
+      "verdict": "true",
+      "assertion": "A short or empty rail says why in terms it can vouch for: the server's supply count when one is sent, the device's own browse view when that is what hides the cards it loaded, and no cause at all on a tier that pages no rails.",
+      "evidence": "railSupplyLine names the device view only when cards this rail loaded are hidden by the per-device Movies/TV and availability toggles (applied in the browser, not by the server), so the server's count is not quoted as the reason (HREV1-RET-07).",
+      "tests": [
+        "src/frontend/src/lib/railSupplyCopy.test.ts::blames the device's view, not the conditions, when the cards it did load are hidden by the browse toggles",
+        "src/frontend/tests-e2e/rail-supply.spec.ts::an empty rail names what the conditions hide, and See why opens the editor"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/railSupplyCopy.ts",
+          "text": "Nothing here matches the Movies/TV and availability view set on this device"
+        }
+      ]
     }
   ],
   "notClaims": [
@@ -1456,7 +1501,7 @@
       "reason": "status label"
     },
     {
-      "file": "src/frontend/src/components/settings/PreferencesSection.tsx",
+      "file": "src/frontend/src/components/settings/PinCard.tsx",
       "text": "Remove the settings PIN?",
       "reason": "confirmation question"
     },

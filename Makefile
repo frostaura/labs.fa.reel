@@ -161,8 +161,11 @@ ci-audit:
 ci-frontend-lint:
 	cd src/frontend && npm run lint
 
+# The app, then the Playwright specs, fixtures and harness (tsconfig.e2e.json, WS-9 CR-9): typed
+# route fixtures protect nothing unless something type-checks them.
 ci-frontend-typecheck:
 	cd src/frontend && npm run typecheck
+	cd src/frontend && npm run typecheck:e2e
 
 ci-frontend-test:
 	cd src/frontend && npm run test -- --run --coverage
@@ -191,7 +194,7 @@ ci-vite-proxy:
 # The dev-server specs in both engines (Safari is where the founder's installed PWA runs; WebKit runs in
 # batches of at most 40 tests per browser, because one WebKit browser hangs on its 64th page), with service
 # workers blocked by the Playwright config; then the *.preview.spec.ts specs against the production
-# build (Chromium), which test the real service worker (WS-9 CR-3). PW_PORT keeps parallel runs apart.
+# build (Chromium and WebKit, WS-9 PH-12), which test the real service worker (WS-9 CR-3). PW_PORT keeps parallel runs apart.
 ci-e2e:
 	cd src/frontend && CI=1 npm run test:e2e
 	cd src/frontend && CI=1 npx --no-install playwright test -c playwright.preview.config.ts

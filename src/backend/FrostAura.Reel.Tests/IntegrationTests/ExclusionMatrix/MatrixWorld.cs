@@ -114,8 +114,12 @@ public sealed class MatrixWorld
     /// The rule exclusions under test. <c>genre-standin</c> is the TV half of an ExcludeGenre of horror,
     /// which TMDB's TV taxonomy cannot tag (GenreStandIns): a show carrying "zombie" is excluded; a film
     /// carrying it is not (films have a horror id), so its movie violator must STAY visible.
+    /// <c>genre-alias</c> is an ExcludeGenre of romance reaching a title tagged only "soap" (the alias
+    /// genre, GenreStandIns.Aliases), on both media. <c>genre-overview</c> is the same exclusion reaching
+    /// a SHOW whose only romance is its overview (GenreStandIns.OverviewPhrases); the film with the same
+    /// overview is not excluded (films have a romance id), so it must STAY visible (HREV1-RET-09).
     /// </summary>
-    public static readonly string[] RuleKinds = ["genre", "genre-standin", "keyword", "language", "crowd"];
+    public static readonly string[] RuleKinds = ["genre", "genre-standin", "genre-alias", "genre-overview", "keyword", "language", "crowd"];
 
     /// <summary>The footprint kinds under test.</summary>
     public static readonly string[] FootprintKinds = ["watched", "rated", "not-interested", "dropped", "saved"];
@@ -261,6 +265,12 @@ public sealed class MatrixWorld
                         break;
                     case "genre-standin":
                         v.Keywords = [Topic, "zombie"];
+                        break;
+                    case "genre-alias":
+                        v.Genres = ["drama", "crime", "soap"];
+                        break;
+                    case "genre-overview":
+                        v.Overview = "Two exes rekindle an old romance.";
                         break;
                     case "keyword":
                         v.Keywords = [Topic, "killer clown"];
@@ -577,6 +587,8 @@ public sealed class MatrixWorld
                 {
                     ["genre"] = (FilterKind.ExcludeGenre, "horror"),
                     ["genre-standin"] = (FilterKind.ExcludeGenre, "horror"),
+                    ["genre-alias"] = (FilterKind.ExcludeGenre, "romance"),
+                    ["genre-overview"] = (FilterKind.ExcludeGenre, "romance"),
                     ["keyword"] = (FilterKind.ExcludeKeyword, "clown"),
                     ["language"] = (FilterKind.Language, "en"),
                     ["crowd"] = (FilterKind.MinCrowdRating, "6.0"),
