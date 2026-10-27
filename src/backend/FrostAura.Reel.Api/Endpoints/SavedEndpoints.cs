@@ -289,8 +289,9 @@ public static class SavedEndpoints
                 title.Year,
                 title.PosterPath,
                 title.RuntimeMinutes,
-                // 1dp at the response edge, matching the feed and title detail.
-                entry.PredictedRating is { } p ? Math.Round(p, 1) : null,
+                // The badge's own number (one decimal, half away from zero), the same one the pin's
+                // bar test below reads.
+                entry.PredictedRating is { } p ? ForYouBar.Shown(p) : null,
                 CrowdRating.For(title),
                 CrowdRating.VotesFor(title),
                 titleProviders,
@@ -306,7 +307,7 @@ public static class SavedEndpoints
                 isPinned
                     ? SavedQueue.WatchTonightReason(
                         // The number the card shows, so the bar test and the badge cannot disagree.
-                        Math.Round(entry.PredictedRating!.Value, 1),
+                        ForYouBar.Shown(entry.PredictedRating!.Value),
                         expectedAbsoluteError,
                         entry.RuntimeMinutes!.Value,
                         eveningBudget,
@@ -394,7 +395,7 @@ public static class SavedEndpoints
                 x.Name,
                 x.Year,
                 x.PosterPath,
-                Math.Round(x.Predicted!.Value, 1),
+                ForYouBar.Shown(x.Predicted!.Value),
                 x.WatchedAt!.Value)).ToList());
     }
 

@@ -95,6 +95,52 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
             s => s.AccountId == accountId && s.ModelArtifactId == artifactId));
     }
 
+    /// <summary>
+    /// R1-05 on Saved: the badge rounds half away from zero, and the pin's reason reads the bar
+    /// against that same number. A pin stored at 7.45 reads "7.5" and meets the hero's 7.5 bar;
+    /// half-to-even showed "7.4" and opened the reason with "nothing reaches 7.5". Varied: 7.44
+    /// reads "7.4" and is under the bar, and a 6.25 off the pin reads "6.3".
+    /// </summary>
+    [Theory]
+    [InlineData(7.45, 7.5, true)]
+    [InlineData(7.44, 7.4, false)]
+    public async Task The_saved_badge_and_the_pins_bar_read_the_same_number(double stored, double badge, bool clears)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync(eveningBudgetMinutes: 120);
+        var artifactId = await SeedActiveArtifactAsync(accountId);
+        var (providerId, _) = await KnownProviderAsync(8, "Netflix");
+        var pinned = await SeedTitleAsync("midpoint-pin", runtimeMinutes: 100);
+        var other = await SeedTitleAsync("midpoint-other", runtimeMinutes: 100);
+        await SeedAvailabilityAsync(pinned, providerId, "US", Now.AddHours(-2));
+        await SeedAvailabilityAsync(other, providerId, "US", Now.AddHours(-2));
+        await SeedScoresAsync(accountId, artifactId, new()
+        {
+            [pinned] = (decimal)stored,
+            [other] = 6.25m,
+        }, Now.AddDays(-1));
+        await SaveAllAsync(accountId, [pinned, other]);
+
+        var tonight = await QueueAsync(accountId);
+
+        var pin = Assert.Single(tonight.Items, i => i.WatchTonight);
+        Assert.Equal(pinned, pin.TitleId);
+        Assert.Equal((decimal)badge, pin.PredictedRating);
+        Assert.Equal(6.3m, tonight.Items.Single(i => i.TitleId == other).PredictedRating);
+        if (clears)
+        {
+            Assert.StartsWith("Highest-predicted thing in your queue", pin.WatchTonightReason!, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.StartsWith("Nothing in your queue that's streaming and fits tonight reaches 7.5 for you.", pin.WatchTonightReason!, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task Tonight_pins_the_best_available_title_inside_the_evening_budget()
     {

@@ -137,6 +137,9 @@ public class DigestDegradedReasonEndpointTests(PostgresFixture fixture, ReelApiF
             TraktSlug = $"digest-reason-{Guid.NewGuid():N}",
             Name = $"Digest Reason {Guid.NewGuid():N}",
             Genres = ["drama"],
+            // English: with no Language rule the account is English-only (the read path re-checks
+            // eligibility since XM-04), and an untagged title would be held back as ineligible.
+            Language = "en",
             ReleasedAt = DateTime.UtcNow.AddDays(-2),
             CreatedAt = DateTime.UtcNow,
         };

@@ -35,7 +35,7 @@ public sealed class WeeklyDigestService(
             try
             {
                 var now = DateTime.UtcNow;
-                if (now.DayOfWeek != DayOfWeek.Friday || now.Hour < 16)
+                if (!IsDigestWindow(now))
                 {
                     continue;
                 }
@@ -48,6 +48,17 @@ public sealed class WeeklyDigestService(
             }
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="utcNow"/> falls in the digest's scheduling window: Friday, from 16:00
+    /// UTC to the end of the day. Outside it a tick does nothing; inside it every tick runs
+    /// <see cref="ScheduleAsync"/>, which converges rather than duplicating.
+    /// </summary>
+    internal static bool IsDigestWindow(DateTime utcNow) =>
+        utcNow.DayOfWeek == DayOfWeek.Friday && utcNow.Hour >= DigestHourUtc;
+
+    /// <summary>The hour (UTC) on Friday from which the week's digest is built.</summary>
+    internal const int DigestHourUtc = 16;
 
     /// <summary>
     /// One scheduling pass for the week containing <paramref name="now"/>: queues a BuildDigest for
