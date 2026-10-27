@@ -23,12 +23,16 @@ export function signed(value: number | null | undefined, digits = 2): string {
 
 /**
  * The headline sentence, in second person and with no softening. On the founder's live data this
- * reads "Within one point on 26% of what you rate" — which is the number, and the number is the
- * point. If it ever reads better, that will be because the model got better.
+ * reads "Within one point on 26% of the predictions you've rated" — which is the number, and the
+ * number is the point. If it ever reads better, that will be because the model got better.
+ *
+ * "Of the predictions you've rated", not "of what you rate" (R1-47): the population is the scored
+ * calls you later rated (shown cards, or scores written before the rating — `sourceNote` says
+ * which), never every rating you make.
  */
 export function headlineSentence(payload: AccuracyPayload): string {
   if (payload.headline.n === 0) return "Nothing to score yet.";
-  return `Within one point on ${pct(payload.headline.withinOnePoint)} of what you rate`;
+  return `Within one point on ${pct(payload.headline.withinOnePoint)} of the predictions you've rated`;
 }
 
 /**
@@ -53,7 +57,17 @@ export function sourceNote(payload: AccuracyPayload): string {
  * usual "rate titles it has already put a number on" points at numbers that do not exist yet.
  */
 export const NO_MODEL_SOURCE_NOTE =
-  "Reel puts a number on titles once it has a model; every one it scores that you then rate lands here.";
+  "Reel puts a number on titles once it has a model; rate titles after it has scored them and this page fills in.";
+
+/**
+ * Where the page's numbers come from, said without overreach (R1-47). It used to say these were "the
+ * same numbers the engine is judged on internally" — but a model is promoted on a ranking test
+ * (NDCG@10 in the eval harness) this page does not show, and the retrain check reads its own
+ * population (the active model's calibration pairs). What is true of every number here is what it
+ * is: Reel's prediction against your rating, unsmoothed.
+ */
+export const PROVENANCE_NOTE =
+  "Every number here is Reel's prediction against the rating you then gave — unsmoothed, and nothing here is a marketing figure.";
 
 /** Which way the model is wrong, in words rather than a sign. */
 export function biasNote(bias: number): string {

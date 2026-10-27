@@ -169,8 +169,12 @@ test.describe("track record", () => {
   test("leads with the unflattering headline and says the evidence is exposures", async ({ page }) => {
     await boot(page, ACCURACY_EXPOSURES);
 
-    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of what you rate");
+    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of the predictions you've rated");
     await expect(page.getByTestId("source-note")).toContainText("actually put in front of you");
+    // R1-47: what the numbers are, and no claim that the engine is judged on them internally.
+    const provenance = page.getByTestId("track-record-provenance");
+    await expect(provenance).toContainText("Every number here is Reel's prediction against the rating you then gave");
+    await expect(provenance).not.toContainText("judged on internally");
 
     const headline = page.getByTestId("headline");
     // The average miss, the direction of the miss, and the fact that the ordering carries no
@@ -353,7 +357,7 @@ test.describe("track record", () => {
 
     fail = false;
     await page.getByTestId("track-record-error-retry").click();
-    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of what you rate");
+    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of the predictions you've rated");
   });
 
   test("a window that fails never shows the previous window's numbers under its button", async ({ page }) => {
@@ -380,7 +384,7 @@ test.describe("track record", () => {
 
     // Stepping back to the window that loaded shows it again.
     await page.getByRole("button", { name: "90 days" }).click();
-    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of what you rate");
+    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of the predictions you've rated");
   });
 
   test("switching the window re-asks the server for that window", async ({ page }) => {

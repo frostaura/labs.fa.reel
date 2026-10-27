@@ -28,6 +28,7 @@ import { verdictSurface } from "../lib/verdictCopy";
 import { relTime } from "../lib/format";
 import {
   NO_MODEL_SOURCE_NOTE,
+  PROVENANCE_NOTE,
   WINDOW_LABELS,
   agreementNote,
   biasNote,
@@ -398,9 +399,8 @@ export default function TrackRecord() {
         </section>
       )}
 
-      <p className="fa-caption text-3">
-        These are the same numbers the engine is judged on internally — nothing here is a marketing
-        figure. <Link to="/dna" className="underline underline-offset-2 hover:text-fa-frost">See your taste profile</Link>.
+      <p className="fa-caption text-3" data-testid="track-record-provenance">
+        {PROVENANCE_NOTE} <Link to="/dna" className="underline underline-offset-2 hover:text-fa-frost">See your taste profile</Link>.
       </p>
     </div>
   );
