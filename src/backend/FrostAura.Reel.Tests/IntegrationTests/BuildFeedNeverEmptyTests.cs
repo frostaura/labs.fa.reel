@@ -132,8 +132,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.True(third.ShortlistCount > 0);
     }
 
-    [Fact]
-    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published()
+    /// <summary>
+    /// Also R1-11: "Judging fit for tonight's picks" is shown only on a build that is asking the model.
+    /// It used to be published on every Fresh build, keyless ones included, where nothing is judged.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published(bool modelAvailable)
     {
         if (!Fixture.Available)
         {
@@ -164,10 +170,12 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         }
 
         var hub = new RowReadingHub(Fixture, jobId);
-        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId);
+        var agent = new CannedWhyAgent();
+        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId, agent: modelAvailable ? agent : new UnavailableSearchAgent());
 
         Assert.Contains(hub.Frames, f => f.Published == "Writing why-lines");
-        Assert.Contains(hub.Frames, f => f.Published == "Judging fit for tonight's picks");
+        Assert.Equal(modelAvailable, hub.Frames.Any(f => f.Published == "Judging fit for tonight's picks"));
+        Assert.Equal(modelAvailable, agent.RerankCalls > 0);
         Assert.All(hub.Frames, f => Assert.Equal(f.Published, f.OnRow));
     }
 

@@ -99,6 +99,9 @@ public class BuildFeedJobHandler(
     /// </summary>
     internal const int QualityReserve = 40;
     private const int HeroSize = 5;
+
+    /// <summary>The progress step shown while the pre-assembly fit pass is asking the model.</summary>
+    internal const string JudgingFitStep = "Judging fit for tonight's picks";
     // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
     // from this same bar, so a card can never be labelled against a threshold the build did not use.
     private const decimal HeroConfidenceFloor = Domain.Feed.HeroConfidence.Floor;
@@ -1351,13 +1354,13 @@ public class BuildFeedJobHandler(
         // only produce an order it is not allowed to use — and would spend for the privilege.
         // Every verdict lands in the shared 6h fit cache, so the why pass below reads them back for
         // free and the pass costs the build ~5 calls in total rather than two passes' worth.
-        if (mode == FeedBuildMode.Fresh && capture.Progress is { } judging)
-        {
-            await judging(88, "Judging fit for tonight's picks");
-        }
-
+        // The "Judging fit" step is announced from inside the pass, at the moment it is about to call
+        // the model — never on a keyless build, an exhausted allowance or a fully cached slice, where
+        // no judging happens and the caption would describe work that is not being done (R1-11).
         var preAssemblyFits = mode == FeedBuildMode.Fresh
-            ? await JudgeFitBeforeAssemblyAsync(account.Id, taste, candidates, effectiveFloor, RankKey, ct)
+            ? await JudgeFitBeforeAssemblyAsync(
+                account.Id, taste, candidates, effectiveFloor, RankKey,
+                capture.Progress is { } judging ? () => judging(88, JudgingFitStep) : null, ct)
             : new Dictionary<Guid, double>();
         capture.JudgedBeforeAssembly = preAssemblyFits.Count;
 
@@ -2241,7 +2244,7 @@ public class BuildFeedJobHandler(
     /// </summary>
     private async Task<Dictionary<Guid, double>> JudgeFitBeforeAssemblyAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, IReadOnlyList<Candidate> candidates,
-        decimal effectiveFloor, Func<Candidate, decimal> rankKey, CancellationToken ct)
+        decimal effectiveFloor, Func<Candidate, decimal> rankKey, Func<Task>? announce, CancellationToken ct)
     {
         var fits = new Dictionary<Guid, double>();
         if (!agent.IsAvailable || candidates.Count == 0)
@@ -2296,6 +2299,12 @@ public class BuildFeedJobHandler(
         if (!await HasBackgroundRerankHeadroomAsync(accountId, "pre-assembly fit pass", ct))
         {
             return fits;
+        }
+
+        // Only now is the model about to be asked, so only now is the step true to show.
+        if (announce is not null)
+        {
+            await announce();
         }
 
         try
