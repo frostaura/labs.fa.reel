@@ -499,14 +499,44 @@ uses it only to know which frames to expect.
 
 ### The pipeline
 
-1. **Plan** — one model call (`ask-plan`, strict JSON schema, effort none). It classifies the message
+1. **Plan** — one model call (`ask-plan`, JSON schema with only `act` required, effort none — the
+   planner writes only the fields that carry something, since output tokens are what the stage waits
+   on; a missing field reads as empty or unchanged, and a genre outside the slug list is dropped). It classifies the message
    as one **act** — `NewRequest`, `Refine`, `CritiqueSet`, `CritiqueItem`, `ItemQuestion` or
    `Chitchat` — and returns a delta to the conversation's state, the handles it refers to, and the
    tools it wants. A `length` finish or a timeout is retried once at twice the budget; if the retry
    fails too the previous state is **carried forward**, only additive words from the new message are
-   added (never ordinals, never a negation phrase as a topic), and the turn is degraded (`plan`).
+   added (never ordinals, never a negation phrase as a topic), and the turn is degraded (`plan`). On
+   a conversation's **first** turn there is nothing to carry: the user's positive words are searched
+   as the **phrases** they wrote ("time travel", "liam neeson" — never each word as its own
+   requirement), and the reply leads "I couldn't fully read that, so I searched for …", never "as
+   before". A plan no model wrote (carried forward, or keyless) takes the media the message names.
+   **Media:** the user's own media word outranks a plan that left media unset **or answered
+   `any`** ("samurai films" is films); `any` stands only where the words name both media or neither,
+   ask for one in addition ("shows too") or rule one out ("no tv shows" asks for films).
+   **Pointers:** an ordinal no answer on screen can satisfy ("the third one" after one pick, or
+   with nothing shown) is asked back **before any model call** (`clarify`, R1-04); one some answer
+   could satisfy but that nothing resolved to a card (no handle, and the newest answer has no card
+   there, or "from before" without saying which) is asked back after planning — a search never runs
+   on an unresolved pointer. **"More like the third one"** (a `Refine` whose reference resolved, in
+   a message asking for likeness) searches **near that card**: the earlier person and topics stop
+   being hard filters unless the message restates them; media, years, runtime and the user's own
+   negations still hold.
    A spent plan allowance (`ask_budget_spent`) or an open provider breaker (`provider_unavailable`)
    ends the turn **before any work**: `Failed` with that code and the cause's degraded copy.
+   **Speculative retrieval:** while the plan runs, a plain topic request's keyless reading
+   (concepts only — no person, mood or pointer) is retrieved on a scope of its own; the plan's
+   retrieval uses it only when the plan asks for the identical query, else it is cancelled. Stored
+   timings then carry `retrieve.spec` (its own length) and `retrieve` is only the wait after the plan.
+   With that retrieval back, its **first judge batch** (the 4 titles the turn would send first,
+   filtered exactly as the turn filters them) is judged too, against the request as the keyless
+   reading states it, once the plan has built the persona. The turn's judge reuses a verdict only
+   for the same request on the same title (the verdict cache key), and **waits for one still in
+   flight instead of sending the title again**; what the early call failed on is judged afresh. A
+   plan that reads the request differently costs one wasted batch. `judge.spec` records the early
+   call's length on a turn that took the speculation; `judge.first` is the catalogue pass's first
+   batch only (an admitted-provisional pass no longer adds to it).
+   Stage timings also record `load`, `retrieve.titles` and `judge.prep`.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
    sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
    (genres, and keywords in every spelling), the message and the account's region into retrieval.
@@ -517,9 +547,9 @@ uses it only to know which frames to expect.
    eligibility, this turn's rejections and the hard constraints, and judged as one more pass.
    `conditions()` answers with the pool the standing rules leave and the three rules costing the most,
    each with its marginal (the Conditions editor's own numbers).
-3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6**, at most
-   **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and **emitted as it
-   returns**.
+3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6** (the first
+   **4**), at most **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and
+   **emitted as it returns**. On a speculated topic the first batch may already be judged (above).
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
@@ -530,7 +560,12 @@ uses it only to know which frames to expect.
    the bar; the rest are counted as unchecked.
 5. **Compose** — the reply is written by templates from the supply report, the handles and the
    facts. **No model writes a search turn's reply.** No markdown, never "pulled", never an echo of
-   the message.
+   the message. A none-found reply claims a check only for **verdicts that came back** — a person's
+   credits, a turn with no model and a judge whose every batch failed checked nothing — and of the
+   tagged supply only the part the judge saw ("I checked 16 of them … the other 4 weren't among the
+   16 titles I checked"); titles this conversation already showed are named as shown. An
+   `ItemQuestion` answer names the title and states the answer; one that cites Reel's inputs ("the
+   runtime fact says…", "the keywords identify…") is discarded for the fact line, which names the title.
 6. **Persist** — cards are written **as they are emitted** (each `picks` / `tray` frame is a row
    write), so a turn that dies mid-stream still holds what it showed; the turn's act, mode, plan
    source, degraded flags, timings, models and effort are written at the end, and the conversation's
@@ -549,7 +584,7 @@ uses it only to know which frames to expect.
 | `none-found` | a search act with no pick | `{ supply }` — the `done.supply` shape |
 | `degraded` | when anything the client is told about did not run as designed: before `answer` / `clarify`, else before `assistant-message` | `{ what: [flag] }` — the `done.degraded` tokens (`plan`, `plan-cause:{code}`, `judge:n/m`, `judge-missing:n/m`, `no-model`, `answer`); never `arm:` notes |
 | `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — **the turn's reply**: no `assistant-message` follows it. `handle` and `titleId` are null when the answer is about no single title |
-| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), or an item question names no title | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
+| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), an item question names no title, or a pointer ("the third one") resolves to no card — before planning when no answer on screen has that many cards (then no `plan` frame precedes it) | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
 | `assistant-message` | search and refused turns only, once, after the trays and just before `done` | `{ text, degraded }` — the composed reply. A client must accept it before or after the turn's `picks` (the chat UI's own fixtures send it first) |
 | `done` | last, always | every v1 key, plus `engine: "v2"`, `act`, `planSource`, `answer` (string or null) and `clarify` (object or null). `mode` is `Picks` · `NoneFound` · `Clarify` · `Answer` |
 

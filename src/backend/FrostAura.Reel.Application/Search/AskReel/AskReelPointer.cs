@@ -125,6 +125,15 @@ public static class AskReelPointer
             $"My answers here have shown at most {most} {(most == 1 ? "title" : "titles")} at a time, so there’s no {Place(position)} to point at. Which title did you mean?");
     }
 
+    /// <summary>
+    /// The reply when a pointer COULD resolve against some answer on screen, but nothing settled
+    /// which card it means — the plan named none, and the newest answer has no card at that place, or
+    /// the message points at an earlier answer without saying which (HREV1-ASK-03). Asked back, never
+    /// searched: a search would run on the topic again and call the result "like the third one".
+    /// </summary>
+    public static string Unresolved(int position) =>
+        $"I couldn’t tell which title “{Named(position)}” means here. Which one did you mean? Name it, or tell me which answer it was in.";
+
     /// <summary>The pointer as the user would say it: "the second one", "the last one", "the title #12".</summary>
     public static string Named(int position) => position == Last ? "the last one" : $"the {Place(position)}";
 

@@ -142,7 +142,8 @@ public sealed class OpenRouterAskPlanner(
             .ToList();
         var delta = new ConversationStateDelta(
             Strings(root, "concepts"),
-            Strings(root, "genres"),
+            // The schema is no longer strict, so its genre enum is enforced here.
+            [.. Strings(root, "genres").Where(g => Genres.Contains(g, StringComparer.Ordinal))],
             people,
             min is null && max is null ? null : new YearRange(min, max),
             Int(root, "maxRuntimeMinutes"),
@@ -210,14 +211,23 @@ public sealed class OpenRouterAskPlanner(
                     : $"{p.Handle} {p.Name}")
                 .ToList(),
             standingConditions = input.Conditions.Summary ?? "none",
-            taste = Cap(input.TasteSummary, 1200),
-            mediaFilter = MediaWord(input.MediaFilter),
+            taste = Cap(input.TasteSummary, TasteChars),
+            // The app's own filter, applied by the server. "none" rather than "any" when unset: the
+            // planner copied "any" into media and "samurai films" searched shows (HREV1-ASK-02).
+            mediaFilter = input.MediaFilter == MediaScope.Any ? "none" : MediaWord(input.MediaFilter),
             clarifiedAlready = state.ClarifiedOnce,
             message = input.Message,
         };
         messages.Add(LlmMessage.User(JsonSerializer.Serialize(context, Json)));
         return messages;
     }
+
+    /// <summary>
+    /// How much of the taste summary the planner reads. It steers how an open request is read, never
+    /// what is eligible; 600 characters keep its lead lines and cut ~150 input tokens a call against
+    /// §4.11's ~1.2k plan budget (the live plan input measured ~1.87k tokens, HREV1-ASK-05).
+    /// </summary>
+    internal const int TasteChars = 600;
 
     internal const string SystemPrompt =
         "You are the planner for Reel, a film and TV recommender. You never write prose for the user. You read the " +
@@ -233,7 +243,10 @@ public sealed class OpenRouterAskPlanner(
         "FIELDS: concepts = topics the user REQUIRES, in their own words, singular and lower-case (\"ninja movies\" -> " +
         "[\"ninja\"]); never a mood, never a person, never a title, never a word the user negated. genres = genre slugs " +
         "the user names as a requirement (\"comedies\" -> [\"comedy\"]). people = named directors or actors. " +
-        "minYear/maxYear: a decade means both bounds (\"80s\" -> 1980, 1989). media = movie | tv | any | unchanged. " +
+        "minYear/maxYear: a decade means both bounds (\"80s\" -> 1980, 1989). media = movie when the message says " +
+        "film(s)/movie(s), tv when it says show(s)/series/tv as the KIND of title (\"zombie shows\", \"a show\") — " +
+        "never the verb in \"show me\"/\"show us\", which names no medium — any ONLY when it asks for both, " +
+        "unchanged when it names neither; mediaFilter is the app's own filter, applied by the server — never copy it into media. " +
         "moods = soft feelings (\"feel-good\", \"cosy\", \"tense\"). directions = attribute steers: attribute is one of " +
         "darkness, pacing, complexity, intensity, humor, optimism; trend more|less (\"funnier\" -> humor more). " +
         "negations = ONLY words the user says they do not want, copied from their message (\"no superheroes please\" " +
@@ -248,6 +261,10 @@ public sealed class OpenRouterAskPlanner(
         "two readings differ in what they REQUIRE, and never when clarifiedAlready is true; otherwise clarifyQuestion " +
         "is null and clarifyOptions empty.\n" +
         "EXAMPLES: \"ninja movies\" -> {act:NewRequest, concepts:[ninja], media:movie, tools:[search_catalog]}. " +
+        "\"samurai films\" -> {act:NewRequest, concepts:[samurai], media:movie}. \"Liam Neeson movies\" -> " +
+        "{act:NewRequest, people:[{name:Liam Neeson, role:cast}], media:movie, tools:[filmography]}. \"zombie shows\" -> " +
+        "{act:NewRequest, concepts:[zombie], media:tv}. \"show me samurai films\" -> {act:NewRequest, concepts:[samurai], " +
+        "media:movie}. \"show me something feel-good\" -> {act:NewRequest, moods:[feel-good], media:unchanged}. " +
         "\"feel-good movie\" -> {act:NewRequest, moods:[feel-good], media:movie}. \"no superheroes please\" -> " +
         "{act:Refine, negations:[superheroes], media:unchanged}. \"like John Wick but funnier\" -> {act:NewRequest, " +
         "referenceNames:[John Wick], directions:[{attribute:humor, trend:more}], tools:[similar_to]}. \"none of the " +
@@ -258,11 +275,20 @@ public sealed class OpenRouterAskPlanner(
         "references:[<rank-1 handle>], tools:[title_facts], question:\"is it violent?\"}. \"what has Christopher Nolan " +
         "directed?\" -> {act:NewRequest, people:[{name:Christopher Nolan, role:director}], tools:[filmography]}. " +
         "\"how many ninja movies are left?\" -> {act:ItemQuestion, concepts:[ninja], tools:[supply]}. \"thanks!\" -> " +
-        "{act:Chitchat}. Every field must be present; use [] or null when it does not apply.";
+        "{act:Chitchat}.\n" +
+        "OUTPUT: act is always present. Omit EVERY other field that would be empty, null or unchanged — return only " +
+        "the fields that carry something, exactly as the examples show.";
 
     private static readonly string[] Genres = OpenRouterSearchAgent.InterpretGenreSlugs;
 
-    /// <summary>The strict response schema; every field required, none extra.</summary>
+    /// <summary>
+    /// The response schema: every field the planner may write, none extra — but only <c>act</c>
+    /// required, and not strict, so the model writes only the fields that carry something (HREV1-ASK-05).
+    /// The plan's output was ~94 tokens a call, ~70 of them empty fields a strict schema forced it to
+    /// write ("minYear":null, "clarifyOptions":[] …), and output tokens are what the plan stage waits
+    /// on. <see cref="Parse"/> reads a missing field as empty and drops a value outside its enum, so
+    /// nothing the strict schema guaranteed is lost.
+    /// </summary>
     internal static object Schema()
     {
         static object Strings() => new { type = "array", items = new { type = "string" } };
@@ -326,12 +352,12 @@ public sealed class OpenRouterAskPlanner(
             json_schema = new
             {
                 name = "reel_ask_plan",
-                strict = true,
+                strict = false,
                 schema = new
                 {
                     type = "object",
                     additionalProperties = false,
-                    required = properties.Keys.ToArray(),
+                    required = new[] { "act" },
                     properties,
                 },
             },

@@ -264,6 +264,13 @@ public interface IRequestJudgeModel
 public interface IRequestJudge
 {
     IAsyncEnumerable<JudgeVerdict> JudgeAsync(JudgeInput input, CancellationToken ct);
+
+    /// <summary>
+    /// Judges the first batch of <paramref name="input"/> ahead of <see cref="JudgeAsync"/> (HREV1-ASK-05),
+    /// which then reuses those verdicts instead of sending the titles again. Returns the model call's
+    /// length, or null when nothing was sent or it failed.
+    /// </summary>
+    Task<double?> PrejudgeAsync(JudgeInput input, CancellationToken ct);
 }
 
 /// <summary>What the server knows about one title, for an item question (§4.4 <c>title_facts</c>).</summary>

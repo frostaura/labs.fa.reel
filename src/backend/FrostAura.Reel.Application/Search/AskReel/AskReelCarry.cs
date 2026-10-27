@@ -45,20 +45,84 @@ public static class AskReelCarry
             return current;
         }
 
-        return AskReelIntentSanitizer.Words(message).Any(MediaWords.Contains) ? current : carried;
+        return AskReelIntentSanitizer.Words(WithoutShowVerb(message)).Any(MediaWords.Contains) ? current : carried;
     }
 
     /// <summary>
     /// The media a message names in its own words, for a turn no model read: movies when it says
     /// only movie words, shows when it says only show words, nothing when it says both or neither.
+    /// The verb in "show me" / "show us" names nothing (<see cref="WithoutShowVerb"/>).
     /// </summary>
-    public static IReadOnlyList<MediaType> MediaNamed(string? message)
+    public static IReadOnlyList<MediaType> MediaNamed(string? message) =>
+        MediaIn(AskReelIntentSanitizer.Words(WithoutShowVerb(message)));
+
+    /// <summary>
+    /// The media a list of words names, read word by word: callers that have already taken the verb
+    /// "show" out (<see cref="WithoutShowVerb"/>) and then selected words — the asked-for or the
+    /// ruled-out ones — read them here, so the selection cannot re-create a "show me".
+    /// </summary>
+    public static IReadOnlyList<MediaType> MediaIn(IEnumerable<string> words)
     {
-        var words = AskReelIntentSanitizer.Words(message);
-        var movie = words.Any(MovieWords.Contains);
-        var show = words.Any(ShowWords.Contains);
+        var said = words.ToList();
+        var movie = said.Any(MovieWords.Contains);
+        var show = said.Any(ShowWords.Contains);
         return movie == show ? [] : movie ? [MediaType.Movie] : [MediaType.Show];
     }
+
+    /// <summary>
+    /// The message with every VERB "show" replaced by a word that names no medium (HREV1-ASK-02
+    /// follow-on). "Show me samurai films" asks for films, and "show me something feel-good" names no
+    /// medium at all; read as a media word, "show" made the first name both media (so the planner's
+    /// "any" stood and shows came back) and the second name TV. "Show" before "me" or "us" is the
+    /// verb unless a determiner in its own clause, before any other media word, owns it as a noun:
+    /// "a cosy show me and my wife can watch", "any show us kids would like".
+    /// </summary>
+    public static string WithoutShowVerb(string? message)
+    {
+        if (string.IsNullOrEmpty(message))
+        {
+            return string.Empty;
+        }
+
+        return ShowBeforeObject.Replace(message, match => IsNoun(message[..match.Index]) ? match.Value : "find");
+
+        static bool IsNoun(string before)
+        {
+            var clause = before[(before.LastIndexOfAny(ClauseBreaks) + 1)..];
+            var words = AskReelIntentSanitizer.Words(clause);
+            for (var i = words.Count - 1; i >= Math.Max(0, words.Count - NounReach); i--)
+            {
+                if (ShowDeterminers.Contains(words[i]))
+                {
+                    return true;
+                }
+
+                if (MovieWords.Contains(words[i]) || ShowWords.Contains(words[i]))
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>"show" directly before "me" or "us", as a whole word in any case.</summary>
+    private static readonly System.Text.RegularExpressions.Regex ShowBeforeObject = new(
+        @"\bshow(?=\s+(?:me|us)\b)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(100));
+
+    private static readonly char[] ClauseBreaks = [',', '.', ';', ':', '!', '?'];
+
+    /// <summary>How far back a determiner may stand and still own "show" ("a really cosy show me…").</summary>
+    private const int NounReach = 3;
+
+    /// <summary>Words that make the "show" after them a noun ("a show", "any show", "this show").</summary>
+    private static readonly IReadOnlySet<string> ShowDeterminers = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "a", "an", "the", "any", "another", "one", "this", "that", "every", "each", "some",
+    };
 
     private static readonly IReadOnlySet<string> MovieWords = new HashSet<string>(StringComparer.Ordinal)
     {

@@ -71,11 +71,16 @@ public sealed class OpenRouterAskAnswerer(
         return new AnswerResult(text, meta, null);
     }
 
-    /// <summary>Plain text, at most two sentences and <see cref="MaxAnswerChars"/>; null when nothing usable is left.</summary>
+    /// <summary>
+    /// Plain text, at most two sentences and <see cref="MaxAnswerChars"/>; null when nothing usable is
+    /// left — including an answer that talks about Reel's inputs instead of the title ("The runtime
+    /// fact says it is 197 minutes long.", "the keywords and overview identify it as…", HREV1-ASK-07).
+    /// The engine then answers from the fact sheet itself, which names the title.
+    /// </summary>
     internal static string? Clean(string? raw)
     {
         var text = AskReelText.StripMarkdown(raw)?.Trim();
-        if (string.IsNullOrEmpty(text))
+        if (string.IsNullOrEmpty(text) || PipelineTalk.IsMatch(text))
         {
             return null;
         }
@@ -107,7 +112,9 @@ public sealed class OpenRouterAskAnswerer(
             new
             {
                 question = input.Question,
-                facts = new
+                // "title", not "facts": the key names what the answer is about, and an answer primed
+                // with "facts" cited them ("The runtime fact says…", HREV1-ASK-07).
+                title = new
                 {
                     name = f.Name,
                     year = f.Year,
@@ -127,12 +134,28 @@ public sealed class OpenRouterAskAnswerer(
             Json);
     }
 
+    /// <summary>
+    /// Words that cite the answer's INPUT as a source: "the facts", "the runtime fact", "the given
+    /// facts", "facts provided", "its keywords", "the overview says", "the data". The viewer never
+    /// sees a fact sheet, so an answer that quotes one answers nobody. "Fact" alone is not a
+    /// citation: the idiom "in fact" / "as a matter of fact", "the fact that…" and "the facts of the
+    /// case" are kept — dropping them threw away right answers for the generic fact line.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex PipelineTalk = new(
+        @"\b(?:keywords?|overview|fact\s+sheet|the\s+data|details\s+(?:given|listed|provided))\b"
+        + @"|\b(?:the|these|those|its|given|provided|listed|supplied)\s+(?:[a-z]+\s+)?facts?\b(?!\s+(?:of|that)\b)"
+        + @"|\bfacts\s+(?:say|says|said|state|states|list|lists|given|provided|listed|supplied|indicate|indicates|mention|mentions)\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(100));
+
     internal const string SystemPrompt =
-        "You answer one question about one film or show for Reel, using ONLY the facts given. Reply in at most two " +
-        "short sentences, plain text, addressed to the viewer as \"you\". Every claim must come from a fact given — " +
-        "name the fact (its certification, a keyword, the overview, a credit). If the facts do not answer the " +
-        "question, say plainly that you don't know from what you have, and say what you do know. Never guess, never " +
-        "recommend, never use markdown. Return ONLY {\"answer\": \"...\"}.";
+        "You answer the viewer's question about one film or show for Reel, using ONLY what you are told about it. " +
+        "Reply in at most two short sentences, plain text, addressed to the viewer as \"you\". Name the title and " +
+        "state the answer directly as a statement about it: \"On the Beach runs 134 minutes.\", \"Blade of the 47 " +
+        "Ronin is a samurai film; nothing I know about it makes it a ninja film.\". Never refer to where you got it: " +
+        "never write \"fact\", \"facts\", \"keyword\", \"keywords\", \"overview\" or \"data\". If what you are told " +
+        "does not answer the question, say plainly that you don't know that about the title, and say what you do know. " +
+        "Never guess, never recommend, never use markdown. Return ONLY {\"answer\": \"...\"}.";
 
     internal static object Schema() => new
     {
