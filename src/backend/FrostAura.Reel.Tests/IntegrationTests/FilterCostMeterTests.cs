@@ -498,6 +498,53 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         Assert.Equal((await EligibleShrunkAsync(accountId, rules, [rated, traktOnly, unrated])).Count, report.EligibleUnderShrunkFloor);
     }
 
+    /// <summary>
+    /// A keyword exclusion matches its value LITERALLY and regardless of case in the name and the
+    /// overview, on the persisted path, the draft path and the meter alike. The draft path and the
+    /// meter read a pattern rather than lower(…) (R1-20, for speed), so a value carrying a pattern
+    /// character — "sci.fi", "c++", "(500)" — is the case that would tell the two phrasings apart.
+    /// </summary>
+    [Theory]
+    [InlineData("sci.fi", "A loud SCI.FI romp", "A loud sci-fi romp")]
+    [InlineData("c++", "Coding in C++ at midnight", "Coding in C at midnight")]
+    [InlineData("(500)", "Days (500) of summer", "Days 500 of summer")]
+    [InlineData("zombie", "The ZOMBIE apocalypse", "The zomb ie apocalypse")]
+    public async Task Keyword_exclusions_match_literally_and_ignore_case_on_every_path(string keyword, string matches, string doesNot)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var genre = $"literal{Guid.NewGuid():N}"[..16];
+        var inOverview = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Overview = matches; });
+        var inName = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Name = $"{matches} {Guid.NewGuid():N}"; });
+        var lookalike = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Overview = doesNot; });
+        var inKeywords = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Keywords = ["night", $"old {keyword} lore"]; });
+
+        // Split across two labels: the labels are searched joined, and a match must never span two.
+        var acrossLabels = await SeedTitleAsync(t => { t.Genres = [genre]; t.Year = 2015; t.TmdbVoteAverage = 7.5m; t.Keywords = [keyword[..2], keyword[2..]]; });
+        var mine = new[] { inOverview, inName, lookalike, inKeywords, acrossLabels };
+        await SeedFilterAsync(accountId, FilterKind.IncludeGenre, genre);
+        await SeedFilterAsync(accountId, FilterKind.ExcludeKeyword, keyword);
+        await SeedFilterAsync(accountId, FilterKind.Language, "*");
+
+        HashSet<Guid> persisted;
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db).EligibleTitles(accountId).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync()).ToHashSet();
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        Assert.Equal(new HashSet<Guid> { lookalike, acrossLabels }, persisted);
+        Assert.Equal(persisted, (await EligibleAsync(accountId, drafted, mine)).ToHashSet());
+        var report = await MeasureAsync(accountId, drafted);
+        Assert.Equal(2, report.Eligible);
+        Assert.Equal(3, Marginal(report, FilterKind.ExcludeKeyword, keyword));
+    }
+
     [Fact]
     public async Task Excluding_anime_removes_japanese_animation_on_both_paths()
     {

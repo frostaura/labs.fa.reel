@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Text.RegularExpressions;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 
@@ -74,13 +75,55 @@ public static class FilterBreaches
         return AnyOf(arms);
     }
 
-    /// <summary>An ExcludeKeyword: the value in the name, the overview or any TMDB keyword (containment, as stored).</summary>
+    /// <summary>
+    /// An ExcludeKeyword: the value in the name, the overview or any TMDB keyword (containment, as
+    /// stored). The name and overview are matched case-insensitively by a LITERAL pattern
+    /// (<see cref="LiteralPattern"/>, Postgres <c>~*</c>) rather than <c>lower(…) LIKE</c>: the same
+    /// titles, but <c>lower()</c> over every overview was the single most expensive term in the cost
+    /// meter's one pass — about 130 ms of a 38k-title scan per excluded keyword against 60 ms for the
+    /// pattern (R1-20). The keyword arm stays a case-sensitive containment (the value arrives
+    /// lower-cased from <see cref="FilterRuleSet"/>, as TMDB keywords are stored), read over the labels
+    /// joined by newlines — one string search per title instead of a subplan unnesting every label,
+    /// which halved that arm. A value that itself spans a newline could match across two labels, so
+    /// such a value keeps the per-label form.
+    /// </summary>
     public static Expression<Func<Title, bool>> CarriesKeyword(string keyword)
     {
+        ArgumentNullException.ThrowIfNull(keyword);
         var value = keyword;
-        return t => t.Name.ToLower().Contains(value)
-            || (t.Overview != null && t.Overview.ToLower().Contains(value))
-            || t.Keywords.Any(k => k.Contains(value));
+        var pattern = LiteralPattern(keyword);
+        if (value.Contains('\n', StringComparison.Ordinal))
+        {
+            return t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+                || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase))
+                || t.Keywords.Any(k => k.Contains(value));
+        }
+
+        return t => Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase)
+            || (t.Overview != null && Regex.IsMatch(t.Overview, pattern, RegexOptions.IgnoreCase))
+            || string.Join("\n", t.Keywords).Contains(value);
+    }
+
+    /// <summary>
+    /// A Postgres regular expression (ARE) that matches <paramref name="value"/> literally: every
+    /// character that is not a letter or digit is backslash-escaped, which an ARE always reads as that
+    /// character itself ("sci.fi" never matches "sci-fi", "c++" is not a quantifier).
+    /// </summary>
+    public static string LiteralPattern(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        var pattern = new System.Text.StringBuilder(value.Length * 2);
+        foreach (var c in value)
+        {
+            if (!char.IsLetterOrDigit(c))
+            {
+                pattern.Append('\\');
+            }
+
+            pattern.Append(c);
+        }
+
+        return pattern.ToString();
     }
 
     /// <summary>The IncludeGenre allow-list: non-empty and the title carries none of it.</summary>

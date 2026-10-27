@@ -422,13 +422,11 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             }
         }
 
+        // One phrasing with the cost meter's breach mask (FilterBreaches), so "breaks no rule" there
+        // selects exactly this pool.
         foreach (var keyword in rules.ExcludeKeywords)
         {
-            var value = keyword;
-            query = query.Where(t =>
-                !(t.Name.ToLower().Contains(value)
-                    || (t.Overview != null && t.Overview.ToLower().Contains(value))
-                    || t.Keywords.Any(k => k.Contains(value))));
+            query = query.Where(FilterBreaches.Not(FilterBreaches.CarriesKeyword(keyword)));
         }
 
         // Include-genres are an allow-list when present: at least one must match.
