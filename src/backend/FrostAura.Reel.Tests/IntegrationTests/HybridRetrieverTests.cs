@@ -254,6 +254,178 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         _ = (teenComedy, namedComedy, overviewFilm);
     }
 
+    [Theory]
+    [InlineData("romantic comedy", new[] { "romance", "comedy" })]
+    [InlineData("romantic comedies", new[] { "romance", "comedy" })]
+    [InlineData("Romantic Comedy movies", new[] { "romance", "comedy" })]
+    [InlineData("comedy romance", new[] { "comedy", "romance" })]
+    [InlineData("horror western", new[] { "horror", "western" })]
+    public async Task A_phrase_of_genre_words_no_label_carries_is_the_genres_never_their_keywords(string words, string[] genres)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // HREV1-RET-06 (refuted round 2): "romantic comedy" — the singular, lower-case concept the planner
+        // emits — reaches no label (TMDB says "romcom"), so the phrase fell back to its words and
+        // "romantic" and "comedy" became keyword stems: on the founder's catalogue that was 109 labels
+        // ("dark comedy", "teen comedy", "romantic") and Black Mirror among "6 unseen romantic comedy
+        // titles" while comedy and romance were both standing exclusions. The vocabulary is pinned so
+        // the phrase reaches nothing here whatever the shared catalogue holds, and carries exactly the
+        // labels the bug reached.
+        var resolver = PinnedVocabularyResolver(out var db, "romantic", "dark comedy", "teen comedy", "comedy club", "romcom", "western town");
+        await using var owned = db;
+
+        var resolved = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+
+        Assert.Equal(genres, resolved.Genres);
+        Assert.Empty(resolved.CatalogueLabels);
+        Assert.Empty(resolved.ExactLabels!);
+        Assert.Empty(HardConstraintFilter.LabelsOf(resolved));
+    }
+
+    [Fact]
+    public async Task A_genre_word_inside_a_phrase_is_a_genre_the_title_must_also_carry()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // A phrase's genre words narrow it: a romantic comedy is a comedy AND a romance, as the reducer's
+        // one-concept-per-genre plan reads it, never every comedy plus every romance. A phrase with a
+        // genre word and a topic ("romantic heist") is a heist that is also a romance.
+        var topic = $"phrasegenre{Guid.NewGuid():N}";
+        var both = await SeedTitleAsync(t => { t.Genres = ["comedy", "romance"]; t.Keywords = [topic]; });
+        var comedyOnly = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Keywords = [topic, "romantic"]; });
+        var romanceOnly = await SeedTitleAsync(t => { t.Genres = ["romance", "drama"]; t.Keywords = [topic, "dark comedy"]; });
+        var soapComedy = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["comedy", "soap"]; t.Keywords = [topic]; });
+        var neither = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = [topic, "romantic", "dark comedy", "teen comedy"]; });
+        var romanticHeist = await SeedTitleAsync(t => { t.Genres = ["romance", "crime"]; t.Keywords = [topic, "bank robbery"]; });
+        var plainHeist = await SeedTitleAsync(t => { t.Genres = ["crime"]; t.Keywords = [topic, "heist"]; });
+
+        var resolver = PinnedVocabularyResolver(out var db, topic, "romantic", "dark comedy", "teen comedy", "heist", "bank robbery", "robbery");
+        await using var owned = db;
+
+        var hard = await resolver.ResolveAsync(
+            HardConstraints.None with { Concepts = [new ConceptTerm(topic, [topic], []), new ConceptTerm("romantic comedy", [], [])] },
+            default);
+
+        // The phrase's own words stay the topic the reply names; each further genre is its own requirement.
+        Assert.Equal(3, hard.Concepts.Count);
+        Assert.Equal("romantic comedy", hard.Concepts[1].UserWords);
+        Assert.Equal(["romance"], hard.Concepts[1].Genres);
+        Assert.Equal(["comedy"], hard.Concepts[2].Genres);
+        Assert.All(hard.Concepts.Skip(1), c => Assert.Empty(HardConstraintFilter.LabelsOf(c)));
+
+        var matched = (await HardConstraintFilter.Apply(db.Titles, db, hard).Select(t => t.Id).ToListAsync()).ToHashSet();
+        Assert.Equal(new HashSet<Guid> { both, soapComedy }, matched);
+        var accountId = await SeedAccountAsync();
+        var supply = await new SupplyReporter(db, new EligibilityQueryBuilder(db)).ReportAsync(accountId, hard, CancellationToken.None);
+        Assert.Equal(2, supply.MatchingInCatalogue);
+
+        // A planner that ALSO names the genres gives the same set, not a third count.
+        var withGenres = await resolver.ResolveAsync(
+            HardConstraints.None with
+            {
+                Concepts =
+                [
+                    new ConceptTerm(topic, [topic], []), new ConceptTerm("romantic comedy", [], []),
+                    new ConceptTerm("comedy", [], ["comedy"]), new ConceptTerm("romance", [], ["romance"]),
+                ],
+            },
+            default);
+        Assert.Equal(matched, (await HardConstraintFilter.Apply(db.Titles, db, withGenres).Select(t => t.Id).ToListAsync()).ToHashSet());
+
+        // Resolving the resolved constraints again (the Ask engine and the retriever both resolve)
+        // changes nothing: the split concepts keep their one genre each.
+        var again = await resolver.ResolveAsync(hard, default);
+        Assert.Equal(hard.Concepts.Select(c => string.Join(',', c.Genres)), again.Concepts.Select(c => string.Join(',', c.Genres)));
+        Assert.Equal(matched, (await HardConstraintFilter.Apply(db.Titles, db, again).Select(t => t.Id).ToListAsync()).ToHashSet());
+
+        // "Or" asks for either genre: one concept, OR-ed.
+        var either = await resolver.ResolveAsync(
+            HardConstraints.None with { Concepts = [new ConceptTerm(topic, [topic], []), new ConceptTerm("comedy or romance", [], [])] },
+            default);
+        Assert.Equal(2, either.Concepts.Count);
+        Assert.Equal(
+            new HashSet<Guid> { both, comedyOnly, romanceOnly, soapComedy, romanticHeist },
+            (await HardConstraintFilter.Apply(db.Titles, db, either).Select(t => t.Id).ToListAsync()).ToHashSet());
+
+        var heist = await resolver.ResolveAsync(
+            HardConstraints.None with { Concepts = [new ConceptTerm(topic, [topic], []), new ConceptTerm("romantic heist", [], [])] },
+            default);
+        Assert.Equal("romantic heist", heist.Concepts[1].UserWords);
+        Assert.Contains("bank robbery", heist.Concepts[1].ExactLabels!);
+        Assert.Empty(heist.Concepts[1].Genres);
+        Assert.Equal(["romance"], heist.Concepts[2].Genres);
+        Assert.Equal(
+            new HashSet<Guid> { romanticHeist },
+            (await HardConstraintFilter.Apply(db.Titles, db, heist).Select(t => t.Id).ToListAsync()).ToHashSet());
+        _ = (comedyOnly, romanceOnly, neither, plainHeist);
+    }
+
+    [Theory]
+    [InlineData("heists")]
+    [InlineData("Heist movies")]
+    [InlineData("robberies")]
+    public async Task A_plural_concept_keeps_its_synonym_group(string words)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // G1 risk: "heists" reached nothing, retried singular as "heist" alone, and lost "bank robbery"
+        // and "robbery" — 258 founder titles where "heist" finds 522.
+        var resolver = PinnedVocabularyResolver(out var db, "heist", "heist gone wrong", "bank robbery", "robbery", "train robbery");
+        await using var owned = db;
+
+        var plural = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+        var singular = await resolver.ResolveAsync(new ConceptTerm("heist", [], []), default);
+
+        Assert.Equal(singular.ExactLabels, plural.ExactLabels);
+        Assert.Contains("bank robbery", plural.ExactLabels!);
+        Assert.Empty(plural.Genres);
+    }
+
+    [Theory]
+    [InlineData("romances", "romance")]
+    [InlineData("horrors", "horror")]
+    [InlineData("fantasies", "fantasy")]
+    public async Task A_plural_genre_word_is_the_genre(string words, string genre)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // "romances" is not a GenreWords key; read as a stem it reached every label containing
+        // "romance" (the two-definitions defect by its plural).
+        var resolver = PinnedVocabularyResolver(out var db, "romance", "teenage romance", "horror host", "fantasy world");
+        await using var owned = db;
+
+        var resolved = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+
+        Assert.Equal([genre], resolved.Genres);
+        Assert.Empty(resolved.ExactLabels!);
+        Assert.Empty(HardConstraintFilter.LabelsOf(resolved));
+    }
+
+    /// <summary>A resolver over exactly <paramref name="labels"/> (the vocabulary cache pre-filled), on the fixture database.</summary>
+    private ConceptResolver PinnedVocabularyResolver(out ReelDbContext db, params string[] labels)
+    {
+        db = Fixture.CreateContext(new AccountContext());
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        cache.Set(KeywordVocabulary.CacheKey, (IReadOnlyList<VocabularyLabel>)[.. labels.Select(l => new VocabularyLabel(l, 10))]);
+        return new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new StubEmbeddingProvider(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+    }
+
     [Fact]
     public async Task Keyword_neighbours_share_specific_evidence_and_say_which()
     {

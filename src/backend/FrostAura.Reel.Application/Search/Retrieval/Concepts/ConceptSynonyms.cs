@@ -117,7 +117,7 @@ public static class ConceptSynonyms
             return null;
         }
 
-        if (GenreWords.TryGetValue(phrase, out var whole))
+        if (GenreSlugsOf(phrase) is { } whole)
         {
             return whole;
         }
@@ -139,7 +139,7 @@ public static class ConceptSynonyms
                 continue;
             }
 
-            if (!GenreWords.TryGetValue(tokens[i], out var single))
+            if (GenreSlugsOf(tokens[i]) is not { } single)
             {
                 return null;
             }
@@ -148,6 +148,70 @@ public static class ConceptSynonyms
         }
 
         return slugs.Count == 0 ? null : [.. slugs.Distinct(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The genre slugs <paramref name="word"/> names as one <see cref="GenreWords"/> key, or as the
+    /// singular of one ("romances", "horrors", "fantasies") — null when it names none. A plural genre
+    /// word read as a keyword stem reached every label containing the genre's name (HREV1-RET-06).
+    /// Lower-case, normalised input.
+    /// </summary>
+    public static IReadOnlyList<string>? GenreSlugsOf(string word)
+    {
+        if (GenreWords.TryGetValue(word, out var slugs))
+        {
+            return slugs;
+        }
+
+        foreach (var singular in Singulars(word))
+        {
+            if (GenreWords.TryGetValue(singular, out slugs))
+            {
+                return slugs;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The synonym group of <paramref name="stem"/> or of its singular ("heists" → the heist group,
+    /// "robberies" → the same group), or just the stem. Retrying only the singular STEM kept "heist"
+    /// and lost "bank robbery" and "robbery": 258 founder titles where "heist" finds 522.
+    /// </summary>
+    public static IEnumerable<string> GroupOfAnyForm(string stem)
+    {
+        foreach (var form in Singulars(stem).Prepend(stem))
+        {
+            foreach (var group in Groups)
+            {
+                if (group.Contains(form, StringComparer.Ordinal))
+                {
+                    return group;
+                }
+            }
+        }
+
+        return [stem];
+    }
+
+    /// <summary>The singular forms an English plural <paramref name="word"/> may have, most specific first.</summary>
+    public static IEnumerable<string> Singulars(string word)
+    {
+        if (word.EndsWith("ies", StringComparison.Ordinal) && word.Length > 4)
+        {
+            yield return word[..^3] + "y";
+        }
+
+        if (word.EndsWith("es", StringComparison.Ordinal) && word.Length > 3)
+        {
+            yield return word[..^2];
+        }
+
+        if (word.EndsWith('s') && word.Length > 2)
+        {
+            yield return word[..^1];
+        }
     }
 
     /// <summary>The synonym group containing <paramref name="stem"/>, or just the stem.</summary>

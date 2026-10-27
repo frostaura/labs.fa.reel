@@ -42,10 +42,12 @@ public static class HardConstraintFilter
 {
     /// <summary>
     /// The concept labels actually matched for <paramref name="concept"/>: its catalogue labels, or its
-    /// own words — minus any label that only restates the concept's genres ("comedy", "romantic
-    /// comedies" beside genres {comedy, romance}). A genre is satisfied by the genre predicate alone,
-    /// the one eligibility uses; a keyword or a name that merely CONTAINS the genre word never
-    /// satisfies it (HREV1-RET-06: "teen comedy" on a family sci-fi film).
+    /// own words — minus, on a concept that carries genres, any label made only of genre words
+    /// ("comedy", "romantic comedies"). A genre is satisfied by the genre predicate alone, the one
+    /// eligibility uses; a keyword or a name that merely CONTAINS the genre word never satisfies it
+    /// (HREV1-RET-06: "teen comedy" on a family sci-fi film). That holds when the phrase names more
+    /// genres than this concept carries: "romantic comedy" split into a romance concept and a comedy
+    /// concept, each of which still drops the phrase.
     /// </summary>
     public static IReadOnlyList<string> LabelsOf(ConceptTerm concept)
     {
@@ -56,10 +58,10 @@ public static class HardConstraintFilter
             : Clean(labels).Where(label => !RestatesGenres(label, genres)).ToList();
     }
 
-    /// <summary>True when every genre <paramref name="label"/> names is one of <paramref name="genres"/> and it names nothing else.</summary>
+    /// <summary>True when <paramref name="label"/> is made only of genre words and names at least one of <paramref name="genres"/>.</summary>
     private static bool RestatesGenres(string label, IReadOnlyList<string> genres) =>
         Concepts.ConceptSynonyms.GenresNamedBy(Concepts.ConceptResolver.Normalise(label)) is { } named
-        && named.All(g => genres.Contains(g, StringComparer.Ordinal));
+        && named.Any(g => genres.Contains(g, StringComparer.Ordinal));
 
     /// <summary>The genre slugs that satisfy <paramref name="concept"/>, cleaned.</summary>
     public static IReadOnlyList<string> GenresOf(ConceptTerm concept) => Clean(concept.Genres);
