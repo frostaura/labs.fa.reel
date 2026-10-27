@@ -86,6 +86,15 @@ async function boot(page: Page, opts: { resume?: "none" | "stored" } = {}) {
       body: JSON.stringify({ titles: [], people: [], global: [] }),
     }),
   );
+  // The header box's second ask since the global typeahead landed (`/typeahead/global`, beyond the
+  // catalogue): typing the question fires it, so it is mocked empty like its local sibling.
+  await page.route(
+    (u) => u.pathname === "/api/search/typeahead/global",
+    (route) => route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({ global: [], hiddenByConditions: 0 }),
+    }),
+  );
   if (opts.resume === "stored") {
     await page.route(
       (u) => u.pathname.startsWith("/api/search/conversations/"),
