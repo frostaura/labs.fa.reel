@@ -1,7 +1,11 @@
+using FrostAura.Reel.Api.Middleware;
 using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -300,6 +304,50 @@ public class InboundLimitTests
         Fail(pins, account);
 
         Assert.Null(pins.TryBegin(account).LockedFor);
+    }
+
+    /// <summary>
+    /// HREV2-PLAT-1: the turn limits apply to the request the Ask route will answer, whatever the
+    /// spelling of its path. With an endpoint selected, the route decides — including the method, so a
+    /// GET on the same template is not an Ask; with none selected, the path is compared without its
+    /// trailing slash or case, and a neighbouring path is not the Ask path.
+    /// </summary>
+    [Theory]
+    [InlineData("POST", "/api/search/ask", true)]
+    [InlineData("POST", "/api/search/ask/", true)]
+    [InlineData("POST", "/API/SEARCH/ASK/", true)]
+    [InlineData("post", "/api/search/ask//", true)]
+    [InlineData("GET", "/api/search/ask/", false)]
+    [InlineData("POST", "/api/search/asks", false)]
+    [InlineData("POST", "/api/search/ask/extra", false)]
+    [InlineData("POST", "/api/search", false)]
+    public void Without_a_routed_endpoint_the_ask_path_is_matched_by_spelling(string method, string path, bool limited)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = method;
+        context.Request.Path = path;
+
+        Assert.Equal(limited, InboundLimits.IsAsk(context));
+    }
+
+    [Theory]
+    [InlineData("/api/search/ask", "POST", "/elsewhere", true)]
+    [InlineData("/api/search/ask/", "POST", "/elsewhere", true)]
+    [InlineData("/api/search/ask", "GET", "/api/search/ask", false)]
+    [InlineData("/api/search/typeahead", "POST", "/api/search/ask", false)]
+    public void With_a_routed_endpoint_the_route_decides_not_the_raw_path(string template, string routeMethod, string rawPath, bool limited)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = "POST";
+        context.Request.Path = rawPath;
+        context.SetEndpoint(new RouteEndpoint(
+            _ => Task.CompletedTask,
+            RoutePatternFactory.Parse(template),
+            order: 0,
+            new EndpointMetadataCollection(new HttpMethodMetadata([routeMethod])),
+            displayName: template));
+
+        Assert.Equal(limited, InboundLimits.IsAsk(context));
     }
 
     private static void Fail(PinAttemptLimiter pins, Guid account)

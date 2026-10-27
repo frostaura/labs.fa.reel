@@ -181,6 +181,75 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         Assert.Contains("event: ", answered.Body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// HREV2-PLAT-1: routing answers the Ask route for spellings of its path that are not the
+    /// canonical one — a trailing slash, another case — and the limits used to compare the raw path,
+    /// so every one of those spellings was an Ask with no limit at all: no minute, hour or day window
+    /// and no in-flight cap. The limit follows the endpoint, so each spelling shares the canonical
+    /// path's windows; turns are interleaved across the two spellings to prove it is one partition.
+    /// </summary>
+    [Theory]
+    [InlineData("/api/search/ask/")]
+    [InlineData("/API/SEARCH/ASK/")]
+    [InlineData("/Api/Search/Ask")]
+    public async Task Every_spelling_of_the_ask_path_shares_the_minute_limit(string spelling)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var cookie = await CookieAsync(await api.SeedAccountAsync($"edge-ask-spelling-{Guid.NewGuid():N}"));
+        for (var i = 0; i < 6; i++)
+        {
+            var path = i % 2 == 0 ? spelling : "/api/search/ask";
+            Assert.Equal(StatusCodes.Status200OK, (await SendAsync(api, "POST", path, cookie, body: ValidAsk())).Status);
+        }
+
+        foreach (var path in new[] { spelling, "/api/search/ask" })
+        {
+            var refused = await SendAsync(api, "POST", path, cookie, body: ValidAsk());
+            Assert.Equal(StatusCodes.Status429TooManyRequests, refused.Status);
+            Assert.Equal("ask_rate_minute", Code(refused.Body));
+        }
+    }
+
+    /// <summary>
+    /// HREV2-PLAT-1, the in-flight cap: with a turn already running for the account, an Ask on any
+    /// spelling of the path is the limiter's own 409 (its Retry-After is the limiter's wait, which
+    /// the handler's busy-thread 409 does not send), and the same spelling is answered once the
+    /// running turn ends.
+    /// </summary>
+    [Theory]
+    [InlineData("/api/search/ask/")]
+    [InlineData("/API/SEARCH/ASK/")]
+    [InlineData("/api/search/ask")]
+    public async Task Every_spelling_of_the_ask_path_waits_for_a_turn_in_flight(string spelling)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await api.SeedAccountAsync($"edge-ask-inflight-{Guid.NewGuid():N}");
+        var cookie = await CookieAsync(accountId);
+        var limiter = api.Services.GetRequiredService<AskTurnLimiter>();
+
+        var (running, refusal) = limiter.TryStart(accountId, AccountTier.Founder);
+        Assert.Null(refusal);
+        using (running)
+        {
+            var busy = await SendAsync(api, "POST", spelling, cookie, body: ValidAsk());
+            Assert.Equal(StatusCodes.Status409Conflict, busy.Status);
+            Assert.Equal("turn_in_progress", Code(busy.Body));
+            Assert.Equal(
+                ((int)AskTurnLimiter.InFlightRetryAfter.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                busy.RetryAfter);
+        }
+
+        Assert.Equal(StatusCodes.Status200OK, (await SendAsync(api, "POST", spelling, cookie, body: ValidAsk())).Status);
+    }
+
     private static string ValidAsk() =>
         JsonSerializer.Serialize(new { query = "a tense heist movie", clientTurnId = Guid.NewGuid() });
 
