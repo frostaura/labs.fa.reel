@@ -187,16 +187,20 @@ public static class SavedQueue
     /// the line says "streaming now" and names nothing.</item>
     /// <item><b>A choice where there was none.</b> With one candidate, "highest-predicted" compares
     /// the pick with nothing; it says "the only thing" instead.</item>
+    /// <item><b>A budget the user never set as theirs</b> (HREV1-D10). "Against your 2h 30m" is
+    /// said only of a budget the account stored; the default reads "inside a 2h 30m evening", because
+    /// a user who never chose a number must not be told the product's guess is their own.</item>
     /// </list>
     /// </summary>
     /// <param name="predictedRating">The prediction as the card displays it (1dp), so the line, the badge and the bar test agree.</param>
     /// <param name="bar">The bar a pick must reach to be called the answer: <see cref="HeroConfidence.BarFor"/> of the account's minimum.</param>
+    /// <param name="configuredEveningBudgetMinutes">The budget the account stored, or null when it never set one and <see cref="DefaultEveningBudgetMinutes"/> applies.</param>
     /// <param name="candidateCount">How many titles could have been pinned, the pick included; at least 1.</param>
     public static string WatchTonightReason(
         decimal predictedRating,
         double? expectedAbsoluteError,
         int runtimeMinutes,
-        int eveningBudgetMinutes,
+        int? configuredEveningBudgetMinutes,
         string? providerName,
         decimal bar,
         int candidateCount)
@@ -208,7 +212,10 @@ public static class SavedQueue
             ? "streaming now"
             : string.Format(CultureInfo.InvariantCulture, "on {0}", providerName);
         var runtime = FormatRuntime(runtimeMinutes);
-        var budget = FormatRuntime(eveningBudgetMinutes);
+        var budget = FormatRuntime(EffectiveEveningBudget(configuredEveningBudgetMinutes));
+        var fit = configuredEveningBudgetMinutes is null
+            ? string.Format(CultureInfo.InvariantCulture, "{0}, inside a {1} evening", runtime, budget)
+            : string.Format(CultureInfo.InvariantCulture, "{0} against your {1}", runtime, budget);
         var cleared = HeroConfidence.For(predictedRating, bar) == HeroConfidence.Confident;
         var only = candidateCount <= 1;
 
@@ -218,20 +225,20 @@ public static class SavedQueue
         {
             (true, false) => string.Format(
                 CultureInfo.InvariantCulture,
-                "Highest-predicted thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
-                where, predictedRating, band, runtime, budget),
+                "Highest-predicted thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3}.",
+                where, predictedRating, band, fit),
             (true, true) => string.Format(
                 CultureInfo.InvariantCulture,
-                "The only thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
-                where, predictedRating, band, runtime, budget),
+                "The only thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3}.",
+                where, predictedRating, band, fit),
             (false, false) => string.Format(
                 CultureInfo.InvariantCulture,
-                "Nothing in your queue that's streaming and fits tonight reaches {5:0.0} for you. The closest is {0}: {1:0.0} for you{2}, {3} against your {4}.",
-                where, predictedRating, band, runtime, budget, bar),
+                "Nothing in your queue that's streaming and fits tonight reaches {4:0.0} for you. The closest is {0}: {1:0.0} for you{2}, {3}.",
+                where, predictedRating, band, fit, bar),
             (false, true) => string.Format(
                 CultureInfo.InvariantCulture,
-                "The only thing in your queue that's {0} and fits tonight is under {5:0.0} for you — {1:0.0}{2}, {3} against your {4}.",
-                where, predictedRating, band, runtime, budget, bar),
+                "The only thing in your queue that's {0} and fits tonight is under {4:0.0} for you — {1:0.0}{2}, {3}.",
+                where, predictedRating, band, fit, bar),
         };
     }
 }
