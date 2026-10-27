@@ -3,7 +3,7 @@ import type { AskCard, DoneData } from "../askReelStream";
 import { AskStreamError } from "../askReelStream";
 import { chatReducer, failureFor, gridRowOf, initialChatState, type ChatAction } from "./reducer";
 import { failureCopy, refineChips, waitPhrase } from "./copy";
-import { transcriptOf, type ConversationPayload } from "./transcript";
+import { answerRowIndex, transcriptOf, type ConversationPayload } from "./transcript";
 
 /**
  * Chat UI v2 (WS-2 task 3) — the reducer half. Each test drives the state machine with the frames
@@ -242,6 +242,139 @@ describe("v2 none-found, answer, clarify, degraded and plan", () => {
       { type: "done", data: done({ results: [card(2)] }) },
     ]);
     expect(bare.plan).toBeNull();
+  });
+});
+
+/**
+ * R1-32. The server restores the newest SEARCH answer as the grid and skips an item question or a
+ * clarifying question (`SearchTurnMode.LeavesGrid`), but the client anchored that grid — and the
+ * collision notice, and the question the seam names, and the turn a page extends — to the newest
+ * assistant row of any mode. Resume after "is the first one violent?" and the ninja cards sat
+ * under "Yes — it opens on a massacre." with the item question named as what they answered.
+ */
+describe("an item question or a clarifying question never becomes the grid's row (R1-32)", () => {
+  /** A search, then a follow-up whose reply is `mode`. Ids on every assistant row, as the server sends. */
+  function thread(mode: string | null): ConversationPayload {
+    return {
+      id: "c1",
+      turns: [
+        { role: "user", text: "ninja movies", status: "Completed", kind: "ask" },
+        { id: "turn-1", role: "assistant", text: "Ninja picks.", status: "Completed", kind: "ask", mode: "Picks", cards: [card(1), card(2)] },
+        { role: "user", text: "is the first one violent?", status: "Completed", kind: "ask" },
+        { id: "turn-2", role: "assistant", text: "Yes — it opens on a massacre.", status: "Completed", kind: "ask", mode, cards: [] },
+      ],
+      cards: [card(1), card(2)],
+      mode: "Picks",
+      conflict: { message: "Your conditions permanently exclude comedy.", excludedGenres: ["Comedy"] },
+    };
+  }
+
+  it.each(["Answer", "Clarify"])("resumes a thread whose newest reply is %s with the grid under the search reply", (mode) => {
+    const s = chatReducer(initialChatState, { type: "resume", payload: thread(mode) });
+    expect(gridRowOf(s)).toBe(1);
+    expect(answerRowIndex(s.turns)).toBe(1);
+    // The notice explains the grid, so it goes on the grid's reply and nowhere else.
+    expect(s.turns[1].conflict).toBe(true);
+    expect(s.turns[3].conflict).toBeUndefined();
+    // The seam names the question the cards answer, and a page extends THAT turn…
+    expect(s.answeredQuery).toBe("ninja movies");
+    expect(s.pageQuery).toBe("ninja movies");
+    expect(s.pageTurnId).toBe("turn-1");
+    // …while "Ask again" still replays the newest question.
+    expect(s.lastQuery).toBe("is the first one violent?");
+  });
+
+  it.each([["Picks"], ["NoneFound"], [null]])("keeps the newest reply as the grid's row when it is a search (%s)", (mode) => {
+    // Fixture variation, one field: the newest reply's `mode`. Absent reads as Picks, as on the server.
+    const s = chatReducer(initialChatState, { type: "resume", payload: thread(mode) });
+    expect(gridRowOf(s)).toBe(3);
+    expect(answerRowIndex(s.turns)).toBe(3);
+    expect(s.turns[3].conflict).toBe(true);
+    expect(s.answeredQuery).toBe("is the first one violent?");
+    expect(s.pageTurnId).toBe("turn-2");
+  });
+
+  it.each([
+    ["answer", { type: "answer", data: { text: "Yes — it opens on a massacre." } }, "Answer"],
+    ["clarify", { type: "clarify", data: { question: "Which one did you mean?", options: ["Title 1"] } }, "Clarify"],
+  ] as [string, ChatAction, string][])("anchors the live answer's row past a %s reply", (_name, frame, mode) => {
+    const s = run([
+      ...answered("ninja movies", [card(1), card(2)]),
+      { type: "userTurn", message: "is the first one violent?", fresh: false },
+      frame,
+      { type: "done", data: done({ mode }) },
+    ]);
+    expect(gridRowOf(s)).toBe(1);
+    expect(answerRowIndex(s.turns)).toBe(1);
+  });
+
+  /**
+   * The live half, found on the real server: "samurai films" came back NoneFound with one card in
+   * the under-bar tray and four relaxations, then "is the first one violent?" answered beside it —
+   * and the live screen dropped the tray, the relaxations and the none-found card (the hold only
+   * ever covered PICKS, so an answer made of trays was cleared at ask-time), while a reload put all
+   * of it back under the samurai reply. One answer, two screens, a reload apart.
+   */
+  const knockout = { kind: "ExcludeGenre", value: "comedy", contentFilterId: null, label: "excluded genre: comedy", wouldUnlock: 4 };
+  function noneFound(trays: { belowFloor?: AskCard[]; nearMiss?: AskCard[] }): ChatAction[] {
+    return [
+      { type: "userTurn", message: "samurai films", fresh: false },
+      { type: "assistant", data: { text: "None of your unseen samurai titles clears your bar." } },
+      ...(trays.belowFloor ? [{ type: "tray", data: { kind: "belowFloor", cards: trays.belowFloor } } as ChatAction] : []),
+      ...(trays.nearMiss ? [{ type: "tray", data: { kind: "nearMiss", cards: trays.nearMiss } } as ChatAction] : []),
+      { type: "noneFound", data: { supply: { knockouts: [knockout] } } },
+      { type: "done", data: done({ mode: "NoneFound", ...trays }) },
+    ];
+  }
+
+  it.each([
+    ["a tray", { belowFloor: [card(7)] }],
+    ["near misses", { nearMiss: [card(8)] }],
+    ["nothing but the reply", {}],
+  ] as [string, { belowFloor?: AskCard[]; nearMiss?: AskCard[] }][])(
+    "keeps a none-found answer made of %s on screen past an item question, as a reload does",
+    (_name, trays) => {
+      const s = run([
+        ...noneFound(trays),
+        { type: "userTurn", message: "is the first one violent?", fresh: false },
+        { type: "answer", data: { text: "Rated R; the facts don’t say how violent." } },
+        { type: "done", data: done({ mode: "Answer" }) },
+      ]);
+      expect(s.status).toBe("done");
+      expect(s.mode).toBe("NoneFound");
+      expect(s.knockouts.map((k) => k.label)).toEqual(["excluded genre: comedy"]);
+      expect(s.belowFloor.map((c) => c.titleId)).toEqual((trays.belowFloor ?? []).map((c) => c.titleId));
+      expect(s.nearMiss.map((c) => c.titleId)).toEqual((trays.nearMiss ?? []).map((c) => c.titleId));
+      expect(gridRowOf(s)).toBe(1);
+      expect(answerRowIndex(s.turns)).toBe(1);
+    },
+  );
+
+  it("still replaces a none-found answer with the next SEARCH's", () => {
+    // One field: the follow-up's mode. A search is the new answer, whatever the old one was made of.
+    const s = run([
+      ...noneFound({ belowFloor: [card(7)] }),
+      { type: "userTurn", message: "ninja movies", fresh: false },
+      { type: "assistant", data: { text: "Ninja picks." } },
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "done", data: done({ results: [card(1)], kept: 1 }) },
+    ]);
+    expect(s.mode).toBe("Picks");
+    expect(s.knockouts).toEqual([]);
+    expect(s.order).toEqual(["t1"]);
+    expect(s.belowFloor).toEqual([]);
+    // …and the tray it had is kept under its own reply, as the resume keeps it.
+    expect(s.turns[1].answer?.belowFloor.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(gridRowOf(s)).toBe(3);
+  });
+
+  it("is minus one when the only reply is an item question's", () => {
+    const s = run([
+      { type: "userTurn", message: "is Heat violent?", fresh: true },
+      { type: "answer", data: { text: "Yes." } },
+      { type: "done", data: done({ mode: "Answer" }) },
+    ]);
+    expect(answerRowIndex(s.turns)).toBe(-1);
   });
 });
 

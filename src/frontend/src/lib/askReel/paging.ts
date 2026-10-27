@@ -1,6 +1,6 @@
 import type { DoneData } from "../askReelStream";
 import type { ChatStatus } from "./reducer";
-import type { ConversationPayload } from "./transcript";
+import { leavesGrid, type ConversationPayload } from "./transcript";
 
 /** Paging: whether "Show me more" may be offered, what it names, and the thread menu's listing. */
 /**
@@ -121,10 +121,16 @@ export function answeredQuestion(rows: ConversationPayload["turns"]): string {
   return "";
 }
 
-/** Where the last completed assistant `ask` row sits, or -1. The row a resumed grid belongs to. */
+/**
+ * Where the last completed assistant `ask` row that is a SEARCH sits, or -1. The row a resumed grid
+ * belongs to. An item question's or a clarifying question's reply is skipped exactly as the server's
+ * `lastAsk` skips it (`SearchTurnMode.LeavesGrid`, R1-32): it showed no cards, so the grid restored
+ * above it is still the search it was asked about — and a page names that search, not the question.
+ */
 function answeredTurnIndex(rows: ConversationPayload["turns"]): number {
   return rows.reduce(
-    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
+    (found, t, i) =>
+      t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" && !leavesGrid(t.mode) ? i : found,
     -1,
   );
 }

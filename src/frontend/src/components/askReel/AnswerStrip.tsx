@@ -217,7 +217,9 @@ export default function AnswerStrip({
             content of the new turn replaces it. */}
         {holdingPrevious && (visible.length > 0 || outsideVisible.length > 0) && (
           <p className="fa-caption text-fa-frost-dim" data-testid="askreel-previous-answer">
-            {streaming
+            {/* A 409 (`blocked`) is that question still running elsewhere — "Check again" fetches its
+                answer — so the hold is still a hold there; "never" is only true of a turn that ended. */}
+            {streaming || status === "blocked"
               ? "Previous answer — held until the new one arrives."
               : "Previous answer — the last question never replaced it."}
           </p>
