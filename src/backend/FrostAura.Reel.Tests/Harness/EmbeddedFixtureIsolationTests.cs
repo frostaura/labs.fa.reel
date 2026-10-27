@@ -57,7 +57,11 @@ public class EmbeddedFixtureIsolationTests
     /// Files that seed embeddings in the postgres collection and are deliberately not on the base,
     /// keyed by path relative to the test project. Empty is the intended state.
     /// </summary>
-    private static readonly Dictionary<string, string> Exempt = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> Exempt = new(StringComparer.Ordinal)
+    {
+        ["IntegrationTests/SyntheticWeek/DatabaseClockTests.cs"] =
+            "Seeds its one embedding on a database of its own (FreshDatabaseAsync), never on the shared catalogue, and drops that database afterwards.",
+    };
 
     [Fact]
     public void Every_embedded_fixture_cleans_up_after_itself()
