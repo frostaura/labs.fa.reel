@@ -242,4 +242,29 @@ public class SavedQueueTests
 
         Assert.Equal(expected, reason);
     }
+
+    /// <summary>
+    /// HREV1-D10: an account that never set an evening budget was told the default was "your 2h 30m".
+    /// Every one of the four sentences names the default as a plain evening, and only a stored budget
+    /// — even one equal to the default — is "yours".
+    /// </summary>
+    [Theory]
+    [InlineData(8.4, 3, "Highest-predicted thing in your queue that's on Netflix and fits tonight — 8.4 for you (±1.2), 1h 49m, inside a 2h 30m evening.")]
+    [InlineData(8.4, 1, "The only thing in your queue that's on Netflix and fits tonight — 8.4 for you (±1.2), 1h 49m, inside a 2h 30m evening.")]
+    [InlineData(5.0, 3, "Nothing in your queue that's streaming and fits tonight reaches 7.5 for you. The closest is on Netflix: 5.0 for you (±1.2), 1h 49m, inside a 2h 30m evening.")]
+    [InlineData(5.0, 1, "The only thing in your queue that's on Netflix and fits tonight is under 7.5 for you — 5.0 (±1.2), 1h 49m, inside a 2h 30m evening.")]
+    public void A_default_budget_is_never_called_yours(double rating, int candidates, string expected)
+    {
+        var unset = SavedQueue.WatchTonightReason((decimal)rating, 1.2d, 109, null, "Netflix", HeroConfidence.Floor, candidates);
+        Assert.Equal(expected, unset);
+        Assert.DoesNotContain("your 2h", unset, StringComparison.Ordinal);
+
+        // The same number, stored by the account, is the user's own.
+        var stored = SavedQueue.WatchTonightReason((decimal)rating, 1.2d, 109, SavedQueue.DefaultEveningBudgetMinutes, "Netflix", HeroConfidence.Floor, candidates);
+        Assert.Equal(expected.Replace("1h 49m, inside a 2h 30m evening.", "1h 49m against your 2h 30m.", StringComparison.Ordinal), stored);
+
+        // And a different stored budget is named as itself.
+        var shorter = SavedQueue.WatchTonightReason((decimal)rating, 1.2d, 109, 120, "Netflix", HeroConfidence.Floor, candidates);
+        Assert.EndsWith("1h 49m against your 2h.", shorter, StringComparison.Ordinal);
+    }
 }

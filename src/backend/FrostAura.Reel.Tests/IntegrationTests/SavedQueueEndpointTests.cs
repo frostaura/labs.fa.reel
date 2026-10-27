@@ -319,6 +319,45 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// HREV1-D10: the pin read "…1h 42m against your 2h 30m." for an account that never set an
+    /// evening budget and has no control to set one, so the default was presented as the user's own.
+    /// "Your" belongs only to a budget the account stored; the default is named as a plain evening.
+    /// The fixture varies only the stored budget: none, the same number as the default, and another.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "1h 49m, inside a 2h 30m evening.")]
+    [InlineData(150, "1h 49m against your 2h 30m.")]
+    [InlineData(120, "1h 49m against your 2h.")]
+    public async Task The_pin_calls_the_budget_yours_only_when_the_account_set_it(int? stored, string expectedTail)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync(eveningBudgetMinutes: stored);
+        var artifactId = await SeedActiveArtifactAsync(accountId);
+        var (netflix, netflixName) = await KnownProviderAsync(8, "Netflix");
+        var pick = await SeedTitleAsync("pick", runtimeMinutes: 109);
+        await SeedAvailabilityAsync(pick, netflix, "US", Now.AddHours(-3));
+        await SeedScoresAsync(accountId, artifactId, new() { [pick] = 8.4m }, Now.AddDays(-1));
+        await SaveAllAsync(accountId, [pick]);
+
+        var queue = await QueueAsync(accountId);
+
+        // The served budget stays resolved either way: the shelf still needs a number to filter by.
+        Assert.Equal(stored ?? SavedQueue.DefaultEveningBudgetMinutes, queue.EveningBudgetMinutes);
+        var pin = Assert.Single(queue.Items, i => i.WatchTonight);
+        Assert.Equal(
+            $"The only thing in your queue that's on {netflixName} and fits tonight — 8.4 for you, {expectedTail}",
+            pin.WatchTonightReason);
+        if (stored is null)
+        {
+            Assert.DoesNotContain("your 2h", pin.WatchTonightReason!, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// A title on a free, ad-supported service alone is streaming now (G-2): it leads the Tonight
     /// sort, can be pinned, and shows its logo — where it used to read as "not streaming".
     /// </summary>

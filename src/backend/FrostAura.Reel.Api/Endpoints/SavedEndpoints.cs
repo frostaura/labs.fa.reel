@@ -311,7 +311,9 @@ public static class SavedEndpoints
                         ForYouBar.Shown(entry.PredictedRating!.Value),
                         expectedAbsoluteError,
                         entry.RuntimeMinutes!.Value,
-                        eveningBudget,
+                        // The stored budget, not the resolved one: only a budget the account set is
+                        // "yours" in the sentence (HREV1-D10).
+                        account.Settings.EveningBudgetMinutes,
                         ProviderTheCardShows(offers.GetValueOrDefault(entry.TitleId, []), nowUtc),
                         bar,
                         candidates.Count)
