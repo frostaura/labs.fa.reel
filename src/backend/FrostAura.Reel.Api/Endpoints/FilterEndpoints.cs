@@ -198,18 +198,22 @@ public static class FilterEndpoints
             if (account.Settings.SettingsPinHash is { } current)
             {
                 // Changing a PIN proves the current one, so it is a PIN check like any other (K-4).
-                if (attempts.LockedFor(account.Id) is { } locked)
+                var (attempt, locked) = attempts.TryBegin(account.Id);
+                if (attempt is null)
                 {
-                    return PinLocked(http, locked);
+                    return PinLocked(http, locked!.Value);
                 }
 
-                if (!VerifyPin(current, request.CurrentPin ?? string.Empty))
+                using (attempt)
                 {
-                    attempts.RecordFailure(account.Id);
-                    return Results.StatusCode(StatusCodes.Status423Locked);
-                }
+                    if (!VerifyPin(current, request.CurrentPin ?? string.Empty))
+                    {
+                        attempt.Failed();
+                        return Results.StatusCode(StatusCodes.Status423Locked);
+                    }
 
-                attempts.RecordSuccess(account.Id);
+                    attempt.Succeeded();
+                }
             }
 
             account.Settings.SettingsPinHash = HashPin(request.Pin);
@@ -227,19 +231,24 @@ public static class FilterEndpoints
                 return Results.StatusCode(StatusCodes.Status423Locked);
             }
 
-            // Five wrong PINs in fifteen minutes and the sixth attempt is refused unread (K-4).
-            if (attempts.LockedFor(account.Id) is { } locked)
+            // Five wrong PINs in fifteen minutes and the sixth attempt is refused unread (K-4). The
+            // attempt is taken BEFORE the hash, so PINs compared concurrently all count (HREV1-PLAT-1).
+            var (attempt, locked) = attempts.TryBegin(account.Id);
+            if (attempt is null)
             {
-                return PinLocked(http, locked);
+                return PinLocked(http, locked!.Value);
             }
 
-            if (!VerifyPin(hash, request.Pin ?? string.Empty))
+            using (attempt)
             {
-                attempts.RecordFailure(account.Id);
-                return Results.StatusCode(StatusCodes.Status423Locked);
-            }
+                if (!VerifyPin(hash, request.Pin ?? string.Empty))
+                {
+                    attempt.Failed();
+                    return Results.StatusCode(StatusCodes.Status423Locked);
+                }
 
-            attempts.RecordSuccess(account.Id);
+                attempt.Succeeded();
+            }
 
             // Success hands back a short-lived unlock token INSTEAD of the client re-sending the
             // raw PIN per call — the PIN itself must never be cached on the client.
@@ -260,21 +269,26 @@ public static class FilterEndpoints
                 return Results.Ok(new { pinConfigured = false });
             }
 
-            if (attempts.LockedFor(account.Id) is { } locked)
+            var (attempt, locked) = attempts.TryBegin(account.Id);
+            if (attempt is null)
             {
-                return PinLocked(http, locked);
+                return PinLocked(http, locked!.Value);
             }
 
-            // Deliberately raw-PIN-only — an unlock token is NOT accepted here. Removing the PIN
-            // is destructive (it opens content conditions to everyone on the device), so it always
-            // re-prompts; a token minted 14 minutes ago on a shared screen must not be enough.
-            if (!await VerifyPinHeaderAsync(account.Settings.SettingsPinHash, http))
+            using (attempt)
             {
-                attempts.RecordFailure(account.Id);
-                return Results.StatusCode(StatusCodes.Status423Locked);
+                // Deliberately raw-PIN-only — an unlock token is NOT accepted here. Removing the PIN
+                // is destructive (it opens content conditions to everyone on the device), so it always
+                // re-prompts; a token minted 14 minutes ago on a shared screen must not be enough.
+                if (!await VerifyPinHeaderAsync(account.Settings.SettingsPinHash, http))
+                {
+                    attempt.Failed();
+                    return Results.StatusCode(StatusCodes.Status423Locked);
+                }
+
+                attempt.Succeeded();
             }
 
-            attempts.RecordSuccess(account.Id);
             account.Settings.SettingsPinHash = null;
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { pinConfigured = false });

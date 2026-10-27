@@ -11,7 +11,8 @@ namespace FrostAura.Reel.Api.Middleware;
 /// Inbound request limits that sit in front of a route rather than inside it (J-8, B-14):
 /// <list type="bullet">
 /// <item><c>POST /api/search/ask</c> — the per-account turn limits (<see cref="AskTurnLimiter"/>).
-/// The in-flight slot is held until the whole streamed response has been written.</item>
+/// The in-flight slot is held until the whole streamed response has been written; a request the
+/// handler refuses with a 4xx gives its window slot back, so only answered turns count.</item>
 /// <item><c>/api/dev/*</c> — at most <see cref="DevConcurrency"/> requests at once, process-wide.
 /// Several of those routes start or read whole-catalogue work; two terminals hammering them should
 /// queue on the founder, not on the database.</item>
@@ -61,6 +62,14 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
             using (lease)
             {
                 await next(context);
+
+                // A request the handler refused (4xx: malformed, missing its turn id, an unknown
+                // conversation, a turn already running) answered nothing and wrote no turn, so it is
+                // not a turn (HREV1-PLAT-2). An answered turn streams 200; a 5xx may have spent, and counts.
+                if (context.Response.StatusCode is >= 400 and < 500)
+                {
+                    lease!.Refund();
+                }
             }
 
             return;

@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -134,14 +135,13 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         var accountId = await api.SeedAccountAsync($"edge-ask-{Guid.NewGuid():N}");
         var cookie = await CookieAsync(accountId);
 
-        // Malformed on purpose: the limit counts turns STARTED at the edge, before the engine reads
-        // the body, so six refusals by the handler are six turns — and no model is ever reached.
+        // Six answered turns — the stub models answer them, so nothing is spent.
         for (var i = 0; i < 6; i++)
         {
-            Assert.Equal(StatusCodes.Status400BadRequest, (await SendAsync(api, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}")).Status);
+            Assert.Equal(StatusCodes.Status200OK, (await SendAsync(api, "POST", "/api/search/ask", cookie, body: ValidAsk())).Status);
         }
 
-        var seventh = await SendAsync(api, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}");
+        var seventh = await SendAsync(api, "POST", "/api/search/ask", cookie, body: ValidAsk());
 
         Assert.Equal(StatusCodes.Status429TooManyRequests, seventh.Status);
         Assert.Equal("ask_rate_minute", Code(seventh.Body));
@@ -149,8 +149,40 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
 
         // Another account is its own partition.
         var other = await CookieAsync(await api.SeedAccountAsync($"edge-ask-2-{Guid.NewGuid():N}"));
-        Assert.Equal(StatusCodes.Status400BadRequest, (await SendAsync(api, "POST", "/api/search/ask", other, body: "{\"query\": 7}")).Status);
+        Assert.Equal(StatusCodes.Status200OK, (await SendAsync(api, "POST", "/api/search/ask", other, body: ValidAsk())).Status);
     }
+
+    /// <summary>
+    /// HREV1-PLAT-2: a request the Ask handler refuses is not a turn. Six refusals used to spend the
+    /// minute's six turns (and six of the hour's twenty), so the next real question was a 429 although
+    /// nothing had been answered. Each refusal shape the handler makes before it writes a turn record
+    /// is tried: a malformed body, a missing turn id, an empty query and an unknown conversation.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"bogus\":1}", StatusCodes.Status400BadRequest)]
+    [InlineData("{\"query\":\"a tense heist movie\"}", StatusCodes.Status400BadRequest)]
+    [InlineData("{\"query\":\"   \",\"clientTurnId\":\"6f1c1f9e-3c4b-4d43-9a43-1f2e3d4c5b6a\"}", StatusCodes.Status400BadRequest)]
+    [InlineData("{\"query\":\"a tense heist movie\",\"clientTurnId\":\"6f1c1f9e-3c4b-4d43-9a43-1f2e3d4c5b6a\",\"conversationId\":\"0b7f3a52-5d2e-4f43-8a51-2c3d4e5f6a7b\"}", StatusCodes.Status404NotFound)]
+    public async Task Refused_asks_do_not_spend_the_accounts_turns(string refusedBody, int refusedStatus)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var cookie = await CookieAsync(await api.SeedAccountAsync($"edge-ask-refused-{Guid.NewGuid():N}"));
+        for (var i = 0; i < 8; i++)
+        {
+            Assert.Equal(refusedStatus, (await SendAsync(api, "POST", "/api/search/ask", cookie, body: refusedBody)).Status);
+        }
+
+        var answered = await SendAsync(api, "POST", "/api/search/ask", cookie, body: ValidAsk());
+        Assert.Equal(StatusCodes.Status200OK, answered.Status);
+        Assert.Contains("event: ", answered.Body, StringComparison.Ordinal);
+    }
+
+    private static string ValidAsk() =>
+        JsonSerializer.Serialize(new { query = "a tense heist movie", clientTurnId = Guid.NewGuid() });
 
     /// <summary>
     /// R1-15: the day limit is counted in the zone the account saved, so its 429 says the day's
@@ -177,8 +209,8 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
             Assert.Equal(StatusCodes.Status200OK, saved.Status);
         }
 
-        Assert.Equal(StatusCodes.Status400BadRequest, (await SendAsync(host, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}")).Status);
-        var second = await SendAsync(host, "POST", "/api/search/ask", cookie, body: "{\"query\": 7}");
+        Assert.Equal(StatusCodes.Status200OK, (await SendAsync(host, "POST", "/api/search/ask", cookie, body: ValidAsk())).Status);
+        var second = await SendAsync(host, "POST", "/api/search/ask", cookie, body: ValidAsk());
         var now = DateTime.UtcNow;
 
         Assert.Equal(StatusCodes.Status429TooManyRequests, second.Status);
@@ -217,6 +249,56 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         // The removal path is the same lock, not a second oracle.
         var removal = await SendAsync(api, "DELETE", "/api/settings/pin", cookie, headers: new() { ["X-Settings-Pin"] = "2468" });
         Assert.Equal(StatusCodes.Status429TooManyRequests, removal.Status);
+    }
+
+    /// <summary>
+    /// HREV1-PLAT-1: the lockout counts attempts, not finished failures. Forty wrong PINs sent at once
+    /// used to clear the lock check together — fourteen of them were each a full PBKDF2 comparison of
+    /// a guess — because a failure was recorded only after its 100k-iteration hash. At most the
+    /// account's remaining allowance may be compared, on every route that checks a PIN, and the lock
+    /// that follows is real: the right PIN waits it out.
+    /// </summary>
+    [Theory]
+    [InlineData("verify", 0)]
+    [InlineData("verify", 3)]
+    [InlineData("change", 0)]
+    [InlineData("remove", 0)]
+    [InlineData("remove", 4)]
+    public async Task Forty_concurrent_wrong_pins_compare_no_more_than_the_remaining_allowance(string route, int earlierFailures)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await api.SeedAccountAsync($"edge-pin-race-{Guid.NewGuid():N}");
+        var cookie = await CookieAsync(accountId);
+        Assert.Equal(StatusCodes.Status200OK, (await SendAsync(api, "POST", "/api/settings/pin", cookie, body: "{\"pin\":\"4831\"}")).Status);
+        for (var i = 0; i < earlierFailures; i++)
+        {
+            Assert.Equal(StatusCodes.Status423Locked, (await SendAsync(api, "POST", "/api/settings/pin/verify", cookie, body: "{\"pin\":\"0000\"}")).Status);
+        }
+
+        var answers = await Task.WhenAll(Enumerable.Range(1000, 40).Select(guess => route switch
+        {
+            "verify" => SendAsync(api, "POST", "/api/settings/pin/verify", cookie, body: $"{{\"pin\":\"{guess}\"}}"),
+            "change" => SendAsync(api, "POST", "/api/settings/pin", cookie, body: $"{{\"pin\":\"1234\",\"currentPin\":\"{guess}\"}}"),
+            _ => SendAsync(api, "DELETE", "/api/settings/pin", cookie, headers: new() { ["X-Settings-Pin"] = $"{guess}" }),
+        }));
+
+        var compared = answers.Count(a => a.Status == StatusCodes.Status423Locked);
+        Assert.Equal(PinAttemptLimiter.MaxFailures - earlierFailures, compared);
+        Assert.All(
+            answers.Where(a => a.Status != StatusCodes.Status423Locked),
+            a =>
+            {
+                Assert.Equal(StatusCodes.Status429TooManyRequests, a.Status);
+                Assert.Equal("pin_locked", Code(a.Body));
+                Assert.True(int.TryParse(a.RetryAfter, out var seconds) && seconds is > 0 and <= 900, $"Retry-After was '{a.RetryAfter}'.");
+            });
+
+        var right = await SendAsync(api, "POST", "/api/settings/pin/verify", cookie, body: "{\"pin\":\"4831\"}");
+        Assert.Equal(StatusCodes.Status429TooManyRequests, right.Status);
     }
 
     [Fact]
@@ -325,6 +407,40 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         Assert.Equal("dean@frostaura.net", account.Settings.EmailForBilling);
     }
 
+    /// <summary>
+    /// HREV1-PLAT-7: a redeploy needs no key-ring mount. The Data Protection keys live in the
+    /// <c>DataProtectionKeys</c> table, so a brand-new process on the same database — what a redeploy
+    /// is — reads every secret the old one sealed. The control proves the check can fail: a host whose
+    /// ring is NOT the database cannot read the same token, which is the R1-27 "Revoked" path a lost
+    /// ring (or, once <c>DATAPROTECTION_CERT_PATH</c> is set, a missing certificate) leads to.
+    /// </summary>
+    [Fact]
+    public async Task A_redeployed_process_reads_the_old_ones_secrets_from_the_database_alone()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var secret = $"trakt-token-{Guid.NewGuid():N}";
+        var sealedByOld = api.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>().Protect(secret);
+
+        await using (var redeployed = api.WithWebHostBuilder(_ => { }))
+        {
+            Assert.Equal(secret, redeployed.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>().Unprotect(sealedByOld));
+        }
+
+        await using (var elsewhere = api.WithWebHostBuilder(b => b.ConfigureServices(s =>
+            s.AddDataProtection().SetApplicationName("FrostAura.Reel").UseEphemeralDataProtectionProvider())))
+        {
+            var reader = elsewhere.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>();
+            Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() => reader.Unprotect(sealedByOld));
+        }
+
+        await using var db = Db();
+        Assert.True(await db.DataProtectionKeys.AnyAsync(), "the key ring is expected in the DataProtectionKeys table");
+    }
+
     [Fact]
     public async Task Health_reports_the_running_commit()
     {
@@ -338,7 +454,12 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         Assert.Equal(StatusCodes.Status200OK, answer.Status);
         using var json = JsonDocument.Parse(answer.Body);
         Assert.Equal(FrostAura.Reel.Api.ReleaseInfo.Commit, json.RootElement.GetProperty("commit").GetString());
-        Assert.Matches("^[0-9a-f]{40}$", json.RootElement.GetProperty("commit").GetString());
+        // A git-archive build outside any checkout is stamped with nothing and says so (HREV1-PLAT-6).
+        Assert.Equal(FrostAura.Reel.Tests.Harness.BuildProvenance.StampedCommit, json.RootElement.GetProperty("commit").GetString());
+        if (FrostAura.Reel.Tests.Harness.BuildProvenance.MustBeStamped)
+        {
+            Assert.Matches(FrostAura.Reel.Tests.Harness.BuildProvenance.FullSha, json.RootElement.GetProperty("commit").GetString());
+        }
     }
 
     private ReelDbContext Db() => api.Services.CreateScope().ServiceProvider.GetRequiredService<ReelDbContext>();
