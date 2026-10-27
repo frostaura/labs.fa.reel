@@ -40,17 +40,18 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
             && path.Equals(AskPath, StringComparison.OrdinalIgnoreCase)
             && accountContext.AccountId is { } accountId)
         {
-            var tier = await db.Accounts.AsNoTracking()
+            // The tier picks the day's allowance; the zone says where the day starts (R1-15).
+            var account = await db.Accounts.AsNoTracking()
                 .Where(a => a.Id == accountId)
-                .Select(a => (Domain.Tenancy.AccountTier?)a.Tier)
+                .Select(a => new { a.Tier, a.Settings.TimeZone })
                 .FirstOrDefaultAsync(context.RequestAborted);
-            if (tier is null)
+            if (account is null)
             {
                 await next(context); // a token for a deleted account: the route answers 401
                 return;
             }
 
-            var (lease, refusal) = askTurns.TryStart(accountId, tier.Value);
+            var (lease, refusal) = askTurns.TryStart(accountId, account.Tier, account.TimeZone);
             if (refusal is not null)
             {
                 await RefuseAsync(context, refusal.Status, refusal.Code, refusal.Message, refusal.RetryAfter);

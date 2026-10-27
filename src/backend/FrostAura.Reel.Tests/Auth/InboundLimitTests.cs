@@ -22,9 +22,9 @@ public class InboundLimitTests
             new ConfigurationBuilder().AddInMemoryCollection(settings ?? []).Build())), clock);
 
     /// <summary>Starts a turn and finishes it at once, as a short answer would.</summary>
-    private static AskTurnLimiter.Refusal? Ask(AskTurnLimiter limiter, Guid account, AccountTier tier = AccountTier.Founder)
+    private static AskTurnLimiter.Refusal? Ask(AskTurnLimiter limiter, Guid account, AccountTier tier = AccountTier.Founder, string? zone = null)
     {
-        var (lease, refusal) = limiter.TryStart(account, tier);
+        var (lease, refusal) = limiter.TryStart(account, tier, zone);
         lease?.Dispose();
         return refusal;
     }
@@ -80,8 +80,71 @@ public class InboundLimitTests
 
         var refused = Ask(limiter, free, AccountTier.Free);
         Assert.Equal("ask_rate_day", refused?.Code);
-        // Rolling 24 h: the first of the ten frees 24 h after it was asked, which is 14 h from now.
-        Assert.Equal(TimeSpan.FromHours(14), refused!.RetryAfter);
+        // The day is the account's calendar day (R1-15) — UTC for an account with no zone — so the
+        // allowance comes back at midnight: 22:20 now, so in 1 h 40 min, not 24 h after the first ask.
+        Assert.Equal(new TimeSpan(1, 40, 0), refused!.RetryAfter);
+
+        clock.Now = clock.Now.Add(refused.RetryAfter);
+        Assert.Null(Ask(limiter, free, AccountTier.Free));
+    }
+
+    /// <summary>
+    /// R1-15: the day limit counts the account's own calendar day. Ten Free asks an hour apart from
+    /// 12:00 UTC on 26 October, then an eleventh at 21:30 UTC: refused in every zone (all ten fall in
+    /// one local day), with the wait running to THAT zone's next midnight — and admitted once it passes.
+    /// </summary>
+    [Theory]
+    [InlineData(null, 2, 30)]                       // UTC: midnight is 2 h 30 min away
+    [InlineData("Africa/Johannesburg", 0, 30)]      // 23:30 at +02:00
+    [InlineData("America/New_York", 6, 30)]         // 17:30 at -04:00 (EDT until 1 November)
+    [InlineData("Pacific/Kiritimati", 12, 30)]      // already 27 October, 11:30 at +14:00
+    [InlineData("Mars/Olympus_Mons", 2, 30)]        // a zone this host cannot resolve counts UTC
+    public void The_day_limit_resets_at_the_accounts_local_midnight(string? zone, int hours, int minutes)
+    {
+        var clock = new ManualClock();
+        var limiter = Limiter(clock);
+        var account = Guid.NewGuid();
+
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Null(Ask(limiter, account, AccountTier.Free, zone));
+            clock.Now = clock.Now.AddHours(1);
+        }
+
+        clock.Now = clock.Now.AddMinutes(-30);
+        var refused = Ask(limiter, account, AccountTier.Free, zone);
+
+        Assert.Equal("ask_rate_day", refused?.Code);
+        Assert.Equal(new TimeSpan(hours, minutes, 0), refused!.RetryAfter);
+
+        clock.Now = clock.Now.Add(refused.RetryAfter).AddSeconds(-1);
+        Assert.Equal("ask_rate_day", Ask(limiter, account, AccountTier.Free, zone)?.Code);
+        clock.Now = clock.Now.AddSeconds(1);
+        Assert.Null(Ask(limiter, account, AccountTier.Free, zone));
+    }
+
+    [Fact]
+    public void Turns_asked_before_local_midnight_do_not_count_against_the_new_day()
+    {
+        // Johannesburg: five asks from 17:00 to 19:00 local on the 26th, five more from 00:10 local on
+        // the 27th, and an eleventh at 01:50 local (23:50 UTC). With the day split at local midnight
+        // the eleventh is the sixth of the new day and is admitted; on the UTC day all eleven fall on
+        // the 26th and the eleventh is refused.
+        var clock = new ManualClock { Now = new(2026, 10, 26, 15, 0, 0, TimeSpan.Zero) };
+        var local = Limiter(clock);
+        var utc = Limiter(clock);
+        var account = Guid.NewGuid();
+
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Null(Ask(local, account, AccountTier.Free, "Africa/Johannesburg"));
+            Assert.Null(Ask(utc, account, AccountTier.Free));
+            clock.Now = clock.Now.AddMinutes(i < 4 ? 30 : i == 4 ? 310 : 20);
+        }
+
+        Assert.Equal(new DateTimeOffset(2026, 10, 26, 23, 50, 0, TimeSpan.Zero), clock.Now);
+        Assert.Null(Ask(local, account, AccountTier.Free, "Africa/Johannesburg"));
+        Assert.Equal("ask_rate_day", Ask(utc, account, AccountTier.Free)?.Code);
     }
 
     [Fact]

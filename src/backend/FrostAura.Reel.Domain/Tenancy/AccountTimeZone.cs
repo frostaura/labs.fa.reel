@@ -67,10 +67,19 @@ public static partial class AccountTimeZone
     /// On a day that skips midnight (a daylight-saving jump at 00:00) it is the first local instant
     /// that exists.
     /// </summary>
-    public static DateTime DayStartUtc(string? timeZoneId, DateTime utcNow)
+    public static DateTime DayStartUtc(string? timeZoneId, DateTime utcNow) =>
+        MidnightUtc(Resolve(timeZoneId), LocalDate(timeZoneId, utcNow));
+
+    /// <summary>
+    /// The UTC instant the account's NEXT day begins — when a daily allowance counted from
+    /// <see cref="DayStartUtc"/> comes back. Same daylight-saving rule as <see cref="DayStartUtc"/>.
+    /// </summary>
+    public static DateTime NextDayStartUtc(string? timeZoneId, DateTime utcNow) =>
+        MidnightUtc(Resolve(timeZoneId), LocalDate(timeZoneId, utcNow).AddDays(1));
+
+    private static DateTime MidnightUtc(TimeZoneInfo zone, DateOnly date)
     {
-        var zone = Resolve(timeZoneId);
-        var midnight = LocalDate(timeZoneId, utcNow).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        var midnight = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
         while (zone.IsInvalidTime(midnight))
         {
             midnight = midnight.AddMinutes(15);

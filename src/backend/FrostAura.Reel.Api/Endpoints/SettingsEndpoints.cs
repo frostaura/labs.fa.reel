@@ -1,4 +1,5 @@
 using System.Net.Mail;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Domain.Tenancy;
@@ -28,7 +29,7 @@ public static class SettingsEndpoints
                 : Results.Ok(Payload(account));
         });
 
-        group.MapPut("/", async (UpdateSettingsRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapPut("/", async (UpdateSettingsRequest request, IReelDbContext db, IBudgetCalendar budgetCalendar, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -78,9 +79,12 @@ public static class SettingsEndpoints
                 account.Region = region;
             }
 
+            var zoneChanged = false;
             if (request.TimeZone is not null)
             {
-                account.Settings.TimeZone = clearTimeZone ? null : timeZone;
+                var next = clearTimeZone ? null : timeZone;
+                zoneChanged = !string.Equals(account.Settings.TimeZone, next, StringComparison.Ordinal);
+                account.Settings.TimeZone = next;
             }
 
             if (request.Onboarded is true)
@@ -100,6 +104,15 @@ public static class SettingsEndpoints
             }
 
             await db.SaveChangesAsync(ct);
+
+            // The budget calendar caches a zone for up to ZoneLifetime; without this the account's
+            // per-day ceilings keep counting the old day for ten minutes after the change (R1-15).
+            // After the save, so a read racing this request cannot re-cache the old zone.
+            if (zoneChanged)
+            {
+                budgetCalendar.Forget(account.Id);
+            }
+
             return Results.Ok(Payload(account));
         });
     }
