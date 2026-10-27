@@ -12,8 +12,9 @@ public static class SettingsEndpoints
     /// despite the verb, because three unrelated screens post to it and none of them holds the
     /// others' values. <c>EveningBudgetMinutes</c> is the exception that needs stating: a
     /// non-positive value is an explicit CLEAR back to the queue's default, not a clamp to 30.
+    /// <c>TimeZone</c> is an IANA id; an empty string clears it back to UTC.
     /// </summary>
-    public record UpdateSettingsRequest(string? Region, bool? Onboarded, string? Email, int? EveningBudgetMinutes);
+    public record UpdateSettingsRequest(string? Region, bool? Onboarded, string? Email, int? EveningBudgetMinutes, string? TimeZone = null);
 
     public static void MapSettingsEndpoints(this IEndpointRouteBuilder app)
     {
@@ -60,9 +61,26 @@ public static class SettingsEndpoints
                 }
             }
 
+            string? timeZone = null;
+            var clearTimeZone = false;
+            if (request.TimeZone is not null)
+            {
+                clearTimeZone = request.TimeZone.Trim().Length == 0;
+                timeZone = clearTimeZone ? null : AccountTimeZone.Normalise(request.TimeZone);
+                if (!clearTimeZone && timeZone is null)
+                {
+                    return Results.BadRequest(new { error = "timeZone must be an IANA time zone such as Africa/Johannesburg", code = "time_zone_invalid" });
+                }
+            }
+
             if (region is not null)
             {
                 account.Region = region;
+            }
+
+            if (request.TimeZone is not null)
+            {
+                account.Settings.TimeZone = clearTimeZone ? null : timeZone;
             }
 
             if (request.Onboarded is true)
@@ -103,6 +121,9 @@ public static class SettingsEndpoints
     /// The one settings projection, so GET and PUT can never disagree about what was saved.
     /// <c>eveningBudgetMinutes</c> is served RESOLVED (never null): the Saved shelf needs a number
     /// to reason with, and "null means 150" is a rule the client should not have to know.
+    /// <c>timeZone</c> is served AS STORED (null when never set) beside the zone actually in force,
+    /// so the client can offer the browser's zone to an account that has not chosen one instead of
+    /// presenting UTC as a choice the user made.
     /// </summary>
     private static object Payload(Domain.Tenancy.Account account) => new
     {
@@ -110,5 +131,7 @@ public static class SettingsEndpoints
         onboarded = account.Settings.OnboardingCompleted,
         email = account.Settings.EmailForBilling,
         eveningBudgetMinutes = SavedQueue.EffectiveEveningBudget(account.Settings.EveningBudgetMinutes),
+        timeZone = account.Settings.TimeZone,
+        effectiveTimeZone = AccountTimeZone.Resolve(account.Settings.TimeZone).Id,
     };
 }

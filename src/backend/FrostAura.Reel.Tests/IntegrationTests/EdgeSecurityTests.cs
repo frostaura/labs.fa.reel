@@ -23,7 +23,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>
 {
-    private sealed record Answer(int Status, string Body, IReadOnlyList<string> SetCookies, string? RetryAfter);
+    internal sealed record Answer(int Status, string Body, IReadOnlyList<string> SetCookies, string? RetryAfter);
 
     [Fact]
     public async Task Production_session_cookies_are_secure_even_over_the_gateways_plain_http()
@@ -335,7 +335,7 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         }
     }
 
-    private static async Task<Answer> SendAsync(
+    internal static async Task<Answer> SendAsync(
         WebApplicationFactory<Program> host,
         string method,
         string path,

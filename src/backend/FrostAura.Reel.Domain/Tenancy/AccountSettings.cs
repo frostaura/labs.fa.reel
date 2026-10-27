@@ -23,4 +23,12 @@ public class AccountSettings
     /// change and must not produce a migration.
     /// </summary>
     public int? EveningBudgetMinutes { get; set; }
+
+    /// <summary>
+    /// The account's IANA time zone (<c>Africa/Johannesburg</c>) — the day "tonight", a daily
+    /// allowance and stable-within-day picks are counted in (ADD-22). Null means never set, and every
+    /// consumer counts in UTC through <see cref="AccountTimeZone"/>. Lives in the owned jsonb
+    /// document, so adding it is NOT a schema change (M7 needs no migration).
+    /// </summary>
+    public string? TimeZone { get; set; }
 }

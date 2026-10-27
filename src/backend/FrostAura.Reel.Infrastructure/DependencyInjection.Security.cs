@@ -38,6 +38,7 @@ public static partial class DependencyInjection
 
         // ── Application services ───────────────────────────────────────────────────────────
         services.AddValidatedOptions<SessionOptions>();
+        services.AddValidatedOptions<FounderAccessOptions>();
         services.AddSingleton<OAuthStateCodec>();
         services.AddScoped<SessionService>();
         services.AddScoped<TraktOAuthService>();

@@ -70,9 +70,10 @@ public class EndpointAuthorizationMatrixTests(PostgresFixture fixture, ReelApiFa
         {
             // A JSON body, so a route whose handler binds one reaches its filters instead of failing
             // binding first; a binding failure answers before any filter runs and would hide the gate.
-            // `?q=` for the same reason on the one GET that requires a query value (typeahead).
+            // `?q=` and `?ids=` for the same reason on the GETs that require a query value
+            // (typeahead and its score badges).
             var status = route.Method == "GET"
-                ? await SendAsync(api, route.Method, route.Concrete + "?q=x", cookie: null)
+                ? await SendAsync(api, route.Method, route.Concrete + "?q=x&ids=x", cookie: null)
                 : await SendAsync(api, route.Method, route.Concrete, cookie: null, body: "{}");
             if (status != StatusCodes.Status401Unauthorized)
             {

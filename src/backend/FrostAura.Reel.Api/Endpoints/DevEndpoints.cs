@@ -2,6 +2,7 @@ using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
 using FrostAura.Reel.Domain.Tenancy;
@@ -131,6 +132,9 @@ public static class DevEndpoints
                 await db.SaveChangesAsync(ct);
             }
 
+            // The rest of this request acts as the account it just signed in (J-11): the session
+            // payload reads scoped tables, and a stale cookie for another account must not narrow them.
+            http.RequestServices.GetRequiredService<IAccountContext>().SetAccount(account.Id);
             var session = await sessions.IssueAsync(account, MarkDevLinkUserAgent(http.Request.Headers.UserAgent.FirstOrDefault()), ct);
             SessionCookies.Write(http, session);
             return Results.Ok(await account.ToSessionPayloadAsync(http, ct));
