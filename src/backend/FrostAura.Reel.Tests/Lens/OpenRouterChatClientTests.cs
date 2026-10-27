@@ -41,6 +41,24 @@ public class OpenRouterChatClientTests
     public void The_listed_purposes_run_at_effort_none(string purpose) =>
         Assert.Equal(ReasoningEfforts.None, new LlmPurposeCatalog(Config()).For(purpose).ReasoningEffort);
 
+    /// <summary>
+    /// Ask v2's ceilings (R1-51). The plan is sized from 10 per-call ledger deltas on luna at effort
+    /// none (86–114 completion tokens, every one a different act and query length) against a 53-call
+    /// mean of 93 with 0 truncations at the old 600: 250 is the observed max × 1.5 with the margin a
+    /// 10-sample tail needs, and a length finish still retries once at 500. The judge keeps the
+    /// rerank-ask measurement it shares a shape with. The answer is unmeasured (2 calls) and keeps the
+    /// ceiling its 360-character cap already bounds.
+    /// </summary>
+    [Fact]
+    public void Ask_v2_ceilings_are_the_measured_ones()
+    {
+        var catalog = new LlmPurposeCatalog(Config());
+        Assert.Equal(250, catalog.For(ApiUsagePurpose.AskPlan).MaxTokens);
+        Assert.Equal(500, catalog.For(ApiUsagePurpose.AskPlan).MaxTokensFor(0) * 2);
+        Assert.Equal(100 + (370 * 6), catalog.For(ApiUsagePurpose.AskJudge).MaxTokensFor(6));
+        Assert.Equal(300, catalog.For(ApiUsagePurpose.AskAnswer).MaxTokens);
+    }
+
     [Fact]
     public void Extraction_runs_with_no_reasoning_parameter_and_no_immediate_retries()
     {
@@ -126,7 +144,7 @@ public class OpenRouterChatClientTests
 
         using var doc = JsonDocument.Parse(handler.Bodies[0]);
         Assert.Equal("none", doc.RootElement.GetProperty("reasoning").GetProperty("effort").GetString());
-        Assert.Equal(600, doc.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.Equal(250, doc.RootElement.GetProperty("max_tokens").GetInt32());
         Assert.Equal(
             ["model", "temperature", "max_tokens", "response_format", "messages", "reasoning"],
             doc.RootElement.EnumerateObject().Select(p => p.Name));
