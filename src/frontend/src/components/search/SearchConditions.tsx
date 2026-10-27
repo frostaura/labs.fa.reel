@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import ConditionSummary from "../settings/ConditionSummary";
 import PickConditionsButton from "../rec/PickConditionsButton";
+import PillButton from "../askReel/PillButton";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
 import type { BrowseFilter } from "../../lib/browseFilter";
@@ -45,7 +46,7 @@ export default function SearchConditions({
   browse?: BrowseFilter | null;
   onBrowseChange?: (next: BrowseFilter) => void;
 }) {
-  const { data: filters } = useGetFiltersQuery();
+  const { data: filters, isLoading } = useGetFiltersQuery();
   const wide = useMinWidth(MD_BREAKPOINT_PX);
   const [open, setOpen] = useState(false);
   const stripId = useId();
@@ -54,7 +55,15 @@ export default function SearchConditions({
   // "English only" condition the account may not have. Same rule as `PickConditionsSummary`, and
   // the reason this is a sibling of it rather than a wrapper around it.
   const count = filters ? summaryChips(filters, browse).length : 0;
-  if (!filters || count === 0) return null;
+  // The row is held while the conditions load. The strip is the first thing under the title, and
+  // arriving about a second after the shell it pushed the whole page down — 0.053 of layout shift
+  // on every cold /search, more than the page's whole 0.05 budget, before anything had been asked.
+  // One 44 px row is exactly the phone's "N conditions" button and the wide strip's first row; an
+  // account with nothing set gives the row back when the answer says so, which is the rare case.
+  if (!filters) {
+    return isLoading ? <div aria-hidden className={`min-h-11 ${className}`} data-testid="askreel-conditions-pending" /> : null;
+  }
+  if (count === 0) return null;
   const strip = (
     <>
       <ConditionSummary filters={filters} browse={browse} onBrowseChange={onBrowseChange} />
@@ -72,17 +81,16 @@ export default function SearchConditions({
           one tap opens every chip and the editor, exactly as the wide strip shows them. */}
       {wide ? strip : (
         <>
-          <button
-            type="button"
+          <PillButton
+            tone="quiet"
             data-testid="askreel-conditions-toggle"
             aria-expanded={open}
             aria-controls={stripId}
             onClick={() => setOpen((v) => !v)}
-            className="fa-caption inline-flex min-h-11 items-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
           >
             <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
             {`${count} ${plural(count, "condition")}`}
-          </button>
+          </PillButton>
           {open && (
             <div id={stripId} className="flex w-full flex-wrap items-center gap-x-3 gap-y-2">
               {strip}

@@ -39,7 +39,18 @@ export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "stopped" |
  * which is a different offer from "try again". `request` is a 400 — the client sent something the
  * server refuses, and repeating it verbatim cannot work.
  */
-export type ErrorReason = "session" | "timeout" | "conversation" | "request" | null;
+export type ErrorReason = "session" | "timeout" | "conversation" | "request" | "rate" | null;
+
+/**
+ * A 429 from `/ask`: which of the account's turn windows is full (`ask_rate_minute`, `_hour`,
+ * `_day`; null for a 429 without one of those codes) and how long the server asked the client to
+ * wait. Carried beside `errorReason: "rate"` so the page can say WHICH limit and WHEN — "hit a
+ * snag" for a limit the reader can simply wait out told them something false (WS-8 CR-5).
+ */
+export interface RateLimit {
+  window: "minute" | "hour" | "day" | null;
+  retryAfterSeconds: number | null;
+}
 
 /**
  * Which run a frame belongs to — the label every frame of one `/ask` stream carries.
@@ -236,6 +247,8 @@ interface State {
   droppedByFloor: number | null;
   /** Set alongside `status: "error"` when the client can name the cause. */
   errorReason: ErrorReason;
+  /** Set alongside `errorReason: "rate"`; read only while that is the reason. */
+  rateLimit: RateLimit | null;
   /**
    * True while the cards on screen belong to the PREVIOUS answer and the current turn has not yet
    * produced one of its own. A new question used to blank the grid the instant it was asked, so the
@@ -403,7 +416,7 @@ export type ChatAction =
   | { type: "turnInProgress" }
   | { type: "pageRefused"; refusal: PageRefusal }
   | { type: "conversationGone" }
-  | { type: "error"; reason?: ErrorReason };
+  | { type: "error"; reason?: ErrorReason; rateLimit?: RateLimit };
 
 /** The three actions that START a run, and so set the id whose frames the reducer will accept. */
 const TURN_STARTS: ReadonlySet<ChatAction["type"]> = new Set(["userTurn", "moreTurn", "reaskTurn"]);
@@ -456,6 +469,13 @@ export function failureFor(err: unknown): ChatAction {
     // than a "try again" that cannot work.
     if (err.status === 401) return { type: "error", reason: "session" };
     if (err.status === 400) return { type: "error", reason: "request" };
+    if (err.status === 429) {
+      const window = err.code === "ask_rate_minute" ? "minute"
+        : err.code === "ask_rate_hour" ? "hour"
+        : err.code === "ask_rate_day" ? "day"
+        : null;
+      return { type: "error", reason: "rate", rateLimit: { window, retryAfterSeconds: err.retryAfterSeconds } };
+    }
   }
   return { type: "error", reason: null };
 }
@@ -464,7 +484,7 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], turnConflict: null, turnConflictTerms: [],
-  belowFloor: [], nearMiss: [], unchecked: [], mode: null, knockouts: [], droppedByFloor: null, errorReason: null,
+  belowFloor: [], nearMiss: [], unchecked: [], mode: null, knockouts: [], droppedByFloor: null, errorReason: null, rateLimit: null,
   holdingPrevious: false, arrived: 0, removed: 0, removedEarlier: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
   pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
@@ -1135,6 +1155,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       // `appending` and `phase` are cleared deliberately. A failed page used to leave `appending`
       // latched true, so the next `done` appended to a grid the user had been told was broken, and
       // the progress bar kept animating under an error banner.
-      return { ...state, status: "error", appending: false, phase: null, errorReason: action.reason ?? null };
+      return {
+        ...state, status: "error", appending: false, phase: null, errorReason: action.reason ?? null,
+        rateLimit: action.rateLimit ?? null,
+      };
   }
 }

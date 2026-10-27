@@ -1,4 +1,4 @@
-import type { ChatStatus } from "./reducer";
+import type { ChatStatus, ErrorReason, RateLimit } from "./reducer";
 
 /** What the Ask Reel page says, and when — every sentence built on the client, in one place. */
 /**
@@ -367,4 +367,78 @@ export function nearMissHeading(concepts: readonly string[]): string {
 export function earlierAnswerSummary(picks: number, trayed: number): string {
   const head = picks > 0 ? `${picks} ${plural(picks, "pick")}` : "No picks";
   return trayed > 0 ? `Earlier answer · ${head} · ${trayed} in its trays` : `Earlier answer · ${head}`;
+}
+
+/**
+ * What a failed `/ask` says, by cause — the full card's title and line, the one-liner shown under
+ * an answer that is still on screen, and whether "Try again" can work.
+ *
+ * The causes are the ones `failureFor` can name, and each is a different thing to do: a limit is
+ * waited out (and says for how long), a lapsed session is signed back into (a retry cannot fix it),
+ * a timeout and an unnamed failure are retried, a malformed request is reworded. One "Search hit a
+ * snag — Reel couldn’t reach the search engine" for all of them told a reader who had simply asked
+ * too often that the engine was down (WS-8 CR-5), and told a signed-out one to keep retrying.
+ */
+export interface FailureCopy {
+  title: string;
+  detail: string;
+  inline: string;
+  retryable: boolean;
+}
+
+const RATE_WINDOW: Record<NonNullable<RateLimit["window"]>, string> = { minute: "a minute", hour: "an hour", day: "a day" };
+
+export function failureCopy(reason: ErrorReason, rateLimit: RateLimit | null = null): FailureCopy {
+  switch (reason) {
+    case "rate": {
+      const per = rateLimit?.window ? RATE_WINDOW[rateLimit.window] : null;
+      const when = waitPhrase(rateLimit?.retryAfterSeconds ?? null);
+      const title = per ? `That’s the most questions Reel answers in ${per}` : "Reel is answering too many of your questions at once";
+      const detail = when ? `You can ask again ${when}. Nothing was lost — your conversation is as you left it.` : "Give it a moment, then ask again. Nothing was lost — your conversation is as you left it.";
+      return { title, detail, inline: when ? `${title} — you can ask again ${when}.` : `${title} — give it a moment.`, retryable: true };
+    }
+    case "session":
+      return {
+        title: "You’re signed out",
+        detail: "Your session ended before Reel could answer. Sign in again to keep asking — your conversations are saved.",
+        inline: "You’re signed out — sign in again to keep asking.",
+        retryable: false,
+      };
+    case "timeout":
+      return {
+        title: "That took too long",
+        detail: "Reel stopped waiting for an answer. Asking again usually works.",
+        inline: "That took too long — asking again usually works.",
+        retryable: true,
+      };
+    case "request":
+      return {
+        title: "Reel couldn’t take that question",
+        detail: "Something about the request was off. Try asking it another way.",
+        inline: "Reel couldn’t take that request — try asking it another way.",
+        retryable: false,
+      };
+    default:
+      return {
+        title: "Search hit a snag",
+        detail: "Reel couldn’t finish that answer. It’s usually momentary.",
+        inline: "That last request hit a snag.",
+        retryable: true,
+      };
+  }
+}
+
+/** "in 40 seconds", "in about 3 minutes", "in about 5 hours" — or null when no wait was named. */
+export function waitPhrase(seconds: number | null): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds < 60) {
+    const s = Math.ceil(seconds);
+    return `in ${s} ${plural(s, "second")}`;
+  }
+  if (seconds < 3600) {
+    const m = Math.ceil(seconds / 60);
+    return m === 1 ? "in about a minute" : `in about ${m} minutes`;
+  }
+  const h = Math.ceil(seconds / 3600);
+  return h === 1 ? "in about an hour" : `in about ${h} hours`;
 }

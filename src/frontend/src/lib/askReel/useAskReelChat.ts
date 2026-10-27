@@ -808,6 +808,7 @@ export function useAskReelChat() {
     droppedByFloor: state.droppedByFloor,
     /** Why the last failure happened, where the client can name it. */
     errorReason: state.errorReason,
+    rateLimit: state.rateLimit,
     /** True once the last question has been asked, so a retry has something to replay. */
     canRetry: state.lastQuery.length > 0,
     /**

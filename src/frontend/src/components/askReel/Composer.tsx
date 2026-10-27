@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { Mic, Send } from "lucide-react";
+import { Button } from "../ui/button";
 import { COMPOSER_MIN_PX, composerHeight, composerSends } from "../../lib/askReel/useAskReelChat";
 
 /**
@@ -86,31 +87,35 @@ export default function Composer({
               : "Ask for more, or refine…"
           }
           style={{ height: COMPOSER_MIN_PX }}
-          className="flex-1 min-h-11 resize-none overflow-y-auto rounded-3xl bg-fa-frost/10 px-4 py-2.5 fa-body leading-6 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
+          className="flex-1 min-h-11 resize-none overflow-y-auto rounded-3xl bg-fa-frost/10 px-4 py-2.5 fa-body leading-6 text-fa-frost-bright placeholder:text-3 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
         />
         {speech.supported && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => (speech.listening ? speech.stop() : speech.start())}
             disabled={streaming}
             aria-label="Voice search"
+            aria-pressed={speech.listening}
             data-testid="askreel-mic"
-            className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
-              speech.listening ? "bg-fa-frost/40 text-fa-frost-bright animate-pulse" : "bg-fa-frost/10 text-fa-frost-dim hover:text-fa-frost-bright"
+            className={`min-h-11 min-w-11 rounded-full disabled:opacity-40 ${
+              speech.listening ? "bg-fa-frost/40 text-fa-frost-bright animate-pulse hover:bg-fa-frost/40" : "bg-fa-frost/10 text-fa-frost-dim hover:text-fa-frost-bright"
             }`}
           >
-            <Mic className="h-4 w-4" />
-          </button>
+            <Mic className="h-4 w-4" aria-hidden />
+          </Button>
         )}
-        <button
+        <Button
           type="submit"
+          variant="ghost"
+          size="icon"
           disabled={!draft.trim() || streaming}
           data-testid="askreel-send"
-          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full bg-fa-frost/20 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
+          className="min-h-11 min-w-11 rounded-full bg-fa-frost/20 text-fa-frost-bright hover:bg-fa-frost/30 hover:text-fa-frost-bright disabled:opacity-40"
           aria-label="Send"
         >
-          <Send className="h-4 w-4" />
-        </button>
+          <Send className="h-4 w-4" aria-hidden />
+        </Button>
       </div>
     </form>
   );
