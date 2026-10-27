@@ -865,6 +865,139 @@ public class AskReelV2UnitTests
         Assert.True(model.Calls > calls);
     }
 
+    /// <summary>
+    /// HREV1-ASK-05: a first batch judged ahead of the turn (beside the plan) is never sent again —
+    /// the turn's batch takes its verdicts from the cache, or waits for the call still in flight — and
+    /// is judged afresh only for a different request or where the early call failed.
+    /// </summary>
+    [Theory]
+    [InlineData("in flight", 1, 3)]
+    [InlineData("finished", 1, 3)]
+    [InlineData("other request", 2, 4)]
+    [InlineData("early call failed", 2, 4)]
+    public async Task A_first_batch_judged_ahead_is_never_sent_twice(string scenario, int firstBatchSends, int calls)
+    {
+        var titles = Enumerable.Range(0, 16).Select(_ => Title(Guid.NewGuid())).ToList();
+        var account = Guid.NewGuid();
+        var model = new GatedJudgeModel(holdFirst: scenario == "in flight", failFirst: scenario == "early call failed");
+        var judge = new RequestJudge(model, new MemoryCache(new MemoryCacheOptions()), NullLogger<RequestJudge>.Instance);
+
+        var early = judge.PrejudgeAsync(new JudgeInput(account, "Request: samurai films. Media: movie", "persona", titles), CancellationToken.None);
+        if (scenario != "in flight")
+        {
+            await early;
+        }
+
+        var request = scenario == "other request" ? "Request: samurai films. Media: tv" : "Request: samurai films.  media: MOVIE";
+        var reading = Task.Run(async () =>
+        {
+            var read = new List<JudgeVerdict>();
+            await foreach (var v in judge.JudgeAsync(new JudgeInput(account, request, "persona", titles), CancellationToken.None))
+            {
+                read.Add(v);
+            }
+
+            return read;
+        });
+        if (scenario == "in flight")
+        {
+            // The turn's own batches are out before the early call returns: the first batch must wait.
+            await model.Sent(RequestJudge.MaxJudged).WaitAsync(TimeSpan.FromSeconds(10));
+            model.Release();
+        }
+
+        var verdicts = await reading;
+        Assert.Equal(scenario != "early call failed", await early is not null);
+        Assert.Equal(titles.Select(t => t.TitleId).Order(), verdicts.Select(v => v.TitleId).Order());
+        Assert.All(verdicts, v => Assert.True(v.Judged));
+        Assert.All(titles.Take(RequestJudge.FirstBatchSize), t => Assert.Equal(firstBatchSends, model.SendsOf(t.TitleId)));
+        Assert.All(titles.Skip(RequestJudge.FirstBatchSize), t => Assert.Equal(1, model.SendsOf(t.TitleId)));
+        Assert.Equal(calls, model.Calls);
+    }
+
+    /// <summary>
+    /// A judge model that counts every title it is sent, can hold its first call until released, or
+    /// fail it. <see cref="Sent"/> completes once that many titles have been sent in total.
+    /// </summary>
+    private sealed class GatedJudgeModel(bool holdFirst, bool failFirst) : IRequestJudgeModel
+    {
+        private readonly object _gate = new();
+        private readonly Dictionary<Guid, int> _sends = [];
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly List<(int Count, TaskCompletionSource Done)> _waiters = [];
+        private int _sent;
+
+        public int Calls { get; private set; }
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "gated";
+
+        public string CacheSalt => "gated";
+
+        public int SendsOf(Guid id)
+        {
+            lock (_gate)
+            {
+                return _sends.GetValueOrDefault(id);
+            }
+        }
+
+        public Task Sent(int count)
+        {
+            lock (_gate)
+            {
+                var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (_sent >= count)
+                {
+                    done.SetResult();
+                }
+                else
+                {
+                    _waiters.Add((count, done));
+                }
+
+                return done.Task;
+            }
+        }
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct)
+        {
+            bool first;
+            lock (_gate)
+            {
+                first = Calls++ == 0;
+                foreach (var t in input.Titles)
+                {
+                    _sends[t.TitleId] = _sends.GetValueOrDefault(t.TitleId) + 1;
+                }
+
+                _sent += input.Titles.Count;
+                foreach (var (count, done) in _waiters.Where(w => _sent >= w.Count))
+                {
+                    done.TrySetResult();
+                }
+            }
+
+            if (first && holdFirst)
+            {
+                await _release.Task.WaitAsync(ct);
+            }
+
+            if (first && failFirst)
+            {
+                return new JudgeBatchResult(input.Titles.Select(t => JudgeVerdict.Unjudged(t.TitleId)).ToList(), LlmCallMeta.None, true);
+            }
+
+            return new JudgeBatchResult(
+                input.Titles.Select(t => new JudgeVerdict(t.TitleId, Satisfies.Yes, 0.8, "You get samurai.", "keyword: samurai", ResultSource.Llm, ResultSource.Llm)).ToList(),
+                LlmCallMeta.None,
+                false);
+        }
+    }
+
     private sealed class ScriptedJudgeModel(Guid failBatchContaining) : IRequestJudgeModel
     {
         private readonly object _gate = new();

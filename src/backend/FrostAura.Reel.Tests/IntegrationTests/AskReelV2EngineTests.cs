@@ -900,6 +900,120 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// A client may close the stream the moment `done` arrives — the answer is complete on its
+    /// screen. The work left after `done` (the exposure log) ran on the request's token, so that
+    /// close threw, and the endpoint stored a finished turn as Failed/client_aborted with no intent,
+    /// act or conversation state (found measuring HREV1-ASK-05 with a client that stops at `done`).
+    /// Varied: with an active model artifact the exposures are still written; without one there is
+    /// nothing to write.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_client_that_leaves_at_done_still_gets_a_finished_turn(bool trained)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var yes = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        if (trained)
+        {
+            await SeedScoresAsync(accountId, yes, 8.4m);
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+        using var client = new CancellationTokenSource();
+        LiveSearchExpansionService.Emit leaving = async (name, payload) =>
+        {
+            await emit(name, payload);
+            if (name == "done")
+            {
+                await client.CancelAsync();
+            }
+        };
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, leaving, client.Token);
+
+        Assert.True(client.IsCancellationRequested);
+        Assert.False(outcome.Failed);
+        Assert.NotNull(outcome.IntentJson);
+        Assert.NotNull(outcome.ConversationStateJson);
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var exposed = await db.ExposureEvents.IgnoreQueryFilters()
+            .Where(e => e.AccountId == accountId && e.Surface == Domain.Feed.ExposureSurface.AskReel)
+            .Select(e => e.TitleId)
+            .ToListAsync();
+        Assert.Equal(trained ? yes.Order() : [], exposed.Order());
+    }
+
+    /// <summary>
+    /// HREV1-ASK-05: the first judge batch of a plain topic is judged WHILE the plan runs — the
+    /// planner here waits until the judge has been sent titles, so a turn that judged only after its
+    /// plan would time out — and the turn never sends those titles again. Varied: a plan that reads
+    /// the request differently (shows, not films) judges its own titles afresh, and none of the
+    /// early ones reach its picks.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_first_judge_batch_of_a_plain_topic_is_judged_while_the_plan_runs_and_never_twice(bool agrees)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var movies = await SeedTopicalAsync(topic, ("V2 Yes", 3), ("V2 No", 3));
+        var shows = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        await MakeShowsAsync(shows);
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var judge = new CountingJudge();
+        var services = new ServiceCollection();
+        services.AddScoped<AccountContext>();
+        services.AddScoped<IAccountContext>(sp => sp.GetRequiredService<AccountContext>());
+        services.AddScoped(sp => Fixture.CreateContext(sp.GetRequiredService<AccountContext>()));
+        services.AddScoped<Application.Persistence.IReelDbContext>(sp => sp.GetRequiredService<Infrastructure.Persistence.ReelDbContext>());
+        services.AddScoped<IAskReelRetriever>(sp => new OwnedRetriever(Fixture.CreateContext(sp.GetRequiredService<AccountContext>()), _ => { }));
+        services.AddScoped(sp => new TitleFacts(sp.GetRequiredService<Application.Persistence.IReelDbContext>()));
+        services.AddScoped<IRequestJudge>(_ => new RequestJudge(judge, cache, NullLogger<RequestJudge>.Instance));
+        await using var provider = services.BuildServiceProvider();
+        var planner = new AwaitingPlanner(async _ =>
+        {
+            await judge.FirstSend.WaitAsync(TimeSpan.FromSeconds(10));
+            return Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+            {
+                Concepts = [topic],
+                Media = agrees ? MediaScope.Movies : MediaScope.Shows,
+            });
+        });
+        var (engine, events, emit) = Build(accountId, planner, judge, scopes: provider.GetRequiredService<IServiceScopeFactory>(), cache: cache);
+
+        var outcome = await engine.StreamAsync(Input($"{topic} films"), accountId, emit, CancellationToken.None);
+
+        var picks = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray())
+            .Select(c => c.GetProperty("titleId").GetGuid()).ToList();
+        if (agrees)
+        {
+            Assert.Equal(movies.Take(3).Order(), picks.Order());
+            Assert.All(movies, id => Assert.Equal(1, judge.SendsOf(id)));
+            Assert.Contains(AskStageTimings.JudgeSpeculative, outcome.StageTimingsJson, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(shows.Order(), picks.Order());
+            Assert.All(shows, id => Assert.Equal(1, judge.SendsOf(id)));
+            Assert.DoesNotContain(AskStageTimings.JudgeSpeculative, outcome.StageTimingsJson, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// §4.6 acceptance: a recorded v1 conversation resumed under v2 repeats nothing — through the
     /// endpoint, with the state rebuilt from the turn record and written back beside it.
     /// </summary>
@@ -1110,12 +1224,12 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
         Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
         Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null,
-        IServiceScopeFactory? scopes = null)
+        IServiceScopeFactory? scopes = null, IMemoryCache? cache = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         var db = Fixture.CreateContext(scoped);
-        var cache = new MemoryCache(new MemoryCacheOptions());
+        cache ??= new MemoryCache(new MemoryCacheOptions());
         var eligibility = new EligibilityQueryBuilder(db);
         var supply = new SupplyReporter(db, eligibility);
         var features = new FeatureVectorBuilder(db);
@@ -1494,6 +1608,39 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
                     ResultSource.Llm, ResultSource.Llm);
             }).ToList();
             return Task.FromResult(new JudgeBatchResult(verdicts, new LlmCallMeta("name-judge", "none", false, 1, 3), false));
+        }
+    }
+
+    /// <summary>
+    /// <see cref="NameJudge"/>'s rulings with a stable cache salt (so verdicts are shared across
+    /// scopes, as in production), counting every time a title is sent; <see cref="FirstSend"/>
+    /// completes when the first title is.
+    /// </summary>
+    private sealed class CountingJudge : IRequestJudgeModel
+    {
+        private readonly NameJudge _rulings = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, int> _sends = new();
+        private readonly TaskCompletionSource _firstSend = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task FirstSend => _firstSend.Task;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "counting-judge";
+
+        public string CacheSalt => "counting-judge";
+
+        public int SendsOf(Guid id) => _sends.GetValueOrDefault(id);
+
+        public Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct)
+        {
+            foreach (var t in input.Titles)
+            {
+                _sends.AddOrUpdate(t.TitleId, 1, (_, n) => n + 1);
+            }
+
+            _firstSend.TrySetResult();
+            return _rulings.JudgeBatchAsync(input, ct);
         }
     }
 

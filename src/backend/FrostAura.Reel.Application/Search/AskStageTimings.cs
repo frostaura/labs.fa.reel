@@ -117,8 +117,15 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: every judge batch, first sent to last returned (§4.2 step 3).</summary>
     public const string Judge = "judge";
 
-    /// <summary>Ask Reel v2: the first judge batch to return.</summary>
+    /// <summary>Ask Reel v2: the first judge batch to return (of the catalogue pass).</summary>
     public const string JudgeFirstBatch = "judge.first";
+
+    /// <summary>
+    /// Ask Reel v2: the early first judge batch's model call, run beside the plan on the speculative
+    /// retrieval (HREV1-ASK-05). Present only on a turn that took that retrieval and whose early call
+    /// came back; its verdicts are the ones used wherever the plan asked the same request.
+    /// </summary>
+    public const string JudgeSpeculative = "judge.spec";
 
     /// <summary>Ask Reel v2: the ItemQuestion answer call.</summary>
     public const string Answer = "answer";
@@ -136,7 +143,7 @@ public sealed class AskStageTimings
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
             Load, Plan, PlanContext, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgePrep, Judge,
-            JudgeFirstBatch, Answer, Compose,
+            JudgeFirstBatch, JudgeSpeculative, Answer, Compose,
         ];
 
     /// <summary>

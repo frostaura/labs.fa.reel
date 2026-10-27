@@ -528,6 +528,14 @@ uses it only to know which frames to expect.
    (concepts only — no person, mood or pointer) is retrieved on a scope of its own; the plan's
    retrieval uses it only when the plan asks for the identical query, else it is cancelled. Stored
    timings then carry `retrieve.spec` (its own length) and `retrieve` is only the wait after the plan.
+   With that retrieval back, its **first judge batch** (the 4 titles the turn would send first,
+   filtered exactly as the turn filters them) is judged too, against the request as the keyless
+   reading states it, once the plan has built the persona. The turn's judge reuses a verdict only
+   for the same request on the same title (the verdict cache key), and **waits for one still in
+   flight instead of sending the title again**; what the early call failed on is judged afresh. A
+   plan that reads the request differently costs one wasted batch. `judge.spec` records the early
+   call's length on a turn that took the speculation; `judge.first` is the catalogue pass's first
+   batch only (an admitted-provisional pass no longer adds to it).
    Stage timings also record `load`, `retrieve.titles` and `judge.prep`.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
    sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
@@ -539,9 +547,9 @@ uses it only to know which frames to expect.
    eligibility, this turn's rejections and the hard constraints, and judged as one more pass.
    `conditions()` answers with the pool the standing rules leave and the three rules costing the most,
    each with its marginal (the Conditions editor's own numbers).
-3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6**, at most
-   **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and **emitted as it
-   returns**.
+3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6** (the first
+   **4**), at most **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and
+   **emitted as it returns**. On a speculated topic the first batch may already be judged (above).
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
