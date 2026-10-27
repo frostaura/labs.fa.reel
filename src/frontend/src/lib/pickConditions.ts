@@ -78,7 +78,30 @@ export function toggleGenre<T extends GenreLists>(filters: T, genre: string, tar
 }
 
 /** Maturity ceilings, "" meaning no ceiling. */
-export const MATURITY_LEVELS = ["", "G", "PG", "PG-13", "R"] as const;
+const MATURITY_LEVELS = ["", "G", "PG", "PG-13", "R"] as const;
+
+/**
+ * The maturity picker's options. The picker is the Select primitive (HREV1-D08), and a Radix item
+ * cannot carry an empty value — so "no ceiling" travels as `none` in the control and as null in the
+ * saved rules, and these two functions are the only place the two spellings meet.
+ */
+export const NO_MATURITY_CEILING = "none";
+
+export const MATURITY_OPTIONS = MATURITY_LEVELS.map((level) => ({
+  value: level === "" ? NO_MATURITY_CEILING : level,
+  label: level === "" ? "none" : level === "R" ? "R / TV-MA" : level,
+}));
+
+/** The control's value for a saved ceiling; an unknown or empty ceiling reads as "none". */
+export function maturityOptionValue(ceiling: string | null | undefined): string {
+  const known = MATURITY_OPTIONS.find((o) => o.value !== NO_MATURITY_CEILING && o.value === ceiling);
+  return known ? known.value : NO_MATURITY_CEILING;
+}
+
+/** The saved ceiling for a picked option: null for "none". */
+export function maturityFromOption(value: string): string | null {
+  return value === NO_MATURITY_CEILING || value === "" ? null : value;
+}
 
 export const ALL_LANGUAGES = "*";
 

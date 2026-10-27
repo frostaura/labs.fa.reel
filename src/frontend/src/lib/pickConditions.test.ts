@@ -6,6 +6,10 @@ import {
   genreReach,
   genreState,
   isInvertedYearRange,
+  MATURITY_OPTIONS,
+  maturityFromOption,
+  maturityOptionValue,
+  NO_MATURITY_CEILING,
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
@@ -475,5 +479,28 @@ describe("ruleControlTestId", () => {
   it("has no control for an unknown kind or a genre without a value", () => {
     expect(ruleControlTestId({ kind: "SomethingNew", value: "x" })).toBeNull();
     expect(ruleControlTestId({ kind: "ExcludeGenre", value: "  " })).toBeNull();
+  });
+});
+
+describe("maturity picker options (HREV1-D08)", () => {
+  it("offers every ceiling, with no empty value for the Select primitive to reject", () => {
+    expect(MATURITY_OPTIONS.map((o) => o.value)).toEqual(["none", "G", "PG", "PG-13", "R"]);
+    expect(MATURITY_OPTIONS.find((o) => o.value === "R")?.label).toBe("R / TV-MA");
+    expect(MATURITY_OPTIONS.every((o) => o.value !== "")).toBe(true);
+  });
+
+  it("round-trips each saved ceiling through the control", () => {
+    for (const ceiling of [null, "G", "PG", "PG-13", "R"]) {
+      expect(maturityFromOption(maturityOptionValue(ceiling))).toBe(ceiling);
+    }
+  });
+
+  it("reads an empty, unknown or sentinel-shaped saved ceiling as no ceiling", () => {
+    expect(maturityOptionValue("")).toBe(NO_MATURITY_CEILING);
+    expect(maturityOptionValue(undefined)).toBe(NO_MATURITY_CEILING);
+    expect(maturityOptionValue("NC-17")).toBe(NO_MATURITY_CEILING);
+    expect(maturityOptionValue("none")).toBe(NO_MATURITY_CEILING);
+    expect(maturityFromOption("none")).toBeNull();
+    expect(maturityFromOption("")).toBeNull();
   });
 });

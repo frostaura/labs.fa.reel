@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useLazyFilterCostQuery, type FiltersPayload } from "../../store/api";
+import { useLazyFilterCostQuery, type FilterCostReport, type FiltersPayload } from "../../store/api";
 
 /**
  * How long the editor waits before costing a draft. Long enough that a chip-tapping burst is one
@@ -18,8 +18,15 @@ export const COST_DEBOUNCE_MS = 350;
  *
  * Failures are deliberately swallowed by the caller: the meter is an aid, and an editor that refused
  * to render because a count failed would be a worse screen than one that shows no counts.
+ *
+ * `settled` says the first answer is in — a report or a failure — so the editor can draw its
+ * counts in the same frame as its controls instead of pushing the controls down when they land
+ * (HREV1-D03). It latches: later drafts re-cost without un-settling anything.
  */
-export function useFilterCostMeter(draft: FiltersPayload | null, skip: boolean) {
+export function useFilterCostMeter(
+  draft: FiltersPayload | null,
+  skip: boolean,
+): { report: FilterCostReport | undefined; settled: boolean } {
   const [trigger, result] = useLazyFilterCostQuery();
   const inflight = useRef<{ abort: () => void } | null>(null);
   // Serialised so a fresh object identity per keystroke neither re-arms the timer for ever nor
@@ -44,5 +51,5 @@ export function useFilterCostMeter(draft: FiltersPayload | null, skip: boolean) 
     [],
   );
 
-  return result.data;
+  return { report: result.data, settled: result.data !== undefined || result.isError };
 }

@@ -105,7 +105,15 @@ export default function RatePicker() {
               className="group block text-left rounded-lg reel-rise focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60 focus-visible:ring-offset-2 focus-visible:ring-offset-fa-ink"
               data-testid="rate-card"
             >
-              <div className="relative overflow-hidden rounded-lg group-hover:ring-2 group-hover:ring-fa-frost/50 transition">
+              {/* Decorative (PH-09): the title is the text right under it, which already names the
+                  button, so a poster announced as the same title read every card out twice (axe
+                  image-redundant-alt ×30 on real suggestions). Hidden as a whole rather than given
+                  alt="" so the initials fallback for a missing poster keeps its letters. */}
+              <div
+                className="relative overflow-hidden rounded-lg group-hover:ring-2 group-hover:ring-fa-frost/50 transition"
+                aria-hidden
+                data-testid="rate-card-poster"
+              >
                 <PosterImage path={t.posterPath} alt={t.name} size="w185" />
               </div>
               <p className="mt-1.5 fa-caption text-fa-frost-bright truncate" title={t.name}>{t.name}</p>

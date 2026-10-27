@@ -26,7 +26,9 @@ import {
   genreState,
   isInvertedYearRange,
   LANGUAGES,
-  MATURITY_LEVELS,
+  MATURITY_OPTIONS,
+  maturityFromOption,
+  maturityOptionValue,
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
@@ -42,6 +44,7 @@ import { pinAttemptText } from "../../lib/pinLockout";
 import { COARSE_TAP } from "../../lib/tapTarget";
 import { Button } from "../ui/button";
 import { Chip } from "../ui/chip";
+import { Select } from "../ui/select";
 import { cn } from "../../lib/cn";
 import ConditionSummary from "./ConditionSummary";
 import LoadFailed from "../ui/load-failed";
@@ -50,6 +53,14 @@ import { saveFailureMessage, savedMessage, type SaveMessage } from "../ui/save-o
 import { useLeaveGuard } from "./useLeaveGuard";
 import { useFilterCostMeter } from "./useFilterCostMeter";
 import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
+import { useSettledGate } from "../../lib/useSettledGate";
+
+/**
+ * How long the editor holds its skeleton for the chips and the first cost answer before drawing
+ * anyway. The eval stack answers both within about a second of mount; the cap is for a meter that
+ * never answers, which then fills its counts in late rather than holding the form back.
+ */
+const REVEAL_CAP_MS = 2500;
 
 interface Props {
   /** Fired after a successful save — the feed surface uses it to adopt the regenerated picks. */
@@ -70,6 +81,12 @@ interface Props {
    * A rule with no control of its own focuses the editor. Applied once per rule object.
    */
   focusRule?: RuleFocus | null;
+  /**
+   * Fired once the editor has drawn what it will keep drawing — the form with its chips and counts,
+   * the PIN gate, or the load failure. Settings holds the cards below the editor until then, so the
+   * editor growing into its settled height never pushes them down (HREV1-D03).
+   */
+  onReady?: () => void;
 }
 
 const GENRE_TONE: Record<GenreState, string> = {
@@ -103,7 +120,7 @@ const GENRE_BUTTON =
  * depending on which screen you set it from. The pure rules it applies live in
  * `lib/pickConditions.ts` and are unit-tested there.
  */
-export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds, focusRule }: Props) {
+export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds, focusRule, onReady }: Props) {
   const { data: session } = useGetSessionQuery();
   const { data: saved, isError: loadFailed, isFetching: loadingSaved, refetch: refetchSaved } = useGetFiltersQuery();
   const [updateFilters, { isLoading: saving }] = useUpdateFiltersMutation();
@@ -160,7 +177,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
 
   // The cost of the draft, debounced, with any request for an older draft aborted (H-6).
-  const cost = useFilterCostMeter(draft, locked);
+  const { report: cost, settled: costSettled } = useFilterCostMeter(draft, locked);
   // The catalogue's genre chips (H-7). A failed read is its own state below, never a missing list.
   const {
     data: chipReport,
@@ -168,6 +185,18 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
     isFetching: chipsLoading,
     refetch: refetchChips,
   } = useGetFilterChipsQuery();
+
+  // One reveal, not three (HREV1-D03): the saved rules, the chip list and the first cost answer each
+  // used to land on their own frame, and each grew the form — the chips wrapping to four rows, then
+  // the count line, the suggestions and a note under every costed control — so everything under
+  // the editor jumped once per read. The skeleton now stays until all three have answered (or
+  // failed), or until the cap, and the form is drawn whole.
+  const chipsSettled = chipReport !== undefined || chipsFailed;
+  const revealed = useSettledGate(draft !== null && chipsSettled && costSettled, REVEAL_CAP_MS);
+  const ready = locked || (draft === null && loadFailed) || (draft !== null && revealed);
+  useEffect(() => {
+    if (ready) onReady?.();
+  }, [ready, onReady]);
 
   // Where the rule this editor was opened on lives, once it has rendered (see `focusRule`).
   const editorRef = useRef<HTMLElement>(null);
@@ -259,9 +288,16 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       />
     );
   }
-  if (!draft) {
+  if (!draft || !revealed) {
     return (
-      <section className={bare ? "space-y-3" : "fa-card p-5 space-y-3"} data-testid={testIds?.loading ?? "conditions-loading"}>
+      // Keyed apart from the editor: React would otherwise reuse this section and its bars as the
+      // editor's own section and blocks, and report each bar "moving" to where the block it became
+      // sits — a layout shift of 0.17 at 390 px, with nothing on screen actually moving.
+      <section
+        key="conditions-skeleton"
+        className={bare ? "space-y-3" : "fa-card p-5 space-y-3"}
+        data-testid={testIds?.loading ?? "conditions-loading"}
+      >
         <div className="h-5 w-48 rounded reel-shimmer" />
         <div className="h-20 rounded reel-shimmer" />
         <div className="h-20 rounded reel-shimmer" />
@@ -322,7 +358,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   };
 
   return (
-    <section ref={editorRef} className={shell} data-testid={testIds?.editor ?? "conditions-editor"}>
+    <section key="conditions-editor" ref={editorRef} className={shell} data-testid={testIds?.editor ?? "conditions-editor"}>
       {/* Suppressed in the dialog, which supplies its own DialogTitle — two identical headings
           stacked on top of each other read as a rendering bug. */}
       {!bare && (
@@ -613,20 +649,20 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
 
       {/* ── Maturity ────────────────────────────────────────────────────────────────────────── */}
       <div className="space-y-2">
-        <p className="fa-overline text-fa-frost-dim">maturity ceiling</p>
-        <select
-          className={cn("fa-input fa-select w-40 [@media(pointer:coarse)]:h-11", COARSE_TAP)}
-          value={draft.maturityCeiling ?? ""}
-          aria-label="Maturity ceiling"
+        <p className="fa-overline text-fa-frost-dim" aria-hidden>
+          maturity ceiling
+        </p>
+        {/* The Select primitive, like the Region and Time-zone pickers beside it (HREV1-D08): the
+            native control drew the operating system's own dropdown in the middle of the form. */}
+        <Select
+          label="Maturity ceiling"
+          hideLabel
+          options={MATURITY_OPTIONS}
+          value={maturityOptionValue(draft.maturityCeiling)}
+          onValueChange={(value) => setDraft({ ...draft, maturityCeiling: maturityFromOption(value) })}
+          className="w-40"
           data-testid="maturity-ceiling"
-          onChange={(e) => setDraft({ ...draft, maturityCeiling: e.target.value || null })}
-        >
-          {MATURITY_LEVELS.map((level) => (
-            <option key={level} value={level} className="bg-fa-ink-2">
-              {level === "" ? "none" : level === "R" ? "R / TV-MA" : level}
-            </option>
-          ))}
-        </select>
+        />
       </div>
 
       {/* ── Keyword exclusions ──────────────────────────────────────────────────────────────── */}
