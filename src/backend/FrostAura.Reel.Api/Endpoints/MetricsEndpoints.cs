@@ -126,13 +126,11 @@ public static class MetricsEndpoints
             });
         });
 
-        group.MapPost("/model/train", async (IReelDbContext db, IAccountContext accountContext, HttpContext http, CancellationToken ct) =>
+        // Founder-only at the route (RequireFounder), like every founder surface, rather than by an
+        // inline tier comparison a later edit could drop (WS-8 CR-B, R1-24).
+        group.MapPost("/model/train", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
+            var account = http.GatedAccount();
 
             var inFlight = await db.SyncJobs.AnyAsync(
                 j => j.AccountId == account.Id
@@ -152,7 +150,7 @@ public static class MetricsEndpoints
             }
 
             return Results.Accepted();
-        });
+        }).RequireFounder();
 
         // The interleaving instrument. Founder-only, like the training trigger: it is the readout of
         // a live experiment on this account's own feed, and the honest cadence attached to it
@@ -185,16 +183,11 @@ public static class MetricsEndpoints
         });
 
         group.MapGet("/interleave", async (
-            IReelDbContext db,
             HttpContext http,
             InterleaveSummaryQuery summaries,
             CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
+            var account = http.GatedAccount();
 
             var summary = await summaries.ComputeAsync(account.Id, DateTime.UtcNow, ct);
             return Results.Ok(new
@@ -234,7 +227,7 @@ public static class MetricsEndpoints
                     slateWins = s.SlateWins,
                 }),
             });
-        });
+        }).RequireFounder();
 
         group.MapGet("/pipeline", async (
             IReelDbContext db,
