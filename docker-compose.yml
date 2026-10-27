@@ -169,7 +169,7 @@ services:
       Background__TraktRatingsBackfill: ${Background__TraktRatingsBackfill:-true}
       # WS-6 daily retention purge (terminal jobs > 30 d, superseded scores > 14 d, expired sessions).
       Background__Retention: ${Background__Retention:-true}
-      # WS-6 tenancy: Allow | Warn | Throw for a scoped query with no account pinned; blank is Warn.
+      # WS-6 tenancy: Allow | Warn | Throw for a scoped query with no account pinned; blank is Throw; set Warn to roll back.
       Tenancy__UnscopedReads: ${Tenancy__UnscopedReads:-}
       Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
       # The dump before any pending migration (K-1): the API asks the backup service over the shared
