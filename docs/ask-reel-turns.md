@@ -543,7 +543,7 @@ uses it only to know which frames to expect.
    plan that reads the request differently costs one wasted batch. `judge.spec` records the early
    call's length on a turn that took the speculation; `judge.first` is the catalogue pass's first
    batch only (an admitted-provisional pass no longer adds to it).
-   Stage timings also record `load`, `retrieve.titles` and `judge.prep`.
+   Stage timings also record `load`, `retrieve.titles`, `judge.order` (ordering for the judge against the bar, step 3; only with a bar) and `judge.prep`.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
    sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
    (genres, and keywords in every spelling), the message and the account's region into retrieval.

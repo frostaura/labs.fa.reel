@@ -1112,7 +1112,7 @@ public sealed class AskReelEngine(
     /// cannot fill the judge's slice and some retrieved title would otherwise be left unjudged. The slice
     /// the judge takes is still placed on fresh predictions, scored beside the judge as before.</para>
     ///
-    /// <para>Timed as <see cref="AskStageTimings.Score"/> on <paramref name="timings"/> — null from the
+    /// <para>Timed as <see cref="AskStageTimings.JudgeOrder"/> on <paramref name="timings"/> — null from the
     /// speculation, which runs beside the turn and may not touch its (unsynchronised) timings. The
     /// scorer is resolved only when a candidate needs it. A topped-up title is added to
     /// <paramref name="titles"/>.</para>
@@ -1138,7 +1138,7 @@ public sealed class AskReelEngine(
         var ids = candidates.Select(c => c.TitleId).ToList();
         var predicted = new Dictionary<Guid, decimal>();
         List<Candidate> topUp = [];
-        using (timings?.Stage(AskStageTimings.Score))
+        using (timings?.Stage(AskStageTimings.JudgeOrder))
         {
             var activeId = await store.ModelArtifacts
                 .Where(a => a.AccountId == turn.AccountId && a.Status == ArtifactStatus.Active)

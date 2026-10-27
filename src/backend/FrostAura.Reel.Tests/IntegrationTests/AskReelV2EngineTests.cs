@@ -793,6 +793,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
         Assert.All(first, id => Assert.Equal(1, judge.SendsOf(id)));
         Assert.All(later, id => Assert.Equal(0, judge.SendsOf(id)));
+        Assert.DoesNotContain(AskStageTimings.JudgeOrder, outcome.StageTimingsJson, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -945,6 +946,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.All(clears, id => Assert.Equal(1, judge.SendsOf(id)));
         Assert.Equal(poolScorings, model.PoolScorings);
         Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        // Timed apart from the slice scored beside the judge, so the gate run can read it alone.
+        using var timings = JsonDocument.Parse(outcome.StageTimingsJson!);
+        Assert.True(timings.RootElement.TryGetProperty(AskStageTimings.JudgeOrder, out _));
     }
 
     /// <summary>
