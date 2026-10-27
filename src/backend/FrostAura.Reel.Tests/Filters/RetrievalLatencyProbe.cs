@@ -43,17 +43,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         }
 
         var (accountId, saved) = await AccountAsync();
-        var drafts = new List<FilterRuleSet> { saved };
-        foreach (var rule in saved.Rules())
-        {
-            drafts.Add(saved.Without(rule));
-        }
-
-        drafts.Add(saved.WithExclusions(["horror"], null));
-        drafts.Add(saved.WithExclusions(["thriller", "war"], ["gore"]));
-        drafts.Add(saved.WithExclusions(null, ["zombie", "shark"]));
-        drafts.Add(FilterRuleSet.Create(saved.ExcludeGenres, ["drama", "crime"], saved.ExcludeKeywords, saved.Languages, saved.MinCrowdRating, saved.MinYear, saved.MaxYear));
-        drafts = drafts.DistinctBy(d => d.CacheKey()).Take(20).ToList();
+        var drafts = Drafts(saved);
 
         // One warm-up so connection setup is not billed to the first draft.
         await MeasureAsync(accountId, saved);
@@ -70,6 +60,119 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
 
         output.WriteLine(Summary("cost meter", elapsed));
     }
+
+    /// <summary>
+    /// The same twenty drafts on real data, for correctness rather than speed: each draft's eligible
+    /// count and every rule's marginal must equal the subtractive counts (count, then re-count with
+    /// that one rule relaxed), as <c>FilterCostMeterTests.Single_pass_marginals_equal_the_subtractive_counts</c>
+    /// pins on fixtures. Drafts with two or more keyword exclusions run their keyword bits behind the
+    /// AnyKeyword gate (R1-20), so this is where the gate meets a real catalogue.
+    /// </summary>
+    [Fact]
+    public async Task Cost_meter_marginals_equal_the_subtractive_counts_on_every_draft()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, saved) = await AccountAsync();
+        var gated = 0;
+        foreach (var draft in Drafts(saved))
+        {
+            var context = new AccountContext();
+            context.SetAccount(accountId);
+            await using var db = Context(accountId);
+            var builder = new EligibilityQueryBuilder(db);
+            var report = await new FilterCostMeter(db, builder, context, new MemoryCache(new MemoryCacheOptions())).MeasureAsync(draft);
+            var eligible = await builder.EligibleTitles(accountId, draft).CountAsync();
+            Assert.Equal(eligible, report.Eligible);
+            gated += draft.ExcludeKeywords.Count >= 2 ? 1 : 0;
+            foreach (var rule in draft.Rules())
+            {
+                var without = await builder.EligibleTitles(accountId, draft.Without(rule)).CountAsync();
+                var marginal = report.ByRule.Single(r => r.Kind == rule.Kind.ToString() && r.Value == rule.Value).Marginal;
+                Assert.Equal((rule.Kind, rule.Value, Math.Max(0, without - eligible)), (rule.Kind, rule.Value, marginal));
+            }
+        }
+
+        output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"20 drafts agree, {gated} of them behind the keyword gate"));
+    }
+
+    /// <summary>
+    /// The drafts the cost-meter figure is taken over, always exactly twenty and all distinct: the saved
+    /// set, each one-rule relaxation of it, edits a user makes in the editor, and then single-chip edits
+    /// (one more genre or keyword excluded, a different crowd floor or year bound) until there are
+    /// twenty. An account with few saved rules would otherwise be measured over fewer drafts than the
+    /// acceptance names.
+    /// </summary>
+    internal static IReadOnlyList<FilterRuleSet> Drafts(FilterRuleSet saved)
+    {
+        const int Wanted = 20;
+        var drafts = new List<FilterRuleSet> { saved };
+        foreach (var rule in saved.Rules())
+        {
+            drafts.Add(saved.Without(rule));
+        }
+
+        drafts.Add(saved.WithExclusions(["horror"], null));
+        drafts.Add(saved.WithExclusions(["thriller", "war"], ["gore"]));
+        drafts.Add(saved.WithExclusions(null, ["zombie", "shark"]));
+        drafts.Add(FilterRuleSet.Create(saved.ExcludeGenres, ["drama", "crime"], saved.ExcludeKeywords, saved.Languages, saved.MinCrowdRating, saved.MinYear, saved.MaxYear));
+
+        string[] genrePads = ["romance", "documentary", "animation", "western", "musical", "family", "comedy", "fantasy", "science-fiction", "mystery", "history", "music"];
+        string[] keywordPads = ["vampire", "clown", "spider", "nudity", "torture", "kidnapping", "cannibal", "exorcism"];
+        decimal[] floorPads = [5.5m, 6m, 7m, 7.5m, 8m];
+        int[] minYearPads = [1970, 1990, 2000, 2010, 2015];
+        int[] maxYearPads = [1999, 2005, 2012, 2020];
+        FilterRuleSet With(decimal? floor, int? minYear, int? maxYear) => FilterRuleSet.Create(
+            saved.ExcludeGenres, saved.IncludeGenres, saved.ExcludeKeywords, saved.Languages, floor, minYear, maxYear);
+        drafts.AddRange(genrePads.Select(g => saved.WithExclusions([g], null)));
+        drafts.AddRange(keywordPads.Select(k => saved.WithExclusions(null, [k])));
+        drafts.AddRange(floorPads.Select(f => With(f, saved.MinYear, saved.MaxYear)));
+        drafts.AddRange(minYearPads.Select(y => With(saved.MinCrowdRating, y, saved.MaxYear)));
+        drafts.AddRange(maxYearPads.Select(y => With(saved.MinCrowdRating, saved.MinYear, y)));
+
+        var distinct = drafts.DistinctBy(d => d.CacheKey()).Take(Wanted).ToList();
+        return distinct.Count == Wanted
+            ? distinct
+            : throw new InvalidOperationException($"Only {distinct.Count} distinct drafts; the acceptance is a p95 over {Wanted}.");
+    }
+
+    /// <summary>
+    /// The acceptance is a p95 over TWENTY uncached drafts. An account with few saved rules used to
+    /// yield fewer (16 on the eval account, 5 on an account with none), so the quoted p95 was taken
+    /// over a smaller sample than the criterion names. This runs in CI: it touches no database.
+    /// </summary>
+    [Theory]
+    [InlineData("nothing saved")]
+    [InlineData("eval-shaped")]
+    [InlineData("pads overlap the saved set")]
+    [InlineData("more rules than twenty")]
+    public void The_cost_meter_figure_is_taken_over_exactly_twenty_distinct_drafts(string label)
+    {
+        var saved = SavedSets[label];
+        var drafts = Drafts(saved);
+
+        Assert.True(drafts.Count == 20, $"{label}: {drafts.Count} drafts");
+        Assert.Equal(20, drafts.Select(d => d.CacheKey()).Distinct().Count());
+        Assert.Equal(saved.CacheKey(), drafts[0].CacheKey());
+    }
+
+    private static readonly Dictionary<string, FilterRuleSet> SavedSets = new()
+    {
+        ["nothing saved"] = FilterRuleSet.Create(null, null, null, null, null, null, null),
+        ["eval-shaped"] = FilterRuleSet.Create(["horror", "animation"], null, ["gore", "zombie"], ["en", "fr"], 6.5m, 1990, null),
+        ["pads overlap the saved set"] = FilterRuleSet.Create(["romance", "documentary", "animation"], null, ["vampire", "clown"], ["*"], 6m, 1990, 2020),
+        ["more rules than twenty"] = FilterRuleSet.Create(
+            ["horror", "thriller", "war", "romance", "documentary", "western", "musical", "family", "comedy", "fantasy", "mystery", "history"],
+            null,
+            ["gore", "zombie", "shark", "vampire", "clown", "spider", "nudity", "torture", "suicide", "rape"],
+            ["en"],
+            6m,
+            1980,
+            2024),
+    };
 
     /// <summary>The concepts the acceptance names, plus the golden facet scenarios'.</summary>
     private static readonly string[] Concepts =
