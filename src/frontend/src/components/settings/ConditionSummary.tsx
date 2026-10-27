@@ -1,14 +1,9 @@
 import { X } from "lucide-react";
-import { summaryChips, type ChipTone, type FiltersLike } from "../../lib/pickConditions";
+import { summaryChips, type FiltersLike } from "../../lib/pickConditions";
 import type { BrowseFilter } from "../../lib/browseFilter";
 import { Button } from "../ui/button";
 import { COARSE_TAP } from "../../lib/tapTarget";
-
-const TONE: Record<ChipTone, string> = {
-  include: "border-fa-success/50 bg-fa-success/15 text-fa-success",
-  exclude: "border-fa-danger/50 bg-fa-danger/15 text-fa-danger",
-  neutral: "border-fa-edge bg-fa-glass text-fa-frost-dim",
-};
+import { CHIP_TONE as TONE, SUMMARY_MUTED_TEXT } from "./conditionTone";
 
 /**
  * Everything currently narrowing the feed, as chips — the answer to "why does my feed look like
@@ -50,7 +45,7 @@ export default function ConditionSummary({
 
   if (chips.length === 0) {
     return (
-      <p className={`fa-caption text-fa-frost-dim ${className}`} data-testid="conditions-summary-empty">
+      <p className={`fa-caption ${SUMMARY_MUTED_TEXT} ${className}`} data-testid="conditions-summary-empty">
         Nothing set — everything is fair game.
       </p>
     );
@@ -66,7 +61,7 @@ export default function ConditionSummary({
       {conditions.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5" data-testid="summary-group-conditions">
           <span
-            className="fa-overline text-fa-frost-dim"
+            className={`fa-overline ${SUMMARY_MUTED_TEXT}`}
             title="Saved to your account — these apply everywhere. Change them under Conditions."
           >
             Conditions
@@ -83,14 +78,14 @@ export default function ConditionSummary({
               {chip.label}
             </span>
           ))}
-          {hidden > 0 && <span className="fa-caption text-fa-frost-dim">+{hidden} more</span>}
+          {hidden > 0 && <span className={`fa-caption ${SUMMARY_MUTED_TEXT}`}>+{hidden} more</span>}
         </div>
       )}
 
       {views.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5" data-testid="summary-group-browse">
           <span
-            className="fa-overline text-fa-frost-dim"
+            className={`fa-overline ${SUMMARY_MUTED_TEXT}`}
             title="This browser only — set by the Movies/TV and availability toggles, and not saved to your account."
           >
             Viewing on this device
