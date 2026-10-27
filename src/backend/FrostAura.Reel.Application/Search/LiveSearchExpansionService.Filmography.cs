@@ -116,11 +116,15 @@ public sealed partial class LiveSearchExpansionService
 
     /// <summary>
     /// The person's catalogued credits the account may be offered (<paramref name="eligible"/> is its
-    /// eligibility) inside the request's hard constraints, dated newest first and capped — the ones
-    /// past TMDB's page included.
+    /// eligibility), in the request's media and years, dated newest first and capped — the ones past
+    /// TMDB's page included. Not narrowed by the request's concepts, exactly as TMDB's page is not: the
+    /// filmography is the person's work, and the interpreter can add a genre of its own to "Liam
+    /// Neeson movies" (a "thriller" one is recorded), which would hide Kinsey, a drama. Two live runs
+    /// of that question on unchanged data showed Kinsey once and dropped it once, the pattern a
+    /// thriller genre on the second explains exactly.
     /// </summary>
     private async Task<List<Guid>> CataloguedCreditIdsAsync(IQueryable<Title> eligible, Retrieval.HardConstraints hard, CancellationToken ct) =>
-        await Retrieval.HardConstraintFilter.Apply(eligible, db, hard)
+        await Retrieval.HardConstraintFilter.Apply(eligible, db, hard with { Concepts = [] })
             .OrderBy(t => t.ReleasedAt == null && t.FirstAiredAt == null)
             .ThenByDescending(t => t.ReleasedAt ?? t.FirstAiredAt)
             .ThenBy(t => t.Id)

@@ -161,14 +161,17 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     /// the catalogued credits too. Varied over how many seen credits sit past the page, over one the
     /// account's conditions hold out, and over none at all. A seen title on TMDB's page with no credit
     /// row (his uncredited voice in The Rise of Skywalker, live) is not counted, or v1 says 40 where
-    /// v2 says 39.
+    /// v2 says 39. And a genre the interpreter adds on its own ("thriller", for "Liam Neeson movies")
+    /// narrows neither TMDB's page nor the catalogued credits: the filmography is the person's work.
     /// </summary>
     [Theory]
-    [InlineData(3, false)]
-    [InlineData(3, true)]
-    [InlineData(0, true)]
-    [InlineData(0, false)]
-    public async Task A_person_reply_counts_every_seen_credit_and_offers_unseen_ones_past_the_discovery_page(int offPageSeen, bool heldByConditions)
+    [InlineData(3, false, null)]
+    [InlineData(3, true, null)]
+    [InlineData(0, true, null)]
+    [InlineData(0, false, null)]
+    [InlineData(3, false, "thriller")]
+    public async Task A_person_reply_counts_every_seen_credit_and_offers_unseen_ones_past_the_discovery_page(
+        int offPageSeen, bool heldByConditions, string? interpretedGenre)
     {
         if (!Fixture.Available)
         {
@@ -205,7 +208,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
                 new(pageUnseen, true, "Page Unseen", "/u.jpg", null, "Not seen yet.", 50m, 6.8m, 7000, new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc), [28], "en"),
             ],
         };
-        var agent = new FakePersonAgent(new PersonQuery(name, PersonRole.Cast), $"{name} is in lots of things.");
+        var agent = new FakePersonAgent(
+            new PersonQuery(name, PersonRole.Cast), $"{name} is in lots of things.", interpretedGenre is null ? null : [interpretedGenre]);
         var (service, events) = BuildService(accountId, tmdb, out var emit, agent);
 
         await service.StreamAsync($"{name} movies", region: "US", emit, CancellationToken.None);
@@ -450,7 +454,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     /// <summary>A canned agent that resolves a turn straight to a named-person intent (no LLM).</summary>
-    private sealed class FakePersonAgent(PersonQuery person, string? reply = null) : ISearchAgent
+    private sealed class FakePersonAgent(PersonQuery person, string? reply = null, IReadOnlyList<string>? genres = null) : ISearchAgent
     {
         public bool IsAvailable => true;
 
@@ -460,7 +464,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 reply ?? $"Here are films {person.Role} {person.Name}.",
-                new SearchIntent([], [], [], message, null, null, [person])));
+                new SearchIntent(genres ?? [], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
