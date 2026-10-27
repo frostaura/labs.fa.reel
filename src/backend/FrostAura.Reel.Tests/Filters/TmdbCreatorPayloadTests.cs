@@ -86,7 +86,33 @@ public class TmdbCreatorPayloadTests
         var details = movie ? await client.GetMovieAsync(550) : await client.GetTvAsync(2316);
 
         Assert.NotNull(details!.Creators);
-        Assert.Empty(details.Creators!);
+        Assert.Empty(details.Creators);
+    }
+
+    /// <summary>
+    /// Fakes and other callers build <see cref="TmdbTitleDetails"/> positionally and never pass
+    /// creators. They must still read as "no creators", not null, so a consumer iterating
+    /// <c>Creators</c> cannot throw on a details object that did not come from the adapter.
+    /// </summary>
+    [Theory]
+    [InlineData(1396L, "Breaking Bad")]
+    [InlineData(550L, null)]
+    public void Details_built_without_creators_read_as_an_empty_list(long id, string? name)
+    {
+        var details = new TmdbTitleDetails(id, null, null, 0, 0, 0, null, null, null, null, [], [], null, [], Name: name);
+
+        Assert.NotNull(details.Creators);
+        Assert.Empty(details.Creators);
+    }
+
+    [Fact]
+    public void Details_given_null_creators_read_as_an_empty_list_and_with_keeps_them()
+    {
+        var bare = new TmdbTitleDetails(1, null, null, 0, 0, 0, null, null, null, null, [], [], null, [], Creators: null);
+        var credited = bare with { Creators = [new TmdbCreator(66633, "Vince Gilligan", null)] };
+
+        Assert.Empty(bare.Creators);
+        Assert.Equal([new TmdbCreator(66633, "Vince Gilligan", null)], credited.Creators);
     }
 
     private static TmdbClient Build(string body)
