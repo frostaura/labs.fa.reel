@@ -390,6 +390,167 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         }
     }
 
+    /// <summary>
+    /// R1-18: once the catalogue's evidence fills the request, the semantic and TMDB arms can only
+    /// re-rank what it already admits, so retrieval does not wait on them — it uses what has already
+    /// arrived and lets the rest finish in the background (warming the embedding and keyword caches).
+    /// WS-2 measured ~1.0 s of retrieve on nearly every turn waiting for arms recorded as skipped.
+    /// Each slow arm is its own case: an embedding that takes 5 s, a TMDB that takes 5 s.
+    /// </summary>
+    [Theory]
+    [InlineData(RetrievalArms.Semantic)]
+    [InlineData(RetrievalArms.Tmdb)]
+    public async Task A_concept_the_catalogue_fills_waits_on_no_arm_that_could_only_re_rank(RetrievalArms slowArm)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var label = $"fillword{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        var seeded = new List<Guid>();
+        for (var i = 0; i < 4; i++)
+        {
+            seeded.Add(await SeedTitleAsync(t => t.Keywords = [label]));
+        }
+
+        var hard = new HardConstraints([new ConceptTerm(label, [], [])], [], null, null, MediaScope.Any);
+        var result = await RetrieveWithScopesAsync(
+            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 4) { Arms = RetrievalArms.Catalogue | slowArm, Message = $"{label} movies" },
+            new SlowEmbeddings(TimeSpan.FromSeconds(5)),
+            new SlowTmdbClient(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(seeded.Order(), result.Candidates.Select(c => c.TitleId).Order());
+        var wait = slowArm == RetrievalArms.Semantic ? "semantic-wait" : "tmdb-wait";
+        Assert.True(result.Timings.ElapsedMs[wait] < 250, $"{wait} {result.Timings.ElapsedMs[wait]} ms");
+        Assert.Contains(slowArm == RetrievalArms.Semantic ? "semantic-late" : "tmdb-late", result.SkippedArms);
+    }
+
+    /// <summary>
+    /// The other side of R1-18: when the catalogue's evidence does NOT fill the request, the semantic
+    /// arm is still worth its budget, and an embedding that lands inside it is used.
+    /// </summary>
+    [Fact]
+    public async Task A_concept_the_catalogue_cannot_fill_still_waits_for_an_embedding_inside_its_budget()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var label = $"thinword{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        var vector = UniqueVector();
+        await SeedTitleAsync(t => t.Keywords = [label], vector);
+        await SeedTitleAsync(t => t.Keywords = [label], vector);
+
+        var hard = new HardConstraints([new ConceptTerm(label, [], [])], [], null, null, MediaScope.Any);
+        var result = await RetrieveWithScopesAsync(
+            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 20) { Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic },
+            new SlowEmbeddings(TimeSpan.FromMilliseconds(300)),
+            new SlowTmdbClient(TimeSpan.Zero));
+
+        Assert.True(result.Timings.ElapsedMs.ContainsKey("semantic"), string.Join(", ", result.Timings.ElapsedMs.Keys));
+        Assert.DoesNotContain("semantic-late", result.SkippedArms);
+        Assert.DoesNotContain("semantic", result.SkippedArms);
+        Assert.All(result.Candidates, c => Assert.NotNull(c.Similarity));
+    }
+
+    /// <summary>The retriever with a container behind its own scopes, so the TMDB arm really runs on one.</summary>
+    private async Task<RetrievalResult> RetrieveWithScopesAsync(RetrievalQuery query, Domain.Ports.IEmbeddingProvider provider, Domain.Ports.ITmdbClient tmdb)
+    {
+        var services = new ServiceCollection();
+        services.AddMemoryCache();
+        services.AddScoped<IAccountContext>(_ => new AccountContext(new UnscopedReadPolicy(UnscopedReadMode.Throw)));
+        services.AddDbContext<ReelDbContext>(o => o.UseNpgsql(Fixture.ConnectionString, npgsql => npgsql.UseVector()));
+        services.AddScoped<Application.Persistence.IReelDbContext>(sp => sp.GetRequiredService<ReelDbContext>());
+        services.AddScoped<EligibilityQueryBuilder>();
+        services.AddSingleton(tmdb);
+        services.AddScoped<TmdbDiscoveryArm>();
+        await using var container = services.BuildServiceProvider(validateScopes: true);
+
+        var scoped = new AccountContext();
+        scoped.SetAccount(query.AccountId);
+        await using var db = Fixture.CreateContext(scoped);
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var eligibility = new EligibilityQueryBuilder(db);
+        var embeddings = new ConceptEmbeddings(provider, cache, NullLogger<ConceptEmbeddings>.Instance);
+        var retriever = new HybridRetriever(
+            db,
+            eligibility,
+            new SupplyReporter(db, eligibility),
+            new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
+            new FullTextArm(db),
+            embeddings,
+            container.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<HybridRetriever>.Instance);
+        return await retriever.RetrieveAsync(query, default);
+    }
+
+    /// <summary>Answers every text with a fixed vector, after <paramref name="delay"/>.</summary>
+    private sealed class SlowEmbeddings(TimeSpan delay) : Domain.Ports.IEmbeddingProvider
+    {
+        public bool IsAvailable => true;
+
+        public async Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
+        {
+            await Task.Delay(delay, ct);
+            return [.. texts.Select(_ => UniqueVector())];
+        }
+    }
+
+    /// <summary>A TMDB that answers everything empty, after <paramref name="delay"/> (or when cancelled).</summary>
+    private sealed class SlowTmdbClient(TimeSpan delay) : Domain.Ports.ITmdbClient
+    {
+        public Task<Domain.Ports.Tmdb.TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) => After<Domain.Ports.Tmdb.TmdbTitleDetails?>(null, ct);
+
+        public Task<Domain.Ports.Tmdb.TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => After<Domain.Ports.Tmdb.TmdbTitleDetails?>(null, ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> DiscoverAsync(
+            bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) => Empty(ct);
+
+        public Task<Domain.Ports.Tmdb.TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            After(new Domain.Ports.Tmdb.TmdbDiscoverPage([], page, 0, 0), ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default) => Empty(ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) => Empty(ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) => Empty(ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
+            After<IReadOnlyList<Domain.Ports.Tmdb.TmdbKeyword>>([], ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default) => Empty(ct);
+
+        public Task<Domain.Ports.Tmdb.TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default) => After<Domain.Ports.Tmdb.TmdbPerson?>(null, ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> GetPersonCreditsAsync(
+            long personId, Domain.Ports.Tmdb.PersonCreditRole role, CancellationToken ct = default) => Empty(ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> DiscoverByConceptAsync(
+            bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null,
+            int? maxRuntimeMinutes = null, Domain.Ports.Tmdb.TmdbDiscoverOptions? options = null, CancellationToken ct = default) => Empty(ct);
+
+        public Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
+            After<IReadOnlyList<Domain.Ports.Tmdb.TmdbWatchProvider>>([], ct);
+
+        private Task<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>> Empty(CancellationToken ct) =>
+            After<IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem>>([], ct);
+
+        private async Task<T> After<T>(T value, CancellationToken ct)
+        {
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, ct);
+            }
+
+            return value;
+        }
+    }
+
     private static float[] UniqueVector()
     {
         var random = new Random(Guid.NewGuid().GetHashCode());

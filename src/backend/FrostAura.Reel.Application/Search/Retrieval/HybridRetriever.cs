@@ -25,7 +25,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// keyword labels and genres that carry it, one ranked list per mood. Soft: it finds and orders, never
 /// filters.</item>
 /// <item><b>Semantic</b> — kNN on the positive concept text (moods included, rejected words never),
-/// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/>; an uncached
+/// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/> (none at all
+/// when the catalogue's evidence already fills a concept request: the arm then only re-ranks); an uncached
 /// text that misses it falls back to the mean of the precomputed embeddings of the labels the
 /// concepts and moods reached, and only with none of those is the arm fused without and reported in
 /// <see cref="RetrievalResult.SkippedArms"/>. <c>hnsw.iterative_scan</c> is on for every connection
@@ -34,7 +35,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// dark") and its moods' implied lean, relative to the reference titles' centroid when there are any.
 /// It re-ranks what the other arms found, and reads the whole pool only when nothing else spoke.</item>
 /// <item><b>TMDB</b> — <see cref="TmdbDiscoveryArm"/>, the standing conditions sent with the fetch,
-/// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>), run on its own database
+/// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>, and not at all once the
+/// catalogue's evidence fills a concept request), run on its own database
 /// context so it overlaps the catalogue arms. Titles
 /// not yet in the catalogue come back as <see cref="RetrievalResult.Provisional"/>.</item>
 /// </list>
@@ -159,6 +161,13 @@ public sealed class HybridRetriever(
             ? [.. lists.GetValueOrDefault("facet", []), .. lists.GetValueOrDefault("fulltext", [])]
             : null;
 
+        // When that evidence already fills the request, the semantic and TMDB arms can only re-rank
+        // titles it admits (and TMDB add provisional ones the next turn can use), so retrieval stops
+        // waiting on them (R1-18): it takes what has already arrived and lets the rest finish in the
+        // background, warming the embedding and keyword-id caches. Waiting cost ~1.0 s of a 0.3 s
+        // retrieve on nearly every concept turn, mostly for arms that then arrived too late anyway.
+        var filled = admitted is not null && admitted.Count >= want;
+
         // Moods (soft): one ranked list per mood the catalogue can read — its tone, labels and genres.
         // With a concept they only re-rank what the concept admits (fusion ignores anything else).
         var moodResult = MoodArmResult.Empty;
@@ -180,7 +189,10 @@ public sealed class HybridRetriever(
 
         if (q.Arms.HasFlag(RetrievalArms.Semantic))
         {
-            var vector = await embedding;
+            var waitClock = Stopwatch.StartNew();
+            var late = filled && !embedding.IsCompleted;
+            var vector = late ? null : await embedding;
+            timings["semantic-wait"] = waitClock.ElapsedMilliseconds;
             timings["semantic-embed"] = semanticClock.ElapsedMilliseconds;
             if (vector is null && semanticText.Length > 0)
             {
@@ -198,7 +210,12 @@ public sealed class HybridRetriever(
             var anchor = await AnchorAsync(vector, q.Soft.ReferenceTitleIds, ct);
             if (anchor is null)
             {
-                if (semanticText.Length > 0 || q.Soft.ReferenceTitleIds.Count > 0)
+                if (late)
+                {
+                    // Not waited for (the catalogue filled the request) and no label stood in.
+                    skipped.Add("semantic-late");
+                }
+                else if (semanticText.Length > 0 || q.Soft.ReferenceTitleIds.Count > 0)
                 {
                     skipped.Add("semantic");
                 }
@@ -251,7 +268,7 @@ public sealed class HybridRetriever(
         if (q.Arms.HasFlag(RetrievalArms.Tmdb))
         {
             clock.Restart();
-            var remaining = TmdbWait - started.Elapsed;
+            var remaining = filled ? TimeSpan.Zero : TmdbWait - started.Elapsed;
             if (!tmdb.IsCompleted && remaining > TimeSpan.Zero)
             {
                 await Task.WhenAny(tmdb, Task.Delay(remaining, ct));
