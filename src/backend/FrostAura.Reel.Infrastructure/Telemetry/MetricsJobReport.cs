@@ -40,7 +40,8 @@ public sealed record ClientErrorMetrics(long Accepted, long RateLimited, DateTim
 /// Model calls per purpose since <see cref="LlmSince"/>, every account's: WS-1's call counters
 /// (<see cref="ILlmCallHealthReader"/>) — sent calls, length finishes, fallbacks, retries, and the
 /// rolling 50-call window the alarm reads. One tally: the metrics report, the status API and the
-/// <c>reel.llm.*</c> instruments all read it.
+/// <c>reel.llm.*</c> instruments all read it. Because it is every account's, Founder-tier callers
+/// only, otherwise empty — the status API's <c>llmHealth</c> rule.
 /// </param>
 /// <param name="LlmSince">When this process started counting model calls.</param>
 /// <param name="Alerts">Active operator alerts; Founder-tier callers only, otherwise empty.</param>

@@ -12,7 +12,7 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// <summary>
 /// The observability surface (WS-6 task 6): the browser's client-error sink, and the metrics report —
 /// job failures from the runner's M5 columns, Ask stage latency and fallbacks from the turn record,
-/// model truncation and fallback per purpose, and (for the operator) the active alerts.
+/// and, for the operator only, model truncation and fallback per purpose and the active alerts.
 /// </summary>
 public static class ObservabilityEndpoints
 {
@@ -68,7 +68,9 @@ public static class ObservabilityEndpoints
                 await jobs.GetAsync(accountId, since, ct),
                 new ClientErrorMetrics(totals.Accepted, totals.RateLimited, ProcessStartedAt),
                 await ask.GetAsync(accountId, since, ct),
-                llm.Snapshot(),
+                // The model-call tally carries no account — it is every account's calls — so, like the
+                // alerts and the status API's llmHealth, it is the operator's alone (HREV2-PLAT-2).
+                founder ? llm.Snapshot() : [],
                 ProcessStartedAt,
                 founder ? alerts.Current() : []));
         })
