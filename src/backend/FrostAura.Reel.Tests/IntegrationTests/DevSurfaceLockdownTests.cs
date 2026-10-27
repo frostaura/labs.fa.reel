@@ -4,8 +4,10 @@ using System.Text.Json;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
@@ -349,6 +351,60 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
             .ToListAsync();
         Assert.Equal(2, agents.Count);
         Assert.All(agents, a => Assert.Equal(DevEndpoints.DevLinkSessionMarker, a));
+    }
+
+    /// <summary>
+    /// R1-02: dev/link, under <c>Tenancy__UnscopedReads=Throw</c>, prints the stage the status poll
+    /// prints for the account it signed in — a stage a newer image wrote reads as the shared Degraded
+    /// fallback, a cold-start Degraded as NotEnoughRatings — and the stale cookie of another account
+    /// sent with it changes nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("Hibernating", "Degraded")]
+    [InlineData("Degraded", "NotEnoughRatings")]
+    public async Task Dev_link_prints_the_status_polls_stage_under_Throw(string storedStage, string expected)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var slug = $"dev-lock-stage-{Guid.NewGuid():N}";
+        var accountId = await api.SeedAccountAsync(slug);
+        await using (var db = Db())
+        {
+            db.TraktConnections.Add(new TraktConnection
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                ExpiresAt = DateTime.UtcNow.AddDays(30),
+                Status = ConnectionStatus.Active,
+            });
+            await db.SaveChangesAsync();
+            await db.Database.ExecuteSqlAsync($"""UPDATE "Accounts" SET "PipelineStage" = {storedStage} WHERE "Id" = {accountId}""");
+        }
+
+        var staleCookie = await AccessCookieAsync(await SeedFounderAsync());
+        await using var host = api.WithWebHostBuilder(builder => builder.ConfigureAppConfiguration(c => c.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["TRAKT_DEV_PROFILE"] = slug,
+                [UnscopedReadPolicy.ConfigurationKey] = nameof(UnscopedReadMode.Throw),
+            })));
+
+        var link = await EdgeSecurityTests.SendAsync(host, "POST", DevEndpoints.DevLinkRoute, staleCookie, body: """{"noCascade":true}""");
+        Assert.Equal(StatusCodes.Status200OK, link.Status);
+        using (var json = JsonDocument.Parse(link.Body))
+        {
+            Assert.Equal(accountId.ToString(), json.RootElement.GetProperty("accountId").GetString());
+            Assert.Equal(expected, json.RootElement.GetProperty("pipelineStage").GetString());
+        }
+
+        var access = Assert.Single(link.SetCookies, c => c.StartsWith("reel_at=", StringComparison.Ordinal));
+        var status = await EdgeSecurityTests.SendAsync(host, "GET", "/api/sync/status", access[..access.IndexOf(';', StringComparison.Ordinal)]);
+        Assert.Equal(StatusCodes.Status200OK, status.Status);
+        using var statusJson = JsonDocument.Parse(status.Body);
+        Assert.Equal(expected, statusJson.RootElement.GetProperty("pipelineStage").GetString());
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────

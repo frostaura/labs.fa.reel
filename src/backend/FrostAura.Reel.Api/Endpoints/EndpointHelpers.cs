@@ -141,19 +141,23 @@ public static class EndpointHelpers
 
     /// <summary>
     /// The session payload auth/callback, auth/me and dev/link return. <c>pipelineStage</c> is the
-    /// RESOLVED stage — the one <c>/api/sync/status</c> reports — not the stored column: a stored
-    /// Degraded on a healthy link below the ratings floor reads NotEnoughRatings in both, so the
-    /// shell and the status pill can never disagree about where the account is (WS-6 CR-4).
+    /// stage <c>/api/sync/status</c> reports, read through <see cref="SyncStatusQuery.EffectiveStageAsync"/>
+    /// itself rather than a copy of it: a stored Degraded on a healthy link below the ratings floor
+    /// reads NotEnoughRatings in both, and a stage written by a newer image reads as the shared
+    /// fallback in both, so the shell and the status pill can never disagree about where the
+    /// account is (WS-6 CR-4, R1-02). A copy kept here missed the second rule.
+    ///
+    /// <para><b>Tenancy (J-11).</b> The request is pinned to <paramref name="account"/> before the
+    /// first scoped read. Every caller answers for exactly this account, and two of them — sign-in
+    /// and dev/link — do not know it until the handler is half done, so a request that arrived
+    /// unpinned (or pinned by a stale cookie for another account) would otherwise read the stage
+    /// unscoped, which throws under <c>Tenancy__UnscopedReads=Throw</c>, or through the wrong
+    /// account's filter, which reads no connection and prints the wrong stage.</para>
     /// </summary>
     public static async Task<object> ToSessionPayloadAsync(this Account account, HttpContext http, CancellationToken ct)
     {
-        var db = http.RequestServices.GetRequiredService<IReelDbContext>();
-        var connectionStatus = await db.TraktConnections.AsNoTracking()
-            .Where(c => c.AccountId == account.Id)
-            .Select(c => (Domain.Sync.ConnectionStatus?)c.Status)
-            .FirstOrDefaultAsync(ct) ?? Domain.Sync.ConnectionStatus.Revoked;
-        var (stage, _) = await http.RequestServices.GetRequiredService<SyncStatusQuery>()
-            .ResolveStageAsync(account.Id, account.PipelineStage, connectionStatus, ct);
+        http.RequestServices.GetRequiredService<IAccountContext>().SetAccount(account.Id);
+        var stage = await http.RequestServices.GetRequiredService<SyncStatusQuery>().EffectiveStageAsync(account, ct);
         return new
         {
             accountId = account.Id,
