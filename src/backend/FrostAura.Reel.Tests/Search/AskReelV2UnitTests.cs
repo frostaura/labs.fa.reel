@@ -669,6 +669,32 @@ public class AskReelV2UnitTests
         Assert.Null(plan.ClarifyQuestion);
     }
 
+    /// <summary>
+    /// HREV1-ASK-05: the plan's output was mostly empty fields the strict schema forced ("minYear":null,
+    /// "clarifyOptions":[] …). The schema now requires only the act and the planner omits what is empty;
+    /// a missing field reads as empty or unchanged, and a genre outside the slug list is dropped.
+    /// </summary>
+    [Fact]
+    public void The_planner_writes_only_what_carries_something_and_reads_a_missing_field_as_empty()
+    {
+        using var doc = JsonDocument.Parse("""{"act":"Refine","negations":["gore"],"genres":["horror","not-a-genre"]}""");
+        var plan = OpenRouterAskPlanner.Parse(doc.RootElement, PlanSource.Llm, LlmCallMeta.None);
+
+        Assert.Equal(TurnAct.Refine, plan.Act);
+        Assert.Equal(["gore"], plan.Delta.Negations);
+        Assert.Equal(["horror"], plan.Delta.Genres);
+        Assert.Null(plan.Delta.Media);
+        Assert.Null(plan.Delta.Years);
+        Assert.Empty(plan.Delta.Concepts);
+        Assert.Empty(plan.References);
+        Assert.Null(plan.ClarifyQuestion);
+
+        var schema = JsonSerializer.SerializeToElement(OpenRouterAskPlanner.Schema()).GetProperty("json_schema");
+        Assert.False(schema.GetProperty("strict").GetBoolean());
+        Assert.Equal(["act"], schema.GetProperty("schema").GetProperty("required").EnumerateArray().Select(r => r.GetString()));
+        Assert.Contains("Omit EVERY other field that would be empty", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void The_planner_messages_carry_the_handles_and_never_a_standing_condition_as_state()
     {

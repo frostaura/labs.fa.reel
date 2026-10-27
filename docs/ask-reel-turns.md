@@ -499,7 +499,9 @@ uses it only to know which frames to expect.
 
 ### The pipeline
 
-1. **Plan** — one model call (`ask-plan`, strict JSON schema, effort none). It classifies the message
+1. **Plan** — one model call (`ask-plan`, JSON schema with only `act` required, effort none — the
+   planner writes only the fields that carry something, since output tokens are what the stage waits
+   on; a missing field reads as empty or unchanged, and a genre outside the slug list is dropped). It classifies the message
    as one **act** — `NewRequest`, `Refine`, `CritiqueSet`, `CritiqueItem`, `ItemQuestion` or
    `Chitchat` — and returns a delta to the conversation's state, the handles it refers to, and the
    tools it wants. A `length` finish or a timeout is retried once at twice the budget; if the retry
@@ -522,6 +524,11 @@ uses it only to know which frames to expect.
    negations still hold.
    A spent plan allowance (`ask_budget_spent`) or an open provider breaker (`provider_unavailable`)
    ends the turn **before any work**: `Failed` with that code and the cause's degraded copy.
+   **Speculative retrieval:** while the plan runs, a plain topic request's keyless reading
+   (concepts only — no person, mood or pointer) is retrieved on a scope of its own; the plan's
+   retrieval uses it only when the plan asks for the identical query, else it is cancelled. Stored
+   timings then carry `retrieve.spec` (its own length) and `retrieve` is only the wait after the plan.
+   Stage timings also record `load`, `retrieve.titles` and `judge.prep`.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
    sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
    (genres, and keywords in every spelling), the message and the account's region into retrieval.

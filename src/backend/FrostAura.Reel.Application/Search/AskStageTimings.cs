@@ -89,8 +89,27 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: building the planner's context (taste summary, persona), inside <see cref="Plan"/>.</summary>
     public const string PlanContext = "plan.context";
 
-    /// <summary>Ask Reel v2: the retrieval tool (§4.2 step 2).</summary>
+    /// <summary>Ask Reel v2: the account's conditions and the conversation's state, read before the plan.</summary>
+    public const string Load = "load";
+
+    /// <summary>
+    /// Ask Reel v2: the retrieval tool (§4.2 step 2) — on a turn whose plan matched the speculative
+    /// reading, only the part of it still running once the plan returned.
+    /// </summary>
     public const string Retrieve = "retrieve";
+
+    /// <summary>
+    /// Ask Reel v2: the speculative retrieval's own length, run BESIDE the plan on the message's
+    /// keyless reading and used only when the plan asked for exactly the same query (HREV1-ASK-05).
+    /// Present only on a turn that used it.
+    /// </summary>
+    public const string RetrieveSpeculative = "retrieve.spec";
+
+    /// <summary>Ask Reel v2: loading the retrieved titles, after retrieval and before judging.</summary>
+    public const string RetrieveTitles = "retrieve.titles";
+
+    /// <summary>Ask Reel v2: the judge's inputs (fact rows, persona) read before its first batch is sent.</summary>
+    public const string JudgePrep = "judge.prep";
 
     /// <summary>v2: a mood request's text embedded ahead of retrieval, so the semantic arm has it (see AskReelEngine.WarmMoodAsync).</summary>
     public const string RetrieveEmbed = "retrieve.embed";
@@ -116,7 +135,8 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Plan, PlanContext, RetrieveEmbed, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
+            Load, Plan, PlanContext, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgePrep, Judge,
+            JudgeFirstBatch, Answer, Compose,
         ];
 
     /// <summary>
@@ -149,6 +169,9 @@ public sealed class AskStageTimings
     /// (<see cref="FirstCard"/>, <see cref="RerankFirstBatch"/>). Accumulates like a stage.
     /// </summary>
     public void Mark(string name, double milliseconds) => Record(name, milliseconds);
+
+    /// <summary>Whether <paramref name="name"/> has been recorded on this turn.</summary>
+    public bool Has(string name) => _elapsedMs.ContainsKey(name);
 
     /// <summary>
     /// Whole milliseconds per stage that actually ran, in <see cref="Order"/>. Milliseconds because

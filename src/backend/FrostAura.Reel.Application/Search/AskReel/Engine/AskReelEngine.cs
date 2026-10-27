@@ -136,6 +136,9 @@ public sealed class AskReelEngine(
         /// <summary>The conversation had no answer before this turn (its state's version is 0).</summary>
         public bool FirstTurn { get; set; }
 
+        /// <summary>The retrieval started beside the plan on the message's keyless reading, if any.</summary>
+        public Speculation? Speculative { get; set; }
+
         /// <summary>
         /// Every title the judge actually ruled on this turn — a verdict that came back, not a title
         /// sent — with its prediction, for what a none-found reply may claim was checked (HREV1-ASK-01).
@@ -173,20 +176,84 @@ public sealed class AskReelEngine(
         public string? StoredFlags => Degraded.Count + Notes.Count == 0 ? null : string.Join(',', Degraded.Concat(Notes));
     }
 
+    /// <summary>
+    /// A retrieval started on its own scope while the plan runs (HREV1-ASK-05): the plan is the
+    /// longest stage before the first card, and for a plain topic request ("samurai films") the
+    /// message's keyless reading asks for exactly the query the plan will. It is used only when the
+    /// plan's query is IDENTICAL (<see cref="QueryKey"/>); otherwise it is cancelled and its scope
+    /// released when it stops. It costs no model call — at most a concept embedding the turn would
+    /// make anyway, and TMDB lookups.
+    /// </summary>
+    private sealed class Speculation(string key, Task<(RetrievalResult Result, double Ms)> task, IServiceScope scope, CancellationTokenSource cts)
+    {
+        private int _settled;
+
+        public string Key { get; } = key;
+
+        /// <summary>Takes the result; the caller awaits it. Null when it was already taken or abandoned.</summary>
+        public Task<(RetrievalResult Result, double Ms)>? Take() =>
+            Interlocked.Exchange(ref _settled, 1) == 0 ? Finish(task) : null;
+
+        /// <summary>Cancels it (when not taken) and releases its scope once it has stopped; never throws.</summary>
+        public void Abandon()
+        {
+            if (Interlocked.Exchange(ref _settled, 1) != 0)
+            {
+                return;
+            }
+
+            cts.Cancel();
+            _ = Finish(task).ContinueWith(t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        private async Task<(RetrievalResult Result, double Ms)> Finish(Task<(RetrievalResult Result, double Ms)> running)
+        {
+            try
+            {
+                return await running;
+            }
+            finally
+            {
+                scope.Dispose();
+                cts.Dispose();
+            }
+        }
+    }
+
     public async Task<TurnOutcome> StreamAsync(
         LiveSearchExpansionService.AskTurnInput input, Guid accountId, LiveSearchExpansionService.Emit emit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(emit);
         var turn = new Turn(input, emit) { AccountId = accountId };
+        try
+        {
+            return await TurnAsync(turn, ct);
+        }
+        finally
+        {
+            turn.Speculative?.Abandon();
+        }
+    }
+
+    private async Task<TurnOutcome> TurnAsync(Turn turn, CancellationToken ct)
+    {
+        var input = turn.Input;
+        var accountId = turn.AccountId;
         input.Progress?.Attach(turn.Timings, "{}", null);
 
-        var filterRows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct);
-        turn.Standing = FilterRuleSet.FromRows(filterRows);
-        turn.Floor = Floor(filterRows);
-        var mediaFilter = MediaScopes.From(input.MediaFilter);
-        turn.MediaFilter = mediaFilter;
-        var state = await LoadStateAsync(input, ct);
+        ConversationState state;
+        MediaScope mediaFilter;
+        using (turn.Timings.Stage(AskStageTimings.Load))
+        {
+            var filterRows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct);
+            turn.Standing = FilterRuleSet.FromRows(filterRows);
+            turn.Floor = Floor(filterRows);
+            mediaFilter = MediaScopes.From(input.MediaFilter);
+            turn.MediaFilter = mediaFilter;
+            state = await LoadStateAsync(input, ct);
+        }
+
         turn.FirstTurn = state.Version == 0;
 
         // "The third one" with no answer on screen showing a third card is a question to ask back,
@@ -199,6 +266,7 @@ public sealed class AskReelEngine(
         }
 
         await PhaseAsync(turn, "planning", "Reading your request");
+        turn.Speculative = Speculate(turn, state, mediaFilter, ct);
         PlanResult plan;
         using (turn.Timings.Stage(AskStageTimings.Plan))
         {
@@ -589,30 +657,16 @@ public sealed class AskReelEngine(
 
         await ConflictAsync(turn, hard, ct);
 
-        var exclude = turn.Input.ShownTitleIds
-            .Concat(next.Rejected)
-            .Concat(next.LegacyShown ?? [])
-            .Concat(referenceIds)
-            .ToHashSet();
+        var query = QueryFor(turn, next);
+        var exclude = query.Exclude.ToHashSet();
         var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
 
-        // The user's own rejections ride INTO retrieval as this turn's extra exclusions (WS-3 CR-2b), so
-        // every arm — TMDB's included — fills its depth with titles that can survive the filter below,
-        // and the message and region reach the TMDB arm's title search and release window.
-        var (negatedGenres, negatedKeywords) = NegationRules(next.UserNegations);
-        var query = new RetrievalQuery(accountId, hard, soft, exclude, RetrievalWant)
-        {
-            ExcludeGenres = negatedGenres,
-            ExcludeKeywords = negatedKeywords,
-            Message = turn.Input.Message,
-            Region = turn.Input.Region,
-        };
         await WarmMoodAsync(turn, hard, soft, ct);
         RetrievalResult retrieval;
         using (turn.Timings.Stage(AskStageTimings.Retrieve))
         {
-            retrieval = await retriever.RetrieveAsync(query, ct);
+            retrieval = await RetrieveAsync(turn, query, ct);
         }
 
         // An arm that contributed nothing is a thin retrieval, recorded on the row (WS-3 CR-2c), not a
@@ -622,9 +676,14 @@ public sealed class AskReelEngine(
             turn.Note(SearchTurnDegraded.ArmPrefix + arm);
         }
 
-        var titles = await db.Titles.AsNoTracking()
-            .Where(t => retrieval.Candidates.Select(c => c.TitleId).Contains(t.Id))
-            .ToDictionaryAsync(t => t.Id, ct);
+        Dictionary<Guid, Title> titles;
+        using (turn.Timings.Stage(AskStageTimings.RetrieveTitles))
+        {
+            titles = await db.Titles.AsNoTracking()
+                .Where(t => retrieval.Candidates.Select(c => c.TitleId).Contains(t.Id))
+                .ToDictionaryAsync(t => t.Id, ct);
+        }
+
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
         var candidates = retrieval.Candidates
             .Where(c => titles.ContainsKey(c.TitleId) && !exclude.Contains(c.TitleId))
@@ -785,6 +844,128 @@ public sealed class AskReelEngine(
         var saved = ConversationStateReducer.Presented(next, presented) with { Version = turn.Input.AnswerNumber };
         var all = picks.Concat(placedTrays.SelectMany(t => t.Cards)).ToList();
         return Outcome(turn, plan, saved, composed.Reply, composed.Reason, mode, all, IntentJsonOf(hard, next));
+    }
+
+    /// <summary>
+    /// The retrieval query a search state asks for — built in one place, so the speculative query
+    /// and the plan's can be compared exactly. Titles named as comparisons and everything this
+    /// conversation showed or rejected are excluded; the user's own rejections ride INTO retrieval as
+    /// this turn's extra exclusions (WS-3 CR-2b), so every arm — TMDB's included — fills its depth with
+    /// titles that can survive the filter after it, and the message and region reach the TMDB arm.
+    /// </summary>
+    private static RetrievalQuery QueryFor(Turn turn, ConversationState next)
+    {
+        var exclude = turn.Input.ShownTitleIds
+            .Concat(next.Rejected)
+            .Concat(next.LegacyShown ?? [])
+            .Concat(next.Soft.ReferenceTitleIds)
+            .ToHashSet();
+        var (negatedGenres, negatedKeywords) = NegationRules(next.UserNegations);
+        return new RetrievalQuery(turn.AccountId, next.Hard, next.Soft, exclude, RetrievalWant)
+        {
+            ExcludeGenres = negatedGenres,
+            ExcludeKeywords = negatedKeywords,
+            Message = turn.Input.Message,
+            Region = turn.Input.Region,
+        };
+    }
+
+    /// <summary>Everything a retrieval depends on, as one comparable string.</summary>
+    private static string QueryKey(RetrievalQuery q) =>
+        JsonSerializer.Serialize(
+            new
+            {
+                q.AccountId,
+                q.Hard,
+                q.Soft,
+                Exclude = q.Exclude.Order().ToList(),
+                q.Want,
+                q.ExcludeGenres,
+                q.ExcludeKeywords,
+                q.Arms,
+                q.Message,
+                q.Region,
+            },
+            WireJson);
+
+    /// <summary>
+    /// Starts the speculative retrieval (<see cref="Speculation"/>) when the message's keyless
+    /// reading is a plain topic request — concepts, no person, no mood, no pointer — and a plan is
+    /// coming that could confirm it. Null when there is nothing worth speculating on, or no scope
+    /// to run it on.
+    /// </summary>
+    private Speculation? Speculate(Turn turn, ConversationState state, MediaScope mediaFilter, CancellationToken ct)
+    {
+        var message = turn.Input.Message;
+        if (!planner.IsAvailable || AskReelPointer.Ordinal(message) is not null)
+        {
+            return null;
+        }
+
+        var reading = PlanSanitizer.Clean(FallbackPlans.Keyless(message, state), message, state, turn.Standing);
+        if (reading.Act != TurnAct.NewRequest)
+        {
+            return null;
+        }
+
+        var next = ConversationStateReducer.Apply(state, reading, mediaFilter);
+        if (!next.Hard.HasConcepts || next.Hard.People.Count > 0 || next.Soft.Moods.Count > 0)
+        {
+            return null;
+        }
+
+        var query = QueryFor(turn, next);
+        IServiceScope? scope = null;
+        try
+        {
+            scope = scopes.CreateScope();
+            scope.ServiceProvider.GetRequiredService<Tenancy.IAccountContext>().SetAccount(turn.AccountId);
+            var scoped = scope.ServiceProvider.GetRequiredService<IAskReelRetriever>();
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var token = cts.Token;
+            var task = Task.Run(
+                async () =>
+                {
+                    var clock = Stopwatch.StartNew();
+                    var result = await scoped.RetrieveAsync(query, token);
+                    return (result, clock.Elapsed.TotalMilliseconds);
+                },
+                token);
+            return new Speculation(QueryKey(query), task, scope, cts);
+        }
+        catch (InvalidOperationException ex)
+        {
+            scope?.Dispose();
+            logger.LogDebug(ex, "Ask Reel v2: no scope to speculate on; retrieval waits for the plan.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The plan's retrieval: the speculative one when it asked for exactly this query, else a fresh
+    /// one (and the speculation, if any, is abandoned). A speculation that failed is retried here.
+    /// </summary>
+    private async Task<RetrievalResult> RetrieveAsync(Turn turn, RetrievalQuery query, CancellationToken ct)
+    {
+        if (turn.Speculative is { } speculative && speculative.Key == QueryKey(query) && speculative.Take() is { } taken)
+        {
+            try
+            {
+                var (result, elapsed) = await taken;
+                turn.Timings.Mark(AskStageTimings.RetrieveSpeculative, elapsed);
+                return result;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException && !ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "Ask Reel v2: the speculative retrieval failed; retrieving again.");
+            }
+        }
+        else
+        {
+            turn.Speculative?.Abandon();
+        }
+
+        return await retriever.RetrieveAsync(query, ct);
     }
 
     /// <summary>
@@ -965,6 +1146,7 @@ public sealed class AskReelEngine(
             return;
         }
 
+        var prepClock = Stopwatch.StartNew();
         var judgeTitles = await facts.JudgeTitlesAsync(slice.Select(c => c.TitleId).ToList(), ct);
         var batches = RequestJudge.Batches(judgeTitles.Select(t => t.TitleId).ToList());
         var batchOf = batches.SelectMany((ids, index) => ids.Select(id => (id, index))).ToDictionary(x => x.id, x => x.index);
@@ -973,6 +1155,11 @@ public sealed class AskReelEngine(
         var candidates = slice.ToDictionary(c => c.TitleId);
         var persona = turn.Persona ?? await PersonaLineAsync(turn.AccountId, ct);
         turn.Models["judge"] = judgeModel.ModelId;
+        if (!turn.Timings.Has(AskStageTimings.JudgePrep))
+        {
+            turn.Timings.Mark(AskStageTimings.JudgePrep, prepClock.Elapsed.TotalMilliseconds);
+        }
+
 
         // Scored WHILE the judge runs: the predictions are needed only to place a returned batch, and
         // the judge's calls never touch the database, so the scorer has the context to itself. Every

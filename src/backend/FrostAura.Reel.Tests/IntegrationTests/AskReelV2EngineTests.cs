@@ -830,6 +830,76 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV1-ASK-05: a plain topic request is retrieved WHILE the plan runs — the planner here waits
+    /// until the speculative retrieval has started, so a turn that did not overlap them would time
+    /// out — and the speculation is used only when the plan asks for exactly its query. Varied: a
+    /// plan that reads the request differently (shows, not films) is retrieved afresh.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_plain_topic_is_retrieved_while_the_plan_runs_and_used_only_when_the_plan_agrees(bool agrees)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var movies = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var shows = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        await MakeShowsAsync(shows);
+        var speculative = new List<RetrievalQuery>();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var services = new ServiceCollection();
+        services.AddScoped<AccountContext>();
+        services.AddScoped<IAccountContext>(sp => sp.GetRequiredService<AccountContext>());
+        services.AddScoped<IAskReelRetriever>(sp => new OwnedRetriever(Fixture.CreateContext(sp.GetRequiredService<AccountContext>()), q =>
+        {
+            lock (speculative)
+            {
+                speculative.Add(q);
+            }
+
+            started.TrySetResult();
+        }));
+        await using var provider = services.BuildServiceProvider();
+        var planner = new AwaitingPlanner(async _ =>
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+            {
+                Concepts = [topic],
+                Media = agrees ? MediaScope.Movies : MediaScope.Shows,
+            });
+        });
+        var main = new List<RetrievalQuery>();
+        var (engine, events, emit) = Build(
+            accountId, planner, new NameJudge(), wrap: inner => new SkippingRetriever(inner, main.Add),
+            scopes: provider.GetRequiredService<IServiceScopeFactory>());
+
+        var outcome = await engine.StreamAsync(Input($"{topic} films"), accountId, emit, CancellationToken.None);
+
+        var spec = Assert.Single(speculative);
+        Assert.Equal(MediaScope.Movies, spec.Hard.Media);
+        Assert.Equal([topic], spec.Hard.Concepts.Select(c => c.UserWords));
+        var picks = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray()).ToList();
+        if (agrees)
+        {
+            Assert.Empty(main);
+            Assert.Equal(movies.Order(), picks.Select(c => c.GetProperty("titleId").GetGuid()).Order());
+            Assert.Contains(AskStageTimings.RetrieveSpeculative, outcome.StageTimingsJson, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(MediaScope.Shows, Assert.Single(main).Hard.Media);
+            Assert.Equal(shows.Order(), picks.Select(c => c.GetProperty("titleId").GetGuid()).Order());
+            Assert.DoesNotContain(AskStageTimings.RetrieveSpeculative, outcome.StageTimingsJson, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// §4.6 acceptance: a recorded v1 conversation resumed under v2 repeats nothing — through the
     /// endpoint, with the state rebuilt from the turn record and written back beside it.
     /// </summary>
@@ -1039,7 +1109,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
         Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
-        Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null)
+        Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null,
+        IServiceScopeFactory? scopes = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -1057,7 +1128,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             new TitleFacts(db), (wrap ?? (r => r))(new FacetRetriever(db, eligibility, supply)), supply, eligibility, scorer,
             new ExposureLog(db, NullLogger<ExposureLog>.Instance), features, new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
-            new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            scopes ?? new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             cache, new ConceptEmbeddings(embeddings ?? new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
             NullLogger<AskReelEngine>.Instance);
 
@@ -1367,6 +1438,30 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
             return Task.FromResult(script(input));
         }
+    }
+
+    /// <summary>A planner whose answer is awaited — it can wait on something the turn should already have started.</summary>
+    private sealed class AwaitingPlanner(Func<PlanInput, Task<PlanResult>> script) : IAskReelPlanner
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => "awaiting-plan";
+
+        public Task<PlanResult> PlanAsync(PlanInput input, CancellationToken ct) => script(input);
+    }
+
+    /// <summary>A facet retriever on a context of its own, released with the scope that made it, recording each query.</summary>
+    private sealed class OwnedRetriever(Infrastructure.Persistence.ReelDbContext db, Action<RetrievalQuery> record) : IAskReelRetriever, IDisposable
+    {
+        private readonly EligibilityQueryBuilder _eligibility = new(db);
+
+        public async Task<Application.Search.Retrieval.RetrievalResult> RetrieveAsync(RetrievalQuery q, CancellationToken ct)
+        {
+            record(q);
+            return await new FacetRetriever(db, _eligibility, new SupplyReporter(db, _eligibility)).RetrieveAsync(q, ct);
+        }
+
+        public void Dispose() => db.Dispose();
     }
 
     /// <summary>Rules on the title's name: "V2 Yes" → yes, "V2 Partial" → partial, anything else → no.</summary>
