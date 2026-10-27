@@ -61,6 +61,10 @@ async function bootTitle(page: Page, titleOverrides: Record<string, unknown> = {
   });
   // The "More like this" rail self-loads a page on mount; keep it deterministic and empty.
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+  // No lens for this title: the on-demand read answers "none" instead of reaching the tripwire.
+  await mockJson(page, "**/api/titles/movie/1001/lens", {
+    source: "none", lens: null, hook: null, caution: null, anchors: [], mood: null, whenToWatch: null, generatedAt: null,
+  });
   await page.goto("/title/movie/1001");
   await expect(page.getByTestId("title-detail")).toBeVisible();
 }
@@ -105,6 +109,21 @@ test.describe("title detail actions", () => {
     expect(ratingCalls).toHaveLength(2);
     expect(ratingCalls[1].method).toBe("DELETE");
   });
+
+  // R1-40: ReactionEndpoints logs a play only for a movie with no play yet; an already-watched movie
+  // gets the rating alone, so the popover may promise the play only when it will happen.
+  for (const { plays, logs } of [{ plays: 0, logs: true }, { plays: 1, logs: false }, { plays: 4, logs: false }]) {
+    test(`the rating note promises a logged play only when the movie has none (plays ${plays})`, async ({ page }) => {
+      await bootTitle(page, { userState: { ...TITLE.userState, plays, isFullyWatched: plays > 0 } });
+      await page.getByRole("button", { name: /seen it \+ rate/i }).click();
+      const note = page.getByTestId("rating-trakt-note");
+      if (logs) {
+        await expect(note).toHaveText("Also logs a play on your Trakt history — cleared if you remove the rating.");
+      } else {
+        await expect(note).toHaveText("Ratings sync to Trakt — this movie is already in your history, so no play is added.");
+      }
+    });
+  }
 
   test("the Not interested menu sends the chosen reason on the wire", async ({ page }) => {
     await bootTitle(page);
@@ -166,7 +185,9 @@ test.describe("the after-rating verdict", () => {
     await expect(toast).toBeVisible();
     await expect(toast).toContainText("Reel said 8.4 · you said 5");
     await expect(toast).toContainText("shown 12 days ago on tonight's picks");
-    await expect(toast).toContainText("that goes into tonight's retrain");
+    // "Next", not "tonight" (R1-40): one rating does not make RetrainGate owe a retrain.
+    await expect(toast).toContainText("that goes into your next retrain");
+    await expect(toast).not.toContainText("tonight's retrain");
     // It routes to the full scorecard rather than being the whole story.
     await expect(toast.getByRole("link", { name: /see the track record/i })).toBeVisible();
   });

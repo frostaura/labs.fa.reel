@@ -36,6 +36,7 @@ import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
 import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
+import { lockedRowsCaption, lockedRowsHeadline } from "../lib/lockedRowsCopy";
 import { Button } from "../components/ui/button";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
@@ -301,13 +302,8 @@ export default function Home() {
               <section className="fa-card p-5 flex items-center gap-4">
                 <Lock className="h-5 w-5 text-3 shrink-0" />
                 <div>
-                  <p className="fa-body text-fa-frost-bright">
-                    {feed!.lockedRowCount} more personalised row{feed!.lockedRowCount === 1 ? "" : "s"} on the full feed
-                  </p>
-                  <p className="fa-caption text-3">
-                    The free shortlist gives you three picks a day — the paid feed unlocks every row, natural-language
-                    search and the managed Trakt queue.
-                  </p>
+                  <p className="fa-body text-fa-frost-bright">{lockedRowsHeadline(feed!.lockedRowCount)}</p>
+                  <p className="fa-caption text-3" data-testid="locked-rows-caption">{lockedRowsCaption()}</p>
                 </div>
               </section>
             )}

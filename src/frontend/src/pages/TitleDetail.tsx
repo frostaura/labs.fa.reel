@@ -30,6 +30,7 @@ import { featureLabel } from "../lib/featureLabel";
 import { predictionWaterfall, significantContributions, signedStep } from "../lib/predictionWaterfall";
 import { canGoBack, titleFailure } from "../components/title/titleRouting";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+import { ratingPopoverNote } from "../lib/ratingNote";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -362,10 +363,8 @@ export default function TitleDetail() {
                             </Button>
                           )}
                         </div>
-                        <p className="fa-caption text-3 mt-2">
-                          {title.mediaType === "Movie"
-                            ? "Also logs a play on your Trakt history — cleared if you remove the rating."
-                            : "Ratings sync to Trakt — your episode history is never touched."}
+                        <p className="fa-caption text-3 mt-2" data-testid="rating-trakt-note">
+                          {ratingPopoverNote(title.mediaType, title.userState.plays)}
                         </p>
                       </PopoverContent>
                     </Popover>
@@ -381,7 +380,7 @@ export default function TitleDetail() {
                       data-testid="save-button"
                     >
                       {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" aria-hidden /> : <Bookmark className="h-4 w-4" aria-hidden />}
-                      {title.userState.savedForLater ? "Saved — on your Up Next" : "Save for later"}
+                      {title.userState.savedForLater ? "Saved — in your queue" : "Save for later"}
                     </Button>
 
                     {title.userState.notInterested ? (
