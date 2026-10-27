@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint . --ext ts,tsx --max-warnings 0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json --noEmit",
     "preview": "vite preview",
     "test": "vitest",
     "test:e2e": "playwright test --project=chromium && node scripts/e2e/webkitShards.ts",
@@ -18,7 +19,8 @@
     "slot:api": "node scripts/e2e/slotApi.ts",
     "gen:api": "MSBuildEnableWorkloadResolver=false dotnet build ../backend/FrostAura.Reel.Api/FrostAura.Reel.Api.csproj --nologo --no-incremental -p:OpenApiGenerateDocuments=true && openapi-typescript openapi/reel-api.json -o src/store/generated/openapi.ts",
     "design:ratchet": "node scripts/designRatchet.ts",
-    "design:baseline": "node scripts/designRatchet.ts --write"
+    "design:baseline": "node scripts/designRatchet.ts --write",
+    "pwa:icons": "node scripts/pwaIcons.ts"
   },
   "dependencies": {
     "@fontsource-variable/figtree": "^5.3.0",

@@ -10,6 +10,14 @@
  * file named in argv[3]; the unmocked-API reporter attributes them to tests and fails the run.
  * Only the method and pathname are kept — never the query string, headers or body.
  *
+ * Server-layer mocks (PH-12). A spec that must answer requests no Playwright route can see — a
+ * service worker's own fetches in WebKit, which `context.route` never intercepts — runs its own
+ * mock server and hands /api to it: `PUT /__tripwire/forward` with `{"target":"http://127.0.0.1:N"}`
+ * forwards every request there, unrecorded, because the spec answers it; `DELETE /__tripwire/forward`
+ * goes back to recording. Only a loopback http target is accepted, so a spec cannot point the
+ * suite at a real API through this door. If the target is gone, the request is answered with the
+ * tripwire's own 502 and recorded, as an unmocked call.
+ *
  * Usage: node scripts/e2e/apiTripwire.mjs <port> <log file>
  */
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -25,15 +33,80 @@ if (!Number.isInteger(port) || port <= 0 || !logFile) {
 // A fresh run starts from an empty log; a stale one would blame this run's tests.
 writeFileSync(logFile, "");
 
+/** Where /api goes while a spec's own mock server answers it; null = record and refuse. */
+let forwardTo = null;
+
+/** A loopback http origin, or null: anything else could reach a real API. */
+function loopbackTarget(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" || !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function record(req, res, pathname) {
+  appendFileSync(logFile, `${JSON.stringify({ at: Date.now(), method: req.method, path: pathname })}\n`);
+  req.resume();
+  if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" });
+  res.end();
+}
+
+function control(req, res) {
+  if (req.method === "DELETE") {
+    forwardTo = null;
+    res.writeHead(204).end();
+    return;
+  }
+  let body = "";
+  req.setEncoding("utf8");
+  req.on("data", (chunk) => (body += chunk));
+  req.on("end", () => {
+    let target = null;
+    try {
+      target = loopbackTarget(JSON.parse(body).target);
+    } catch {
+      target = null;
+    }
+    if (req.method !== "PUT" || !target) {
+      res.writeHead(400, { "Content-Type": "text/plain" }).end("PUT {\"target\":\"http://127.0.0.1:<port>\"}");
+      return;
+    }
+    forwardTo = target;
+    res.writeHead(204).end();
+  });
+}
+
+function forward(req, res, pathname) {
+  const upstream = http.request(
+    `${forwardTo}${req.url}`,
+    { method: req.method, headers: req.headers },
+    (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(res);
+    }
+  );
+  upstream.on("error", () => record(req, res, pathname));
+  req.pipe(upstream);
+}
+
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url ?? "/", "http://tripwire.invalid");
   if (pathname === "/__tripwire/health") {
     res.writeHead(200, { "Content-Type": "text/plain" }).end("tripwire");
     return;
   }
-  appendFileSync(logFile, `${JSON.stringify({ at: Date.now(), method: req.method, path: pathname })}\n`);
-  req.resume();
-  res.writeHead(502, { "Content-Type": "text/plain" }).end();
+  if (pathname === "/__tripwire/forward") {
+    control(req, res);
+    return;
+  }
+  if (forwardTo) {
+    forward(req, res, pathname);
+    return;
+  }
+  record(req, res, pathname);
 });
 
 server.listen(port, "127.0.0.1");

@@ -6,13 +6,17 @@ import { tripwirePort, tripwireServer, unmockedApiReporter, viteProxyEnv } from 
  * `vite:preloadError` path, the built worker. Builds once, serves `dist/` with `vite preview`, and
  * mocks every /api call at the route layer like the dev-server specs. Service workers stay
  * blocked by default, as in every spec here; the one exception is service-worker.preview.spec.ts, which
- * allows them to test the built worker itself and mocks on the context (which, in Chromium, also
- * answers the worker's own fetches). `vite preview` inherits the dev proxy, so it too points at the e2e
- * tripwire and an unmocked call fails the run (see playwright.config.ts). Run with
- * `CI=1 PW_PORT=<free> npx playwright test -c playwright.preview.config.ts`.
+ * allows them to test the built worker itself and mocks at the server layer, through the tripwire's
+ * forward mode, because WebKit's route mocks never see a worker's own fetches. `vite preview`
+ * inherits the dev proxy, so it too points at the e2e tripwire and an unmocked call fails the run
+ * (see playwright.config.ts). Chromium and WebKit both run every spec here (PH-12): the founder's
+ * phone is an iPhone. Run with `CI=1 PW_PORT=<free> npx playwright test -c playwright.preview.config.ts`.
  */
 const port = Number(process.env.PW_PORT ?? 4173);
 const tripwire = tripwirePort(port);
+// Where a spec hands /api to its own mock server (service-worker.preview.spec; the tripwire's
+// forward mode). Set here so the workers, forked after the config loads, inherit it.
+process.env.REEL_E2E_TRIPWIRE = `http://127.0.0.1:${tripwire}`;
 
 export default defineConfig({
   testDir: "./tests-e2e",
@@ -39,5 +43,8 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+  ],
 });

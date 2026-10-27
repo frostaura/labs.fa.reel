@@ -83,7 +83,10 @@ export default function Layout() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
+    // Below md the fixed tab bar (3.5rem plus the home-indicator inset, MobileTabBar) covers the
+    // bottom of the viewport, so the SHELL clears it — not `main`: the footer comes after `main`
+    // and carries the TMDB licence line, which sat under the bar at every scroll position (PH-01).
+    <div className="min-h-screen flex flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
       {/* The first Tab stop: skips the header and its controls straight to the page (WCAG 2.4.1). */}
       <a
         href="#main"
@@ -167,7 +170,7 @@ export default function Layout() {
           screen while a page is still loading and then jumps away (G-14, I-5).
           Fluid up to 1,680 px with a gutter that grows with the screen (O-9): a wide screen gets
           more cards per row, not a narrow column in a sea of background. */}
-      <main id="main" tabIndex={-1} className="flex-1 mx-auto w-full max-w-shell px-gutter focus:outline-none py-6 pb-24 md:pb-6 min-h-[calc(100dvh-3.5rem)]">
+      <main id="main" tabIndex={-1} className="flex-1 mx-auto w-full max-w-shell px-gutter focus:outline-none py-6 min-h-[calc(100dvh-3.5rem)]">
         {/* The boundary and the suspense both sit INSIDE the shell: a page that throws, or whose
             chunk is still loading, replaces only itself — the header, nav and pill stay (I-4).
             Navigating elsewhere clears a caught error. */}

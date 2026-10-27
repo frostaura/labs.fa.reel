@@ -1,1 +1,69 @@
-{}
+{
+  "_owed": {
+    "card-rate-popover@desktop": "WS-10A CardQuickActions: the rate PopoverContent (role=dialog) has no accessible name — pass aria-label (PH-03 CR-1)",
+    "card-rate-popover@phone": "WS-10A CardQuickActions: the rate PopoverContent (role=dialog) has no accessible name — pass aria-label (PH-03 CR-1)",
+    "card-reason-popover@desktop": "WS-10A CardQuickActions: the reason PopoverContent (role=dialog) has no accessible name — pass aria-label (PH-03 CR-1)",
+    "card-reason-popover@phone": "WS-10A CardQuickActions: the reason PopoverContent (role=dialog) has no accessible name — pass aria-label (PH-03 CR-1)",
+    "dna@desktop": "WS-10B TastePockets: pocket-summary text fails 4.5:1 on the pocket tile — move to text-2/text-3 (PH-03 CR-2)",
+    "dna@phone": "WS-10B TastePockets: pocket-summary text fails 4.5:1 on the pocket tile — move to text-2/text-3 (PH-03 CR-2)",
+    "lab@desktop": "WS-10B Lab/InterleavePanel: fa-caption text-fa-frost-dim stat captions fail 4.5:1 on fa-card; the two overflow-x-auto tables are not keyboard-focusable on a phone (PH-03 CR-3)",
+    "lab@phone": "WS-10B Lab/InterleavePanel: fa-caption text-fa-frost-dim stat captions fail 4.5:1 on fa-card; the two overflow-x-auto tables are not keyboard-focusable on a phone (PH-03 CR-3)",
+    "rate@desktop": "WS-10A PosterImage (via WS-10B RatePicker): poster alt repeats the visible title — alt=\"\" where the name is rendered beside it (PH-03 CR-4)",
+    "rate@phone": "WS-10A PosterImage (via WS-10B RatePicker): poster alt repeats the visible title — alt=\"\" where the name is rendered beside it (PH-03 CR-4)",
+    "saved@desktop": "WS-10A WhereToWatch: provider-chip and tmdb-more-link aria-labels do not contain their visible text (PH-03 CR-5)",
+    "saved@phone": "WS-10A WhereToWatch: provider-chip and tmdb-more-link aria-labels do not contain their visible text (PH-03 CR-5)",
+    "title-sheet@desktop": "WS-10A TitleDetail credit rows: a person's photo alt repeats the visible name (PH-03 CR-4)",
+    "title-sheet@phone": "WS-10A TitleDetail credit rows: a person's photo alt repeats the visible name (PH-03 CR-4)",
+    "title@desktop": "WS-10A TitleDetail credit rows: a person's photo alt repeats the visible name (PH-03 CR-4)",
+    "title@phone": "WS-10A TitleDetail credit rows: a person's photo alt repeats the visible name (PH-03 CR-4)"
+  },
+  "card-rate-popover@desktop": {
+    "aria-dialog-name": 1
+  },
+  "card-rate-popover@phone": {
+    "aria-dialog-name": 1
+  },
+  "card-reason-popover@desktop": {
+    "aria-dialog-name": 1
+  },
+  "card-reason-popover@phone": {
+    "aria-dialog-name": 1
+  },
+  "dna@desktop": {
+    "color-contrast": 3
+  },
+  "dna@phone": {
+    "color-contrast": 3
+  },
+  "lab@desktop": {
+    "color-contrast": 4
+  },
+  "lab@phone": {
+    "color-contrast": 6,
+    "scrollable-region-focusable": 2
+  },
+  "rate@desktop": {
+    "image-redundant-alt": 7
+  },
+  "rate@phone": {
+    "image-redundant-alt": 7
+  },
+  "saved@desktop": {
+    "label-content-name-mismatch": 2
+  },
+  "saved@phone": {
+    "label-content-name-mismatch": 2
+  },
+  "title-sheet@desktop": {
+    "image-redundant-alt": 1
+  },
+  "title-sheet@phone": {
+    "image-redundant-alt": 1
+  },
+  "title@desktop": {
+    "image-redundant-alt": 1
+  },
+  "title@phone": {
+    "image-redundant-alt": 1
+  }
+}

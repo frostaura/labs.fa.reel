@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, stubEventSource, syncStatus } from "./helpers";
 
 /**
@@ -14,11 +16,13 @@ import { SESSION_FOUNDER, stubEventSource, syncStatus } from "./helpers";
  * - a redeploy's worker waits behind the "new version" prompt, and Reload hands the page over to it
  *   with exactly one reload.
  *
- * Workers fetch on their own, past `page.route`, so the API is mocked on the context, which in
- * Chromium also intercepts the worker's requests. Anything the mocks miss reaches the e2e tripwire
- * and fails the run, so a mock the worker bypassed cannot pass silently.
+ * Workers fetch on their own, past `page.route` — and in WebKit past `context.route` too — so the
+ * API is mocked at the server layer (see `mockApi`), and every test runs in Chromium and WebKit
+ * (PH-12). Anything the mock server does not answer still reaches the e2e tripwire and fails the run.
  */
 test.use({ serviceWorkers: "allow" });
+// A network-down step waits out the worker's network timeout (see DROP_AFTER_MS).
+test.describe.configure({ timeout: 60_000 });
 
 const SESSION_B = { ...SESSION_FOUNDER, accountId: "acc-b", traktUsername: "account-b", displayName: "Account B" };
 
@@ -59,63 +63,127 @@ const B_PICK = "Account B Own Pick";
 
 interface Api {
   signIn(session: Record<string, unknown>, savedName: string): void;
-  /**
-   * The network goes (or comes back). `context.setOffline` does not stop a context route from
-   * answering the worker's own fetch, so the route itself fails every request the way a dropped
-   * connection does; the page is set offline as well.
-   */
-  setNetwork(up: boolean, options?: { keepSession: boolean }): Promise<void>;
+  /** The network goes (or comes back), for the page and its worker alike. */
+  setNetwork(up: boolean): void;
   /** Requests for /api/saved the network (not the worker's cache) answered. */
   savedFetches(): number;
 }
 
-/** Mocks the whole API on the context, so the worker's own fetches are answered too. */
-async function mockApi(context: BrowserContext): Promise<Api> {
+const TRIPWIRE = process.env.REEL_E2E_TRIPWIRE;
+/**
+ * How long a request hangs while the network is down before its connection drops: past the
+ * worker's 8 s `networkTimeoutSeconds` (sw.ts), so the worker gives up on the network and answers
+ * from its cache first, exactly as on a phone that has lost signal.
+ */
+const DROP_AFTER_MS = 10_000;
+let closeApi: (() => Promise<void>) | null = null;
+
+/**
+ * Mocks the whole API at the SERVER layer (PH-12): a mock server on a loopback port, with the e2e
+ * tripwire — Vite's /api proxy target — forwarding to it. Route mocks cannot do this job: WebKit's
+ * `context.route` never sees a service worker's own fetches, so in WebKit the worker's /api/saved
+ * went past every mock to the tripwire and the cache under test never filled. Through the proxy,
+ * the page's fetches and the worker's are the same real HTTP requests in both engines.
+ *
+ * The network going down is the server going silent, not `context.setOffline`: WebKit's offline
+ * emulation fails the page's request before the worker sees it ("Load failed" with the answer in
+ * the cache), so it tests the emulator rather than the worker. A silent server is the same in both
+ * engines and is what a phone that lost signal sees: the worker's network timeout fires and it
+ * falls back to its cache; with nothing cached the connection drops and the page shows its error.
+ */
+async function mockApi(): Promise<Api> {
+  if (!TRIPWIRE) throw new Error("REEL_E2E_TRIPWIRE is unset: run under playwright.preview.config.ts");
   let networkUp = true;
-  let keepSession = false;
   let session: Record<string, unknown> | null = null;
   let savedName = A_PICK;
   let savedFetches = 0;
-  const json = (body: unknown, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
+  const held = new Set<http.ServerResponse>();
 
-  await context.route(
-    (url) => url.pathname.startsWith("/api/"),
-    (route) => {
-      const path = new URL(route.request().url()).pathname;
-      if (!networkUp && !(keepSession && path === "/api/auth/me")) return route.abort("internetdisconnected");
-      if (path === "/api/auth/me") return route.fulfill(session ? json(session) : json({}, 401));
-      if (path === "/api/auth/refresh") return route.fulfill(json({}, 401));
-      if (path === "/api/auth/logout") {
-        session = null;
-        return route.fulfill(json({}));
-      }
-      if (path === "/api/sync/status") return route.fulfill(json(syncStatus()));
-      if (path === "/api/saved") {
-        savedFetches += 1;
-        return route.fulfill({ ...json(saved(savedName)), headers: { Date: new Date().toUTCString() } });
-      }
-      return route.fulfill({ status: 204, body: "" });
+  const server = http.createServer((req, res) => {
+    req.resume();
+    if (!networkUp) {
+      held.add(res);
+      setTimeout(() => {
+        held.delete(res);
+        res.socket?.destroy();
+      }, DROP_AFTER_MS).unref();
+      return;
     }
-  );
+    const path = new URL(req.url ?? "/", "http://mock.invalid").pathname;
+    const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+      res.writeHead(status, { "Content-Type": "application/json", ...headers }).end(JSON.stringify(body));
+    if (path === "/api/auth/me") return session ? json(session) : json({}, 401);
+    if (path === "/api/auth/refresh") return json({}, 401);
+    if (path === "/api/auth/logout") {
+      session = null;
+      return json({});
+    }
+    if (path === "/api/sync/status") return json(syncStatus());
+    if (path === "/api/saved") {
+      savedFetches += 1;
+      return json(saved(savedName), 200, { Date: new Date().toUTCString() });
+    }
+    res.writeHead(204).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const handOver = await fetch(`${TRIPWIRE}/__tripwire/forward`, {
+    method: "PUT",
+    body: JSON.stringify({ target: `http://127.0.0.1:${port}` }),
+  });
+  expect(handOver.status, "the tripwire refused the mock server").toBe(204);
+  closeApi = async () => {
+    await fetch(`${TRIPWIRE}/__tripwire/forward`, { method: "DELETE" });
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+
   return {
     signIn(next, name) {
       session = next;
       savedName = name;
     },
-    async setNetwork(up, options) {
+    setNetwork(up) {
       networkUp = up;
-      keepSession = options?.keepSession ?? false;
-      await context.setOffline(!up);
+      if (up) for (const res of held) res.socket?.destroy();
+      if (up) held.clear();
     },
     savedFetches: () => savedFetches,
   };
 }
+
+test.afterEach(async () => {
+  await closeApi?.();
+  closeApi = null;
+});
 
 /** The built worker controls the page (it claims clients on its first activation). */
 async function workerInControl(page: Page): Promise<void> {
   await expect
     .poll(() => page.evaluate(() => navigator.serviceWorker?.controller?.state ?? null), { timeout: 15_000 })
     .toBe("activated");
+}
+
+/**
+ * After the handover: the new worker controls the reloaded page and nothing waits. The page's own
+ * view of the worker may read "activating" for good in WebKit — a document that loads while its
+ * worker activates never gets the statechange (measured: still "activating" after 60 s, while its
+ * fetches go through that worker and a fresh document reads "activated"). So the reloaded page is
+ * held to "controlled, nothing waiting", and a second tab in the same browser to "activated".
+ */
+async function handedOver(page: Page): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(async () => ({
+        controller: ["activating", "activated"].includes(navigator.serviceWorker?.controller?.state ?? ""),
+        waiting: (await navigator.serviceWorker.getRegistration())?.waiting?.state ?? null,
+      }))
+    )
+    .toEqual({ controller: true, waiting: null });
+  const tab = await page.context().newPage();
+  await tab.goto("/home");
+  await workerInControl(tab);
+  await tab.close();
 }
 
 /** The names in every Saved answer the worker's API cache holds (any query string), or null. */
@@ -138,9 +206,9 @@ async function openSavedFromTheShell(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/saved$/);
 }
 
-test("an answer the worker serves from its cache is marked, and the page says so (I-11)", async ({ page, context }) => {
+test("an answer the worker serves from its cache is marked, and the page says so (I-11)", async ({ page }) => {
   await stubEventSource(page);
-  const api = await mockApi(context);
+  const api = await mockApi();
   api.signIn(SESSION_FOUNDER, A_PICK);
 
   await page.goto("/home");
@@ -159,18 +227,19 @@ test("an answer the worker serves from its cache is marked, and the page says so
   await page.goto("/home");
   await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
   const fetchesOnline = api.savedFetches();
-  await api.setNetwork(false);
+  api.setNetwork(false);
   await openSavedFromTheShell(page);
 
-  await expect(page.getByText(A_PICK).first()).toBeVisible();
+  // The worker waits out its 8 s network timeout before it falls back to the cache.
+  await expect(page.getByText(A_PICK).first()).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("offline-banner")).toContainText("Couldn't reach Reel — showing what was saved");
   expect(api.savedFetches()).toBe(fetchesOnline);
-  await api.setNetwork(true);
+  api.setNetwork(true);
 });
 
-test("after A signs out, B on the same browser offline is never shown A's Saved (I-11)", async ({ page, context }) => {
+test("after A signs out, B on the same browser offline is never shown A's Saved (I-11)", async ({ page }) => {
   await stubEventSource(page);
-  const api = await mockApi(context);
+  const api = await mockApi();
   api.signIn(SESSION_FOUNDER, A_PICK);
 
   await page.goto("/home");
@@ -190,16 +259,17 @@ test("after A signs out, B on the same browser offline is never shown A's Saved 
   api.signIn(SESSION_B, B_PICK);
   await page.goto("/home");
   await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
-  await api.setNetwork(false);
+  api.setNetwork(false);
   await openSavedFromTheShell(page);
 
   // The worker has nothing for B, and must not fall back to A.
   await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
   // The read settles as a failure (the queue's own error state), not as A's list.
-  await expect(page.getByTestId("saved-error")).toBeVisible();
+  // The worker has no cache to fall back to, so the read fails when the connection drops.
+  await expect(page.getByTestId("saved-error")).toBeVisible({ timeout: DROP_AFTER_MS + 10_000 });
   await expect(page.getByText(A_PICK)).toHaveCount(0);
   expect(await cachedSaved(page)).toBeNull();
-  await api.setNetwork(true);
+  api.setNetwork(true);
 });
 
 // Two tabs a redeploy can find: one opened after the worker was installed (the usual case), and the
@@ -212,9 +282,9 @@ test.afterEach(() => {
 });
 
 for (const visit of ["a later visit", "the visit that installed the worker"] as const) {
-  test(`a redeploy's worker waits for the prompt, and Reload hands over to it with one reload, on ${visit} (I-3)`, async ({ page, context }) => {
+  test(`a redeploy's worker waits for the prompt, and Reload hands over to it with one reload, on ${visit} (I-3)`, async ({ page }) => {
     await stubEventSource(page);
-    const api = await mockApi(context);
+    const api = await mockApi();
     api.signIn(SESSION_FOUNDER, A_PICK);
 
     await page.goto("/home");
@@ -240,25 +310,21 @@ for (const visit of ["a later visit", "the visit that installed the worker"] as 
     // The new worker waits: the page keeps running the build it loaded.
     expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state ?? null)).toBe("installed");
 
-    // The handover runs with the data API down and only the session probe answering. Answering the
-    // worker's fetches while it activates makes it hand control back and forth hundreds of times a
-    // second (a Playwright interception artifact: with no routes at all it activates once, in about
-    // a second), and with no routes the reloaded page's calls would reach the tripwire. What is
-    // under test is the handover and the reload, not the data.
-    await api.setNetwork(false, { keepSession: true });
-
+    // The handover runs with the API up. Under route mocks it had to run with the data API down:
+    // Playwright answering the worker's fetches while it activated made it hand control back and
+    // forth hundreds of times a second. The server-layer mock intercepts nothing, so that artifact
+    // is gone and the reloaded page loads real (mocked) data, as after a real redeploy.
     let loads = 0;
     page.on("load", () => (loads += 1));
     await prompt.getByRole("button", { name: "Reload" }).click();
 
     await expect.poll(() => loads).toBe(1);
     await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
-    await workerInControl(page);
-    expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting ?? null)).toBeNull();
+    await handedOver(page);
     await expect(prompt).toHaveCount(0);
     // Settled: no second reload follows.
     await page.waitForLoadState("networkidle");
     expect(loads).toBe(1);
-    // The network stays down: back online, every query would refetch past the removed mocks.
+    await expect(page.getByTestId("route-error-boundary")).toHaveCount(0);
   });
 }

@@ -3,208 +3,338 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
+import { SESSION_FOUNDER, mockJson, stubEventSource, syncJob, syncStatus } from "./helpers";
+import {
+  PERSON_ID,
+  TITLE,
+  mockDna,
+  mockHome,
+  mockLab,
+  mockPerson,
+  mockRate,
+  mockSaved,
+  mockSearch,
+  mockTitle,
+  mockTmdbImages,
+  mockTrackRecord,
+} from "./route-fixtures";
 
 /**
  * Accessibility on every route (WS-9 task 10, ADD-19): the FULL axe rule set — not only colour
- * contrast — in Chromium and WebKit, on each page in the state it is mocked into here.
+ * contrast — in Chromium and WebKit, at a desktop and a phone viewport, on each page as a person
+ * actually reads it, and with each overlay open.
  *
- * Each surface owner fixes its own violations, so the pages are held to a baseline that only
- * shrinks (`a11y-baseline.json`, route → rule → node count): a rule a route does not already break,
- * or more nodes breaking one it does, fails the run. Removing a fixed rule from the baseline is the
- * owner's last step; nothing is ever added to it.
+ * PH-03: this gate used to check pages in their empty or error states — /dna with no genres, eras,
+ * creators or pockets, /lab and /person unmocked (404 error states), a title with no cast, /rate
+ * with no suggestions, at 1440 × 900 only, with no overlay ever open — and reported green while the
+ * same routes on real data failed axe. Now:
  *
- * Every /api call is answered: specific mocks per page, then 404 for anything else, so a page
- * whose data is not mocked is checked in its error state rather than reaching the tripwire.
+ * - every page is fed a POPULATED fixture (tests-e2e/route-fixtures.ts) and `ready` proves the
+ *   populated content rendered before axe runs;
+ * - every /api call the page makes must be answered by a fixture: an unanswered one fails the case
+ *   (it would otherwise be checked in a partial error state and pass on less than the page);
+ * - every route runs at 1440 × 900 and on a 390 × 844 touch phone;
+ * - the card's rate and reason popovers, the sync-pill popover and the title sheet are checked open.
+ *
+ * Each surface owner fixes its own violations, so cases are held to a baseline that only shrinks
+ * (`a11y-baseline.json`, case → rule → node count): a rule a case does not already break, or more
+ * nodes breaking one it does, fails the run. Removing a fixed rule from the baseline is the owner's
+ * last step, and the baseline is EXACT: a case breaking fewer nodes than its entry allows fails too,
+ * naming the entry to lower, so a fix cannot leave slack behind for a regression to use. An entry
+ * is added only when new coverage finds debt that already shipped, never for a regression, and
+ * every entry names its owner and change request in the baseline's `_owed` map.
  */
 
 type Baseline = Record<string, Record<string, number>>;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BASELINE: Baseline = JSON.parse(readFileSync(path.join(HERE, "a11y-baseline.json"), "utf8"));
-
-const ACCURACY = {
-  window: "90d", from: "2026-06-12T00:00:00Z", to: "2026-09-10T00:00:00Z", source: "exposures",
-  headline: { withinOnePoint: 0.26, n: 116, meanAbsoluteError: 1.94, bias: 0.37, correlation: -0.004, meanPredicted: 6.81, meanActual: 5.78 },
-  calibration: [
-    { bucket: 6, low: 6, high: 7, n: 61, meanPredicted: 6.7, meanActual: 5.9 },
-    { bucket: 7, low: 7, high: 8, n: 31, meanPredicted: 7.4, meanActual: 5.2 },
-  ],
-  moments: [],
-  conversion: { shown: 40, saved: 6, watched: 3, rated: 3, shownToSaved: 0.15, savedToWatched: 0.5, shownToRated: 0.075, medianDaysToWatch: 4 },
-  counterfactual: [],
-  learnedThisWeek: null,
-};
+const { _owed: OWED, ...BASELINE } = JSON.parse(readFileSync(path.join(HERE, "a11y-baseline.json"), "utf8")) as {
+  _owed: Record<string, string>;
+} & Baseline;
 
 const FILTERS = {
   excludeGenres: ["horror"], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
   minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
 };
 
-const hero = (n: number) => ({
-  titleId: `00000000-0000-0000-0000-0000000001${String(n).padStart(2, "0")}`,
-  mediaType: "Movie", tmdbId: 9100 + n, name: `Pick ${n}`, year: 2018, runtimeMinutes: 115,
-  posterPath: null, backdropPath: null, genres: ["thriller"], predictedRating: 7.2, crowdRating: 7.1,
-  crowdVotes: 120000, whyThis: "Close to the thrillers you rate highest.", hook: "A heist goes wrong in a small harbour town.",
-  lensClause: null, isReleased: true, confidence: "confident", floorUsed: 6,
-});
+const VIEWPORTS = {
+  desktop: { viewport: { width: 1440, height: 900 } },
+  phone: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true },
+} as const;
+type Viewport = keyof typeof VIEWPORTS;
 
-const TITLE = {
-  titleId: "00000000-0000-0000-0000-0000000000t1", mediaType: "Movie", tmdbId: 1001, name: "Quiet Harbor", year: 2024,
-  overview: "A harbormaster keeps one last secret.", whyThis: "Shares the slow-burn dread you love.", tagline: null,
-  runtimeMinutes: 112, certification: "PG-13", genres: ["drama"], network: null, status: "Released", traktRating: 7.8,
-  traktVotes: 12000, posterPath: null, backdropPath: null, trailerUrl: null, cast: [], directors: [], writers: [],
-  prediction: null, contributionDetails: [],
-  userState: { isFullyWatched: false, plays: 0, userRating: null, savedForLater: false, notInterested: false, dropped: false },
-};
-
-const saved = (n: number) => ({
-  titleId: `00000000-0000-0000-0000-0000000002${String(n).padStart(2, "0")}`, tmdbId: 9200 + n, name: `Saved ${n}`,
-  mediaType: "Movie", year: 2021, posterPath: null, runtimeMinutes: 100, predictedRating: 7.0, crowdRating: 7.4,
-  crowdVotes: 12000, providers: [], availableNow: true, savedAt: "2026-08-01T00:00:00Z", daysSaved: 39,
-  fitsEveningBudget: true, onManagedList: true, watchTonight: n === 1, watchTonightReason: null,
-});
-
-/** Answers every /api call this file does not mock with a 404, and the shell's own calls with data. */
-async function shell(page: Page, session: unknown = SESSION_FOUNDER) {
+/**
+ * Answers the shell's own calls, and every /api call nothing else answers with a 404 that is
+ * RECORDED: a case fails if its page asked for data no fixture gave it.
+ */
+async function shell(page: Page, session: unknown = SESSION_FOUNDER, status: unknown = syncStatus()): Promise<string[]> {
+  const unanswered: string[] = [];
   await stubEventSource(page);
+  await mockTmdbImages(page);
   await page.route(
     (u) => u.pathname.startsWith("/api/"),
-    (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
+    (route) => {
+      unanswered.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
+      return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    }
   );
   if (session) await mockJson(page, "**/api/auth/me", session);
   else await mockJson(page, "**/api/auth/me", {}, 401);
-  await mockJson(page, "**/api/sync/status", syncStatus());
+  await mockJson(page, "**/api/sync/status", status);
+  return unanswered;
 }
 
-async function mockHome(page: Page) {
-  await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [1, 2, 3, 4, 5].map(hero), rows: [], lockedRowCount: 0 });
-  await mockJson(page, "**/api/feed/continue-watching", []);
-  await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
-  await mockJson(page, "**/api/feed/genres", { genres: [] });
-  await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
-  await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: null, items: [] });
-  await mockJson(page, "**/api/settings/filters", FILTERS);
-  await mockJson(page, "**/api/accuracy", ACCURACY);
-}
-
-interface RouteCase {
+interface AxeCase {
   name: string;
   path: string;
   /** What the page needs beyond the shell. */
   mock?: (page: Page) => Promise<void>;
-  /** Proof the page rendered its content, so axe checks the page and not an error state. */
-  ready?: (page: Page) => Promise<void>;
+  /** Proof the page rendered its POPULATED content, so axe checks the page and not an empty state. */
+  ready: (page: Page, viewport: Viewport) => Promise<void>;
+  /** Opens the overlay under test, for overlay cases; resolves once it is open. */
+  open?: (page: Page, viewport: Viewport) => Promise<void>;
   session?: unknown;
+  status?: unknown;
 }
 
-const ROUTES: RouteCase[] = [
+const homeReady = async (page: Page) => {
+  await expect(page.getByTestId("hero-card")).toHaveCount(5);
+  await expect(page.getByTestId("rec-card")).toHaveCount(6);
+};
+
+/** The first rail card's quick actions, revealed the way each pointer reveals them. */
+async function railCard(page: Page, viewport: Viewport) {
+  const card = page.getByTestId("rec-card").first();
+  await card.scrollIntoViewIfNeeded();
+  if (viewport === "desktop") await card.hover();
+  return card;
+}
+
+const ROUTES: AxeCase[] = [
   {
     name: "landing",
     path: "/",
     session: null,
     ready: (page) => expect(page.getByRole("button", { name: /sign in with trakt/i })).toBeVisible(),
   },
-  { name: "home", path: "/home", ready: (page) => expect(page.getByTestId("hero-card")).toHaveCount(5), mock: mockHome },
+  { name: "home", path: "/home", mock: mockHome, ready: homeReady },
   {
     name: "dna",
     path: "/dna",
-    ready: (page) => expect(page.getByText("Your taste DNA")).toBeVisible(),
-    mock: async (page) => {
-      await mockJson(page, "**/api/taste", {
-        userMean: 6.7, contrarianScore: 0.2, ratingsCount: 2044, hoursWatched: 4000, titlesWatched: 3353, showCompletionRate: 0.7,
-        topGenres: [], eras: [], creators: [], topActors: [], histogram: [{ rating: 7, count: 10 }], drift: [],
-      });
-      await mockJson(page, "**/api/taste/dislikes", { total: 0, offset: 0, limit: 20, hasMore: false, items: [], profile: null });
+    mock: mockDna,
+    ready: async (page) => {
+      await expect(page.getByTestId("taste-pocket")).toHaveCount(3);
+      await expect(page.getByTestId("genre-fingerprint")).toBeVisible();
+      await expect(page.getByText("Michael Mann").first()).toBeVisible();
+      // The dislike history, expanded, so its rows are checked too.
+      await page.getByTestId("dislike-toggle").click();
+      await expect(page.getByTestId("dislike-row")).toHaveCount(3);
     },
   },
   {
     name: "title",
     path: "/title/movie/1001",
-    ready: (page) => expect(page.getByTestId("title-detail")).toBeVisible(),
-    mock: async (page) => {
-      await mockJson(page, "**/api/titles/movie/1001", TITLE);
-      await mockJson(page, "**/api/titles/movie/1001/providers", {
-        region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/1001/watch", providers: [],
-      });
-      await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+    mock: (page) => mockTitle(page),
+    ready: async (page) => {
+      await expect(page.getByTestId("title-detail")).toBeVisible();
+      await expect(page.getByText("Cast Member 1").first()).toBeVisible();
+      await expect(page.locator('[data-testid="title-detail"] img[src*="/cast1.jpg"]').first()).toBeAttached();
     },
   },
   {
     name: "settings",
     path: "/settings",
-    ready: (page) => expect(page.getByTestId("prefs-section")).toBeVisible(),
     mock: async (page) => {
       await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
       await mockJson(page, "**/api/preferences/tags", []);
       await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
       await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150 });
       await mockJson(page, "**/api/settings/filters", FILTERS);
+      await mockFilterChips(page);
     },
+    ready: (page) => expect(page.getByTestId("prefs-section")).toBeVisible(),
   },
   {
     name: "saved",
     path: "/saved",
-    ready: (page) => expect(page.getByText("Saved 1")).toBeVisible(),
-    mock: async (page) => {
-      await mockJson(page, "**/api/saved", {
-        managedListUrl: "https://trakt.tv/lists/42", sort: "tonight", eveningBudgetMinutes: 150,
-        expectedAbsoluteError: 1.9, unscoredRemaining: 0, items: [1, 2, 3].map(saved),
-      });
-      await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: null, items: [] });
+    mock: mockSaved,
+    ready: async (page) => {
+      await expect(page.getByText("Saved 1").first()).toBeVisible();
+      await expect(page.getByText("Saved 8").first()).toBeAttached();
     },
   },
-  { name: "search", path: "/search", mock: async (page) => mockJson(page, "**/api/settings/filters", FILTERS) },
+  {
+    name: "search",
+    path: "/search",
+    mock: async (page) => {
+      await mockJson(page, "**/api/settings/filters", FILTERS);
+      await mockSearch(page);
+    },
+    ready: async (page) => {
+      await expect(page.getByText("Answer 1").first()).toBeVisible();
+      await expect(page.getByText("Answer 3").first()).toBeVisible();
+    },
+  },
   {
     name: "track-record",
     path: "/track-record",
-    mock: async (page) => mockJson(page, "**/api/accuracy", ACCURACY),
-    ready: (page) => expect(page.getByTestId("track-record")).toBeVisible(),
+    mock: mockTrackRecord,
+    ready: async (page) => {
+      await expect(page.getByTestId("track-record")).toBeVisible();
+      await expect(page.getByText("Right Call").first()).toBeVisible();
+    },
   },
-  { name: "lab", path: "/lab" },
-  { name: "rate", path: "/rate", mock: async (page) => mockJson(page, "**/api/titles/rate-suggestions", []) },
-  { name: "onboarding", path: "/onboarding", session: { ...SESSION_FOUNDER, onboarded: false, pipelineStage: "Ingesting" } },
-  { name: "person", path: "/person/31" },
+  {
+    name: "lab",
+    path: "/lab",
+    mock: mockLab,
+    ready: async (page) => {
+      await expect(page.getByTestId("gate-badge")).toBeVisible();
+      await expect(page.getByTestId("interleave-slates")).toHaveText("148");
+      await expect(page.getByTestId("iteration-ledger")).toBeVisible();
+    },
+  },
+  {
+    name: "rate",
+    path: "/rate",
+    mock: mockRate,
+    ready: (page) => expect(page.getByTestId("rate-card")).toHaveCount(8),
+  },
+  {
+    name: "onboarding",
+    path: "/onboarding",
+    session: { ...SESSION_FOUNDER, onboarded: false, pipelineStage: "Ingesting" },
+    status: syncStatus({ pipelineStage: "Ingesting" }),
+    ready: (page) => expect(page.getByTestId("stage-copy")).toBeVisible(),
+  },
+  {
+    name: "person",
+    path: `/person/${PERSON_ID}`,
+    mock: mockPerson,
+    ready: async (page) => {
+      await expect(page.getByRole("heading", { name: "Cast Member 1" })).toBeVisible();
+      await expect(page.getByText("Credit 1").first()).toBeVisible();
+      await expect(page.getByTestId("person-hidden")).toBeVisible();
+    },
+  },
 ];
 
-/** Violations as route-baseline counts: rule id → number of failing nodes. */
-async function violations(page: Page) {
-  const result = await new AxeBuilder({ page }).analyze();
-  return result.violations;
+const OVERLAYS: AxeCase[] = [
+  {
+    name: "card-rate-popover",
+    path: "/home",
+    mock: mockHome,
+    ready: homeReady,
+    open: async (page, viewport) => {
+      const card = await railCard(page, viewport);
+      await card.getByTestId("quick-rate").click();
+      await expect(page.getByTestId("quick-rate-picker")).toBeVisible();
+    },
+  },
+  {
+    name: "card-reason-popover",
+    path: "/home",
+    mock: mockHome,
+    ready: homeReady,
+    open: async (page, viewport) => {
+      const card = await railCard(page, viewport);
+      // Right-click is the desktop path and long-press the touch one; both open the same picker.
+      await card.getByTestId("quick-not-interested").click({ button: "right" });
+      await expect(page.getByTestId("quick-reason-picker")).toBeVisible();
+    },
+  },
+  {
+    name: "sync-pill-popover",
+    path: "/home",
+    mock: mockHome,
+    status: syncStatus({ activeJob: syncJob() }),
+    ready: homeReady,
+    open: async (page) => {
+      await page.getByTestId("sync-pill").click();
+      await expect(page.getByTestId("sync-tooltip")).toBeVisible();
+    },
+  },
+  {
+    name: "title-sheet",
+    path: "/home",
+    mock: async (page) => {
+      await mockHome(page);
+      await mockTitle(page, { ...TITLE, tmdbId: 9101, name: "Pick 1" });
+    },
+    ready: homeReady,
+    open: async (page) => {
+      await page.getByTestId("hero-card-link").first().click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText("Cast Member 1").first()).toBeVisible();
+    },
+  },
+];
+
+async function survey(page: Page, key: string) {
+  const found = (await new AxeBuilder({ page }).analyze()).violations;
+  if (process.env.A11Y_RECORD) {
+    // Survey mode for an owner checking progress: what this case breaks now, per browser. A11Y_RECORD
+    // names the directory (a path), so a Chromium and a WebKit run do not clear each other's files.
+    const dir = path.isAbsolute(process.env.A11Y_RECORD) ? process.env.A11Y_RECORD : path.join(test.info().project.outputDir, "a11y-survey");
+    mkdirSync(dir, { recursive: true });
+    const detail = found.map((v) => ({ rule: v.id, impact: v.impact, nodes: v.nodes.length, targets: v.nodes.map((n) => n.target.join(" ")) }));
+    writeFileSync(path.join(dir, `${key}.${test.info().project.name}.json`), JSON.stringify(detail, null, 1));
+  }
+  const allowed = BASELINE[key] ?? {};
+  const over = found
+    .filter((v) => v.nodes.length > (allowed[v.id] ?? 0))
+    .map((v) => ({
+      rule: v.id,
+      impact: v.impact,
+      nodes: v.nodes.length,
+      baseline: allowed[v.id] ?? 0,
+      help: v.help,
+      targets: v.nodes.slice(0, 5).map((n) => n.target.join(" ")),
+    }));
+  // Slack: an owed rule now breaking fewer nodes (or none) — the fix landed; lower the entry.
+  const loose = Object.entries(allowed)
+    .map(([rule, nodes]) => ({ rule, baseline: nodes, nodes: found.find((v) => v.id === rule)?.nodes.length ?? 0 }))
+    .filter((r) => r.nodes < r.baseline)
+    .map((r) => ({ ...r, fix: `lower a11y-baseline.json "${key}".${r.rule} to ${r.nodes}` }));
+  return { over, loose };
 }
 
-for (const route of ROUTES) {
-  test(`axe: ${route.name} (${route.path}) breaks no rule beyond its baseline`, async ({ page }) => {
-    await shell(page, route.session === undefined ? SESSION_FOUNDER : route.session);
-    await route.mock?.(page);
-    await page.goto(route.path);
-    await route.ready?.(page);
-    // Settled: the page fallback is gone and the network is quiet.
-    await expect(page.locator("#root")).not.toBeEmpty();
-    await expect(page.getByTestId("page-fallback")).toHaveCount(0);
-    await page.waitForLoadState("networkidle");
+for (const [viewport, options] of Object.entries(VIEWPORTS) as [Viewport, (typeof VIEWPORTS)[Viewport]][]) {
+  test.describe(`axe at ${viewport} size`, () => {
+    test.use(options);
 
-    const found = await violations(page);
-    if (process.env.A11Y_RECORD) {
-      // Survey mode for an owner checking progress: what this route breaks now, per browser.
-      const dir = path.join(test.info().project.outputDir, "a11y-survey");
-      mkdirSync(dir, { recursive: true });
-      const counts = Object.fromEntries(found.map((v) => [v.id, v.nodes.length]));
-      writeFileSync(path.join(dir, `${route.name}.${test.info().project.name}.json`), JSON.stringify(counts));
+    for (const c of [...ROUTES, ...OVERLAYS]) {
+      const key = `${c.name}@${viewport}`;
+      test(`axe: ${c.name} (${c.path}${c.open ? ", open" : ""}) breaks no rule beyond its baseline`, async ({ page }) => {
+        const unanswered = await shell(page, c.session === undefined ? SESSION_FOUNDER : c.session, c.status ?? syncStatus());
+        await c.mock?.(page);
+        await page.goto(c.path);
+        await c.ready(page, viewport);
+        // Settled: the page fallback is gone and the network is quiet.
+        await expect(page.getByTestId("page-fallback")).toHaveCount(0);
+        await page.waitForLoadState("networkidle");
+        await c.open?.(page, viewport);
+
+        expect(unanswered, `${c.path} asked for data its fixture does not give`).toEqual([]);
+        const { over, loose } = await survey(page, key);
+        expect(over, `new accessibility violations on ${key}`).toEqual([]);
+        expect(loose, `a11y-baseline.json allows more than ${key} now breaks`).toEqual([]);
+      });
     }
-    const allowed = BASELINE[route.name] ?? {};
-    const over = found
-      .filter((v) => v.nodes.length > (allowed[v.id] ?? 0))
-      .map((v) => ({
-        rule: v.id,
-        impact: v.impact,
-        nodes: v.nodes.length,
-        baseline: allowed[v.id] ?? 0,
-        help: v.help,
-        targets: v.nodes.slice(0, 5).map((n) => n.target.join(" ")),
-      }));
-    expect(over, `new accessibility violations on ${route.path}`).toEqual([]);
   });
 }
+
+test("every a11y baseline entry is a case this file runs, and names its owner and change request", () => {
+  const cases = new Set(
+    (Object.keys(VIEWPORTS) as Viewport[]).flatMap((v) => [...ROUTES, ...OVERLAYS].map((c) => `${c.name}@${v}`))
+  );
+  for (const key of Object.keys(BASELINE)) {
+    expect(cases.has(key), `a11y-baseline.json names "${key}", which no case runs`).toBe(true);
+    expect(OWED[key] ?? "", `a11y-baseline.json "${key}" has no _owed note`).toMatch(/^WS-\S+ .+\(PH-\d+ CR-\d+\)$/);
+  }
+  expect(Object.keys(OWED).sort()).toEqual(Object.keys(BASELINE).sort());
+});
 
 // ── Keyboard paths (task 10): navigation, cards and the title modal, in Chromium and WebKit ──────
 

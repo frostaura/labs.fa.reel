@@ -1,0 +1,12 @@
+{
+  // The Playwright specs, their fixtures and the e2e harness, type-checked against the app's own
+  // payload types (`npm run typecheck:e2e`). tsconfig.json covers src/ only, so a fixture shaped
+  // like a payload the API no longer sends compiled nowhere and failed only at run time, if at all.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"],
+    // The harness scripts run under Node's type stripping, which needs the .ts in an import path.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["tests-e2e", "scripts/e2e", "scripts/pwaIcons.ts", "playwright.config.ts", "playwright.preview.config.ts"]
+}

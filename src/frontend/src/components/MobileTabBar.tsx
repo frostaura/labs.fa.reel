@@ -7,6 +7,9 @@ import { Button } from "./ui/button";
  * inline header nav collapses into this fixed bottom bar (the plan's "top header + mobile
  * bottom tabs"). Search is a button rather than a route — it toggles the header search panel
  * so typeahead + Ask Reel are reachable on a phone, which the desktop-only search box hid.
+ *
+ * Its height is a contract: 3.5rem plus the safe-area inset. Layout pads the shell by that much
+ * below md so the footer (and its TMDB licence line) is never under the bar; mobile-nav.spec pins it.
  */
 export default function MobileTabBar({
   searchOpen,
@@ -22,10 +25,14 @@ export default function MobileTabBar({
 
   return (
     <nav
-      className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-fa-edge/60 bg-fa-ink/90 backdrop-blur-md pb-[env(safe-area-inset-bottom)]"
+      className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-fa-edge/60 bg-fa-ink/90 backdrop-blur-md h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]"
       data-testid="mobile-tabbar"
     >
-      <div className="flex items-stretch">
+      {/* The bar is exactly 3.5rem plus the inset, border included, in every engine: the shell's
+          bottom clearance (Layout) and the Ask Reel composer's offset (Composer) are both written
+          against that height. Left to its content it measured 49 px in Chromium and 59 px in
+          WebKit, so one engine always overlapped. */}
+      <div className="flex h-full items-stretch">
         <NavLink to="/home" className={tabClass}>
           <Home className="h-5 w-5" />
           <span className="fa-overline">Home</span>
