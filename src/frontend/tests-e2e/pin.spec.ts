@@ -68,6 +68,40 @@ test.describe("settings PIN", () => {
     expect(stored).not.toContain("2468");
   });
 
+  test("the five-wrong-PINs pause says how long, never 'Wrong PIN' (WS-8 CR-6)", async ({ page }) => {
+    await boot(page);
+    // The server's lockout: 429, the stable code pin_locked, and the pause in seconds.
+    await page.route("**/api/settings/pin/verify", (route) =>
+      route.fulfill({
+        status: 429,
+        contentType: "application/json",
+        headers: { "Retry-After": "840" },
+        body: JSON.stringify({
+          error: "Too many wrong PINs. PIN entry is paused for this account.",
+          code: "pin_locked",
+          retryAfterSeconds: 840,
+        }),
+      })
+    );
+
+    await page.getByTestId("pin-input").fill("2468");
+    await page.getByRole("button", { name: "Unlock" }).click();
+    await expect(page.getByTestId("pin-unlock-error")).toHaveText(
+      "Too many wrong PINs — PIN entry is paused. Try again in 14 minutes."
+    );
+    await expect(page.getByText(/wrong pin$/i)).toHaveCount(0);
+    await expect(page.getByTestId("prefs-locked")).toBeVisible();
+  });
+
+  test("a PIN check that fails on the server is not called a wrong PIN", async ({ page }) => {
+    await boot(page);
+    await page.route("**/api/settings/pin/verify", (route) => route.fulfill({ status: 500, body: "{}" }));
+
+    await page.getByTestId("pin-input").fill("2468");
+    await page.getByRole("button", { name: "Unlock" }).click();
+    await expect(page.getByTestId("pin-unlock-error")).toHaveText("Couldn't check the PIN — nothing changed. Try again.");
+  });
+
   test("removing the PIN demands a fresh PIN entry in a confirm dialog", async ({ page }) => {
     await boot(page);
     await page.route("**/api/settings/pin/verify", async (route) => {

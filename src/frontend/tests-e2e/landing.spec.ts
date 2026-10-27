@@ -54,4 +54,13 @@ test.describe("landing on phones", () => {
     // No score badge of any kind on a page with no real title to score.
     await expect(body).not.toContainText(/\b\d\.\d\b/);
   });
+
+  test("carries the Reel mark and no studio artwork (O-19)", async ({ page }) => {
+    await page.goto("/");
+    const mark = page.getByTestId("landing-mark");
+    await expect(mark).toBeVisible();
+    await expect(mark).toHaveAttribute("src", /reel-mark|^data:image\/svg/);
+    // Nothing above the fold is a poster or backdrop from TMDB.
+    await expect(page.locator('img[src*="image.tmdb.org"]')).toHaveCount(0);
+  });
 });

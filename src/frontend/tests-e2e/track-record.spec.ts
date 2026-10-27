@@ -109,8 +109,12 @@ const POPULATIONS = {
   crossReference: XREF_EMPTY.population,
 };
 
-async function mockXref(page: Page, body: unknown = XREF_EMPTY) {
+async function mockXref(page: Page, body: unknown = XREF_EMPTY, band: unknown = null) {
   await mockJson(page, "**/api/metrics/cross-reference", body);
+  // The band's own status (GET /api/feed/cross-reference): 204 until a pass has judged anything.
+  await page.route("**/api/feed/cross-reference", (route) =>
+    band === null ? route.fulfill({ status: 204 }) : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(band) })
+  );
 }
 
 const ACCURACY_EMPTY = {
@@ -138,6 +142,30 @@ async function boot(page: Page, accuracy: unknown) {
 }
 
 test.describe("track record", () => {
+  test("carries the cross-reference band that left Home (FD-15)", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/accuracy", ACCURACY_EXPOSURES);
+    await mockXref(page, XREF_EMPTY, {
+      running: false, judged: 412, total: 430, kept: 37, ruledOut: 61, unsure: 314, noSignal: 18, gating: "unmeasured",
+    });
+    await page.goto("/track-record");
+
+    await expect(page.getByTestId("cross-reference-sentence")).toHaveText(
+      "Cross-referenced 412 titles against your history · 37 kept, nudged up a little · rule-outs change nothing — nothing has measured them against your history yet"
+    );
+    await expect(page.getByTestId("cross-reference-coverage")).toBeVisible();
+  });
+
+  test("shows no band while no pass has judged anything", async ({ page }) => {
+    await boot(page, ACCURACY_EXPOSURES);
+    await expect(page.getByTestId("cross-reference-band")).toHaveCount(0);
+  });
+
   test("leads with the unflattering headline and says the evidence is exposures", async ({ page }) => {
     await boot(page, ACCURACY_EXPOSURES);
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Lock, X } from "lucide-react";
 import {
   useGetFilterChipsQuery,
@@ -30,12 +30,19 @@ import {
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
+  ruleControlTestId,
   sameConditions,
   YEAR_FLOOR,
   toggleGenre,
   yearCeiling,
   type GenreState,
+  type RuleFocus,
 } from "../../lib/pickConditions";
+import { pinAttemptText } from "../../lib/pinLockout";
+import { COARSE_TAP } from "../../lib/tapTarget";
+import { Button } from "../ui/button";
+import { Chip } from "../ui/chip";
+import { cn } from "../../lib/cn";
 import ConditionSummary from "./ConditionSummary";
 import LoadFailed from "../ui/load-failed";
 import SaveStatus from "../ui/save-status";
@@ -56,6 +63,13 @@ interface Props {
    * rather than hard-coded here, which is what keeps this a single implementation.
    */
   testIds?: { editor?: string; locked?: string; loading?: string };
+  /**
+   * Open the editor ON one rule (WS-2B CR-1): once the saved rules — and, for a genre, the chips —
+   * have rendered, the rule's control is scrolled into view and focused, so a reader who came from
+   * "Without “English only”: +4" lands on the language allow-list rather than the top of the form.
+   * A rule with no control of its own focuses the editor. Applied once per rule object.
+   */
+  focusRule?: RuleFocus | null;
 }
 
 const GENRE_TONE: Record<GenreState, string> = {
@@ -89,7 +103,7 @@ const GENRE_BUTTON =
  * depending on which screen you set it from. The pure rules it applies live in
  * `lib/pickConditions.ts` and are unit-tested there.
  */
-export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds }: Props) {
+export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds, focusRule }: Props) {
   const { data: session } = useGetSessionQuery();
   const { data: saved, isError: loadFailed, isFetching: loadingSaved, refetch: refetchSaved } = useGetFiltersQuery();
   const [updateFilters, { isLoading: saving }] = useUpdateFiltersMutation();
@@ -100,7 +114,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   const [years, setYears] = useState({ min: "", max: "" });
   const [status, setStatus] = useState<SaveMessage | null>(null);
   const [pinEntry, setPinEntry] = useState("");
-  const [pinError, setPinError] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
 
   // Adopted during render rather than in an effect (React's documented alternative to a syncing
   // effect — it re-renders before commit instead of cascading). Seeding in an effect meant every
@@ -155,15 +169,39 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
     refetch: refetchChips,
   } = useGetFilterChipsQuery();
 
+  // Where the rule this editor was opened on lives, once it has rendered (see `focusRule`).
+  const editorRef = useRef<HTMLElement>(null);
+  const focusedRule = useRef<RuleFocus | null>(null);
+  useEffect(() => {
+    const root = editorRef.current;
+    if (!focusRule || !root || focusedRule.current === focusRule) return;
+    const id = ruleControlTestId(focusRule);
+    const control = id ? root.querySelector<HTMLElement>(`[data-testid="${CSS.escape(id)}"]`) : null;
+    // A genre's chip may not be drawn yet: wait for the chip list (or its failure) before settling
+    // for the editor's top.
+    if (!control && id?.startsWith("genre-") && !chipReport && !chipsFailed) return;
+    const target = control ?? root;
+    if (target === root) root.setAttribute("tabindex", "-1");
+    target.scrollIntoView({ block: "center" });
+    target.focus({ preventScroll: true });
+    focusedRule.current = focusRule;
+  });
+
   const unlock = async () => {
-    const result = await verifyPin({ pin: pinEntry }).unwrap().catch(() => null);
-    if (result?.valid && result.unlockToken) {
-      // What gets kept is the server-minted unlock token, never the PIN the user just typed.
-      storeUnlockToken(result.unlockToken, result.expiresAt);
-      setPinEntry("");
-      setPinError(false);
-    } else {
-      setPinError(true);
+    try {
+      const result = await verifyPin({ pin: pinEntry }).unwrap();
+      if (result.valid && result.unlockToken) {
+        // What gets kept is the server-minted unlock token, never the PIN the user just typed.
+        storeUnlockToken(result.unlockToken, result.expiresAt);
+        setPinEntry("");
+        setPinError(null);
+        return;
+      }
+      setPinError("Wrong PIN");
+    } catch (error: unknown) {
+      // A wrong PIN, the five-wrong-PINs pause (429 pin_locked, with how long) and a request that
+      // failed are three different sentences — the last two are not "Wrong PIN" (WS-8 CR-6).
+      setPinError(pinAttemptText(error, "Wrong PIN"));
     }
   };
 
@@ -190,13 +228,18 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
             onChange={(e) => setPinEntry(e.target.value.replace(/\D/g, ""))}
             onKeyDown={(e) => e.key === "Enter" && unlock()}
             placeholder="PIN"
-            className="fa-input w-28 tabular-nums"
+            aria-label="Settings PIN"
+            className={cn("fa-input w-28 tabular-nums", COARSE_TAP)}
             data-testid="pin-input"
           />
-          <button onClick={unlock} className="fa-button">
+          <Button onClick={unlock} className={COARSE_TAP} data-testid="pin-unlock">
             Unlock
-          </button>
-          {pinError && <span className="fa-caption text-fa-danger">Wrong PIN</span>}
+          </Button>
+          {pinError && (
+            <span role="alert" className="fa-caption text-fa-danger" data-testid="pin-unlock-error">
+              {pinError}
+            </span>
+          )}
         </div>
       </section>
     );
@@ -279,7 +322,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   };
 
   return (
-    <section className={shell} data-testid={testIds?.editor ?? "conditions-editor"}>
+    <section ref={editorRef} className={shell} data-testid={testIds?.editor ?? "conditions-editor"}>
       {/* Suppressed in the dialog, which supplies its own DialogTitle — two identical headings
           stacked on top of each other read as a rendering bug. */}
       {!bare && (
@@ -312,19 +355,20 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
           <div className="flex flex-wrap items-center gap-1.5 pt-1" data-testid="filter-cost-suggestions">
             <span className="fa-caption text-fa-frost-dim">Widest options:</span>
             {cost!.suggestions.map((suggestion) => (
-              <button
+              <Button
                 key={`${suggestion.kind}:${suggestion.value}`}
-                type="button"
+                variant="chip"
+                size="chip"
                 onClick={() => setDraft(applySuggestion(draft, suggestion))}
                 data-testid="cost-suggestion"
                 data-kind={suggestion.kind}
                 data-value={suggestion.value}
                 title="Applies to this draft — nothing is saved until you save"
-                className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/40 bg-fa-glass px-2.5 py-1 fa-caption text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+                className={cn("gap-1.5 border-fa-frost/40", COARSE_TAP)}
               >
                 {suggestionLabel(suggestion)}
                 <span className="tabular-nums text-fa-success">{formatMarginal(suggestion.gain)}</span>
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -467,7 +511,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
             onBlur={commitYears}
             placeholder="from"
             aria-label="Earliest release year"
-            className="fa-input w-24 tabular-nums"
+            className={cn("fa-input w-24 tabular-nums", COARSE_TAP)}
             data-testid="min-year"
           />
           <span className="fa-caption text-fa-frost-dim">to</span>
@@ -484,20 +528,21 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
             onBlur={commitYears}
             placeholder="to"
             aria-label="Latest release year"
-            className="fa-input w-24 tabular-nums"
+            className={cn("fa-input w-24 tabular-nums", COARSE_TAP)}
             data-testid="max-year"
           />
           {(draft.minYear != null || draft.maxYear != null) && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 setDraft({ ...draft, minYear: null, maxYear: null });
                 setYears({ min: "", max: "" });
               }}
-              className="fa-button-ghost fa-caption"
+              className={COARSE_TAP}
             >
               Any year
-            </button>
+            </Button>
           )}
         </div>
         {/* What each bound is holding back, counted separately — they are two controls, and a user
@@ -534,34 +579,26 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
           Only recommend titles in these languages. English only by default.
         </p>
         <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
+          <Chip
+            selected={allLanguages}
             onClick={() => setDraft({ ...draft, languages: allLanguages ? ["en"] : [ALL_LANGUAGES] })}
-            className={`rounded-full border px-2.5 py-1 fa-caption transition ${
-              allLanguages
-                ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
-                : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
-            }`}
+            className={COARSE_TAP}
             data-testid="lang-all"
           >
             All languages
-          </button>
+          </Chip>
           {LANGUAGES.map(({ code, label }) => {
             const on = !allLanguages && languages.includes(code);
             return (
-              <button
+              <Chip
                 key={code}
-                type="button"
+                selected={on}
                 onClick={() => toggleLanguage(code)}
-                className={`rounded-full border px-2.5 py-1 fa-caption transition ${
-                  on
-                    ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
-                    : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
-                } ${allLanguages ? "opacity-50" : ""}`}
+                className={cn(COARSE_TAP, allLanguages && "opacity-50")}
                 data-testid={`lang-${code}`}
               >
                 {label}
-              </button>
+              </Chip>
             );
           })}
         </div>
@@ -578,9 +615,10 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       <div className="space-y-2">
         <p className="fa-overline text-fa-frost-dim">maturity ceiling</p>
         <select
-          className="fa-input fa-select w-40"
+          className={cn("fa-input fa-select w-40 [@media(pointer:coarse)]:h-11", COARSE_TAP)}
           value={draft.maturityCeiling ?? ""}
           aria-label="Maturity ceiling"
+          data-testid="maturity-ceiling"
           onChange={(e) => setDraft({ ...draft, maturityCeiling: e.target.value || null })}
         >
           {MATURITY_LEVELS.map((level) => (
@@ -601,9 +639,9 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       </div>
 
       <div className="flex flex-wrap items-center gap-3 border-t border-fa-edge/50 pt-4">
-        <button onClick={save} disabled={saving} className="fa-button-primary" data-testid="save-prefs">
+        <Button variant="primary" onClick={save} disabled={saving} className={COARSE_TAP} data-testid="save-prefs">
           {saving ? "Saving…" : saveLabel}
-        </button>
+        </Button>
         {dirty && !saving && (
           <span className="fa-caption text-fa-warning" data-testid="conditions-unsaved">
             Unsaved changes
@@ -650,7 +688,7 @@ function RatingFloor({
           value={current}
           aria-label={label}
           onChange={(e) => onChange(Number(e.target.value) || null)}
-          className="fa-range flex-1"
+          className={cn("fa-range flex-1", COARSE_TAP)}
           style={{ "--fa-range-fill": `${((current / 9) * 100).toFixed(0)}%` } as React.CSSProperties}
           data-testid={testId}
         />
@@ -683,9 +721,16 @@ function KeywordEditor({ keywords, onChange }: { keywords: string[]; onChange: (
       {keywords.map((keyword) => (
         <span key={keyword} className="inline-flex items-center gap-1 rounded-full border border-fa-edge bg-fa-glass px-2.5 py-1 fa-caption text-fa-frost">
           {keyword}
-          <button onClick={() => onChange(keywords.filter((k) => k !== keyword))} aria-label={`remove ${keyword}`}>
-            <X className="h-3 w-3 text-fa-frost-dim hover:text-fa-danger" />
-          </button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => onChange(keywords.filter((k) => k !== keyword))}
+            aria-label={`remove ${keyword}`}
+            data-testid={`keyword-${keyword}-remove`}
+            className={cn("h-5 w-5 rounded-full hover:text-fa-danger", COARSE_TAP)}
+          >
+            <X className="h-3 w-3" />
+          </Button>
         </span>
       ))}
       <input
@@ -695,7 +740,8 @@ function KeywordEditor({ keywords, onChange }: { keywords: string[]; onChange: (
         onBlur={add}
         placeholder="add keyword…"
         aria-label="Add an excluded keyword"
-        className="fa-input h-8 w-36 text-sm"
+        className="fa-input h-8 w-36 text-sm [@media(pointer:coarse)]:h-11"
+        data-testid="keyword-input"
       />
     </div>
   );

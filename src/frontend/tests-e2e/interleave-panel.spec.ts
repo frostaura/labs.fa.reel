@@ -220,3 +220,47 @@ test.describe("interleaving panel", () => {
     await expect(page.getByTestId("lab-xref-online-row")).toContainText("not yet answerable — 4 outcomes so far");
   });
 });
+
+test.describe("the lab's layout", () => {
+  /** The order the lab promises (G-14), top to bottom. */
+  const ORDER = [
+    "gate-badge",
+    "retro-loop",
+    "lab-xref",
+    "interleave-panel",
+    "metric-tiles",
+    "split-origins",
+    "feature-importance",
+    "iteration-ledger",
+  ];
+
+  test("keeps every section in a fixed order, data or not, and reads the 181 KB metrics once while idle", async ({ page }) => {
+    await page.clock.install();
+    let metricReads = 0;
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await page.route("**/api/metrics/model", (route) => {
+      metricReads += 1;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MODEL_METRICS) });
+    });
+    await mockJson(page, "**/api/metrics/interleave", RUNNING);
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
+    await page.goto("/lab");
+    await expect(page.getByTestId("interleave-panel")).toBeVisible();
+
+    const order = await page
+      .getByTestId("lab")
+      .locator(ORDER.map((id) => `[data-testid="${id}"]`).join(","))
+      .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid")));
+    expect(order).toEqual(ORDER);
+
+    // Nothing is training, so nothing can have changed: a minute passes and the payload is not read again.
+    await page.clock.fastForward(60_000);
+    await expect(page.getByTestId("gate-badge")).toBeVisible();
+    expect(metricReads).toBe(1);
+  });
+});

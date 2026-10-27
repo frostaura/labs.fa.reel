@@ -12,6 +12,9 @@ import {
 } from "recharts";
 import { Target } from "lucide-react";
 import LoadFailed from "../components/ui/load-failed";
+import { Chip } from "../components/ui/chip";
+import { COARSE_TAP } from "../lib/tapTarget";
+import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import {
   useGetAccuracyQuery,
   useGetCrossReferenceStatsQuery,
@@ -38,11 +41,14 @@ import {
   sourceNote,
 } from "../lib/trackRecordCopy";
 import { xrefBacktestSentence, xrefOnlineNote, xrefVerdictLabel } from "../lib/xrefCopy";
+import { CHART_CHROME, CHART_SERIES } from "../design/chartPalette";
 
-const FROST = "#A4D4F4";
-const FROST_DIM = "#5C8AB4";
-const AMBER = "#F6C667";
-const GRID = "rgba(164,212,244,0.12)";
+// From the chart palette (WS-9): every series holds 3:1 on every ink surface, and the axis colour is
+// the AA tertiary text the rest of the page uses.
+const FROST = CHART_SERIES[0];
+const AMBER = CHART_SERIES[1];
+const FROST_DIM = CHART_CHROME.axis;
+const GRID = CHART_CHROME.grid;
 
 /**
  * Who a block's numbers are about, and how the account's own choices picked that group (G-8). Every
@@ -52,7 +58,7 @@ const GRID = "rgba(164,212,244,0.12)";
 function Population({ note, testId }: { note: PopulationNote | undefined | null; testId: string }) {
   if (!note) return null;
   return (
-    <p className="fa-caption text-fa-frost-dim mt-2" data-testid={testId}>
+    <p className="fa-caption text-3 mt-2" data-testid={testId}>
       <span className="text-fa-frost">{note.name}.</span> {note.selectionNote}
     </p>
   );
@@ -62,7 +68,7 @@ function ChartTip({ active, payload, label }: { active?: boolean; payload?: { na
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-md border border-fa-edge bg-fa-ink/95 backdrop-blur px-3 py-2">
-      {label != null && <p className="fa-overline text-fa-frost-dim mb-1">{label}</p>}
+      {label != null && <p className="fa-overline text-3 mb-1">{label}</p>}
       {payload.map((entry) => (
         <p key={entry.name} className="fa-caption text-fa-frost">
           {entry.name}: <span className="text-fa-frost-bright tabular-nums">{Number(entry.value).toFixed(2)}</span>
@@ -88,7 +94,7 @@ function MomentCard({ moment }: { moment: AccuracyMoment }) {
         {poster ? (
           <img src={poster} alt="" loading="lazy" className="h-full w-full object-cover" />
         ) : (
-          <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim px-2 text-center">
+          <div className="h-full w-full flex items-center justify-center fa-caption text-3 px-2 text-center">
             {moment.name}
           </div>
         )}
@@ -100,7 +106,7 @@ function MomentCard({ moment }: { moment: AccuracyMoment }) {
         </span>
       </p>
       {(where || moment.daysToOutcome != null) && (
-        <p className="fa-caption text-fa-frost-dim truncate">
+        <p className="fa-caption text-3 truncate">
           {where ?? "scored"}
           {moment.daysToOutcome != null && ` · ${moment.daysToOutcome}d`}
         </p>
@@ -148,31 +154,21 @@ export default function TrackRecord() {
         <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
           <Target className="h-6 w-6 text-fa-frost" /> Reel's track record
         </h1>
-        <p className="fa-caption text-fa-frost-dim mt-1">
+        <p className="fa-caption text-3 mt-1">
           How wrong Reel has been about you, and what it is doing about it.
         </p>
       </div>
       {offered.length > 1 ? (
         <div className="flex items-center gap-1" role="group" aria-label="Time window" data-testid="window-switch">
           {offered.map((value) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setWindow(value)}
-              aria-pressed={window_ === value}
-              className={`fa-caption px-3 py-1.5 rounded-md border transition ${
-                window_ === value
-                  ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
-                  : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
-              }`}
-            >
+            <Chip key={value} selected={window_ === value} onClick={() => setWindow(value)} className={COARSE_TAP}>
               {WINDOW_LABELS[value] ?? value}
-            </button>
+            </Chip>
           ))}
         </div>
       ) : (
         singleNote && (
-          <p className="fa-caption text-fa-frost-dim max-w-xs sm:text-right" data-testid="single-window-note">
+          <p className="fa-caption text-3 max-w-xs sm:text-right" data-testid="single-window-note">
             {singleNote}
           </p>
         )
@@ -211,7 +207,7 @@ export default function TrackRecord() {
 
       {/* Headline — the one sentence the page exists to say. */}
       <section className="fa-card p-5" data-testid="headline">
-        <p className="fa-overline text-fa-frost-dim">the honest number</p>
+        <p className="fa-overline text-3">the honest number</p>
         <p className="text-3xl font-light text-fa-frost-bright mt-1" data-testid="headline-sentence">
           {headlineSentence(data)}
         </p>
@@ -223,7 +219,7 @@ export default function TrackRecord() {
             {noModel}
           </p>
         )}
-        <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
+        <p className="fa-caption text-3 mt-2" data-testid="source-note">
           {empty && noModel ? NO_MODEL_SOURCE_NOTE : sourceNote(data)}
         </p>
         {!empty && <Population note={data.populations?.headline} testId="headline-population" />}
@@ -231,7 +227,7 @@ export default function TrackRecord() {
             for you; /rate offers what you've watched and never rated (plus popular titles), so the
             button says that rather than promising a list of scored titles it does not show. */}
         {empty && (
-          <Link to="/rate" className="fa-button-primary inline-flex mt-3" data-testid="track-record-empty-rate">
+          <Link to="/rate" className={`fa-button-primary inline-flex mt-3 ${COARSE_TAP}`} data-testid="track-record-empty-rate">
             Rate what you&apos;ve watched
           </Link>
         )}
@@ -241,22 +237,22 @@ export default function TrackRecord() {
             <div className="fa-card px-4 py-3">
               <p className="fa-stat-label">average miss</p>
               <p className="fa-stat-value">{num(data.headline.meanAbsoluteError)}</p>
-              <p className="fa-caption text-fa-frost-dim mt-1">rating points, either way</p>
+              <p className="fa-caption text-3 mt-1">rating points, either way</p>
             </div>
             <div className="fa-card px-4 py-3">
               <p className="fa-stat-label">bias</p>
               <p className="fa-stat-value">{signed(data.headline.bias)}</p>
-              <p className="fa-caption text-fa-frost-dim mt-1">{biasNote(data.headline.bias)}</p>
+              <p className="fa-caption text-3 mt-1">{biasNote(data.headline.bias)}</p>
             </div>
             <div className="fa-card px-4 py-3">
               <p className="fa-stat-label">agreement</p>
               <p className="fa-stat-value">{num(data.headline.correlation, 3)}</p>
-              <p className="fa-caption text-fa-frost-dim mt-1">{agreementNote(data.headline.correlation)}</p>
+              <p className="fa-caption text-3 mt-1">{agreementNote(data.headline.correlation)}</p>
             </div>
             <div className="fa-card px-4 py-3">
               <p className="fa-stat-label">scored on</p>
               <p className="fa-stat-value">{data.headline.n}</p>
-              <p className="fa-caption text-fa-frost-dim mt-1">
+              <p className="fa-caption text-3 mt-1">
                 predictions you have since rated
               </p>
             </div>
@@ -265,7 +261,7 @@ export default function TrackRecord() {
         {/* Every rating is a new scored call, so the way to a fairer number is always one tap away —
             not only on the empty page (G-19). */}
         {!empty && (
-          <Link to="/rate" className="fa-link fa-caption inline-flex mt-3" data-testid="track-record-rate">
+          <Link to="/rate" className={`fa-link fa-caption inline-flex items-center mt-3 ${COARSE_TAP}`} data-testid="track-record-rate">
             Rate what you&apos;ve watched →
           </Link>
         )}
@@ -274,12 +270,12 @@ export default function TrackRecord() {
       {/* Calibration — the shape of the wrongness, not just its size. */}
       <section className="fa-card p-5" data-testid="calibration">
         <h2 className="fa-section-title mb-1">Where the number lands</h2>
-        <p className="fa-caption text-fa-frost-dim mb-3">
+        <p className="fa-caption text-3 mb-3">
           For every band Reel predicts in, what you actually gave. A model that meant what it said
           would have the two bars level in every band.
         </p>
         {calibration.length === 0 ? (
-          <p className="fa-body text-fa-frost-dim" data-testid="calibration-empty">
+          <p className="fa-body text-3" data-testid="calibration-empty">
             No bands to draw yet — nothing Reel has scored has come back with a rating.
           </p>
         ) : (
@@ -300,11 +296,11 @@ export default function TrackRecord() {
       {/* Moments — the specific claims, newest first. */}
       <section className="fa-card p-5" data-testid="moments">
         <h2 className="fa-section-title mb-1">Recent calls</h2>
-        <p className="fa-caption text-fa-frost-dim mb-3">
+        <p className="fa-caption text-3 mb-3">
           What Reel said, what you said. Newest first.
         </p>
         {data.moments.length === 0 ? (
-          <p className="fa-body text-fa-frost-dim" data-testid="moments-empty">
+          <p className="fa-body text-3" data-testid="moments-empty">
             No calls to show yet. Rate something Reel has already put a number on and it appears here.
           </p>
         ) : (
@@ -319,7 +315,7 @@ export default function TrackRecord() {
       {/* Conversion — the honest half. These numbers are about the loop, not the model. */}
       <section className="fa-card p-5" data-testid="conversion">
         <h2 className="fa-section-title mb-1">The queue, end to end</h2>
-        <p className="fa-caption text-fa-frost-dim mb-3">
+        <p className="fa-caption text-3 mb-3">
           Shown → saved → watched. This measures whether the loop closes, which is a different
           question from whether the number was right.
         </p>
@@ -329,24 +325,24 @@ export default function TrackRecord() {
           <div className="fa-card px-4 py-3">
             <p className="fa-stat-label">shown → saved</p>
             <p className="fa-stat-value">{pct(data.conversion.shownToSaved, 1)}</p>
-            <p className="fa-caption text-fa-frost-dim mt-1">
+            <p className="fa-caption text-3 mt-1">
               {data.conversion.saved} of {data.conversion.shown || "—"} titles
             </p>
           </div>
           <div className="fa-card px-4 py-3">
             <p className="fa-stat-label">saved → watched</p>
             <p className="fa-stat-value">{pct(data.conversion.savedToWatched, 1)}</p>
-            <p className="fa-caption text-fa-frost-dim mt-1">{data.conversion.watched} watched</p>
+            <p className="fa-caption text-3 mt-1">{data.conversion.watched} watched</p>
           </div>
           <div className="fa-card px-4 py-3">
             <p className="fa-stat-label">shown → rated</p>
             <p className="fa-stat-value">{pct(data.conversion.shownToRated, 1)}</p>
-            <p className="fa-caption text-fa-frost-dim mt-1">{data.conversion.rated} rated</p>
+            <p className="fa-caption text-3 mt-1">{data.conversion.rated} rated</p>
           </div>
           <div className="fa-card px-4 py-3">
             <p className="fa-stat-label">days to watch</p>
             <p className="fa-stat-value">{num(data.conversion.medianDaysToWatch, 1)}</p>
-            <p className="fa-caption text-fa-frost-dim mt-1">median, once saved</p>
+            <p className="fa-caption text-3 mt-1">median, once saved</p>
           </div>
         </div>
       </section>
@@ -355,7 +351,7 @@ export default function TrackRecord() {
       {data.counterfactual.length > 0 && (
         <section className="fa-card p-5" data-testid="counterfactual">
           <h2 className="fa-section-title mb-1">Because of Reel, vs found yourself</h2>
-          <p className="fa-caption text-fa-frost-dim mb-3">
+          <p className="fa-caption text-3 mb-3">
             Your own ratings, split by how the title reached you. A negative gap means Reel steered
             you toward films you liked less than the ones you found on your own.
           </p>
@@ -364,7 +360,7 @@ export default function TrackRecord() {
           <div className="space-y-1">
             {data.counterfactual.map((w) => (
               <p key={w.window} className="fa-body">
-                <span className="text-fa-frost-dim">
+                <span className="text-3">
                   {w.days == null ? "all time" : `last ${w.days} days`}:
                 </span>{" "}
                 via Reel {num(w.viaReelMeanRating)} ({w.viaReelCount}) · found yourself{" "}
@@ -380,8 +376,12 @@ export default function TrackRecord() {
 
       {/* The cross-reference pass, in words. Its statistics (AUC, intervals, prompt generations) moved
           to the lab (G-10, KILL-11); what stays is what a verdict is allowed to do to your page and
-          why, which the Home pill points here for. */}
-      <CrossReferenceSummary window={window_} />
+          why, which the Home pill points here for. The band — the running pass and what its last run
+          concluded — moved here from Home, which now keeps one status line (FD-15). */}
+      <div className="space-y-3">
+        <CrossReferenceBand />
+        <CrossReferenceSummary window={window_} />
+      </div>
 
       {/* What changed since last time — the "and what I'm doing about it" half. */}
       {data.learnedThisWeek && (
@@ -390,7 +390,7 @@ export default function TrackRecord() {
           <p className="fa-body text-fa-frost mt-2" data-testid="learned-sentence">
             {learnedSentence(data.learnedThisWeek)}
           </p>
-          <p className="fa-caption text-fa-frost-dim mt-2">
+          <p className="fa-caption text-3 mt-2">
             Retrained {relTime(data.learnedThisWeek.trainedAt)} · bias{" "}
             {signed(data.learnedThisWeek.calibrationBias)} · average miss{" "}
             {num(data.learnedThisWeek.calibrationMae)}
@@ -398,7 +398,7 @@ export default function TrackRecord() {
         </section>
       )}
 
-      <p className="fa-caption text-fa-frost-dim">
+      <p className="fa-caption text-3">
         These are the same numbers the engine is judged on internally — nothing here is a marketing
         figure. <Link to="/dna" className="underline underline-offset-2 hover:text-fa-frost">See your taste profile</Link>.
       </p>
@@ -432,7 +432,7 @@ function CrossReferenceSummary({ window }: { window: string }) {
   return (
     <section className="fa-card p-5" data-testid="cross-reference">
       <h2 className="fa-section-title mb-1">Cross-reference</h2>
-      <p className="fa-caption text-fa-frost-dim">
+      <p className="fa-caption text-3">
         A second pass reads every eligible title beside the ones you have actually rated, and says
         keep, rule out, or not sure. What that verdict is allowed to do to your page was decided by
         testing it against your own history.
@@ -449,17 +449,17 @@ function CrossReferenceSummary({ window }: { window: string }) {
           the bottom: only ~2% of ratings are made in the app, so this corroborates the backtest and
           never replaces it. */}
       <div className="mt-4">
-        <p className="fa-overline text-fa-frost-dim">since it went live</p>
+        <p className="fa-overline text-3">since it went live</p>
         {xref.online.length === 0 ? (
-          <p className="fa-caption text-fa-frost-dim mt-1" data-testid="cross-reference-online-empty">
+          <p className="fa-caption text-3 mt-1" data-testid="cross-reference-online-empty">
             Nothing it has judged has reached you and come back with a rating yet.
           </p>
         ) : (
           <div className="space-y-1 mt-1">
             {xref.online.map((o) => (
               <p key={o.verdict} className="fa-body" data-testid="cross-reference-online-row">
-                <span className="text-fa-frost-dim">{xrefVerdictLabel(o.verdict)}:</span>{" "}
-                <span className={o.answerable ? "text-fa-frost" : "text-fa-frost-dim"}>{xrefOnlineNote(o)}</span>
+                <span className="text-3">{xrefVerdictLabel(o.verdict)}:</span>{" "}
+                <span className={o.answerable ? "text-fa-frost" : "text-3"}>{xrefOnlineNote(o)}</span>
               </p>
             ))}
           </div>
