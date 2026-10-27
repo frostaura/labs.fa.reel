@@ -41,11 +41,15 @@ test.describe("landing on phones", () => {
     const boxes = await Promise.all([0, 1, 2].map((i) => steps.nth(i).boundingBox()));
     // One row: every step starts at the same top edge.
     expect(new Set(boxes.map((b) => Math.round(b!.y))).size).toBe(1);
-    const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+    // Overflow is scrollWidth past the layout width (clientWidth): WebKit's classic scrollbar makes
+    // the content box narrower than innerWidth (WS-9 CR-9).
+    const { scrollWidth, clientWidth, innerWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
       innerWidth: window.innerWidth,
     }));
-    expect(scrollWidth).toBe(innerWidth);
+    expect(scrollWidth).toBe(clientWidth);
+    expect(clientWidth).toBeLessThanOrEqual(innerWidth);
   });
 
   test("no made-up pick ships: no invented title, no scores, no 'streaming now' (KILL-10)", async ({ page }) => {

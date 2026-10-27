@@ -90,10 +90,15 @@ test.describe("taste DNA charts", () => {
     // The bar gets most of the row rather than what a fixed label column leaves.
     expect(track!.width).toBeGreaterThan(150);
 
-    const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+    // Against the layout width, not innerWidth (WS-9 CR-9, as landing.spec): WebKit draws a classic
+    // vertical scrollbar, so its content box is narrower than the window (380 of 390) and scrollWidth
+    // matches that, while Chromium's overlay scrollbar leaves the two equal.
+    const { scrollWidth, clientWidth, innerWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
       innerWidth: window.innerWidth,
     }));
-    expect(scrollWidth).toBe(innerWidth);
+    expect(scrollWidth).toBe(clientWidth);
+    expect(clientWidth).toBeLessThanOrEqual(innerWidth);
   });
 });

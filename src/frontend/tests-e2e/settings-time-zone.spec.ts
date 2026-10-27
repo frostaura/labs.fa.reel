@@ -190,11 +190,15 @@ test.describe("time zone on a phone", () => {
     await boot(page, { timeZone: null, effectiveTimeZone: "UTC" });
     const card = page.getByTestId("settings-time-zone");
     await card.scrollIntoViewIfNeeded();
-    const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+    // Overflow is scrollWidth past the layout width (clientWidth): WebKit's classic scrollbar makes
+    // the content box narrower than innerWidth (WS-9 CR-9).
+    const { scrollWidth, clientWidth, innerWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
       innerWidth: window.innerWidth,
     }));
-    expect(scrollWidth).toBe(innerWidth);
+    expect(scrollWidth).toBe(clientWidth);
+    expect(clientWidth).toBeLessThanOrEqual(innerWidth);
     const cardBox = await card.boundingBox();
     for (const id of ["time-zone-use-device", "time-zone-select"]) {
       const box = await page.getByTestId(id).boundingBox();

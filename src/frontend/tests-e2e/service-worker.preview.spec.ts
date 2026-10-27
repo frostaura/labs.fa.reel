@@ -180,7 +180,8 @@ test("after A signs out, B on the same browser offline is never shown A's Saved 
   // Not vacuous: the worker really holds A's Saved before the sign-out.
   await expect.poll(() => cachedSaved(page)).toEqual([A_PICK]);
 
-  await page.getByText(String(SESSION_FOUNDER.displayName)).click();
+  // By role, as shell-session does: since e02672a the name is also in an sr-only span, so text matches twice.
+  await page.getByRole("button", { name: `Account menu, ${SESSION_FOUNDER.displayName}` }).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/$/);
   await expect.poll(() => cachedSaved(page)).toBeNull();
