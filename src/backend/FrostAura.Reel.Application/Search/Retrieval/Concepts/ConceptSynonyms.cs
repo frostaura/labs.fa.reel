@@ -104,6 +104,116 @@ public static class ConceptSynonyms
             ["news"] = ["news"],
         };
 
+    /// <summary>
+    /// The genre slugs <paramref name="phrase"/> names when the WHOLE phrase is genre words — one
+    /// <see cref="GenreWords"/> key ("comedy", "sci-fi &amp; fantasy") or several joined by spaces and
+    /// "and"/"&amp;"/"or" ("romantic comedies", "comedy romance") — or null when any word is not a genre
+    /// word ("romantic comedy film noir" is not). Lower-case, normalised input.
+    /// </summary>
+    public static IReadOnlyList<string>? GenresNamedBy(string phrase)
+    {
+        if (string.IsNullOrWhiteSpace(phrase))
+        {
+            return null;
+        }
+
+        if (GenreSlugsOf(phrase) is { } whole)
+        {
+            return whole;
+        }
+
+        var tokens = phrase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var slugs = new List<string>();
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (tokens[i] is "and" or "&" or "or")
+            {
+                continue;
+            }
+
+            // Two-word genre names first ("science fiction", "talk show", "soap opera").
+            if (i + 1 < tokens.Length && GenreWords.TryGetValue($"{tokens[i]} {tokens[i + 1]}", out var pair))
+            {
+                slugs.AddRange(pair);
+                i++;
+                continue;
+            }
+
+            if (GenreSlugsOf(tokens[i]) is not { } single)
+            {
+                return null;
+            }
+
+            slugs.AddRange(single);
+        }
+
+        return slugs.Count == 0 ? null : [.. slugs.Distinct(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The genre slugs <paramref name="word"/> names as one <see cref="GenreWords"/> key, or as the
+    /// singular of one ("romances", "horrors", "fantasies") — null when it names none. A plural genre
+    /// word read as a keyword stem reached every label containing the genre's name (HREV1-RET-06).
+    /// Lower-case, normalised input.
+    /// </summary>
+    public static IReadOnlyList<string>? GenreSlugsOf(string word)
+    {
+        if (GenreWords.TryGetValue(word, out var slugs))
+        {
+            return slugs;
+        }
+
+        foreach (var singular in Singulars(word))
+        {
+            if (GenreWords.TryGetValue(singular, out slugs))
+            {
+                return slugs;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The synonym group of <paramref name="stem"/> or of its singular ("heists" → the heist group,
+    /// "robberies" → the same group), or just the stem. Retrying only the singular STEM kept "heist"
+    /// and lost "bank robbery" and "robbery": 258 founder titles where "heist" finds 522.
+    /// </summary>
+    public static IEnumerable<string> GroupOfAnyForm(string stem)
+    {
+        foreach (var form in Singulars(stem).Prepend(stem))
+        {
+            foreach (var group in Groups)
+            {
+                if (group.Contains(form, StringComparer.Ordinal))
+                {
+                    return group;
+                }
+            }
+        }
+
+        return [stem];
+    }
+
+    /// <summary>The singular forms an English plural <paramref name="word"/> may have, most specific first.</summary>
+    public static IEnumerable<string> Singulars(string word)
+    {
+        if (word.EndsWith("ies", StringComparison.Ordinal) && word.Length > 4)
+        {
+            yield return word[..^3] + "y";
+        }
+
+        if (word.EndsWith("es", StringComparison.Ordinal) && word.Length > 3)
+        {
+            yield return word[..^2];
+        }
+
+        if (word.EndsWith('s') && word.Length > 2)
+        {
+            yield return word[..^1];
+        }
+    }
+
     /// <summary>The synonym group containing <paramref name="stem"/>, or just the stem.</summary>
     public static IEnumerable<string> GroupOf(string stem)
     {

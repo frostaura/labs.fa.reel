@@ -173,17 +173,82 @@ public static partial class GenreStandIns
         };
 
     /// <summary>
+    /// Whole-word phrases in a title's OVERVIEW that stand in for a genre, on the same media as its
+    /// keyword stand-ins (<see cref="MediaFor"/>: TV for romance). Matched case-insensitively, bounded by
+    /// a non-letter or the text's edge ("in love" never matches "in lovely", "crush" never "crushed").
+    ///
+    /// <para><b>Why an overview arm.</b> Keywords alone left romance shows eligible under "no romance"
+    /// (HREV1-RET-09): Chesapeake Shores ("deals with an old romance") carries only "based on novel or
+    /// book" and "hometown"; Roswell, New Mexico's romance is a "teenage crush" in its overview, and the
+    /// rails served it. TMDB's TV taxonomy has no Romance, so the overview is the one other place the
+    /// catalogue says it.</para>
+    ///
+    /// <para><b>How the phrases were chosen (2026-10-27, ws3 slot copy, 31,546 films / 6,716 shows)</b> —
+    /// by the keyword lists' rule, scored on films where TMDB's genre is the answer: the share of films
+    /// whose overview carries the phrase that TMDB tags Romance, against the 0.46 bar (3× romance's
+    /// 0.154 base rate), on at least 10 films. romance 0.72 (365 films), romantic 0.61 (275), love story
+    /// 0.66 (93), in love 0.64 (833; it subsumes "falls/fell/falling in love", 0.62–0.73), crush 0.60
+    /// (100). Together: precision 0.64 on 1,591 films. "love affair" scores 0.47 and is left to the
+    /// keyword list, where it already is. On the founder snapshot the arm catches 103 shows the keyword
+    /// stand-ins miss; four read "crush" as a verb ("crush the Celtic heart of Britannia") — an
+    /// exclusion errs toward removing, so they stay out rather than the phrase.</para>
+    ///
+    /// <para><b>What it buys, measured the same way.</b> Scored on films, the stand-ins now catch 0.48 of
+    /// Romance-tagged films (keywords alone: 0.36) at precision 0.62 (0.65). Under the founder's twelve
+    /// conditions the soap alias and this arm take his eligible shows from 1,267 to 1,238 (7 soaps, 22
+    /// overview-only): Chesapeake Shores, The L Word, If Loving You Is Wrong, Roswell, New Mexico and the
+    /// 2014 Beauty and the Beast are out. The 2012 Beauty and the Beast stays — nothing in its genres,
+    /// keywords or overview says romance, which is this proxy's honest ceiling.</para>
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> OverviewPhrases =
+        new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+        {
+            ["romance"] = ["romance", "romantic", "love story", "in love", "crush"],
+        };
+
+    /// <summary>The overview phrases standing in for <paramref name="slug"/>; empty when none.</summary>
+    public static IReadOnlyList<string> OverviewPhrasesOf(string slug) =>
+        OverviewPhrases.TryGetValue(slug, out var phrases) ? phrases : [];
+
+    /// <summary>
+    /// The overview phrases as one case-insensitive regular expression, valid in both .NET and Postgres
+    /// (ARE) syntax. The boundaries name the newline explicitly, so a line break bounds a phrase even
+    /// where the engine runs newline-sensitively and a negated bracket does not match one (the
+    /// eligibility integration test pins a newline-bounded overview on Postgres); the text is matched with
+    /// <see cref="RegexOptions.IgnoreCase"/> (<c>~*</c>), so <c>[^a-z]</c> also excludes capitals.
+    /// </summary>
+    public static string OverviewRegex(IEnumerable<string> phrases) =>
+        $"(^|\\n|[^a-z])({string.Join('|', phrases.Select(Escape))})(\\n|[^a-z]|$)";
+
+    /// <summary>True when <paramref name="overview"/> carries an overview stand-in for <paramref name="slug"/> (in memory, any medium).</summary>
+    public static bool MatchesOverview(string slug, string? overview) =>
+        !string.IsNullOrEmpty(overview)
+        && OverviewPhrases.TryGetValue(slug, out var phrases)
+        && Regex.IsMatch(overview, OverviewRegex(phrases), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+
+    /// <summary>
     /// Genre slugs that count as another slug for an exclusion. TMDB's TV "Kids" folds into
     /// <c>family</c> at ingest (<see cref="TmdbGenres.TvIdToSlugs"/>), but a show synced from Trakt keeps
     /// Trakt's own genre slugs — <c>children</c> for family and <c>suspense</c> for thriller — so the
-    /// exclusion has to reach them by name.
+    /// exclusion has to reach them by name. A soap is serialised romance by definition and TMDB's
+    /// TV "Soap" (10766) is the only romance-shaped tag TV has, so "no romance" removes soaps too
+    /// (HREV1-RET-09: The L Word and If Loving You Is Wrong were eligible under it).
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string[]> Aliases =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
             ["family"] = ["children"],
+            ["romance"] = ["soap"],
             ["thriller"] = ["suspense"],
         };
+
+    /// <summary>
+    /// Alias slugs that are a genre in their own right as well as a kind of their target: a soap is
+    /// romance, but "no soaps" is a condition of its own, so the conditions editor still offers it as a
+    /// chip. The other aliases are only another vocabulary's NAME for their target and are folded into it.
+    /// </summary>
+    public static IReadOnlySet<string> AliasesWithTheirOwnChip { get; } =
+        new HashSet<string>(StringComparer.Ordinal) { "soap" };
 
     /// <summary>The alias slugs an exclusion of <paramref name="slug"/> also removes; empty when none.</summary>
     public static IReadOnlyList<string> AliasesOf(string slug) =>
@@ -276,7 +341,8 @@ public static partial class GenreStandIns
     /// the stand-in applies to (in memory). The in-memory twin of <see cref="CarriesStandIn"/>.
     /// </summary>
     public static bool Carries(Title title, string slug) =>
-        MediaFor(slug).Contains(title.MediaType) && title.Keywords.Any(k => Matches(slug, k));
+        MediaFor(slug).Contains(title.MediaType)
+        && (title.Keywords.Any(k => Matches(slug, k)) || MatchesOverview(slug, title.Overview));
 
     /// <summary>
     /// The SQL-translatable predicate "this title carries a stand-in keyword for
@@ -322,6 +388,21 @@ public static partial class GenreStandIns
             anyKeyword = anyKeyword is null ? match : Expression.OrElse(anyKeyword, match);
         }
 
+        // The overview arm (OverviewPhrases): "Overview" ~* pattern, null-guarded. Last in the OR so the
+        // label tests, which are cheaper, settle most titles first.
+        if (OverviewPhrases.TryGetValue(slug, out var phrases) && phrases.Count > 0)
+        {
+            var overview = Expression.Property(title, nameof(Title.Overview));
+            var inOverview = Expression.AndAlso(
+                Expression.NotEqual(overview, Expression.Constant(null, typeof(string))),
+                Expression.Call(
+                    IsMatchWithOptionsMethod,
+                    overview,
+                    Expression.Constant(OverviewRegex(phrases)),
+                    Expression.Constant(RegexOptions.IgnoreCase)));
+            anyKeyword = anyKeyword is null ? inOverview : Expression.OrElse(anyKeyword, inOverview);
+        }
+
         // Both media ⇒ no media test at all; one ⇒ an equality on MediaType.
         Expression body = media.Count == 2
             ? anyKeyword!
@@ -345,6 +426,9 @@ public static partial class GenreStandIns
 
     private static readonly MethodInfo IsMatchMethod =
         typeof(Regex).GetMethod(nameof(Regex.IsMatch), [typeof(string), typeof(string)])!;
+
+    private static readonly MethodInfo IsMatchWithOptionsMethod =
+        typeof(Regex).GetMethod(nameof(Regex.IsMatch), [typeof(string), typeof(string), typeof(RegexOptions)])!;
 
     private static readonly MethodInfo AnyMethod = typeof(Enumerable)
         .GetMethods(BindingFlags.Public | BindingFlags.Static)

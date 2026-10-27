@@ -102,6 +102,21 @@ public class GenreStandInsTests
             }
         }
 
+        // Overview fixtures (no stand-in keyword), so the compiled overview arm is held to the twin too.
+        string[] overviews =
+        [
+            "Deals with an old romance.", "A bromance.", "Is she\nin love?", "A teenage Crush.", "A crushed car.",
+        ];
+        foreach (var media in new[] { MediaType.Movie, MediaType.Show })
+        {
+            foreach (var overview in overviews)
+            {
+                titles.Add(new Title { Id = Guid.NewGuid(), MediaType = media, Name = "x", Keywords = ["detective"], Overview = overview });
+            }
+
+            titles.Add(new Title { Id = Guid.NewGuid(), MediaType = media, Name = "x", Keywords = [], Overview = null });
+        }
+
         foreach (var slug in GenreStandIns.Slugs)
         {
             var compiled = GenreStandIns.CarriesStandIn(slug).Compile();
@@ -111,8 +126,12 @@ public class GenreStandInsTests
             }
         }
 
-        // And the fixture is not vacuous: a romance-keyword show is caught, the same film is not.
+        // And the fixture is not vacuous: a romance-keyword show is caught, the same film is not, and an
+        // overview-only show is caught by the overview arm.
         Assert.Contains(titles, t => GenreStandIns.Carries(t, "romance"));
+        Assert.Equal(
+            3,
+            titles.Count(t => t.MediaType == MediaType.Show && t.Keywords.SequenceEqual(["detective"]) && GenreStandIns.Carries(t, "romance")));
         Assert.DoesNotContain(titles, t => t.MediaType == MediaType.Movie && GenreStandIns.Carries(t, "romance"));
     }
 
@@ -132,6 +151,65 @@ public class GenreStandInsTests
         Assert.False(GenreStandIns.ExcludedBy(childrenShow, "animation"));
         Assert.True(GenreStandIns.ExcludedBy(suspenseShow, "thriller"));
         Assert.False(GenreStandIns.ExcludedBy(suspenseShow, "horror"));
+    }
+
+    [Theory]
+    [InlineData("Ally deals with an old romance when she returns home.", true)]       // Chesapeake Shores
+    [InlineData("A teenage CRUSH who is now a police officer.", true)]                // Roswell, New Mexico; any case
+    [InlineData("Romantic entanglements in a Los Angeles circle.", true)]
+    [InlineData("A love story across three generations.", true)]
+    [InlineData("She falls in love with the prince.", true)]
+    [InlineData("Two strangers fell in love.", true)]
+    [InlineData("Is she\nin love with him?", true)]                                  // a newline is a boundary
+    [InlineData("A bromance between two detectives.", false)]                         // never inside a word
+    [InlineData("A lovely town with a dark secret.", false)]
+    [InlineData("A crushed car and a missing driver.", false)]
+    [InlineData("Necromancers rule the city.", false)]
+    [InlineData("A loving family moves to the coast.", false)]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    public void A_romance_overview_phrase_matches_as_a_whole_word_in_any_case(string? overview, bool expected)
+    {
+        // HREV1-RET-09: TV romance that TMDB tags in neither the taxonomy nor a keyword is often only
+        // in the overview. The phrases are whole words, bounded by any non-letter or the text's edge.
+        Assert.Equal(expected, GenreStandIns.MatchesOverview("romance", overview));
+    }
+
+    [Fact]
+    public void The_overview_arm_applies_only_on_the_media_whose_taxonomy_cannot_tag_the_genre()
+    {
+        var show = new Title { MediaType = MediaType.Show, Genres = ["drama"], Overview = "Deals with an old romance." };
+        var film = new Title { MediaType = MediaType.Movie, Genres = ["drama"], Overview = "Deals with an old romance." };
+        var horrorWordShow = new Title { MediaType = MediaType.Show, Genres = ["drama"], Overview = "A horror of a marriage." };
+
+        Assert.True(GenreStandIns.ExcludedBy(show, "romance"));
+        Assert.False(GenreStandIns.ExcludedBy(film, "romance"));   // TMDB tags films with romance itself
+        Assert.False(GenreStandIns.ExcludedBy(show, "horror"));
+        Assert.False(GenreStandIns.ExcludedBy(horrorWordShow, "horror"));   // only romance has overview phrases
+
+        // Every slug with overview phrases also has keyword patterns, so it is in Slugs and every arm
+        // that walks Slugs (the eligibility builder, the truth SQL generator) reaches it.
+        Assert.All(GenreStandIns.OverviewPhrases.Keys, slug => Assert.Contains(slug, GenreStandIns.Slugs));
+    }
+
+    [Fact]
+    public void A_soap_is_excluded_by_no_romance_yet_keeps_its_own_chip()
+    {
+        // HREV1-RET-09: The L Word (drama, soap) and If Loving You Is Wrong (soap) were eligible under
+        // "no romance". Soap is TV's one romance-shaped tag.
+        var soapShow = new Title { MediaType = MediaType.Show, Genres = ["drama", "soap"] };
+        var dramaShow = new Title { MediaType = MediaType.Show, Genres = ["drama"] };
+
+        Assert.True(GenreStandIns.ExcludedBy(soapShow, "romance"));
+        Assert.False(GenreStandIns.ExcludedBy(dramaShow, "romance"));
+        Assert.False(GenreStandIns.ExcludedBy(soapShow, "horror"));
+        Assert.True(GenreStandIns.ExcludedBy(soapShow, "soap"));
+        Assert.Contains("soap", GenreStandIns.AliasesOf("romance"));
+
+        // "no soaps" stays a condition of its own; children and suspense are only other names.
+        Assert.Contains("soap", GenreStandIns.AliasesWithTheirOwnChip);
+        Assert.DoesNotContain("children", GenreStandIns.AliasesWithTheirOwnChip);
+        Assert.DoesNotContain("suspense", GenreStandIns.AliasesWithTheirOwnChip);
     }
 
     [Fact]

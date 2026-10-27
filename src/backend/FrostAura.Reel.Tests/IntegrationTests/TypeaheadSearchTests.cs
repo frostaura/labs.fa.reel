@@ -128,6 +128,135 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// HREV1-RET-11: "bluey" listed five Bluey items to an account excluding animation while Bluey itself
+    /// (TMDB genres Animation, Comedy, Family, Kids) was hidden — TMDB tags the spin-offs sparsely (Kids
+    /// only, Family only, nothing at all), so their rows passed. A row TMDB left untagged, or one that
+    /// extends a genre-hidden row's name with a subset of its genres, is now hidden and counted; a row
+    /// with a genre its namesake lacks (Bluey (2015), a drama) is a different title and is judged on
+    /// its own. Without an ExcludeGenre rule nothing is inferred. A TV row whose overview carries a
+    /// romance stand-in is hidden under "no romance" (HREV1-RET-09).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_global_leg_hides_sparsely_tagged_spin_offs_of_a_title_an_excluded_genre_hides(bool excludeGenres)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = Token();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.Language, "en");
+        if (excludeGenres)
+        {
+            await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "animation");
+            await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        }
+
+        var tmdb = new SearchOnlyTmdbClient
+        {
+            ShowResults =
+            [
+                Row(82728, false, token, [16, 35, 10751, 10762], popularity: 90m),
+                Row(500001, false, $"{token} Book Reads", [10762], popularity: 80m),
+                Row(500003, false, $"{token}: Turtleboy (Auslan)", [], popularity: 60m),
+                Row(500004, false, token, [18], popularity: 50m),
+                Row(500005, false, $"{token} Nights", [18], popularity: 40m, overview: "A widow and her teenage crush meet again."),
+            ],
+            MovieResults =
+            [
+                Row(500002, true, $"{token}'s Big Play", [10751], popularity: 70m),
+                Row(500006, true, $"{token} Heist", [80], popularity: 30m),
+            ],
+        };
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var global = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).GlobalAsync(accountId, tmdb, token, default);
+
+        if (excludeGenres)
+        {
+            // Bluey (2015) carries drama, which Bluey lacks; the heist film carries crime. Hidden: Bluey,
+            // its three spin-offs and the romance-overview show.
+            Assert.Equal([500004L, 500006L], global.Rows.Select(r => r.TmdbId));
+            Assert.Equal(5, global.HiddenByConditions);
+        }
+        else
+        {
+            Assert.Equal([82728L, 500001L, 500002L, 500003L, 500004L, 500005L], global.Rows.Select(r => r.TmdbId));
+            Assert.Equal(0, global.HiddenByConditions);
+        }
+    }
+
+    /// <summary>
+    /// HREV1-RET-11 (refuted round 2): typing past the namesake ("bluey book", "bluey's big play") left
+    /// Bluey itself out of the word-start-filtered rows, so nothing was hidden by genre and the sparse
+    /// spin-offs were listed again. The namesake is judged from every row TMDB returned, shown or not;
+    /// a row with a genre the namesake lacks is still judged on its own.
+    /// </summary>
+    [Theory]
+    [InlineData(" book", new long[0], 1)]
+    [InlineData("'s big play", new long[0], 1)]
+    [InlineData(": turtleboy", new long[0], 1)]
+    [InlineData(" heist", new[] { 500006L }, 0)]
+    public async Task Typing_past_a_genre_hidden_namesake_still_hides_its_sparse_spin_offs(string suffix, long[] shown, int hidden)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = Token();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.Language, "en");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "animation");
+        var tmdb = new SearchOnlyTmdbClient
+        {
+            ShowResults =
+            [
+                Row(82728, false, token, [16, 35, 10751, 10762], popularity: 90m),
+                Row(500001, false, $"{token} Book Reads", [10762], popularity: 80m),
+                Row(500003, false, $"{token}: Turtleboy (Auslan)", [], popularity: 60m),
+            ],
+            MovieResults =
+            [
+                Row(500002, true, $"{token}'s Big Play", [10751], popularity: 70m),
+                Row(500006, true, $"{token} Heist", [80], popularity: 30m),
+            ],
+        };
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var global = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).GlobalAsync(accountId, tmdb, token + suffix, default);
+
+        Assert.Equal(shown, global.Rows.Select(r => r.TmdbId));
+        Assert.Equal(hidden, global.HiddenByConditions);
+    }
+
+    [Fact]
+    public void A_row_extends_its_namesake_only_at_a_word_boundary_and_with_a_subset_of_its_genres()
+    {
+        var rules = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { AccountId = Guid.Empty, Kind = FilterKind.ExcludeGenre, Value = "animation" },
+        ]);
+        var bluey = Row(1, false, "Bluey", [16, 35, 10751, 10762], popularity: 1m);
+        IReadOnlyList<TmdbListItem> hidden = [bluey];
+
+        Assert.True(TypeaheadSearch.UnprovenUnderGenreRules(rules, Row(2, false, "Bluey: Turtleboy", [10762], 1m), hidden));
+        Assert.True(TypeaheadSearch.UnprovenUnderGenreRules(rules, Row(3, true, "Blüey’s Big Play", [10751], 1m), hidden));   // accents folded
+        Assert.False(TypeaheadSearch.UnprovenUnderGenreRules(rules, Row(4, false, "Blueyonder", [10762], 1m), hidden));      // not a word boundary
+        Assert.False(TypeaheadSearch.UnprovenUnderGenreRules(rules, Row(5, false, "Bluey Nights", [10762, 18], 1m), hidden)); // drama is new
+        Assert.False(TypeaheadSearch.UnprovenUnderGenreRules(rules, bluey, hidden));                                       // never its own sibling
+        Assert.True(TypeaheadSearch.UnprovenUnderGenreRules(rules, Row(6, true, "Anything", [], 1m), []));                  // untagged fails closed
+        Assert.False(TypeaheadSearch.UnprovenUnderGenreRules(FilterRuleSet.FromRows([]), Row(7, true, "Anything", [], 1m), []));
+    }
+
+    private static TmdbListItem Row(long id, bool isMovie, string name, int[] genreIds, decimal popularity, string overview = "An overview.") =>
+        new(id, isMovie, name, "/p.jpg", null, overview, popularity, 7m, 100,
+            new DateTime(2015, 5, 14, 0, 0, 0, DateTimeKind.Utc), genreIds, "en");
+
+    /// <summary>
     /// R1-07, the exclusion matrix's maturity cell on both legs. Under a PG-13 ceiling an R-rated
     /// catalogue title appears in neither leg and is counted once (by the local leg); a TMDB-only row
     /// carries no certification, so under a ceiling that does not admit unrated titles it is held out

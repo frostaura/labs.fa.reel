@@ -10,13 +10,17 @@ import {
 import { enterTarget, hiddenLine, peopleFirst, shouldQueryGlobal, strongMatchCount } from "../../lib/globalTypeahead";
 import { mintHandoff } from "../../lib/askReel/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
-import PredictedRatingBadge from "../rec/PredictedRatingBadge";
+import { ScoreChip } from "../rec/ScoreBadges";
 
 /**
  * One box, two modes: typing streams instant typeahead matches (personal lens — predicted
- * ratings, watched badges; the local matches drop titles the conditions exclude but ignore the
- * "for you" minimum, and the global leg, `?global=1`, applies no conditions by design); the pinned
- * "Ask Reel" row (or Enter) runs natural-language search. A hint, never a silent mode switch.
+ * ratings, watched badges); the pinned "Ask Reel" row (or Enter) runs natural-language search. A
+ * hint, never a silent mode switch. BOTH legs honour the standing conditions (FD-5): the local
+ * matches drop titles the conditions exclude (but ignore the "for you" minimum — a lookup is not a
+ * recommendation), and the global TMDB leg, `?global=1`, hides rows the conditions rule out —
+ * judged by the catalogue title when there is one, else by the row's own genres, language, rating,
+ * year and overview, failing closed on an untagged row or a sparsely tagged spin-off of a hidden
+ * title — and counts them on the "hidden by your conditions" line.
  *
  * Spec §7 asks for title AND person results, and the dropdown is a proper combobox: Up/Down move
  * an active option, Enter takes it, Escape dismisses. Before that there was no keyboard path to a
@@ -27,7 +31,9 @@ import PredictedRatingBadge from "../rec/PredictedRatingBadge";
  * people group leads when it answers better ("nolan"), Enter with nothing active OPENS an exact
  * match ("inception" + Enter never spends an Ask Reel turn — it asks for the lookup of what was
  * typed if it has not answered yet), and anything the conditions hide is counted on a line instead
- * of silently missing (FD-5). The predicted-rating badge is fetched after the rows.
+ * of silently missing (FD-5). The predicted rating is fetched after the rows and drawn through
+ * `ScoreChip`, so it carries the account's measured band ("7.5 ±1.6 for you") exactly as every other
+ * surface prints it (FD-4: every displayed number carries its measured band).
  */
 
 /** How long Enter waits for the lookup of the typed text before falling back to Ask Reel. */
@@ -332,7 +338,7 @@ export default function SearchBox() {
                         </span>
                       )}
                       {predictedFor(title) != null && !title.isFullyWatched && (
-                        <PredictedRatingBadge rating={predictedFor(title)!} />
+                        <ScoreChip predictedRating={predictedFor(title)} />
                       )}
                     </Link>
                   ))}
@@ -373,7 +379,7 @@ export default function SearchBox() {
                         </span>
                       )}
                       {predictedFor(title) != null && !title.isFullyWatched && (
-                        <PredictedRatingBadge rating={predictedFor(title)!} />
+                        <ScoreChip predictedRating={predictedFor(title)} />
                       )}
                     </Link>
                   ))}

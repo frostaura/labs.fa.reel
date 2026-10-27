@@ -313,13 +313,24 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
             ["show-bromance"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["bromance"]),
             ["show-anime-inspired"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["anime inspired"]),
             ["show-clean"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["heist"]),
+            // HREV1-RET-09. Out: TV's Soap genre is romance; a romance phrase in a show's overview stands in.
+            ["show-soap"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["drama", "soap"]),
+            ["show-overview-romance"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["hometown"], overview: "She deals with an old ROMANCE."),
+            ["show-overview-newline"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["hometown"], overview: "Two doctors.\nIn love, at last."),
+            // In: the phrase inside another word, and the same overview on a film (TMDB tags films itself).
+            ["show-overview-lovely"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["hometown"], overview: "A lovely bromance; a crushed car."),
+            ["movie-overview-romance"] = await SeedTitleAsync(keywords: ["hometown"], overview: "She deals with an old romance."),
         };
 
         var (builder, truth) = await BothAsync(account, t.Values);
 
         Assert.Equal(builder, truth);
         Assert.Equal(
-            new[] { "movie-teenage-romance", "movie-period-drama", "show-bromance", "show-anime-inspired", "show-clean" }.Select(k => t[k]).ToHashSet(),
+            new[]
+            {
+                "movie-teenage-romance", "movie-period-drama", "show-bromance", "show-anime-inspired", "show-clean",
+                "show-overview-lovely", "movie-overview-romance",
+            }.Select(k => t[k]).ToHashSet(),
             truth);
     }
 

@@ -157,5 +157,15 @@ public class TmdbDiscoveryPlanTests
         var allowList = FilterRuleSet.Create(null, ["horror"], null, null, null, null, null);
         Assert.True(StandingDiscoverPlan.Admits(allowList, Row(genres: [27])));
         Assert.False(StandingDiscoverPlan.Admits(allowList, Row(genres: [18])));
+
+        // HREV1-RET-09: under "no romance" a TV row is out by TMDB's Soap genre (romance's alias) and by
+        // a romance phrase in its overview; a FILM with the same overview is judged by its genre ids,
+        // because TMDB's movie taxonomy can say romance itself.
+        var noRomance = FilterRuleSet.Create(["romance"], null, null, null, null, null, null);
+        Assert.False(StandingDiscoverPlan.Admits(noRomance, Row(genres: [10766, 18], movie: false)));
+        Assert.False(StandingDiscoverPlan.Admits(noRomance, Row(movie: false, overview: "Deals with an old romance.")));
+        Assert.True(StandingDiscoverPlan.Admits(noRomance, Row(movie: true, overview: "Deals with an old romance.")));
+        Assert.True(StandingDiscoverPlan.Admits(noRomance, Row(movie: false, overview: "A bromance on the force.")));
+        Assert.True(StandingDiscoverPlan.Admits(rules, Row(genres: [10766], movie: false)));   // soap alone is not comedy/family
     }
 }

@@ -16,8 +16,8 @@ SELECT t."Id"
    -- title carries instead (children for family, suspense for thriller); by a composite of catalogue facts
    -- (anime is animation whose original language is Japanese, on both media); or, on a medium whose TMDB taxonomy
    -- has no id for the genre (TV for romance, horror, history, thriller, music; both media for anime and
-   -- musical), by a stand-in keyword label. An Exact label matches the whole label; a Word stem matches as
-   -- a whole word or phrase inside a label ("teenage romance", never "bromance"). The three VALUES lists are
+   -- musical), by a stand-in keyword label or, for romance, a stand-in phrase in the overview. An Exact label matches the whole label; a Word stem matches as
+   -- a whole word or phrase inside a label ("teenage romance", never "bromance"). The four VALUES lists are
    -- the rule's DATA (which aliases, which composites, which labels stand in on which media) and are generated from GenreStandIns by
    -- StandInTruthSqlTests (REEL_REGENERATE_EVAL_SQL=1) so they cannot drift; the matching is written here.
    AND NOT EXISTS (SELECT 1 FROM "ContentFilters" f
@@ -26,6 +26,7 @@ SELECT t."Id"
                            OR EXISTS (SELECT 1 FROM (
                                       -- BEGIN GENERATED genre-aliases
                                       VALUES ('family', ARRAY['children']::text[]),
+                                             ('romance', ARRAY['soap']::text[]),
                                              ('thriller', ARRAY['suspense']::text[])
                                       -- END GENERATED genre-aliases
                                       ) a (slug, genres)
@@ -87,7 +88,16 @@ SELECT t."Id"
                                        WHERE s.slug = f."Value" AND t."MediaType" = ANY (s.media)
                                          AND (s.exact && t."Keywords"
                                               OR EXISTS (SELECT 1 FROM unnest(t."Keywords") k, unnest(s.words) w
-                                                          WHERE strpos(' ' || k || ' ', ' ' || w || ' ') > 0)))))
+                                                          WHERE strpos(' ' || k || ' ', ' ' || w || ' ') > 0)))
+                           -- An overview phrase (romance on TV): the phrase as a whole word in the overview, any case,
+                           -- bounded by a non-letter or the text's edge ("in love", never "in lovely").
+                           OR EXISTS (SELECT 1 FROM (
+                                      -- BEGIN GENERATED genre-overview-phrases
+                                      VALUES ('romance', ARRAY['Show']::text[], ARRAY['romance', 'romantic', 'love story', 'in love', 'crush']::text[])
+                                      -- END GENERATED genre-overview-phrases
+                                      ) o (slug, media, phrases)
+                                       WHERE o.slug = f."Value" AND t."MediaType" = ANY (o.media)
+                                         AND t."Overview" ~* ('(^|[^a-z])(' || array_to_string(o.phrases, '|') || ')([^a-z]|$)'))))
    -- ExcludeKeyword: not in the name, the overview or any TMDB keyword phrase.
    AND NOT EXISTS (SELECT 1 FROM "ContentFilters" f
                     WHERE f."AccountId" = :'account' AND f."Kind" = 'ExcludeKeyword'

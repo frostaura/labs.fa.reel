@@ -31,10 +31,18 @@ public interface IConceptResolver
 /// <item>Normalise: lower-case, drop the media words ("movies", "shows", "series") and leading
 /// articles. "Ninja movies" and "a ninja film" are the same concept.</item>
 /// <item>Stems: the words, the planner's labels, and every <see cref="ConceptSynonyms"/> group either
-/// belongs to. Genre words ("horror", "sci-fi", "Sci-Fi &amp; Fantasy") add genre slugs.</item>
+/// belongs to, or its singular belongs to ("heists" → the heist group). Genre words ("horror",
+/// "romances", "sci-fi", "Sci-Fi &amp; Fantasy", and phrases made only of them: "romantic comedy")
+/// add genre slugs INSTEAD of stems: a genre is its tag (plus aliases and stand-ins where a taxonomy
+/// cannot tag it), never a keyword that merely contains the word ("teen comedy" is not the comedy
+/// genre).</item>
 /// <item>Expand through <see cref="KeywordVocabulary"/>. A stem that reaches nothing is retried
-/// singular ("heists" → "heist", "witches" → "witch"); a phrase that reaches nothing falls back to
-/// its words, each with its synonyms ("ai robot" → AI, robot, android), OR-ed.</item>
+/// singular ("witches" → "witch"); a phrase that reaches nothing falls back to its words, each with
+/// its synonyms ("ai robot" → AI, robot, android), OR-ed — except its genre words, which stay
+/// genres.</item>
+/// <item>Several genres named by one phrase AND: resolving a request's constraints splits them into
+/// a concept each ("romantic comedy" → romance, comedy; "romantic heist" → heist, romance). "Or"
+/// keeps them in one concept, OR-ed.</item>
 /// <item>Only when no stem reached any label and no genre was named: the nearest labels by
 /// embedding (the precomputed <c>KeywordLabels</c> table), within <see cref="NearestLabelDistance"/>,
 /// bounded by <see cref="EmbedBudget"/>.</item>
@@ -81,6 +89,13 @@ public sealed partial class ConceptResolver(
     };
 
     /// <inheritdoc />
+    /// <remarks>
+    /// A phrase whose genre words were peeled off in the phrase fallback becomes one concept per genre
+    /// word beside its topic, so they AND: "romantic comedy" is a romance AND a comedy (the reducer's
+    /// own one-concept-per-genre reading of "romcoms"), never every comedy plus every romance, and
+    /// "romantic heist" is a heist that is also a romance. The first concept keeps the user's words, so
+    /// the reply still names the topic as they said it.
+    /// </remarks>
     public async Task<HardConstraints> ResolveAsync(HardConstraints hard, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(hard);
@@ -92,14 +107,49 @@ public sealed partial class ConceptResolver(
         var resolved = new List<ConceptTerm>(hard.Concepts.Count);
         foreach (var concept in hard.Concepts)
         {
-            resolved.Add(await ResolveAsync(concept, ct));
+            var resolution = await ResolveCoreAsync(concept, ct);
+            resolved.AddRange(Split(resolution));
         }
 
         return hard with { Concepts = resolved };
     }
 
     /// <inheritdoc />
-    public async Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct)
+    /// <remarks>
+    /// One concept ORs everything it resolved to, so a phrase's genre words are among its
+    /// <see cref="ConceptTerm.Genres"/>; <see cref="ResolveAsync(HardConstraints, CancellationToken)"/>
+    /// splits them into concepts of their own.
+    /// </remarks>
+    public async Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct) =>
+        (await ResolveCoreAsync(concept, ct)).Term;
+
+    private static IEnumerable<ConceptTerm> Split(Resolution resolution)
+    {
+        var (term, phraseGenres) = resolution;
+        if (phraseGenres.Count == 0)
+        {
+            yield return term;
+            yield break;
+        }
+
+        var rest = phraseGenres.AsEnumerable();
+        if (term.CatalogueLabels.Count > 0)
+        {
+            yield return term with { Genres = [] };
+        }
+        else
+        {
+            yield return term with { Genres = phraseGenres[0].Slugs };
+            rest = rest.Skip(1);
+        }
+
+        foreach (var genre in rest)
+        {
+            yield return new ConceptTerm(genre.Word, [], genre.Slugs, []);
+        }
+    }
+
+    private async Task<Resolution> ResolveCoreAsync(ConceptTerm concept, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(concept);
         var words = Normalise(concept.UserWords);
@@ -109,15 +159,47 @@ public sealed partial class ConceptResolver(
             .ToList();
 
         var genres = concept.Genres.Select(g => g.Trim().ToLowerInvariant()).Where(g => g.Length > 0).ToList();
+        var givenGenres = genres.Count > 0;
+        var genreSeeds = new HashSet<string>(StringComparer.Ordinal);
+        var phraseGenres = new List<GenreWord>();
         foreach (var seed in seeds)
         {
-            if (ConceptSynonyms.GenreWords.TryGetValue(seed, out var slugs))
+            if (ConceptSynonyms.GenreSlugsOf(seed) is { } slugs)
             {
                 genres.AddRange(slugs);
+                genreSeeds.Add(seed);
+                continue;
+            }
+
+            // A phrase made only of genre words ("romantic comedy", "comedy romance", "horror western")
+            // is those genres whether or not some label happens to spell it: a keyword "romantic comedy"
+            // on a title eligibility does not call a comedy is the two-definitions defect again. A
+            // concept that already carries its genres (one this resolver split, resolved again) keeps
+            // them; the words add nothing.
+            var named = GenreWordsIn(seed, pluralAware: true, out var others);
+            if (named.Count > 0 && others.All(IsConjunction))
+            {
+                genreSeeds.Add(seed);
+                if (!givenGenres)
+                {
+                    genres.AddRange(named.SelectMany(n => n.Slugs));
+                    if (seed == words && concept.CatalogueLabels.Count == 0 && !others.Contains("or"))
+                    {
+                        phraseGenres.AddRange(named);
+                    }
+                }
             }
         }
 
-        var stems = seeds.SelectMany(ConceptSynonyms.GroupOf).Distinct(StringComparer.Ordinal).ToList();
+        // A seed that names a genre is matched as the genre — the tag, and the alias genres and
+        // stand-ins on the media that cannot tag it, exactly as an exclusion reads it — never as a
+        // keyword stem. As a stem "comedy" reached every label containing the word, so "teen comedy"
+        // made a family sci-fi film one of the founder's "unseen comedies" while eligibility (rightly)
+        // did not call it a comedy, and one reply counted with two definitions (HREV1-RET-06).
+        var stems = seeds.Where(s => !genreSeeds.Contains(s))
+            .SelectMany(ConceptSynonyms.GroupOfAnyForm)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
         var labels = await vocabulary.LabelsAsync(ct);
         var exact = new HashSet<string>(StringComparer.Ordinal);
         var matchedStems = new List<string>(stems.Count);
@@ -131,14 +213,17 @@ public sealed partial class ConceptResolver(
         // A phrase no label carries ("ai robot", "haunted lighthouse") falls back to its words, each
         // with its synonym group, OR-ed: the facet arm then finds titles about any of them and the
         // judge decides which answer the whole phrase. Only words of three or more letters that are
-        // not filler; never a single-word concept, which has nothing to split.
+        // not filler; never a single-word concept, which has nothing to split. A word that names a
+        // genre is the genre here too, never a stem — "romantic heist" is a heist that is a romance
+        // (only exact genre words: "wars" in "star wars" is not the war genre).
+        var lookFor = genres.Count == 0 ? words : string.Empty;
         if (exact.Count == 0 && genres.Count == 0 && words.Contains(' ', StringComparison.Ordinal))
         {
-            foreach (var word in words.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                         .Where(w => (w.Length >= 3 || ConceptSynonyms.Groups.Any(g => g.Contains(w, StringComparer.Ordinal)))
-                             && !LeadingFiller.Contains(w) && !PhraseFiller.Contains(w)))
+            var named = GenreWordsIn(words, pluralAware: false, out var rest);
+            foreach (var word in rest.Where(w => (w.Length >= 3 || ConceptSynonyms.Groups.Any(g => g.Contains(w, StringComparer.Ordinal)))
+                         && !LeadingFiller.Contains(w) && !PhraseFiller.Contains(w)))
             {
-                foreach (var stem in ConceptSynonyms.GroupOf(word))
+                foreach (var stem in ConceptSynonyms.GroupOfAnyForm(word))
                 {
                     var reached = ReachedOrSingular(labels, stem, out var used);
                     if (reached.Count > 0)
@@ -148,11 +233,25 @@ public sealed partial class ConceptResolver(
                     }
                 }
             }
+
+            if (named.Count > 0)
+            {
+                genres.AddRange(named.SelectMany(n => n.Slugs));
+                lookFor = string.Join(' ', rest.Where(w => !LeadingFiller.Contains(w) && !PhraseFiller.Contains(w)));
+
+                // "romance or heist" asks for either: its genre stays OR-ed inside the one concept.
+                if (!rest.Contains("or"))
+                {
+                    phraseGenres.AddRange(named);
+                }
+            }
         }
 
-        if (exact.Count == 0 && genres.Count == 0 && words.Length > 0)
+        // The embedding fallback reads what is left to find labels for: the whole phrase, or the words
+        // beside its genre words ("romantic lighthouse" → "lighthouse"). A genre concept has nothing left.
+        if (exact.Count == 0 && lookFor.Length > 0)
         {
-            foreach (var label in await NearestLabelsAsync(words, ct))
+            foreach (var label in await NearestLabelsAsync(lookFor, ct))
             {
                 matchedStems.Add(label);
                 exact.Add(label);
@@ -167,12 +266,48 @@ public sealed partial class ConceptResolver(
         // A concept the catalogue has no label for and no genre for keeps its own words as the stem,
         // so the name and full-text arms can still try; its exact set is empty, not null, so the
         // keyword arm matches nothing rather than every label containing a stray stem.
-        return new ConceptTerm(
+        // A pure genre concept has no stems at all: its words are the genre, which the genre arm
+        // matches, so they are not offered to the name or full-text arms as a phrase either.
+        var pureGenre = genres.Count > 0 && (genreSeeds.Count == seeds.Count || (lookFor.Length == 0 && phraseGenres.Count > 0));
+        var term = new ConceptTerm(
             concept.UserWords,
-            finalStems.Count > 0 ? finalStems : [words],
+            finalStems.Count > 0 ? finalStems : pureGenre ? [] : [lookFor.Length > 0 ? lookFor : words],
             [.. genres.Distinct(StringComparer.Ordinal)],
             exactLabels);
+        return new Resolution(term, [.. phraseGenres.DistinctBy(p => string.Join(',', p.Slugs), StringComparer.Ordinal)]);
     }
+
+    /// <summary>
+    /// The genre words in <paramref name="phrase"/>, two-word names first ("science fiction", "soap
+    /// opera"), with every other token in <paramref name="others"/>. <paramref name="pluralAware"/>
+    /// also reads a plural of a genre word ("romances").
+    /// </summary>
+    private static List<GenreWord> GenreWordsIn(string phrase, bool pluralAware, out List<string> others)
+    {
+        var named = new List<GenreWord>();
+        others = [];
+        var tokens = phrase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (i + 1 < tokens.Length && ConceptSynonyms.GenreWords.TryGetValue($"{tokens[i]} {tokens[i + 1]}", out var pair))
+            {
+                named.Add(new GenreWord($"{tokens[i]} {tokens[i + 1]}", pair));
+                i++;
+            }
+            else if ((pluralAware ? ConceptSynonyms.GenreSlugsOf(tokens[i]) : ConceptSynonyms.GenreWords.GetValueOrDefault(tokens[i])) is { } slugs)
+            {
+                named.Add(new GenreWord(tokens[i], slugs));
+            }
+            else
+            {
+                others.Add(tokens[i]);
+            }
+        }
+
+        return named;
+    }
+
+    private static bool IsConjunction(string token) => token is "and" or "&" or "or";
 
     /// <summary>
     /// The user's words as a stem: lower-cased, punctuation other than in-word hyphens, apostrophes and
@@ -206,7 +341,7 @@ public sealed partial class ConceptResolver(
             return reached;
         }
 
-        foreach (var singular in Singulars(stem))
+        foreach (var singular in ConceptSynonyms.Singulars(stem))
         {
             reached = KeywordVocabulary.Expand(labels, singular).Select(l => l.Label).ToList();
             if (reached.Count > 0)
@@ -217,24 +352,6 @@ public sealed partial class ConceptResolver(
         }
 
         return reached;
-    }
-
-    private static IEnumerable<string> Singulars(string stem)
-    {
-        if (stem.EndsWith("ies", StringComparison.Ordinal) && stem.Length > 4)
-        {
-            yield return stem[..^3] + "y";
-        }
-
-        if (stem.EndsWith("es", StringComparison.Ordinal) && stem.Length > 3)
-        {
-            yield return stem[..^2];
-        }
-
-        if (stem.EndsWith('s') && stem.Length > 2)
-        {
-            yield return stem[..^1];
-        }
     }
 
     private async Task<IReadOnlyList<string>> NearestLabelsAsync(string words, CancellationToken ct)
@@ -265,4 +382,10 @@ public sealed partial class ConceptResolver(
 
     [GeneratedRegex(@"[^\p{L}\p{N}&'\-]+", RegexOptions.CultureInvariant)]
     private static partial Regex NonWord();
+
+    /// <summary>A word of a phrase that names genres ("romantic" → romance).</summary>
+    private sealed record GenreWord(string Word, IReadOnlyList<string> Slugs);
+
+    /// <summary>A resolved concept and the genre words of its phrase, each a requirement of its own.</summary>
+    private sealed record Resolution(ConceptTerm Term, IReadOnlyList<GenreWord> PhraseGenres);
 }

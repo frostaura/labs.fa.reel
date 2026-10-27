@@ -15,7 +15,7 @@ SELECT DISTINCT t."Id", x."Kind", x."Value"
   FROM "Titles" t
   CROSS JOIN LATERAL (
         -- ExcludeGenre: one row per excluded genre the title carries — by its genre tags, an alias genre, a
-        -- composite (anime: animation in Japanese) or a stand-in keyword on a medium that cannot tag the genre (the arm of `_eligible.sql`, which explains
+        -- composite (anime: animation in Japanese) or a stand-in keyword or overview phrase on a medium that cannot tag the genre (the arm of `_eligible.sql`, which explains
         -- the matching; the VALUES lists are generated from GenreStandIns by StandInTruthSqlTests).
         SELECT 'ExcludeGenre' AS "Kind", lower(btrim(f."Value")) AS "Value"
           FROM "ContentFilters" f
@@ -24,6 +24,7 @@ SELECT DISTINCT t."Id", x."Kind", x."Value"
                 OR EXISTS (SELECT 1 FROM (
                            -- BEGIN GENERATED genre-aliases
                            VALUES ('family', ARRAY['children']::text[]),
+                                  ('romance', ARRAY['soap']::text[]),
                                   ('thriller', ARRAY['suspense']::text[])
                            -- END GENERATED genre-aliases
                            ) a (slug, genres)
@@ -85,7 +86,14 @@ SELECT DISTINCT t."Id", x."Kind", x."Value"
                             WHERE s.slug = f."Value" AND t."MediaType" = ANY (s.media)
                               AND (s.exact && t."Keywords"
                                    OR EXISTS (SELECT 1 FROM unnest(t."Keywords") k, unnest(s.words) w
-                                               WHERE strpos(' ' || k || ' ', ' ' || w || ' ') > 0))))
+                                               WHERE strpos(' ' || k || ' ', ' ' || w || ' ') > 0)))
+                OR EXISTS (SELECT 1 FROM (
+                           -- BEGIN GENERATED genre-overview-phrases
+                           VALUES ('romance', ARRAY['Show']::text[], ARRAY['romance', 'romantic', 'love story', 'in love', 'crush']::text[])
+                           -- END GENERATED genre-overview-phrases
+                           ) o (slug, media, phrases)
+                            WHERE o.slug = f."Value" AND t."MediaType" = ANY (o.media)
+                              AND t."Overview" ~* ('(^|[^a-z])(' || array_to_string(o.phrases, '|') || ')([^a-z]|$)')))
         UNION ALL
         -- ExcludeKeyword: in the name, the overview or any TMDB keyword phrase.
         SELECT 'ExcludeKeyword', lower(btrim(f."Value"))

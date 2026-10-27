@@ -7,7 +7,8 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 
 /// <summary>
 /// The genre-chip counts on real Postgres (H-7): chips come from the catalogue, every count is what
-/// an exclusion of that chip removes, aliases fold into their target, anime is animation in Japanese,
+/// an exclusion of that chip removes, aliases fold into their target (soap, a genre of its own, keeps a
+/// chip too), anime is animation in Japanese,
 /// and a chip under the bar is listed but not offered. Counts are catalogue-wide, so each assertion
 /// is a DELTA over what this test seeded rather than an absolute.
 /// </summary>
@@ -31,6 +32,9 @@ public class FilterChipCountsTests(PostgresFixture fixture)
         await SeedAsync(MediaType.Show, ["suspense"]);
         await SeedAsync(MediaType.Show, ["drama"], keywords: ["office romance"]);
         await SeedAsync(MediaType.Movie, ["drama"], keywords: ["office romance"]);
+        await SeedAsync(MediaType.Show, ["drama", "soap"]);
+        await SeedAsync(MediaType.Show, ["drama"], overview: "She deals with an old romance.");
+        await SeedAsync(MediaType.Movie, ["drama"], overview: "She deals with an old romance.");
 
         var after = await CountAsync();
 
@@ -43,9 +47,12 @@ public class FilterChipCountsTests(PostgresFixture fixture)
         // Trakt's suspense slug counts under thriller and is never a chip of its own.
         Assert.Equal(1, Shows(after, "thriller") - Shows(before, "thriller"));
         Assert.Null(Chip(after, "suspense"));
-        // The romance stand-in reaches the show (TV has no romance genre), not the film.
-        Assert.Equal(1, Shows(after, "romance") - Shows(before, "romance"));
+        // The romance stand-ins reach the shows (TV has no romance genre) — the keyword, the soap alias
+        // and the overview phrase (HREV1-RET-09) — never the films, which TMDB tags itself.
+        Assert.Equal(3, Shows(after, "romance") - Shows(before, "romance"));
         Assert.Equal(0, Movies(after, "romance") - Movies(before, "romance"));
+        // Soap folds into romance AND keeps its own chip: "no soaps" is a condition of its own.
+        Assert.Equal(1, Shows(after, "soap") - Shows(before, "soap"));
 
         Assert.All(after.Chips, c => Assert.Equal(c.Total >= FilterChipCounts.MinTitles, c.Offered));
         Assert.Equal(after.Chips.OrderByDescending(c => c.Offered).ThenByDescending(c => c.Total).Select(c => c.Slug), after.Chips.Select(c => c.Slug));
@@ -63,7 +70,7 @@ public class FilterChipCountsTests(PostgresFixture fixture)
         return await new FilterChipCounts(db, new MemoryCache(new MemoryCacheOptions())).CountAsync(default);
     }
 
-    private async Task SeedAsync(MediaType media, string[] genres, string language = "en", string[]? keywords = null)
+    private async Task SeedAsync(MediaType media, string[] genres, string language = "en", string[]? keywords = null, string? overview = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         db.Add(new Title
@@ -76,6 +83,7 @@ public class FilterChipCountsTests(PostgresFixture fixture)
             Language = language,
             Genres = genres,
             Keywords = keywords ?? [],
+            Overview = overview,
             TmdbPopularity = 0m,
             CreatedAt = DateTime.UtcNow,
         });

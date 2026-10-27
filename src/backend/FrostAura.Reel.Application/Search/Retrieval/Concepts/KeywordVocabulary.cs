@@ -33,7 +33,7 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
     /// </summary>
     public const int WholeWordStemLength = 4;
 
-    private const string CacheKey = "keyword-vocabulary:v1";
+    internal const string CacheKey = "keyword-vocabulary:v1";
 
     /// <summary>Every label, most-carried first.</summary>
     public async Task<IReadOnlyList<VocabularyLabel>> LabelsAsync(CancellationToken ct)

@@ -59,6 +59,10 @@ public class StandInTruthSqlTests
         Assert.Equal(new[] { "Movie", "Show" }, standIns.Single(r => r.Slug == "anime").Media);
         Assert.Contains("love of one''s life", Render(Template()), StringComparison.Ordinal);
         Assert.Contains("('thriller', ARRAY['suspense']::text[])", Render(Template()), StringComparison.Ordinal);
+
+        // HREV1-RET-09: soap is romance on TV, and romance's overview phrases apply where its keywords do.
+        Assert.Contains("('romance', ARRAY['soap']::text[])", Render(Template()), StringComparison.Ordinal);
+        Assert.Contains("('romance', ARRAY['Show']::text[], ARRAY['romance', 'romantic', 'love story', 'in love', 'crush']::text[])", Render(Template()), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -92,6 +96,7 @@ public class StandInTruthSqlTests
         Replace(lines, "genre-aliases", AliasValues());
         Replace(lines, "genre-composites", CompositeValues());
         Replace(lines, "genre-stand-ins", StandInValues());
+        Replace(lines, "genre-overview-phrases", OverviewValues());
         return string.Join('\n', lines);
     }
 
@@ -130,6 +135,19 @@ public class StandInTruthSqlTests
     private static List<string> StandInValues() =>
         Values(StandInRows().Select(r =>
             $"({Literal(r.Slug)}, {Array(r.Media)},\n   {Array(r.Exact)},\n   {Array(r.Words)})"));
+
+    /// <summary>
+    /// The overview stand-ins (<see cref="GenreStandIns.OverviewPhrases"/>, HREV1-RET-09) as (slug, media,
+    /// phrases) rows, on the media the slug's keyword stand-ins apply to. The SQL joins the phrases into
+    /// one alternation, so a phrase must be plain words; one carrying a regex metacharacter is refused
+    /// here rather than matched as a pattern.
+    /// </summary>
+    private static List<string> OverviewValues() =>
+        Values(GenreStandIns.OverviewPhrases
+            .OrderBy(o => o.Key, StringComparer.Ordinal)
+            .Select(o => o.Value.All(p => p.All(c => char.IsLetter(c) || c is ' ' or '\''))
+                ? $"({Literal(o.Key)}, {Array(GenreStandIns.MediaFor(o.Key).Select(m => m.ToString()).ToList())}, {Array(o.Value)})"
+                : throw new InvalidOperationException($"overview phrases for '{o.Key}' must be plain words")));
 
     private static List<string> Values(IEnumerable<string> rows)
     {
@@ -170,7 +188,8 @@ public class StandInTruthSqlTests
 
     private static string Template() =>
         "-- BEGIN GENERATED genre-aliases\n-- END GENERATED genre-aliases\n-- BEGIN GENERATED genre-composites\n-- END GENERATED genre-composites\n"
-        + "-- BEGIN GENERATED genre-stand-ins\n-- END GENERATED genre-stand-ins";
+        + "-- BEGIN GENERATED genre-stand-ins\n-- END GENERATED genre-stand-ins\n"
+        + "-- BEGIN GENERATED genre-overview-phrases\n-- END GENERATED genre-overview-phrases";
 
     private static string RepoRoot()
     {
