@@ -170,6 +170,24 @@ public sealed class FeedPaginator(
     private const int RerankBatch = 9;
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
+    /// <summary>
+    /// The one way a fit verdict enters the shared fit cache, for the paginator and the feed build
+    /// alike: only a verdict the MODEL gave (<see cref="RerankResult.Cacheable"/>). A fallback's fit
+    /// is the stub's predicted/10 and its sentence is empty; cached, it would replay one failed batch
+    /// for six hours under a label that says the model judged the title (WS-1 task 4: fallbacks are
+    /// never cached). Returns whether it was stored.
+    /// </summary>
+    internal static bool CacheFit(IMemoryCache cache, string key, RerankResult result)
+    {
+        if (!result.Cacheable)
+        {
+            return false;
+        }
+
+        cache.Set(key, result, FitTtl);
+        return true;
+    }
+
     // Preference-tag re-rank nudge (mirrors the feed build): a title whose plot embedding is close to
     // a declared preference tag lifts by at most +10% on top of the model's rating — enough to sharpen
     // paging order toward stated taste, never enough to float a weak prediction over a strong one.
@@ -497,7 +515,7 @@ public sealed class FeedPaginator(
             // card is no longer the one surface that logs zeros for a decomposition it actually had.
             items.Add(new ScoredFeedItem(
                 c.Scored.Title,
-                Math.Round(c.Scored.Predicted, 2),
+                Domain.Feed.ShownRating.Stored(c.Scored.Predicted),
                 why,
                 IsReleased(c.Scored.Title, now),
                 source,
@@ -505,7 +523,7 @@ public sealed class FeedPaginator(
                 CalibrationDelta: c.Scored.CalibrationDelta,
                 ResidualApplied: c.Scored.BaseScore - (decimal)c.Scored.Row.Score,
                 DemotionApplied: c.Scored.BaseScore + c.Scored.CalibrationDelta - c.Scored.Predicted,
-                LlmFit: c.Fit is { FitSource: ResultSource.Llm } fit ? (decimal)fit.Fit : null,
+                LlmFit: c.Fit?.ModelFit is { } modelFit ? (decimal)modelFit : null,
                 Evidence: evidence.GetValueOrDefault(c.Scored.Title.Id)));
         }
 
@@ -546,7 +564,7 @@ public sealed class FeedPaginator(
         foreach (var s in pool)
         {
             if (cache.TryGetValue<RerankResult>(FitKey(fitSalt, account.Id, s.Title.Id, rowKey), out var hit)
-                && hit is { FitSource: ResultSource.Llm })
+                && hit?.ModelFit is not null)
             {
                 fitById[s.Title.Id] = hit;
             }
@@ -632,13 +650,13 @@ public sealed class FeedPaginator(
                         // A fallback fit is the stub's predicted/10. Blending it in counts the
                         // prediction twice under a model label, and caching it would replay the
                         // failure for six hours — so it is neither used nor cached.
-                        if (r.FitSource != ResultSource.Llm)
+                        if (r.ModelFit is null)
                         {
                             continue;
                         }
 
                         fitById[r.TitleId] = r;
-                        cache.Set(FitKey(fitSalt, account.Id, r.TitleId, rowKey), r, FitTtl);
+                        CacheFit(cache, FitKey(fitSalt, account.Id, r.TitleId, rowKey), r);
                     }
                 });
 
@@ -668,7 +686,7 @@ public sealed class FeedPaginator(
                 // The crowd term rides the model side for the same reason: it is part of the snapshot
                 // build's RankKey, so page 2 of a rail has to be ordered by it too.
                 var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) * CrowdPrior.FactorFor(s.Title) / 10d;
-                var blend = fit is null ? modelNorm : (0.6 * modelNorm) + (0.4 * fit.Fit);
+                var blend = fit?.ModelFit is { } modelFit ? (0.6 * modelNorm) + (0.4 * modelFit) : modelNorm;
                 return (Scored: s, Fit: fit, Blend: blend);
             })
             .OrderByDescending(x => x.Blend)
@@ -717,10 +735,12 @@ public sealed class FeedPaginator(
                 {
                     var results = await scopedAgent.RerankBatchAsync(
                         batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
-                    foreach (var r in results.Where(r => r.FitSource == ResultSource.Llm))
+                    foreach (var r in results)
                     {
-                        cache.Set(FitKey(fitSalt, accountId, r.TitleId, rowKey), r, FitTtl);
-                        cached++;
+                        if (CacheFit(cache, FitKey(fitSalt, accountId, r.TitleId, rowKey), r))
+                        {
+                            cached++;
+                        }
                     }
                 });
 
@@ -1379,7 +1399,7 @@ public sealed class FeedPaginator(
             artifactId,
             taken.Select(s => new TitleScoreWriter.Score(
                 s.Title.Id,
-                Math.Round(s.Predicted, 2),
+                Domain.Feed.ShownRating.Stored(s.Predicted),
                 TitleScoreWriter.SerializeContributions(s.Row.TopContributions))),
             now,
             ct);

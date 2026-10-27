@@ -152,7 +152,6 @@ public class BuildFeedJobHandler(
     // job, not a request a user is staring at; the cache means successive builds converge to warm.
     private static readonly TimeSpan WhyPassBudget = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan WhyPassCeiling = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
     private const int RerankBatch = 9;
 
     // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────────
@@ -2277,9 +2276,9 @@ public class BuildFeedJobHandler(
             // a cached stub fit is the predicted rating divided by ten, and ranking on it would
             // count the prediction twice under a label that says the model judged the title.
             if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(FeedFitSalt, accountId, candidate.Title.Id, rowKey), out var hit)
-                && hit is { FitSource: ResultSource.Llm })
+                && hit?.ModelFit is { } cachedFit)
             {
-                fits[candidate.Title.Id] = hit.Fit;
+                fits[candidate.Title.Id] = cachedFit;
             }
             else
             {
@@ -2327,7 +2326,7 @@ public class BuildFeedJobHandler(
                 {
                     // A fallback verdict is not a verdict: never debiased, never cached, never ranked
                     // on. The title simply stays unjudged — the documented NeutralFit path.
-                    if (raw.FitSource != ResultSource.Llm)
+                    if (raw.ModelFit is not { } modelFit)
                     {
                         continue;
                     }
@@ -2337,12 +2336,15 @@ public class BuildFeedJobHandler(
                     // sense of how well a long-running panel show "fits" someone is contaminated by
                     // how many people watch it, and this pass now decides the hero.
                     var adjusted = byTitleId.TryGetValue(raw.TitleId, out var scored)
-                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, scored.Title.Genres, persona.Taste) }
+                        ? raw with { Fit = UnscriptedFormats.Adjust(modelFit, scored.Title.Genres, persona.Taste) }
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
-                    fits[result.TitleId] = result.Fit;
+                    FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result);
+                    if (result.ModelFit is { } judged)
+                    {
+                        fits[result.TitleId] = judged;
+                    }
                 }
             });
 
@@ -2427,15 +2429,14 @@ public class BuildFeedJobHandler(
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
             var cachedHit = cache.TryGetValue<RerankResult>(
                 FeedPaginator.FitKey(FeedFitSalt, accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
-            var cachedFit = cachedHit && hit!.FitSource == ResultSource.Llm;
-            if (cachedFit && item.Row == FeedRowKind.Hero)
+            if (cachedHit && hit!.ModelFit is { } cachedFit)
             {
-                heroFits[item.Candidate.Title.Id] = hit!.Fit;
-            }
+                if (item.Row == FeedRowKind.Hero)
+                {
+                    heroFits[item.Candidate.Title.Id] = cachedFit;
+                }
 
-            if (cachedFit)
-            {
-                item.LlmFit = (decimal)hit!.Fit;
+                item.LlmFit = (decimal)cachedFit;
             }
 
             if (cachedHit && ModelWhy(hit) is { } cachedWhy)
@@ -2675,8 +2676,8 @@ public class BuildFeedJobHandler(
             item.Replace(replacement, heroContext(replacement));
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
-                cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
-                item.LlmFit = (decimal)verdict.Fit;
+                FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict);
+                item.LlmFit = verdict.ModelFit is { } swappedFit ? (decimal)swappedFit : null;
                 if (ModelWhy(verdict) is { } why)
                 {
                     item.WhyThis = why;
@@ -2751,7 +2752,7 @@ public class BuildFeedJobHandler(
                     // A fallback FIT is the stub's predicted/10: never debiased, cached, logged as a
                     // fit or allowed to swap a hero. A model fit with a fallback WHY (the voice guard
                     // rejected only the sentence) is still a real fit and is kept.
-                    if (raw.FitSource != ResultSource.Llm)
+                    if (raw.ModelFit is not { } modelFit)
                     {
                         continue;
                     }
@@ -2760,19 +2761,22 @@ public class BuildFeedJobHandler(
                     // against reach" instruction — see UnscriptedFormats for why it is conditional
                     // on the account's own narrative and therefore revocable by editing it.
                     var adjusted = byTitleId.TryGetValue(raw.TitleId, out var candidate)
-                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, candidate.Candidate.Title.Genres, persona.Taste) }
+                        ? raw with { Fit = UnscriptedFormats.Adjust(modelFit, candidate.Candidate.Title.Genres, persona.Taste) }
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
-                    if (isHeroRail)
+                    FeedPaginator.CacheFit(cache, FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result);
+                    if (result.ModelFit is { } judged)
                     {
-                        heroFits[result.TitleId] = result.Fit;
-                    }
+                        if (isHeroRail)
+                        {
+                            heroFits[result.TitleId] = judged;
+                        }
 
-                    if (byTitleId.TryGetValue(result.TitleId, out var scored))
-                    {
-                        scored.LlmFit = (decimal)result.Fit;
+                        if (byTitleId.TryGetValue(result.TitleId, out var scored))
+                        {
+                            scored.LlmFit = (decimal)judged;
+                        }
                     }
 
                     if (ModelWhy(result) is { } why && byTitleId.TryGetValue(result.TitleId, out var item))
