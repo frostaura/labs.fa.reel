@@ -774,7 +774,9 @@ public class AskReelEndpointTests(PostgresFixture fixture, ReelApiFactory api)
             var predictions = payload.RootElement.GetProperty("cards").EnumerateArray()
                 .Select(c => c.GetProperty("predictedRating").GetDecimal())
                 .ToList();
-            Assert.Equal([7.25m, 7.25m], predictions);
+            // The stored 7.25 comes back as its badge shows it: one decimal, half away from zero
+            // (ForYouBar.Shown, R1-04 — the server never sends the client more than one decimal).
+            Assert.Equal([7.3m, 7.3m], predictions);
         }
     }
 
