@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { SAVED, mockDna, mockSaved, mockTmdbImages } from "./route-fixtures";
 
 const FEED = {
   generatedAt: new Date().toISOString(),
@@ -107,4 +108,76 @@ test.describe("mobile navigation", () => {
     // Navigating closes the panel.
     await expect(panel).toBeHidden();
   });
+});
+
+/**
+ * PH-01: the footer carries the TMDB licence line, a hard licence requirement, and on a phone the
+ * fixed tab bar sat over it at every scroll position — `main` cleared the bar, the footer after it
+ * did not. At the bottom of a page the footer's last pixel must sit at or above the bar's first, in
+ * both engines, on a touch phone. Varied over a short page (/saved with one item) and two tall
+ * ones, and over two phone heights, so a clearance that only works when `main` is padded enough to
+ * push the footer down cannot pass.
+ */
+test.describe("the footer clears the tab bar at the bottom of the page", () => {
+  for (const viewport of [{ width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test.describe(`${viewport.width}×${viewport.height}`, () => {
+      test.use({ viewport, hasTouch: true, isMobile: true });
+
+      const cases: { path: string; mock: (page: import("@playwright/test").Page) => Promise<void> }[] = [
+        { path: "/saved", mock: mockSaved },
+        { path: "/saved?one", mock: async (page) => mockJson(page, "**/api/saved", { ...SAVED, items: SAVED.items.slice(0, 1) }) },
+        { path: "/dna", mock: mockDna },
+      ];
+
+      for (const { path, mock } of cases) {
+        test(`${path}`, async ({ page }) => {
+          await stubEventSource(page);
+          await mockTmdbImages(page);
+          await page.route(
+            (url) => url.pathname.startsWith("/api/"),
+            (route) => route.fulfill({ status: 204, body: "" })
+          );
+          await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+          await mockJson(page, "**/api/sync/status", syncStatus());
+          await mockSaved(page);
+          await mock(page);
+          await page.goto(path);
+          await expect(page.getByTestId("page-fallback")).toHaveCount(0);
+          await expect(page.locator("main h1").first()).toBeVisible();
+
+          const footer = page.locator("footer");
+          await expect(footer).toContainText("This product uses the TMDB API");
+          // WebKit's phone emulation reports a visual viewport 10 px shorter than the layout one
+          // (visualViewport 380×834 inside 390×844, scale 1), and at max scroll it anchors the fixed
+          // bar 10 px above the content's end. That slack is the emulator's, not the page's, so it is
+          // measured and allowed for; Chromium's is 0, and every line of the footer below is held to
+          // the bar's top edge with no allowance at all.
+          await expect
+            .poll(async () => {
+              await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+              return page.evaluate(() => {
+                const bar = document.querySelector('[data-testid="mobile-tabbar"]')!.getBoundingClientRect();
+                const footer = document.querySelector("footer")!;
+                const slack = Math.round(window.innerHeight - (window.visualViewport?.height ?? window.innerHeight));
+                const lines = [...footer.children].map((c) => c.getBoundingClientRect().bottom);
+                return {
+                  footer: Math.round(footer.getBoundingClientRect().bottom - bar.top) - slack <= 0,
+                  lines: lines.every((b) => b <= bar.top),
+                };
+              });
+            })
+            .toEqual({ footer: true, lines: true });
+          // And the licence line itself is the topmost thing at its own last row, not the bar.
+          const line = footer.getByText("This product uses the TMDB API");
+          const box = await line.boundingBox();
+          if (!box) throw new Error("the licence line has no box");
+          const hit = await page.evaluate(
+            ({ x, y }) => !!document.elementFromPoint(x, y)?.closest("footer"),
+            { x: box.x + box.width / 2, y: box.y + box.height - 2 }
+          );
+          expect(hit, "the licence line's last row is under something").toBe(true);
+        });
+      }
+    });
+  }
 });
