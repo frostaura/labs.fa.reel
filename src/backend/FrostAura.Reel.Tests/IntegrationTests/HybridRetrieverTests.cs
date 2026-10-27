@@ -571,17 +571,19 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             return;
         }
 
-        // "Like X but funnier" (§4.6): the reference's neighbours, the ones funnier than X first.
+        // "Like X but funnier" (§4.6): the reference's neighbours, the ones funnier than X first. They
+        // are its neighbours by what they share with it (a specific label), never by a stored vector.
         var accountId = await SeedAccountAsync();
         var vector = UniqueVector();
-        var reference = await SeedTitleAsync(_ => { }, vector);
+        var label = $"lighthousekeeper{Guid.NewGuid():N}"[..28];
+        var reference = await SeedTitleAsync(t => t.Keywords = [label], vector);
         await SeedAttributesAsync(reference, humor: 0.40m);
-        var funnier = await SeedTitleAsync(_ => { }, vector);
+        var funnier = await SeedTitleAsync(t => t.Keywords = [label], vector);
         await SeedAttributesAsync(funnier, humor: 0.70m);
-        var graver = await SeedTitleAsync(_ => { }, vector);
+        var graver = await SeedTitleAsync(t => t.Keywords = [label], vector);
         await SeedAttributesAsync(graver, humor: 0.20m);
         // Funnier than the midpoint but not than the reference: the pivot is the reference, not 0.5.
-        var slightly = await SeedTitleAsync(_ => { }, vector);
+        var slightly = await SeedTitleAsync(t => t.Keywords = [label], vector);
         await SeedAttributesAsync(slightly, humor: 0.35m);
 
         var result = await RetrieveAsync(new RetrievalQuery(
@@ -604,6 +606,162 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Contains("steer:humor+", byId[funnier].Evidence);
         Assert.DoesNotContain("steer:humor+", byId[slightly].Evidence);
         Assert.DoesNotContain("steer:humor+", byId[graver].Evidence);
+    }
+
+    /// <summary>
+    /// HREV2-ASK-02: "more like the second one" resolved to Red-Eyed (heist, revenge) and came back
+    /// Red Hill, Red Right Hand, Red (2008), Red White &amp; Blue and Red Road — the stored title
+    /// vector leads with the name, so its nearest neighbours are titles CALLED alike. Here the
+    /// reference's stored vector is shared by five "Red …" titles about something else entirely: a
+    /// retriever that anchors on it returns them; one that reads what the reference is about returns
+    /// the heist films — by the specific label they share, and by a description of the reference
+    /// that never contains its name.
+    /// </summary>
+    [Fact]
+    public async Task A_reference_is_searched_near_by_what_it_is_about_never_by_its_name()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var heist = $"vaultjob{tag}";
+        var nameVector = UniqueVector();
+        var accountId = await SeedAccountAsync();
+        Title shape = new()
+        {
+            Name = $"Red-Eyed {tag}",
+            Genres = ["crime", "thriller"],
+            Keywords = [heist, $"payback{tag}"],
+            Overview = $"When a {tag} heist goes sideways, Cole goes back home and prepares to defend himself.",
+        };
+        var reference = await SeedTitleAsync(t => { t.Name = shape.Name; t.Genres = shape.Genres; t.Keywords = shape.Keywords; t.Overview = shape.Overview; }, nameVector);
+
+        // Called alike, about nothing alike: the stored vector the old anchor read.
+        var redAlikes = new List<Guid>();
+        foreach (var name in new[] { "Red Hill", "Red Right Hand", "Red", "Red White & Blue", "Red Road" })
+        {
+            redAlikes.Add(await SeedTitleAsync(t => { t.Name = $"{name} {tag}"; t.Genres = ["drama"]; t.Keywords = ["office"]; }, nameVector));
+        }
+
+        // About alike: two share the reference's specific heist label (and lie near its description);
+        // one shares nothing but what it is about (its stored vector IS the description's embedding).
+        var description = StubVector(HybridRetriever.ReferenceText(shape));
+        var crimeHeist = await SeedTitleAsync(t => { t.Genres = ["crime", "thriller"]; t.Keywords = [heist]; }, Near(description, 0.002f));
+        var comedyHeist = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Keywords = [heist]; }, Near(description, 0.004f));
+        var aboutAlike = await SeedTitleAsync(t => t.Genres = ["crime"], description);
+
+        var result = await RetrieveAsync(new RetrievalQuery(
+            accountId, HardConstraints.None, new SoftPreferences([], [], [reference]), [reference], 40)
+        {
+            Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic,
+        });
+        var order = result.Candidates.Select(c => c.TitleId).ToList();
+        var byId = result.Candidates.ToDictionary(c => c.TitleId);
+
+        Assert.DoesNotContain(reference, order);
+        Assert.Contains(crimeHeist, order);
+        Assert.Contains(comedyHeist, order);
+        Assert.Contains(aboutAlike, order);
+        Assert.Contains($"keyword:{heist}", byId[crimeHeist].Evidence);
+        Assert.True(byId[aboutAlike].Similarity > 0.999);
+
+        // The golden bar: the head is the films about the same thing (only they carry evidence from two
+        // arms or sit at the anchor), and a title merely CALLED alike ranks below every one of them —
+        // never at the anchor (a small test catalogue lets the semantic arm's fixed k reach them at
+        // all; the real one has 38k titles in between).
+        var aboutLast = new[] { crimeHeist, comedyHeist, aboutAlike }.Max(order.IndexOf);
+        Assert.Equal(2, aboutLast);
+        Assert.All(redAlikes.Where(byId.ContainsKey), r =>
+        {
+            Assert.True(order.IndexOf(r) > aboutLast);
+            Assert.True(byId[r].Similarity is null or < 0.999);
+        });
+
+        // The shared label ranks first, and the reference's own genres break the tie between the two.
+        Assert.True(order.IndexOf(crimeHeist) < order.IndexOf(comedyHeist));
+        Assert.Contains("genre:crime", byId[crimeHeist].Evidence);
+        Assert.DoesNotContain(result.SkippedArms, a => a.StartsWith("semantic", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The same request with no embedding provider (or a description that misses its budget): the
+    /// reference's own labels' precomputed embeddings stand in for its description — still never
+    /// the name-led stored vector — and the shared-label arm answers regardless.
+    /// </summary>
+    [Fact]
+    public async Task Without_an_embedding_a_reference_stands_on_its_labels_never_its_stored_vector()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var label = $"funeralhome{tag}";
+        var nameVector = UniqueVector();
+        var labelVector = UniqueVector();
+        var accountId = await SeedAccountAsync();
+        var reference = await SeedTitleAsync(
+            t => { t.Name = $"After.Life {tag}"; t.Genres = ["drama", "horror"]; t.Keywords = [label]; t.Overview = "A woman wakes up being prepared for her own funeral."; },
+            nameVector);
+        var alike = await SeedTitleAsync(t => { t.Name = $"The Life Before Her Eyes {tag}"; t.Genres = ["drama"]; t.Keywords = ["office"]; }, nameVector);
+        var sharesLabel = await SeedTitleAsync(t => { t.Genres = ["horror"]; t.Keywords = [label]; }, UniqueVector());
+        var nearLabel = await SeedTitleAsync(t => t.Genres = ["horror"], labelVector);
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.KeywordLabels.Add(new KeywordLabel
+            {
+                Label = label,
+                TitleCount = 2,
+                Embedding = new Vector(labelVector),
+                EmbeddingModel = "text-embedding-3-small",
+                CountedAt = DateTime.UtcNow,
+                EmbeddedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        try
+        {
+            var result = await RetrieveAsync(
+                new RetrievalQuery(accountId, HardConstraints.None, new SoftPreferences([], [], [reference]), [reference], 40)
+                {
+                    Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic,
+                },
+                new UnavailableEmbeddings());
+            var order = result.Candidates.Select(c => c.TitleId).ToList();
+
+            var byId = result.Candidates.ToDictionary(c => c.TitleId);
+            Assert.Equal(1, result.Timings.ElapsedMs["semantic-reference-labels"]);
+            Assert.Contains(sharesLabel, order);
+            Assert.Contains(nearLabel, order);
+            Assert.True(byId[nearLabel].Similarity > 0.999);
+            Assert.Equal(1, new[] { sharesLabel, nearLabel }.Max(order.IndexOf));
+            if (byId.TryGetValue(alike, out var called))
+            {
+                Assert.True(order.IndexOf(alike) > 1);
+                Assert.True(called.Similarity is null or < 0.999);
+            }
+        }
+        finally
+        {
+            await using var cleanup = Fixture.CreateContext(new AccountContext());
+            await cleanup.KeywordLabels.Where(l => l.Label == label).ExecuteDeleteAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData("Red-Eyed", "When a heist goes sideways, Cole goes back home in Red-Eyed fashion.", new[] { "heist" }, "crime, thriller. heist. When a heist goes sideways, Cole goes back home in fashion.")]
+    [InlineData("After.Life", "AFTER.LIFE: a woman wakes before her funeral.", new string[0], "crime, thriller. : a woman wakes before her funeral.")]
+    [InlineData("Red", null, new[] { "retired", "cia" }, "crime, thriller. retired, cia")]
+    [InlineData("Red", "", new string[0], "")]
+    public void A_reference_description_never_carries_its_name_and_a_bare_genre_list_is_none(
+        string name, string? overview, string[] keywords, string expected)
+    {
+        var title = new Title { Name = name, Overview = overview, Keywords = keywords, Genres = ["crime", "thriller"] };
+        Assert.Equal(expected, HybridRetriever.ReferenceText(title));
     }
 
     [Fact]
@@ -784,6 +942,7 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
             new FullTextArm(db),
             embeddings,
+            new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
             container.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<HybridRetriever>.Instance);
         return await retriever.RetrieveAsync(query, default);
@@ -852,6 +1011,15 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         }
     }
 
+    /// <summary><paramref name="vector"/> nudged by a little random noise, re-normalised: near it, not on it.</summary>
+    private static float[] Near(float[] vector, float noise)
+    {
+        var random = new Random(Guid.NewGuid().GetHashCode());
+        var v = vector.Select(x => x + (noise * (float)(random.NextDouble() - 0.5))).ToArray();
+        var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+        return [.. v.Select(x => x / norm)];
+    }
+
     private static float[] UniqueVector()
     {
         var random = new Random(Guid.NewGuid().GetHashCode());
@@ -909,6 +1077,7 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
             new FullTextArm(db),
             embeddings,
+            new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             NullLogger<HybridRetriever>.Instance);
         return await retriever.RetrieveAsync(query, default);

@@ -30,7 +30,9 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// count told the founder 63 ninja films when the catalogue holds 70. It is a whole-word match, not
 /// containment, because names are short prose: containment would count "Ninjababy" (a pregnancy
 /// comedy) and "Ninjago" as ninja films, which the eval truth deliberately does not.</item>
-/// <item>Concepts AND together; the labels and genres inside one concept OR together.</item>
+/// <item>Concepts AND together; the labels and genres inside one concept OR together. An unresolved
+/// concept made only of genre words is read as those genres (<see cref="Read"/>), and a concept that
+/// requires exactly what an earlier one does is the same requirement, counted once.</item>
 /// <item>A person matches by credit, by resolved id or else by exact case-insensitive name.</item>
 /// <item>The year window is inclusive and resolves <c>Year → ReleasedAt → FirstAiredAt</c>; an
 /// undated title passes, exactly as the standing year rule treats it.</item>
@@ -66,6 +68,26 @@ public static class HardConstraintFilter
     /// <summary>The genre slugs that satisfy <paramref name="concept"/>, cleaned.</summary>
     public static IReadOnlyList<string> GenresOf(ConceptTerm concept) => Clean(concept.Genres);
 
+    /// <summary>
+    /// The concepts as the predicate reads them: a concept no resolver produced has its genre words
+    /// read as genres (<see cref="Concepts.ConceptResolver.GenreReading"/>), and a concept requiring
+    /// exactly what an earlier one does is dropped (<see cref="Concepts.ConceptResolver.Merge"/>). The
+    /// stored conversation state holds UNRESOLVED concepts, and counting "romantic" as keywords
+    /// containing the word, AND-ed with "romance", told the founder there were 94 romantic shows when
+    /// 1,306 are romance by the rule his exclusion applies (HREV2-RET-03).
+    /// </summary>
+    public static IReadOnlyList<ConceptTerm> Read(IReadOnlyList<ConceptTerm> concepts)
+    {
+        ArgumentNullException.ThrowIfNull(concepts);
+        var read = new List<ConceptTerm>(concepts.Count);
+        foreach (var concept in concepts)
+        {
+            read.AddRange(Concepts.ConceptResolver.GenreReading(concept) ?? [concept]);
+        }
+
+        return Concepts.ConceptResolver.Merge(read);
+    }
+
     /// <summary><paramref name="titles"/> narrowed to those satisfying every hard constraint.</summary>
     public static IQueryable<Title> Apply(IQueryable<Title> titles, IReelDbContext db, HardConstraints hard)
     {
@@ -76,7 +98,7 @@ public static class HardConstraintFilter
             _ => titles,
         };
 
-        foreach (var concept in hard.Concepts)
+        foreach (var concept in Read(hard.Concepts))
         {
             query = query.Where(ConceptPredicate(concept));
         }
@@ -113,7 +135,7 @@ public static class HardConstraintFilter
     public static IReadOnlyList<string> EvidenceFor(Title title, HardConstraints hard)
     {
         var evidence = new List<string>();
-        foreach (var concept in hard.Concepts)
+        foreach (var concept in Read(hard.Concepts))
         {
             var labels = LabelsOf(concept);
             var exact = concept.ExactLabels is { } set ? set.ToHashSet(StringComparer.Ordinal) : null;

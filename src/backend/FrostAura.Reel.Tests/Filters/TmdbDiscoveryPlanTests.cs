@@ -167,5 +167,12 @@ public class TmdbDiscoveryPlanTests
         Assert.True(StandingDiscoverPlan.Admits(noRomance, Row(movie: true, overview: "Deals with an old romance.")));
         Assert.True(StandingDiscoverPlan.Admits(noRomance, Row(movie: false, overview: "A bromance on the force.")));
         Assert.True(StandingDiscoverPlan.Admits(rules, Row(genres: [10766], movie: false)));   // soap alone is not comedy/family
+
+        // HREV2-RET-04: a row with no genre at all is unproven under any genre exclusion, on either
+        // medium, as the eligibility builder reads an untagged catalogue title; with no genre rule
+        // there is nothing to prove.
+        Assert.False(StandingDiscoverPlan.Admits(rules, Row(genres: [])));
+        Assert.False(StandingDiscoverPlan.Admits(noRomance, Row(genres: [], movie: false)));
+        Assert.True(StandingDiscoverPlan.Admits(FilterRuleSet.Create(null, null, ["zombie"], null, null, null, null), Row(genres: [])));
     }
 }

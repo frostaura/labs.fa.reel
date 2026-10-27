@@ -33,7 +33,8 @@ namespace FrostAura.Reel.Application.Search;
 /// also reaches the titles a TMDB taxonomy cannot tag with that genre — TV has no romance, horror,
 /// history, thriller or music genre, and neither medium has anime or musical — through the stand-in
 /// keywords and alias genres in <see cref="GenreStandIns"/>, so TV is judged as strictly as movies
-/// as far as TMDB's keywords allow (their measured catch rate is recorded there). MaxMaturity is
+/// as far as TMDB's keywords allow (their measured catch rate is recorded there). Under any
+/// ExcludeGenre a title with no genres at all is unproven and ineligible (HREV2-RET-04). MaxMaturity is
 /// the in-memory gate; MinPredictedRating is applied by the scoring surfaces, since it needs a model.
 /// </summary>
 public class EligibilityQueryBuilder(IReelDbContext db)
@@ -247,6 +248,12 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         if (!skipExcludeGenre)
         {
             query = WithoutStandIns(query, accountId);
+
+            // A title with no genres at all cannot be shown to clear ANY genre exclusion, so under one
+            // it fails closed (FilterBreaches.Untagged, HREV2-RET-04).
+            query = query.Where(t =>
+                t.Genres.Length > 0
+                || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre));
         }
 
         query = query.Where(t =>
@@ -420,6 +427,12 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             {
                 query = query.Where(Not(GenreStandIns.CarriesStandIn(value)));
             }
+        }
+
+        // Untagged titles fail closed under any genre exclusion, exactly as the persisted arm reads it.
+        if (rules.ExcludeGenres.Count > 0)
+        {
+            query = query.Where(t => t.Genres.Length > 0);
         }
 
         // One phrasing with the cost meter's breach mask (FilterBreaches), so "breaks no rule" there

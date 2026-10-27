@@ -570,7 +570,8 @@ public sealed record StandingDiscoverPlan(
     /// True when a TMDB list row for a title NOT in the catalogue passes the conditions the row
     /// carries data for — the same calls the eligibility builder makes: an unknown language is not
     /// English, an unrated title fails a crowd floor, an undated title passes a year window, an
-    /// excluded genre (or its alias) on the row's genre ids fails, an excluded genre's overview stand-in
+    /// excluded genre (or its alias) on the row's genre ids fails, a row with no genre ids fails any genre
+    /// exclusion (unproven), an excluded genre's overview stand-in
     /// (<see cref="GenreStandIns.OverviewPhrases"/>, on the media it applies to) fails, a keyword rule
     /// matches the name or overview. A list row has no keywords and no certification, so stand-in
     /// keywords, keyword-label exclusions and the maturity ceiling are NOT checked here: a pass makes the item
@@ -601,7 +602,14 @@ public sealed record StandingDiscoverPlan(
             return false;
         }
 
+        // A row with no genre at all is unproven under any genre exclusion, as the eligibility builder
+        // reads an untagged catalogue title (FilterBreaches.Untagged).
         var slugs = TmdbGenres.MapToSlugs(item.IsMovie, item.GenreIds);
+        if (rules.ExcludeGenres.Count > 0 && slugs.Length == 0)
+        {
+            return false;
+        }
+
         if (rules.IncludeGenres.Count > 0 && !slugs.Any(rules.IncludeGenres.Contains))
         {
             return false;
