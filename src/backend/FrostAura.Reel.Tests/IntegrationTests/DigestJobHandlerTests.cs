@@ -445,6 +445,60 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// R1-05: the bar is held to the badge, and the badge rounds half away from zero — the rule Ask
+    /// Reel's gate and the supply truth use. At a midpoint the half-to-even rule this used to apply
+    /// disagreed: a 7.45 read "7.4" here and was held out of a 7.5 bar that Ask Reel let it through.
+    /// The midpoint card is in; one hundredth under it is out.
+    /// </summary>
+    [Theory]
+    [InlineData("7.5", 7.45, 7.44)]
+    [InlineData("7.3", 7.25, 7.24)]
+    public async Task A_card_whose_badge_reads_the_bar_clears_it_at_the_midpoint(string bar, double midpoint, double justUnder)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var strong = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var atMidpoint = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
+        var under = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [strong] = 7.8m,
+            [atMidpoint] = (decimal)midpoint,
+            [under] = (decimal)justUnder,
+        });
+        await SeedBarAsync(accountId, bar);
+
+        await RunDigestAsync(accountId, new FakePushSender());
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { strong, atMidpoint }, items.Select(i => i.TitleId).ToArray());
+        Assert.Equal((decimal)midpoint, items[1].PredictedRating);
+    }
+
+    /// <summary>
+    /// The push quotes the badge's number too: a top pick stored at 7.45 is "7.5 for you" in the
+    /// notification, as on the card, not the half-to-even "7.4".
+    /// </summary>
+    [Theory]
+    [InlineData(7.45, "7.5")]
+    [InlineData(7.25, "7.3")]
+    [InlineData(7.44, "7.4")]
+    [InlineData(8.05, "8.1")]
+    public void The_push_quotes_the_number_the_card_shows(double predicted, string shown)
+    {
+        var top = new DigestItem(Guid.NewGuid(), (decimal)predicted, DigestReasons.NewRelease);
+
+        var payload = BuildDigestJobHandler.BuildPushPayload("Arrival", "Movie", 329865L, top, itemCount: 1);
+
+        Assert.Equal($"Arrival \u2014 {shown} for you", payload.Title);
+    }
+
+    /// <summary>
     /// WS-5's media-mix floor reaches the digest: a 90%-movies account whose week is ten strong shows
     /// and four good films gets the films seated (the lowest shows give way), not ten shows. A floor
     /// on representation, never a quota: no film under the digest's floor is pulled in to hit it.
@@ -1039,5 +1093,75 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         var cards = body.RootElement.GetProperty("items").EnumerateArray().Select(c => c.GetProperty("titleId").GetGuid()).ToArray();
         Assert.Equal(new[] { ids[0] }, cards);
+    }
+
+    /// <summary>
+    /// R1-05 on the read path: the bar re-checked on every read is held to the same badge, and the
+    /// card is served with that badge. A digest item stored at 7.45 under a 7.5 bar is served reading
+    /// "7.5" (half-to-even served it as "7.4" — or, with the bar check, dropped it); one stored at
+    /// 7.44 reads "7.4" and is held back.
+    /// </summary>
+    [Fact]
+    public async Task Reading_the_digest_holds_the_bar_to_the_badge_and_serves_that_badge()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"digest-mid-{Guid.NewGuid():N}");
+        var now = DateTime.UtcNow;
+        var ids = new List<Guid>();
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                var title = new Title
+                {
+                    Id = Guid.NewGuid(),
+                    MediaType = MediaType.Movie,
+                    TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktSlug = $"digest-mid-{Guid.NewGuid():N}",
+                    Name = $"Digest Midpoint {i} {Guid.NewGuid():N}",
+                    Genres = ["drama"],
+                    Language = "en",
+                    CreatedAt = now,
+                };
+                db.Add(title);
+                ids.Add(title.Id);
+            }
+
+            db.AccountDigests.Add(new AccountDigest
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                WeekStart = DigestWeek.MondayOf(now),
+                GeneratedAt = now.AddDays(-1),
+                ItemsJson = JsonSerializer.Serialize(new[]
+                {
+                    new DigestItem(ids[0], 8.05m, DigestReasons.NewRelease),
+                    new DigestItem(ids[1], 7.45m, DigestReasons.NewRelease),
+                    new DigestItem(ids[2], 7.44m, DigestReasons.NewRelease),
+                }),
+            });
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.MinPredictedRating,
+                Value = "7.5",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await client.GetAsync("/api/digest/current");
+        response.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var cards = body.RootElement.GetProperty("items").EnumerateArray()
+            .Select(c => (Id: c.GetProperty("titleId").GetGuid(), Badge: c.GetProperty("predictedRating").GetDecimal()))
+            .ToArray();
+        Assert.Equal(new[] { (ids[0], 8.1m), (ids[1], 7.5m) }, cards);
     }
 }

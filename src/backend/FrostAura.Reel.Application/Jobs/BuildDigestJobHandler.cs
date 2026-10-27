@@ -205,7 +205,7 @@ public sealed class BuildDigestJobHandler(
 
         var items = picks
             .Select(kv => new DigestItem(
-                kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key], degradedReason,
+                kv.Key, decimal.Round(kv.Value, 2, MidpointRounding.AwayFromZero), reasons[kv.Key], degradedReason,
                 reasons[kv.Key] == DigestReasons.NewOnProvider ? arrivals[kv.Key] : null))
             .ToList();
 
@@ -316,7 +316,7 @@ public sealed class BuildDigestJobHandler(
         string? topHook = null)
     {
         var culture = System.Globalization.CultureInfo.InvariantCulture;
-        var rating = Math.Round(top.PredictedRating, 1).ToString("0.0", culture);
+        var rating = Saved.ForYouBar.Shown(top.PredictedRating).ToString("0.0", culture);
         var others = itemCount - 1;
 
         var title = topName is { Length: > 0 } name

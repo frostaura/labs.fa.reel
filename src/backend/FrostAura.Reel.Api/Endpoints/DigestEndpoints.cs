@@ -103,7 +103,7 @@ public static class DigestEndpoints
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
-                    Math.Round(item.PredictedRating, 1), crowd, crowdVotes, whyThis, isReleased,
+                    ForYouBar.Shown(item.PredictedRating), crowd, crowdVotes, whyThis, isReleased,
                     shown,
                     Confidence: null, FloorUsed: null,
                     Hook: LensGuards.ServableHook(note), LensClause: note?.FirstClause(), Mood: note?.Mood));
