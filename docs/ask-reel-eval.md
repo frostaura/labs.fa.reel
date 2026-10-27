@@ -336,22 +336,33 @@ the product's "for you" vocabulary). `eval/claims/claims.json` is the register:
 `claims.test.mjs` (in the replay suite) runs the check on the tree, so new claim-shaped copy is audited
 before it merges. `IT/ClaimsAudit/ClaimsAuditTests` pins the claims no owner's test covered (the push
 port's only consumer is the weekly digest; nothing can send an email; the scoring model never reads the
-taste narrative; the retrain threshold the status reports is the one the nightly gate applies), and pins two
-false ones until their owners fix them (the top-bar lookup's global leg shows a title over the maturity
-ceiling that the local leg hides and counts; Ask's "no standing conditions" answer is given while the
-English-only default holds titles out). The first
+taste narrative; the retrain threshold the status reports is the one the nightly gate applies). A pin on a
+false claim fails when the owner's fix lands, and is then deleted in favour of the owner's own test (the
+top-bar lookup's maturity leak and Ask's "no standing conditions" answer went that way in R1-13). The first
 audit (build/trust-v1 @ 20429ff): 268 claim-shaped strings; 194 claims in 36 families — 123 true, 15 false
 (9 families), 56 unverified (6 families); 78 not claims. One false claim was found by the harness rather
 than by reading: `askreel.mjs check --db --api` showed WS-3's cost meter counting 199 unrated titles as
 clearing the crowd floor, so "These rules leave N of M titles" overstates N
-(`EligibilityTruthParityTests.The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect`
-ledgers it until WS-3's fix).
+(`EligibilityTruthParityTests` ledgered it until WS-3's R1-06 fix, and now holds the meter to the truth,
+unrated titles included).
 
 The hardening re-audit (build/trust-v1 @ 4394aad, 2026-10-27): 280 claim-shaped strings; 202 claims in 39
 families — 133 true, 13 false (10 families), 56 unverified; 81 not claims. `exclusions-are-airtight` is now
 true (the matrix holds on all 485 cells with `MatrixLedger` empty); three new false families came from
 wave-B copy: `top-bar-search-hides-and-counts` (WS-3), `ask-reel-no-conditions-means-everything` (WS-2), and
 Ask's "They leave N unseen titles" joining `cost-meter-counts` (WS-3).
+
+The post-merge re-audit (R1-13, build/trust-v1 @ 4394aad with the hardening round's eleven lane branches
+merged, 2026-10-27): 285 claim-shaped strings; 207 claims in 41 families — 155 true, 0 false, 52 unverified
+(6 families); 81 not claims. All ten false families were fixed by their owners and re-audited from the new
+copy: `top-bar-search-hides-and-counts` (WS-3 R1-07), `ask-reel-conditions-answer` (was
+`ask-reel-no-conditions-means-everything`, WS-2 R1-12), `cost-meter-counts` (WS-3 R1-06), `free-tier-upsell`
+and `movie-rating-logs-a-play` (WS-10A R1-40), `verdict-goes-into-the-next-retrain` (WS-10A R1-40),
+`first-model-waits-for-the-floor`, `pick-reasons-when-worth-naming` and `narrative-read-by-the-written-passes`
+(WS-10B R1-43); `ask-reel-permanently-excludes` is retired (WS-2 R1-29: the notice no longer says
+"permanently"). The track record's "same numbers the engine is judged on internally" is gone (WS-10B R1-47):
+its remaining copy splits into `track-record-numbers-are-raw-pairs` (true) and `track-record-evidence-base`
+(unverified). Two new families: `day-turns-over-in-your-zone` and `known-people-are-from-your-ratings`.
 
 ## The exclusion matrix (WS-7 task 7)
 

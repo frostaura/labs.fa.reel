@@ -357,16 +357,16 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
     /// <summary>
     /// The conditions editor's "These rules leave N of M titles" and Ask Reel's conditions() tool read
     /// WS-3's <see cref="FilterCostMeter"/>, a third statement of the rule (one grouped statement over the
-    /// whole catalogue). Its eligible count must equal the SQL truth's — except for one ledgered defect,
-    /// found by `askreel.mjs check --db --api` on the eval snapshot (API 3,706 vs truth 3,507): a title with
-    /// NO crowd rating does not register as breaking the crowd floor in the meter's bitmask (SQL's
-    /// NOT(NULL &gt;= floor) is NULL, so the bit stays clear), while the builder, the serving path and the
-    /// truth hold it out ("no score fails a floor that exists", FD-7's default). The 199 such titles on
-    /// the snapshot are exactly the gap. This test fails the day the meter is fixed, so the allowance is
-    /// removed rather than outliving the defect (owner WS-3; change request in the WS-7 wave-B report).
+    /// whole catalogue). Its eligible count must equal the SQL truth's, unrated titles included: a title
+    /// with NO crowd rating breaks a crowd floor that exists ("no score fails a floor that exists", FD-7's
+    /// default) in the builder, the serving path and the truth, and — since WS-3's R1-06 — in the meter's
+    /// bitmask too. Before it, SQL's NOT(NULL &gt;= floor) left the breach bit clear and the meter counted
+    /// every unrated title as clearing the floor (eval snapshot: 3,706 vs a truth of 3,507). This test
+    /// ledgered that gap until the fix landed; it now holds the meter to the truth. The fixture varies the
+    /// one field that mattered — no rating at all, and a rating of 0 (also no rating) — beside a rated title.
     /// </summary>
     [Fact]
-    public async Task The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect()
+    public async Task The_cost_meter_counts_what_the_truth_counts_unrated_titles_included()
     {
         if (!fixture.Available)
         {
@@ -374,7 +374,7 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
         }
 
         var account = await SeedAccountAsync((FilterKind.MinCrowdRating, "6.0"), (FilterKind.Language, "*"));
-        await SeedTitleAsync(tmdb: null, trakt: null); // unrated: breaks the floor on every statement but the meter's
+        await SeedTitleAsync(tmdb: null, trakt: null); // unrated: breaks the floor on every statement, the meter's included
         await SeedTitleAsync(tmdb: 0m, trakt: 0m);     // "0" is no rating too
         await SeedTitleAsync(tmdb: 7.5m);
 
@@ -393,10 +393,7 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
             + "WHERE coalesce(nullif(t.\"TmdbVoteAverage\", 0), nullif(t.\"TraktRating\", 0)) IS NULL");
 
         Assert.True(unratedCrowdOnly >= 2, "the fixture's unrated titles did not reach the crowd-only knockout");
-        Assert.True(
-            meter.Eligible != truthEligible,
-            "The cost meter now agrees with the truth on unrated titles — WS-3 fixed the ledgered defect: delete this allowance and assert equality.");
-        Assert.Equal(truthEligible + unratedCrowdOnly, meter.Eligible);
+        Assert.Equal(truthEligible, meter.Eligible);
     }
 
     private async Task<int> ScalarAsync(string sql)

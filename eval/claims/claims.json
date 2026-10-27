@@ -1,5 +1,5 @@
 {
-  "note": "The user-facing claims register (program WS-7 task 9). scripts/eval/claims.mjs extracts every claim-shaped string a user can read (frontend copy through the TypeScript compiler, the backend's user-facing C# literals) and holds the tree to this file: every extracted string must be registered here, either in a claim family or in notClaims; every registered text must still be in the tree (an edited claim is re-audited, never silently dropped); every family names its owner and the tests that fail when the claim and the code diverge, and every test named must exist. A family is 'true' (checked against the code, pinned by its tests), 'false' (the code does not do what the copy says: a defect owned by 'owner', counted by the surface harness as a false copy claim until the copy or the code changes), or 'unverified' (the sweep could not establish it from the code; the owner owes the test). Audited 2026-10-26 against build/trust-v1 @ 20429ff.",
+  "note": "The user-facing claims register (program WS-7 task 9). scripts/eval/claims.mjs extracts every claim-shaped string a user can read (frontend copy through the TypeScript compiler, the backend's user-facing C# literals) and holds the tree to this file: every extracted string must be registered here, either in a claim family or in notClaims; every registered text must still be in the tree (an edited claim is re-audited, never silently dropped); every family names its owner and the tests that fail when the claim and the code diverge, and every test named must exist. A family is 'true' (checked against the code, pinned by its tests), 'false' (the code does not do what the copy says: a defect owned by 'owner', counted by the surface harness as a false copy claim until the copy or the code changes), or 'unverified' (the sweep could not establish it from the code; the owner owes the test). Audited 2026-10-26 against build/trust-v1 @ 20429ff; re-audited 2026-10-27 (R1-13) against build/trust-v1 @ 4394aad with the hardening round's lane branches merged (ws/ws1 6a9c1a6, ws/ws2 5481f09, ws/ws2b 44cc249, ws/ws3 d93c83f, ws/ws4 5ae9452, ws/ws5 4091275, ws/ws6 ef86548, ws/ws8 4f6f935, ws/ws9 596e20a, ws/ws10a 6cb661f, ws/ws10b 5cd3f18).",
   "families": [
     {
       "id": "saved-leaves-on-watch",
@@ -14,7 +14,7 @@
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/Saved.tsx",
+          "file": "src/frontend/src/lib/savedQueue.ts",
           "text": "Watch something and it leaves by itself."
         },
         {
@@ -31,24 +31,26 @@
       "id": "saved-syncs-to-managed-list",
       "owner": "WS-4",
       "verdict": "true",
-      "assertion": "Saving a title queues it onto the managed Trakt list ('Reel — Up Next'), and the user's Trakt watchlist is imported as saves; what Trakt-connected apps then show is theirs.",
-      "evidence": "The save endpoint queues ListAdd and AddToWatchlist (SaveConsumption remarks); the list-sync state is pending exactly while a ListAdd waits. Plex / Kodi / Infuse visibility is third-party behaviour and is not checkable here. The watchlist intake turns Trakt watchlist rows into saves, except Reel's own echoes and titles already consumed or declined (TraktP1IngestTests).",
+      "assertion": "Saving a title in Reel queues it onto the managed Trakt list ('Reel — Up Next'); the user's Trakt watchlist is imported as saves that stay off that list; what Trakt-connected apps then show is theirs.",
+      "evidence": "Only the save endpoint queues ListAdd (ReactionEndpoints; no other producer of OutboxKind.ListAdd), so the list-sync state is pending exactly while a ListAdd waits. WatchlistIntake writes saves and enqueues nothing, so a watchlist import is saved but never pushed to Up Next — which the card's offList line says. The intake skips Reel's own echoes and titles already consumed or declined (TraktP1IngestTests). Plex / Kodi / Infuse visibility is third-party behaviour and is not checkable here.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::List_sync_is_pending_only_while_a_list_add_is_actually_waiting",
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TraktP1IngestTests.cs::The_watchlist_becomes_saves_except_reels_own_echoes_consumed_and_declined_titles"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TraktP1IngestTests.cs::The_watchlist_becomes_saves_except_reels_own_echoes_consumed_and_declined_titles",
+        "src/frontend/src/lib/savedQueue.test.ts::scopes the list to saves made in Reel and says watchlist imports stay off it",
+        "src/frontend/src/lib/savedQueue.test.ts::agrees with the card that a save can be here and not on Up Next"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/Saved.tsx",
-          "text": "Reel keeps a Trakt list called"
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Reel keeps a Trakt list called “Reel — Up Next”. What you save in Reel lands on it, and shows up in Plex, Kodi, Infuse and every Trakt-connected app. Titles from your Trakt watchlist are saved here too but stay off that list."
         },
         {
-          "file": "src/frontend/src/pages/Saved.tsx",
-          "text": "What you save here syncs to the managed"
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "What you save in Reel syncs to the managed"
         },
         {
-          "file": "src/frontend/src/pages/Saved.tsx",
-          "text": "list — visible in Plex, Kodi, Infuse and every Trakt-connected app — and your Trakt watchlist lands here too."
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "list — visible in Plex, Kodi, Infuse and every Trakt-connected app. Your Trakt watchlist lands here too, and stays off that list."
         }
       ]
     },
@@ -101,18 +103,23 @@
     {
       "id": "movie-rating-logs-a-play",
       "owner": "WS-10A",
-      "verdict": "false",
-      "assertion": "Rating a movie also logs a play on the user's Trakt history, cleared if the rating is removed.",
-      "evidence": "ReactionEndpoints logs a play (AddToHistory) only for a movie the user has NOT watched; an already-watched movie gets the rating alone. The popover shows this line for every movie.",
-      "defect": "The line is unconditional on TitleDetail for movies; it should be shown only when the movie is unwatched (or say 'if you haven't logged it, also logs a play…').",
+      "verdict": "true",
+      "assertion": "Rating a movie Reel has no play for also logs a play on the user's Trakt history, cleared if the rating is removed; a movie already in the history gets the rating alone, and the line says so.",
+      "evidence": "ReactionEndpoints logs a play (AddToHistory) only when the movie's WatchedTitles row is absent or has Plays == 0, and un-rating reverses only the play Reel logged. ratingPopoverNote picks its line from userState.plays, the same field, so the popover promises the play only when it will happen (was false: the line was unconditional for movies).",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Already_watched_movie_gets_the_rating_only",
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Unrating_a_movie_reverses_the_reel_logged_play"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Unrating_a_movie_reverses_the_reel_logged_play",
+        "src/frontend/src/lib/ratingNote.test.ts::promises a logged play only for a movie with no play yet",
+        "src/frontend/src/lib/ratingNote.test.ts::an already-watched movie is told the rating syncs alone"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/TitleDetail.tsx",
-          "text": "Also logs a play on your Trakt history"
+          "file": "src/frontend/src/lib/ratingNote.ts",
+          "text": "Also logs a play on your Trakt history — cleared if you remove the rating."
+        },
+        {
+          "file": "src/frontend/src/lib/ratingNote.ts",
+          "text": "Ratings sync to Trakt — this movie is already in your history, so no play is added."
         }
       ]
     },
@@ -123,11 +130,12 @@
       "assertion": "Rating a show sends the rating to Trakt and never touches episode history.",
       "evidence": "ReactionEndpoints enqueues AddRating alone for shows.",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Show_rating_enqueues_the_rating_alone_and_never_touches_watched_state"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Show_rating_enqueues_the_rating_alone_and_never_touches_watched_state",
+        "src/frontend/src/lib/ratingNote.test.ts::a show never touches the episode history, watched or not"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "file": "src/frontend/src/lib/ratingNote.ts",
           "text": "Ratings sync to Trakt — your episode history is never touched."
         }
       ]
@@ -135,17 +143,18 @@
     {
       "id": "free-tier-upsell",
       "owner": "WS-10A",
-      "verdict": "false",
-      "assertion": "The paid feed unlocks every row, natural-language search and the managed Trakt queue.",
-      "evidence": "Only FeedEndpoints gates by tier (free gets three hero cards and locked rows). Ask Reel (SearchEndpoints) and Saved (SavedEndpoints) are not tier-gated; WS-10B corrected the same claim in planCopy.ts ('never claims Paid unlocks Ask Reel or the Trakt queue').",
-      "defect": "Home.tsx's locked-rows card repeats the retired claim. Reuse planCopy's PAID_ADDS wording.",
+      "verdict": "true",
+      "assertion": "The free tier's shortlist is three picks a day, and what Paid adds is exactly the paid-only surface, never Ask Reel or the Trakt queue.",
+      "evidence": "FeedEndpoints is the only tier gate: a free account gets hero.Take(3) and locked rows; the hero turns over once a day at the account's midnight (FeedBuildPolicy, R1-16). lockedRowsCaption quotes planCopy's PAID_ADDS, the one list kept equal to the server's checks, instead of its own (was false: it sold Ask Reel and the managed queue as paid).",
       "tests": [
-        "src/frontend/src/components/settings/planCopy.test.ts::never claims Paid unlocks Ask Reel or the Trakt queue"
+        "src/frontend/src/components/settings/planCopy.test.ts::never claims Paid unlocks Ask Reel or the Trakt queue",
+        "src/frontend/src/lib/lockedRowsCopy.test.ts::never sells Ask Reel, search or the Trakt queue as paid",
+        "src/frontend/src/lib/lockedRowsCopy.test.ts::names exactly what Paid adds, in planCopy's words"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/Home.tsx",
-          "text": "The free shortlist gives you three picks a day"
+          "file": "src/frontend/src/lib/lockedRowsCopy.ts",
+          "text": "The free shortlist gives you three picks a day. Paid adds"
         }
       ]
     },
@@ -179,40 +188,41 @@
       ]
     },
     {
-      "id": "first-model-tonight-below-the-floor",
+      "id": "first-model-waits-for-the-floor",
       "owner": "WS-10B",
-      "verdict": "false",
-      "assertion": "With no model yet, any number of ratings means Reel trains the first model tonight.",
-      "evidence": "The nightly reconcile queues account enrichment, which chains a Train for a modelless account, but TrainJobHandler refuses below the training floor ('Not enough ratings to train yet — N of M needed'). RatePicker prints the promise from the first rating, without reading notEnoughRatings.",
-      "defect": "RatePicker's no-model line must say how many more ratings the first model needs while the floor is unmet (the status carries notEnoughRatings), and promise 'tonight' only once it is met.",
+      "verdict": "true",
+      "assertion": "With no model yet, the rate screen asks for more ratings while the training floor is unmet and promises the first model only once it is met, by the server's count or this screen's ratings.",
+      "evidence": "TrainJobHandler refuses below the training floor ('Not enough ratings to train yet — N of M needed'). rateProgress reads the status's notEnoughRatings: below the floor it counts what is still needed (or, without the counts, asks for more and names no number), and only a met floor gets FIRST_MODEL_TIMING (was false: RatePicker promised tonight from the first rating).",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/EnrichCatalogJobHandlerTests.cs::Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/EnrichCatalogJobHandlerTests.cs::Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new",
+        "src/frontend/src/lib/modelReadiness.test.ts::below the floor it counts what the first model still needs, and promises no night",
+        "src/frontend/src/lib/modelReadiness.test.ts::a below-floor stage without the counts asks for more ratings and names no number it does not have",
+        "src/frontend/tests-e2e/rate-picker.spec.ts::below the training floor it counts the ratings the first model needs, and promises no night"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/RatePicker.tsx",
-          "text": "in — Reel trains your first model tonight."
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel needs a few more of your ratings before it can build your first model — keep rating."
         }
       ]
     },
     {
-      "id": "verdict-goes-into-tonights-retrain",
+      "id": "verdict-goes-into-the-next-retrain",
       "owner": "WS-10A",
-      "verdict": "false",
-      "assertion": "A rating that over- or under-called the prediction goes into tonight's retrain.",
-      "evidence": "The nightly retrain runs only when RetrainGate says one is owed (10 new ratings, a 14-day-old artifact or a calibration breach). One rating changes none of these on its own; the rating is used at the next retrain, whenever that is.",
-      "defect": "verdictFollowUp promises a retrain the gate does not perform. Say 'that goes into your next retrain' or read the server's retrain outlook (SyncSummary already does).",
+      "verdict": "true",
+      "assertion": "A rating that over- or under-called the prediction goes into the next retrain.",
+      "evidence": "Every rating is a training label: TrainJobHandler reads the account's UserRatings whenever a retrain runs, and RetrainGate decides when that is. The line names no night (was false: 'tonight's retrain', which one rating cannot trigger).",
       "tests": [
-        "src/frontend/src/lib/verdictCopy.test.ts"
+        "src/frontend/src/lib/verdictCopy.test.ts::promises a retrain only when the rating actually disagreed"
       ],
       "claims": [
         {
           "file": "src/frontend/src/lib/verdictCopy.ts",
-          "text": "noted — that goes into tonight's retrain"
+          "text": "noted — that goes into your next retrain"
         },
         {
           "file": "src/frontend/src/lib/verdictCopy.ts",
-          "text": "under-called it — that goes into tonight's retrain"
+          "text": "under-called it — that goes into your next retrain"
         }
       ]
     },
@@ -223,15 +233,16 @@
       "assertion": "With a model, reaching the new-ratings threshold means the nightly pass retrains; the post-sync message says when.",
       "evidence": "RetrainGate.EvaluateAsync returns NewRatings at >= RETRAIN_MIN_NEW_RATINGS (default 10); SyncEndpoints sends the same key with the same default as retrain.minNewRatings; SyncSummary's 'retraining tonight at' reads RetrainGate.OutlookAsync. CR to WS-4: SyncEndpoints should read RetrainGate.Threshold rather than repeat the key and default.",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_retrain_threshold_the_status_reports_is_the_one_the_nightly_gate_applies"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_retrain_threshold_the_status_reports_is_the_one_the_nightly_gate_applies",
+        "src/frontend/src/lib/modelReadiness.test.ts::with a model it is the retrain gate's countdown, moved by this screen's ratings"
       ],
       "claims": [
         {
-          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "file": "src/frontend/src/lib/modelReadiness.ts",
           "text": "That's enough — Reel retrains tonight on"
         },
         {
-          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "file": "src/frontend/src/lib/modelReadiness.ts",
           "text": "and Reel retrains tonight."
         },
         {
@@ -354,14 +365,14 @@
     {
       "id": "top-bar-search-hides-and-counts",
       "owner": "WS-3",
-      "verdict": "false",
+      "verdict": "true",
       "assertion": "The conditions shape top-bar search too: it still finds titles you have seen and ignores the 'for you' minimum, and anything else the conditions rule out is hidden and counted, not shown.",
-      "evidence": "Both legs hide and count what the content rules exclude (TypeaheadSearchTests: tiers and counted exclusions locally, the global leg judged by the conditions); the local leg shows watched titles badged and is not gated by the bar (MatrixCells NotGated lookup cells). But the maturity ceiling — a condition the editor sets — binds only the local leg: GlobalAsync judges a catalogue row by ContentFilteredTitles and any other row by StandingDiscoverPlan.Admits, and neither reads the ceiling, so an over-ceiling title the local leg hides and counts comes straight back as a global row (fired when the local strong matches are sparse), and an uncertified TMDB row reaches a kids' profile.",
-      "defect": "Hold the global leg to the account's maturity ceiling: drop (and count) a catalogue row that fails EligibilityQueryBuilder.PassesMaturity, and a beyond-catalogue row unless the ceiling allows adult content (PassesMaturity's own rule for an unknown certification). Then flip the ClaimsAuditTests pin.",
+      "evidence": "Both legs hide and count what the content rules exclude (the global leg judged by the conditions), and since fe57af6 the maturity ceiling too: a catalogue row must clear the conditions AND EligibilityQueryBuilder.PassesMaturity, a TMDB-only row (no certification) passes under a ceiling only where an unrated catalogue title would, and each one held out is counted; the local leg counts every over-ceiling strong match, not just its shortlist. The local leg shows watched titles badged and is not gated by the bar (MatrixCells NotGated lookup cells). Was false: an over-ceiling title the local leg hid came straight back as a global row — the pin that showed it went red on the merge and is deleted.",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_top_bar_lookups_global_leg_shows_a_title_over_the_maturity_ceiling_that_the_local_leg_hides",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TypeaheadSearchTests.cs::The_maturity_ceiling_hides_and_counts_in_both_legs",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TypeaheadSearchTests.cs::An_over_ceiling_match_beyond_the_shortlist_is_still_counted",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/TypeaheadSearchTests.cs::The_global_leg_judges_tmdb_rows_by_the_conditions_and_counts_what_it_hid",
-        "src/frontend/src/lib/conditionsCopy.test.ts::names top-bar search as governed, and says hidden matches are counted rather than shown"
+        "src/frontend/src/lib/conditionsCopy.test.ts::says the top-bar lookup hides what the conditions rule out and counts it"
       ],
       "claims": [
         {
@@ -371,19 +382,34 @@
       ]
     },
     {
-      "id": "ask-reel-no-conditions-means-everything",
+      "id": "ask-reel-conditions-answer",
       "owner": "WS-2",
-      "verdict": "false",
-      "assertion": "When Ask Reel says 'You have no standing conditions set', every unseen title in the catalogue is open to the user.",
-      "evidence": "ConditionsAnswer says it whenever AskReelStandingFilters.Describe returns null. Describe names only the FilterRuleSet rules and leaves out a language rule unless the account chose one, so the sentence is also said (a) with no rows at all, when FilterRuleSet's DefaultLanguage holds every non-English title out, and (b) for an account whose only conditions are a maturity ceiling or a 'for you' bar, neither of which FilterRuleSet carries. The answer is word for word the same for an account that allows every language, the one case it is true of.",
-      "defect": "Describe the defaults the answer stands on: say 'English only (the default)' unless every language is allowed, and name a maturity ceiling and a 'for you' bar the account has set; say 'no conditions' only when none of them binds.",
+      "verdict": "true",
+      "assertion": "Ask Reel's answer to 'what are my conditions?' names every condition that binds — the rules, a maturity ceiling, and the 'for you' bar with what it does — and with no rules says the English-only default still applies (unless every language is allowed) and that only the user's own footprint is held back; it never says the whole catalogue is open.",
+      "evidence": "ConditionsAnswer: Describe names every FilterRuleSet rule (a chosen language included) and the ceiling; the engine passes the account's bar (turn.Floor), and AskReelGate.Clears holds a card under the bar, or unscored while one is set, out of the picks into the below-floor tray. With no rows FilterRuleSet.DefaultLanguage is English; EligibilityQueryBuilder's footprint is watched, rated, NotInterested, SaveForLater and Dropped and nothing else, which is what 'seen, saved, dropped or marked not interested' names. Was false: 'every unseen title in the catalogue is open to you' was said under the English-only default and to ceiling- or bar-only accounts — the pin that showed it went red on the merge and is deleted.",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::Asks_no_conditions_answer_is_given_while_the_default_language_rule_holds_titles_out"
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelV2UnitTests.cs::No_conditions_names_the_default_and_the_footprint_never_the_whole_catalogue",
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelV2UnitTests.cs::A_maturity_ceiling_is_named_and_never_quoted_a_pool_the_meter_cannot_count",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelV2EngineTests.cs::The_conditions_tool_names_the_ceiling_and_the_bar_and_quotes_no_count_under_a_ceiling",
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelGateTests.cs::An_unscored_card_never_clears_a_bar",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
       ],
       "claims": [
         {
           "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
-          "text": "You have no standing conditions set, so every unseen title in the catalogue is open to you."
+          "text": "titles predicted under it, or not scored yet, are shown apart rather than as picks"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "Your only standing condition is your bar of"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "Nothing else is held back except titles you've seen, saved, dropped or marked not interested."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "Reel's default still applies: English-language titles only, minus the ones you've seen, saved, dropped or marked not interested."
         }
       ]
     },
@@ -391,18 +417,16 @@
       "id": "operator-alerts-are-app-wide",
       "owner": "WS-6",
       "verdict": "true",
-      "assertion": "The founder's operator alerts are about Reel as a whole: a refusing provider is off for every account until the key or account is fixed, and the job-failure count is the last hour across every account.",
-      "evidence": "OperatorAlertMonitor reads failed SyncJobs inside the IAccountContext system scope (every account) over a one-hour window, plus the runner's remembered retried attempts; provider_refused comes from a provider-wide breaker (Purpose null) in the singleton ProviderHealthService, which refuses every purpose and admits one probe call per cool-off, closing only when a probe is answered — i.e. once the key or account works again.",
+      "assertion": "The founder's operator alerts are about Reel as a whole: a refusing provider is off for every account, probed once every 15 minutes until the key or account works; the job-failure count is the last hour across every account; a model alarm is a purpose's last 50 sent calls across every account.",
+      "evidence": "OperatorAlertMonitor reads failed SyncJobs inside the IAccountContext system scope (every account) over a one-hour window, plus the runner's remembered retried attempts; provider_refused comes from a provider-wide breaker (Purpose null) in the singleton ProviderHealthService, which refuses every purpose and admits one probe call per cool-off, closing only when a probe is answered — i.e. once the key or account works again. PROVIDER_PROBE_MINUTES (15) mirrors ProviderHealthService.CoolOff. llm_alarm reads LlmCallHealth, one process-wide tally per purpose over its last 50 sent calls (LlmCallHealth.Window) with the 2% line (AlarmRate) — every account's calls, since one API process serves them all.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/OperatorAlertMonitorTests.cs::Failed_attempts_over_the_hourly_threshold_raise_one_alert_counting_retried_attempts_and_terminal_failures",
         "src/backend/FrostAura.Reel.Tests/Lens/OpenRouterChatClientTests.cs::A_refusal_is_one_billed_call_zero_retries_and_opens_the_breaker_for_every_purpose",
-        "src/backend/FrostAura.Reel.Tests/Lens/OpenRouterChatClientTests.cs::After_the_cool_off_exactly_one_probe_goes_out_and_an_answer_closes_the_breaker"
+        "src/backend/FrostAura.Reel.Tests/Lens/OpenRouterChatClientTests.cs::After_the_cool_off_exactly_one_probe_goes_out_and_an_answer_closes_the_breaker",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/OperatorAlertMonitorTests.cs::A_model_purpose_over_the_alarm_line_raises_one_alert_naming_it_and_resolves_when_the_window_clears",
+        "src/frontend/src/lib/syncPill.test.ts::names the feature and the exact count from llmHealth, as a warning"
       ],
       "claims": [
-        {
-          "file": "src/frontend/src/lib/syncPill.ts",
-          "text": "for every account, until the key or the account is fixed."
-        },
         {
           "file": "src/frontend/src/lib/syncPill.ts",
           "text": "failed in the last hour, across every account"
@@ -410,18 +434,31 @@
         {
           "file": "src/frontend/src/lib/syncPill.ts",
           "text": "Job attempts are failing across every account"
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "for every account. It tries one call every … minutes and resumes when the key or the account is fixed."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "are above the …% alarm line, across every account."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "across every account (the alarm line is …%)."
         }
       ]
     },
     {
       "id": "cost-meter-counts",
       "owner": "WS-3",
-      "verdict": "false",
+      "verdict": "true",
       "assertion": "The conditions editor's 'These rules leave N of M titles', and Ask Reel's 'They leave N unseen titles open to you', are the number of titles the rules leave.",
-      "evidence": "FilterCostMeter (7b59843) counts a title with no crowd rating as passing the crowd floor: in its bitmask projection NOT(NULL >= floor) is NULL, so the breach bit stays clear, while EligibilityQueryBuilder, the serving path and the SQL truth hold it out (FD-7 default). On the eval snapshot with the founder's rules: meter 3,706 eligible vs truth 3,507 — the 199 unrated titles that break only the floor; the crowd marginal is 3,396 vs 3,595 and every other marginal is inflated by the unrated titles it shares (askreel.mjs check --db reel_ws7 --api). Ask Reel's conditions answer (ConditionsAnswer) prints the same meter's Eligible, so it carries the same gap.",
-      "defect": "Make the meter's crowd bit treat a missing rating as a breach (coalesce the comparison to true, as the builder's predicate does), then delete the allowance in the parity test.",
+      "evidence": "FilterCostMeter's crowd bit is a two-valued test since a1572f8 (R1-06): a title with no TMDB or Trakt rating breaks the floor, as in EligibilityQueryBuilder, the serving path and the SQL truth (FD-7's default), so the meter's Eligible equals the truth's. Ask's 'They leave N unseen titles' prints the same Eligible and is not said under a maturity ceiling, which the meter cannot apply (R1-12). Was false: the meter counted the unrated titles as clearing the floor (3,706 vs a truth of 3,507 on the eval snapshot).",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::The_cost_meter_counts_what_the_truth_counts_unrated_titles_included",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/FilterCostMeterTests.cs::An_unrated_title_breaks_the_crowd_floor_in_the_meter_as_it_does_in_eligibility",
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelV2UnitTests.cs::A_maturity_ceiling_is_named_and_never_quoted_a_pool_the_meter_cannot_count"
       ],
       "claims": [
         {
@@ -467,23 +504,23 @@
       ]
     },
     {
-      "id": "every-pick-has-a-reason",
+      "id": "pick-reasons-when-worth-naming",
       "owner": "WS-10B",
-      "verdict": "false",
-      "assertion": "Every pick comes with why it was picked.",
-      "evidence": "Since IREV3S-01 ExplanationTemplater ships NO line when nothing citable moved the prediction ('the honest rendering of nothing verifiable to say'), and an unjudged Ask card carries no reason. Every pick does carry a predicted rating and an explainable waterfall on its title page.",
-      "defect": "The landing and onboarding lines promise a reason on every pick; say 'a predicted rating, and why when there is a reason worth naming', or point at the title page's breakdown.",
+      "verdict": "true",
+      "assertion": "Every pick carries a predicted rating and where to watch it, and a reason when there is one worth naming.",
+      "evidence": "Every pick is scored (AskReelGate keeps unscored cards out of the picks under a bar; feed picks come from TitleScores), and the title page always shows a where-to-watch section with the region's options or 'No streaming options found in your region'. ExplanationTemplater ships no line when nothing citable moved the prediction, which the copy now allows (was false: it promised a reason on every pick).",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SurfaceHarness/CitableClauseCatalogueTests.cs::Every_rendered_clause_is_recognised_as_its_own_feature_and_no_other"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SurfaceHarness/CitableClauseCatalogueTests.cs::Every_rendered_clause_is_recognised_as_its_own_feature_and_no_other",
+        "src/frontend/tests-e2e/landing.spec.ts::promises a reason for a pick only when there is one worth naming (R1-43)"
       ],
       "claims": [
         {
           "file": "src/frontend/src/pages/Landing.tsx",
-          "text": "Each with a predicted rating for you, why it was picked, and where to watch it."
+          "text": "Each with a predicted rating for you and where to watch it — and why it was picked, when there's a reason worth naming."
         },
         {
           "file": "src/frontend/src/pages/Onboarding.tsx",
-          "text": "every pick comes with the reason and a predicted rating."
+          "text": "every pick comes with a predicted rating, and the reason when there's one worth naming."
         }
       ]
     },
@@ -557,19 +594,19 @@
       ]
     },
     {
-      "id": "narrative-before-every-pick",
+      "id": "narrative-read-by-the-written-passes",
       "owner": "WS-10B",
-      "verdict": "false",
-      "assertion": "Reel reads the taste narrative before every pick it makes.",
-      "evidence": "The model that scores every pick never reads AccountTasteNarratives; the narrative reaches only the LLM passes through PersonalisationContext's persona (cross-reference judge, rerank, lens, Ask), and only when they run (keyless or out of allowance, never).",
-      "defect": "Say what reads it: 'The written passes (cross-reference, the lens and Ask Reel) read this…'.",
+      "verdict": "true",
+      "assertion": "The taste narrative is read by the written passes when they run (the curation of the picks, the cross-reference, the lens and Ask Reel), an edit changes what they read, and the predicted ratings never read it.",
+      "evidence": "PersonalisationContext.ContextForAsync (the user's edit when there is one) is what FeedPaginator's curation pass, the cross-reference judge, the lens and Ask Reel put in their prompts; FeatureVectorBuilder, which builds every predicted rating's features, has no narrative input (was false: 'Reel reads this before every pick it makes').",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_scoring_model_never_reads_the_taste_narrative"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_scoring_model_never_reads_the_taste_narrative",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::A_user_edit_wins_and_survives_regeneration_until_they_ask_for_a_rewrite"
       ],
       "claims": [
         {
           "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
-          "text": "Reel reads this before every pick it makes for you."
+          "text": "Reel's written passes read this when they run — the curation of your picks, the cross-reference, the lens and Ask Reel. Correcting it here changes what they look for; the predicted ratings never read it."
         }
       ]
     },
@@ -702,19 +739,15 @@
       "id": "pipeline-stage-descriptions",
       "owner": "WS-9",
       "verdict": "unverified",
-      "assertion": "The pipeline stage captions describe what each job does (artwork for every title, plot embeddings, ranking by predicted rating, freshness and variety, popularity as the baseline the model must beat).",
-      "evidence": "Stage captions are WS-9's syncCopy; the promotion gate compares against a popularity baseline (IRankingPolicy 'the eval harness's baseline comparator'). The other captions were not traced job by job in this sweep.",
+      "assertion": "The pipeline stage captions describe what each job does (artwork and trailers for the titles in your library, plot embeddings, ranking by predicted rating, freshness and variety, popularity as the baseline the model is measured against).",
+      "evidence": "Stage captions are WS-9's syncCopy. R1-46 corrected two: HydrateCatalog walks the account's library (TitleHydrator), not every title, and TMDB popularity is the eval harness's baseline (EvalHarness) that a model is measured against but need not beat to ship. The other captions were not traced job by job.",
       "tests": [
-        "src/frontend/src/lib/syncCopy.test.ts"
+        "src/frontend/src/lib/syncCopy.test.ts::no longer promises that only a model beating popularity ships"
       ],
       "claims": [
         {
           "file": "src/frontend/src/lib/syncCopy.ts",
-          "text": "Artwork and trailers for every title"
-        },
-        {
-          "file": "src/frontend/src/lib/syncCopy.ts",
-          "text": "Global popularity — the baseline your model must beat"
+          "text": "Global popularity — the baseline your model is measured against"
         },
         {
           "file": "src/frontend/src/lib/syncCopy.ts",
@@ -755,26 +788,39 @@
       ]
     },
     {
-      "id": "track-record-is-the-internal-measure",
+      "id": "track-record-numbers-are-raw-pairs",
+      "owner": "WS-10B",
+      "verdict": "true",
+      "assertion": "Every number on the track record is Reel's prediction set against the rating the user then gave, unsmoothed, over the predictions the user went on to rate.",
+      "evidence": "AccuracyQuery computes the headline, bias and bands straight from (predicted, actual) pairs — no prior, shrinkage or smoothing — over the scored calls later rated (shown cards, or scores written before the rating); the headline names that population (R1-47: it used to say 'of what you rate').",
+      "tests": [
+        "src/frontend/src/lib/trackRecordCopy.test.ts::the provenance line says what the numbers are, and claims no internal judgement",
+        "src/frontend/src/lib/trackRecordCopy.test.ts::the headline names its population on either evidence base, never every rating"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/trackRecordCopy.ts",
+          "text": "Within one point on … of the predictions you've rated"
+        },
+        {
+          "file": "src/frontend/src/lib/trackRecordCopy.ts",
+          "text": "Every number here is Reel's prediction against the rating you then gave — unsmoothed, and nothing here is a marketing figure."
+        }
+      ]
+    },
+    {
+      "id": "track-record-evidence-base",
       "owner": "WS-10B",
       "verdict": "unverified",
-      "assertion": "The track record's numbers are the ones the engine is judged on internally.",
-      "evidence": "Bias and average miss on the account's own pairs are what RetrainGate's calibration breach reads; model promotion reads NDCG@10 (EvalHarness), which the page does not show. 'The same numbers' holds for the retrain gate and not for promotion.",
+      "assertion": "The track record and the Lab state their evidence base: only scored calls the user later rated count, the retro fallback is named as weaker evidence, in-app ratings are a small share, and the calibration bands compare promise to outcome.",
+      "evidence": "AccuracyQuery builds the pairs from the exposure log, or from scores written before the rating (labelled retro), and corroborates the offline backtest without gating anything. The per-line statements (the 2% share, PostWatchStrip's 'only learns when you tell it', the Lab's band reading) were not traced to their code in this sweep. R1-47 retired 'the same numbers the engine is judged on internally' (promotion reads NDCG@10, which the page does not show).",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_retrain_threshold_the_status_reports_is_the_one_the_nightly_gate_applies"
+        "src/frontend/src/lib/trackRecordCopy.test.ts::claims the card was on screen only when the exposure log says so"
       ],
       "claims": [
         {
           "file": "src/frontend/src/pages/TrackRecord.tsx",
-          "text": "These are the same numbers the engine is judged on internally"
-        },
-        {
-          "file": "src/frontend/src/pages/TrackRecord.tsx",
           "text": "A model that meant what it said would have the two bars level in every band."
-        },
-        {
-          "file": "src/frontend/src/lib/trackRecordCopy.ts",
-          "text": "every one it scores that you then rate lands here."
         },
         {
           "file": "src/frontend/src/components/saved/PostWatchStrip.tsx",
@@ -807,10 +853,6 @@
         {
           "file": "src/frontend/src/pages/Lab.tsx",
           "text": "0 = every band lands where it promised"
-        },
-        {
-          "file": "src/frontend/src/lib/trackRecordCopy.ts",
-          "text": "Within one point on … of what you rate"
         }
       ]
     },
@@ -925,23 +967,6 @@
         {
           "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/TurnComposer.cs",
           "text": "I find films and shows for you"
-        }
-      ]
-    },
-    {
-      "id": "ask-reel-permanently-excludes",
-      "owner": "WS-2",
-      "verdict": "false",
-      "assertion": "The user's conditions PERMANENTLY exclude a genre.",
-      "evidence": "Conditions are editable in Settings at any time (ConditionsEditor), and Ask Reel itself offers to relax them (RelaxationChip); nothing about the exclusion is permanent. The year lines in the same method state the window correctly.",
-      "defect": "Drop 'permanently': 'Your conditions exclude …, so nothing you asked for there can appear — change them in Settings.'",
-      "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::Truth_and_builder_agree_on_every_rule_with_explicit_conditions"
-      ],
-      "claims": [
-        {
-          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
-          "text": "Your conditions permanently exclude"
         }
       ]
     },
@@ -1309,6 +1334,42 @@
         {
           "file": "src/frontend/src/pages/RatePicker.tsx",
           "text": "You watched these and never told me what you thought"
+        }
+      ]
+    },
+    {
+      "id": "day-turns-over-in-your-zone",
+      "owner": "WS-10B",
+      "verdict": "true",
+      "assertion": "The account's day — today's picks and the day's Ask Reel allowance — turns over at midnight in the time zone set in Settings (UTC when none is set).",
+      "evidence": "FeedBuildPolicy.Decide and the anchor rotation key on AccountTimeZone.LocalDate, so a rebuild inside the account's day preserves tonight's picks and its midnight deals fresh ones (cb7639b, R1-16); AskTurnLimiter counts the day limit from the account-local midnight, and BudgetCalendar puts every per-account LLM ceiling on the same day (R1-14). An unset or unresolvable zone counts in UTC, which the card says.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/BuildFeedNeverEmptyTests.cs::Tonight_turns_over_at_the_accounts_midnight",
+        "src/backend/FrostAura.Reel.Tests/Auth/InboundLimitTests.cs::The_day_limit_resets_at_the_accounts_local_midnight",
+        "src/backend/FrostAura.Reel.Tests/Auth/AccountSettingsRulesTests.cs::A_zone_this_host_cannot_resolve_counts_in_UTC"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/settings/TimeZoneCard.tsx",
+          "text": "Reel counts your day in this zone: today's picks and a day's Ask Reel allowance turn over at midnight here."
+        }
+      ]
+    },
+    {
+      "id": "known-people-are-from-your-ratings",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "The 'cast & crew you know' contribution counts people the user knows from their own ratings.",
+      "evidence": "FeatureVectorBuilder's KnownPeopleFraction is the share of a title's credited people who appear in titles the user has rated (leave-one-out, so a rated title does not count itself); a title whose people appear in nothing rated reads 0.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeatureVectorLeakageTests.cs::An_all_unknown_cast_is_no_longer_imputed_as_a_solidly_average_one",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeatureVectorLeakageTests.cs::Known_people_fraction_obeys_leave_one_out",
+        "src/frontend/src/lib/featureLabel.test.ts::names the people-coverage features for what they measure"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/featureLabel.ts",
+          "text": "cast & crew you know from your ratings"
         }
       ]
     }
@@ -1710,14 +1771,14 @@
       "reason": "job progress label"
     },
     {
-      "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
-      "text": "Counting what your conditions leave",
-      "reason": "job progress label"
-    },
-    {
       "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
       "text": "“for you” floor left only",
       "reason": "matcher for a retired build reason (IsRetiredRelaxation); the read path replaces any reason it matches, so it is never shown"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Api/Endpoints/SearchEndpoints.cs",
+      "text": "Your conditions permanently exclude",
+      "reason": "LegacyPermanentNotice: the pre-R1-29 opening of a stored conflict notice, matched only to rewrite it to 'Your conditions exclude' before a resume returns it; never shown (AskReelReplayContractTests)"
     }
   ]
 }
