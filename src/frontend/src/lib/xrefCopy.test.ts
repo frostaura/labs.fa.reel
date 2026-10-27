@@ -215,3 +215,25 @@ describe("the online half", () => {
     expect(xrefVerdictLabel("SomethingLater")).toBe("SomethingLater");
   });
 });
+
+describe("on Track record itself (R1-41)", () => {
+  // The band moved to Track record (FD-15), where "— see the track record" pointed at the page
+  // the reader was already on. The explanation sits right below the band there.
+  it("drops the pointer to the page it is on, in every gating branch", () => {
+    for (const gating of ["demote-only", "gating", "unmeasured", "something-new"]) {
+      const clause = ruleOutClause(gating, { onTrackRecord: true });
+      expect(clause, gating).not.toMatch(/track record/i);
+      expect(clause, gating).toMatch(/^rule-outs /);
+    }
+    expect(ruleOutClause("demote-only", { onTrackRecord: true })).toBe("rule-outs change nothing yet");
+    expect(ruleOutClause("gating", { onTrackRecord: true })).toBe("rule-outs have earned their keep but still don't change your picks");
+  });
+
+  it("keeps the pointer anywhere else, and the band sentence follows the same switch", () => {
+    expect(ruleOutClause("demote-only")).toBe("rule-outs change nothing yet — see the track record");
+    expect(xrefBandCopy(status(), { onTrackRecord: true })).toBe(
+      "Cross-referenced 2,242 titles against your history · 210 kept, nudged up a little · rule-outs change nothing yet"
+    );
+    expect(xrefBandCopy(status())).toContain("see the track record");
+  });
+});

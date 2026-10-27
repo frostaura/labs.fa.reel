@@ -7,6 +7,8 @@ import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import { titleFailure } from "../components/title/titleRouting";
 import { filmographyRoleLine } from "../lib/personRoles";
+import { personHiddenLine } from "../lib/personCopy";
+import PickConditionsButton from "../components/rec/PickConditionsButton";
 import { Button } from "../components/ui/button";
 
 /** Initials for the avatar fallback — first letters of the first two words of a name. */
@@ -49,6 +51,7 @@ export default function Person() {
   const { data: person, isLoading, isError, error, isFetching, refetch } = useGetPersonQuery(personId, { skip: !personId });
   const [ratePerson] = useRatePersonMutation();
   const [unratePerson] = useUnratePersonMutation();
+  const [conditionsOpen, setConditionsOpen] = useState(false);
 
   // A 404 is an answer and any other failure is a retryable one; both used to read as "Loading…"
   // forever (F-9).
@@ -78,6 +81,8 @@ export default function Person() {
   if (isLoading || !person) {
     return <div className="fa-body text-3 py-10 text-center">Loading…</div>;
   }
+
+  const hiddenLine = personHiddenLine(person.hiddenByConditions, person.filmography.length);
 
   return (
     <div className="space-y-6">
@@ -125,10 +130,24 @@ export default function Person() {
         <p className="fa-caption text-3">Rating someone you love nudges their titles up across your feed.</p>
       </section>
 
-      {/* Filmography */}
-      {person.filmography.length > 0 && (
+      {/* Filmography. Credits the conditions hold out are counted, never silently dropped (R1-41) —
+          and a person whose every credit is held out still gets the section, with the count. */}
+      {(person.filmography.length > 0 || hiddenLine) && (
         <section className="space-y-3">
           <h2 className="fa-section-title text-base">In your library &amp; beyond</h2>
+          {hiddenLine && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="person-hidden">
+              <p className="fa-caption text-3">{hiddenLine}</p>
+              <Button
+                variant="ghost"
+                onClick={() => setConditionsOpen(true)}
+                className="min-h-11 [@media(pointer:fine)]:min-h-0 px-2 fa-caption text-fa-frost underline underline-offset-2"
+                data-testid="person-hidden-change"
+              >
+                Change conditions
+              </Button>
+            </div>
+          )}
           <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-4">
             {person.filmography.map((t) => {
               const role = filmographyRoleLine(t);
@@ -160,6 +179,12 @@ export default function Person() {
             })}
           </div>
         </section>
+      )}
+
+      {/* The same conditions dialog Home and Saved open; a save re-reads the person. Mounted only
+          while open, so the page never adds a conditions read of its own. */}
+      {conditionsOpen && (
+        <PickConditionsButton trigger={false} open onOpenChange={setConditionsOpen} onSaved={() => void refetch()} />
       )}
     </div>
   );
