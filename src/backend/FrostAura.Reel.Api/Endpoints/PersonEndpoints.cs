@@ -170,8 +170,8 @@ public static class PersonEndpoints
                 crowdRating = CrowdRating.For(x.Title),
                 crowdVotes = CrowdRating.VotesFor(x.Title),
                 x.userRating,
-                // 1dp at the response edge, matching the feed and title detail.
-                predictedRating = x.predictedRating is { } predicted ? Math.Round(predicted, 1) : (decimal?)null,
+                // The badge's one decimal, by the same rule as the feed and title detail (ForYouBar.Shown).
+                predictedRating = x.predictedRating is { } predicted ? Domain.Feed.ShownRating.Of(predicted) : (decimal?)null,
                 // What they did on it, from the credits only — never guessed from the department.
                 roles = creditsByTitle.TryGetValue(x.Title.Id, out var c) ? c.Roles : [],
                 character = creditsByTitle.TryGetValue(x.Title.Id, out var a) ? a.Character : null,

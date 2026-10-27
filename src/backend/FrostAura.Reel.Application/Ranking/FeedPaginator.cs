@@ -219,7 +219,7 @@ public sealed class FeedPaginator(
             entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
             return await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
         }) ?? await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
-        var minPredicted = await MinPredictedAsync(account.Id, ct);
+        var minPredicted = await ForYouBar.ReadAsync(db, account.Id, ct) ?? 0m;
         var exclude = req.ExcludeTitleIds.ToList();
         // Online residual head for this artifact, loaded once and added to every window score below.
         var residual = await residualModel.LoadAsync(account.Id, artifact, ct);
@@ -262,7 +262,7 @@ public sealed class FeedPaginator(
         }
 
         var windowMs = clock.ElapsedMilliseconds;
-        var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
+        var scored = all.Where(s => ForYouBar.Clears(s.Predicted, minPredicted)).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
         // count. A high predicted-rating floor can gut a window that looked full: the old gate saw a
@@ -302,22 +302,15 @@ public sealed class FeedPaginator(
                 cache.Remove(windowKey);
                 all = await ScoreWindowAsync(
                     artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
-                scored = all.Where(s => s.Predicted >= minPredicted).ToList();
+                scored = all.Where(s => ForYouBar.Clears(s.Predicted, minPredicted)).ToList();
             }
         }
 
-        // The floor is soft, exactly as in the feed build and in Ask Reel: when the window holds
-        // real candidates but none clear the account's MinPredictedRating, serving nothing tells the
-        // user the reel ended when it has not. Fall back to the best of what this lane actually has
-        // rather than reporting a false exhaustion.
-        if (scored.Count == 0 && all.Count > 0)
-        {
-            logger.LogInformation(
-                "Feed page relaxed the {Floor} predicted-rating floor for {Row}: none of {Count} candidates cleared it.",
-                minPredicted, RowKey(req), all.Count);
-            scored = all;
-        }
-
+        // The bar holds on a paged rail exactly as it does on tonight's picks (FD-4's default: a card
+        // under the user's own "for you" bar never reaches a main grid). This used to fall back to
+        // the best of the lane when nothing cleared it, which served "load more" cards under the bar
+        // on every rail the build itself had held to it. A lane with nothing above the bar has
+        // genuinely run out of what the user asked to see; it was already deepened above.
         if (scored.Count == 0)
         {
             return [];
@@ -1229,7 +1222,7 @@ public sealed class FeedPaginator(
                     var threshold = ordered.Count > 0
                         ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
                     return scored
-                        .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
+                        .Where(s => ForYouBar.Clears(s.Predicted, 6m) && (s.Title.TmdbPopularity ?? 0m) <= threshold)
                         .OrderByDescending(s => (double)s.Predicted * Weight(s.Title))
                         .ToList();
                 }
@@ -1390,15 +1383,6 @@ public sealed class FeedPaginator(
                 TitleScoreWriter.SerializeContributions(s.Row.TopContributions))),
             now,
             ct);
-    }
-
-    private async Task<decimal> MinPredictedAsync(Guid accountId, CancellationToken ct)
-    {
-        var raw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value).FirstOrDefaultAsync(ct);
-        return raw is not null && decimal.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, out var floor)
-            ? Math.Clamp(floor, 0m, 10m) : 0m;
     }
 
     private static IEnumerable<string> TopGenres(FeatureVectorBuilder.TasteState taste) =>

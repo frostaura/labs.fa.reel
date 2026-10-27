@@ -41,12 +41,13 @@ public static class HeroConfidence
         Math.Max(Floor, minPredictedRating ?? 0m);
 
     /// <summary>
-    /// Whether a hero pick cleared <paramref name="bar"/>. Inclusive at the bar: a title predicted
-    /// at exactly 7.5 met the stated threshold, and calling it a reach would contradict the same
+    /// Whether a hero pick cleared <paramref name="bar"/>, held to the number its badge shows
+    /// (<see cref="ShownRating"/>). Inclusive at the bar: a pick reading "7.5" met the stated
+    /// threshold, and calling it a reach would contradict both the badge beside the label and the
     /// comparison the build used to select it.
     /// </summary>
     public static string For(decimal predictedRating, decimal bar) =>
-        predictedRating >= bar ? Confident : Reaching;
+        ShownRating.Reaches(predictedRating, bar) ? Confident : Reaching;
 
     /// <summary>
     /// The crowd's half of the hero bar for a movie: the vote-shrunk crowd score a movie must reach

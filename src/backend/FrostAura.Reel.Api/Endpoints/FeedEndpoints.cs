@@ -110,8 +110,7 @@ public static class FeedEndpoints
             // displayed prediction has typically been off by against the ratings this account went on
             // to give — the same calibrator, and so the same "± 1.1", the Saved queue shows. Null until
             // the closed loop has pairs: an unmeasured band is not a band.
-            var calibrator = await calibration.GetAsync(account.Id, ct);
-            double? expectedAbsoluteError = calibrator.PairCount == 0 ? null : Math.Round(calibrator.ExpectedAbsoluteError, 1);
+            var expectedAbsoluteError = await TitleEndpoints.ExpectedAbsoluteErrorAsync(calibration, account.Id, ct);
 
             var snapshot = await db.FeedSnapshots
                 .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
@@ -154,12 +153,10 @@ public static class FeedEndpoints
             // The same holds for a content rule or a "for you" bar saved after the build (XM-03,
             // XM-07): the snapshot was dealt under yesterday's rules, and "airtight on every channel"
             // includes the minutes before the rebuild the save queued. Rules and the maturity ceiling
-            // are read from EligibilityQueryBuilder like the footprint; the bar is the build's own raw
-            // comparison (ForYouBar.Clears), so a card the build would not deal now is not served.
-            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
-                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
-                .Select(f => f.Value)
-                .FirstOrDefaultAsync(ct));
+            // are read from EligibilityQueryBuilder like the footprint; the bar is the build's own
+            // comparison (ForYouBar.Clears, held to the badge), so a card the build would not deal
+            // now is not served.
+            var minPredicted = await ForYouBar.ReadAsync(db, account.Id, ct);
             var forYouBar = minPredicted ?? 0m;
             var allowedByRules = (await eligibility.ContentFilteredTitles(account.Id)
                     .Where(t => snapshotTitleIds.Contains(t.Id))
@@ -210,13 +207,15 @@ public static class FeedEndpoints
                     // titles that would have been taken anyway — a prior applied to a pool the size
                     // of the hole it fills is arithmetic with no consequence. Renderable-card gate
                     // (poster + tmdbId) mirrors the paginator so a backfill never floats a blank.
+                    // The bar as a SQL bound on the stored 2 dp column: exactly ForYouBar.Clears.
+                    var lowestClearing = ForYouBar.LowestStoredClearing(forYouBar);
                     var candidates = await (
                         from s in db.TitleScores
                         join t in db.Titles on s.TitleId equals t.Id
                         where s.AccountId == account.Id && s.ModelArtifactId == snapshot.ModelArtifactId
                             && t.TmdbId != null && t.PosterPath != null
                             && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
-                            && (forYouBar <= 0m || s.PredictedRating >= forYouBar)
+                            && (forYouBar <= 0m || s.PredictedRating >= lowestClearing)
                         orderby s.PredictedRating descending
                         select new { s.PredictedRating, s.ContributionsJson, Title = t })
                         .Take((needed * 6) + 20)
@@ -421,7 +420,9 @@ public static class FeedEndpoints
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
-                    item.PredictedRating, crowd, crowdVotes, FeedWhyGuard.Servable(item.WhyThisSentence), isReleased,
+                    // The badge's own number (one decimal), so the client's toFixed(1) cannot
+                    // print a digit the bar was not held to.
+                    ForYouBar.Shown(item.PredictedRating), crowd, crowdVotes, FeedWhyGuard.Servable(item.WhyThisSentence), isReleased,
                     providersByTitle.GetValueOrDefault(title.Id, []),
                     // Rows carry no label: they are selected against the account's own floor, not the
                     // hero bar, so "reaching" would be measuring them against a rule they never had.
@@ -735,7 +736,7 @@ public static class FeedEndpoints
             var cards = items.Select(i => new FeedCard(
                 i.Title.Id, i.Title.MediaType.ToString(), i.Title.TmdbId, i.Title.Name, i.Title.Year, i.Title.RuntimeMinutes,
                 i.Title.PosterPath, i.Title.BackdropPath, i.Title.Genres,
-                i.Predicted, Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
+                ForYouBar.Shown(i.Predicted), Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
                 i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []),
                 Evidence: i.Evidence)).ToList();
 
@@ -784,7 +785,8 @@ public static class FeedEndpoints
                         cards.Select((c, i) => new ExposureCard(
                             c.TitleId,
                             i,
-                            c.PredictedRating,
+                            // The scored value, not the card's one-decimal badge: the log keeps 2 dp.
+                            byTitle[c.TitleId].Predicted,
                             // The decomposition and the source are carried from where the card was
                             // scored and captioned — the paginator — rather than left at zero and
                             // Unknown, which is what 1,800+ paginated rows used to record.

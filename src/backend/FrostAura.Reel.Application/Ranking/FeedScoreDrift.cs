@@ -54,7 +54,7 @@ public static class FeedScoreDrift
     /// <summary>
     /// The <c>feed-scores-updated</c> frame body: the snapshot's UNCHANGED <c>generatedAt</c> (the
     /// client keys rows on it and must be able to prove the frame belongs to the page it is looking
-    /// at) plus only the cards whose rating moved. Contribution-only changes are written but not
+    /// at) plus only the cards whose rating moved, each at the one decimal its badge shows. Contribution-only changes are written but not
     /// broadcast — there is no number on screen for them to patch.
     /// </summary>
     public static IReadOnlyDictionary<string, object?> Payload(
@@ -66,7 +66,8 @@ public static class FeedScoreDrift
                 .Select(c => new Dictionary<string, object?>
                 {
                     ["titleId"] = c.TitleId,
-                    ["predictedRating"] = c.PredictedRating,
+                    // The badge's number, as /api/feed sends it: the client patches it in place.
+                    ["predictedRating"] = ForYouBar.Shown(c.PredictedRating),
                 })
                 .ToList(),
         };

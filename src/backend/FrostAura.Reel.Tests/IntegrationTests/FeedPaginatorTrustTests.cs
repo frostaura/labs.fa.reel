@@ -410,6 +410,64 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.DoesNotContain(second, i => i.Title.Id == rated);
     }
 
+    /// <summary>
+    /// R1-04: the bar holds on a paged rail as it does on tonight's picks. A lane with nothing above
+    /// the bar used to fall back to the best of what it had, serving "load more" cards under the
+    /// user's own bar on every rail. Run against a bar far above the lane, a bar exactly at the
+    /// lane's best badge (inclusive: every card at it is served) and one tenth above that.
+    /// </summary>
+    [Theory]
+    [InlineData("far-above")]
+    [InlineData("at-best")]
+    [InlineData("just-above-best")]
+    public async Task A_paged_rail_never_serves_a_card_under_the_bar(string placement)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"bar-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitlesAsync(30, genre);
+        await SeedActiveArtifactAsync(accountId);
+
+        var unbarred = await MoreAsync(accountId, Genre(genre), new UnavailableSearchAgent());
+        Assert.NotEmpty(unbarred);
+        var best = unbarred.Max(i => ForYouBar.Shown(i.Predicted));
+        var bar = placement switch
+        {
+            "far-above" => 9.9m,
+            "at-best" => best,
+            _ => best + 0.1m,
+        };
+
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.MinPredictedRating,
+                Value = ContentFilterRules.FormatRating(bar),
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var barred = await MoreAsync(accountId, Genre(genre), new UnavailableSearchAgent());
+
+        Assert.All(barred, i => Assert.True(ForYouBar.Clears(i.Predicted, bar), $"{i.Title.Name} at {i.Predicted} under {bar}"));
+        if (placement == "at-best")
+        {
+            Assert.NotEmpty(barred);
+        }
+        else
+        {
+            Assert.Empty(barred);
+        }
+    }
+
     private static MoreFeedRequest Genre(string genre) =>
         new(FeedRowContext.Genre, AnchorTitleId: null, Genre: genre, ExcludeTitleIds: [], Limit: 10);
 

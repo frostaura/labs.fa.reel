@@ -237,13 +237,7 @@ public class BuildFeedJobHandler(
         // first pass on one scale and a final pass on another would be two different numbers for the
         // same title, and the shortlist cut-off would be taken on a scale nothing else uses.
         var calibrator = await calibration.GetAsync(accountId, ct);
-        var minPredictedRaw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == Domain.Filters.FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct);
-        var minPredicted = minPredictedRaw is not null
-            && decimal.TryParse(minPredictedRaw, System.Globalization.CultureInfo.InvariantCulture, out var floor)
-            ? Math.Clamp(floor, 0m, 10m) : 0m;
+        var minPredicted = await ForYouBar.ReadAsync(db, accountId, ct) ?? 0m;
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         await ReportProgressAsync(job, accountId, 10, "Scouting fresh candidates", ct);
@@ -1460,7 +1454,7 @@ public class BuildFeedJobHandler(
         static bool CrowdBacked(Candidate c) =>
             Domain.Feed.HeroConfidence.ClearsCrowdFloor(c.Title.MediaType, CrowdPrior.ShrunkScoreOf(c.Title));
         var heroPool = candidates
-            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null && CrowdBacked(c))
+            .Where(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)) && c.Title.PosterPath != null && CrowdBacked(c))
             .OrderByDescending(HeroKey)
             .ToList();
         // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
@@ -1481,13 +1475,13 @@ public class BuildFeedJobHandler(
                 FeedRowKind.Hero,
                 null,
                 [.. candidates
-                    .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                    .Where(c => c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
                     .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
                 HeroSize,
-                (c, chosen) => c.Predicted >= heroFloor && CrowdBacked(c)
+                (c, chosen) => ForYouBar.Clears(c.Predicted, heroFloor) && CrowdBacked(c)
                     && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
-                (c, _) => c.Predicted >= heroFloor && CrowdBacked(c),
-                (c, _) => c.Predicted >= heroFloor,
+                (c, _) => ForYouBar.Clears(c.Predicted, heroFloor) && CrowdBacked(c),
+                (c, _) => ForYouBar.Clears(c.Predicted, heroFloor),
                 (_, _) => true);
         }
         else if (mode == FeedBuildMode.Preserve)
@@ -1540,8 +1534,8 @@ public class BuildFeedJobHandler(
         {
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
-                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
+                .OrderByDescending(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)))
                 .ThenByDescending(CrowdBacked)
                 .ThenByDescending(HeroKey)
                 .Take(HeroSize - hero.Count));
@@ -1573,8 +1567,8 @@ public class BuildFeedJobHandler(
             // title the crowd floor would have kept out (measured: two sub-floor films entered the
             // hero this way on the first build with the floor).
             var heroSparePool = candidates
-                .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
+                .OrderByDescending(c => ForYouBar.Clears(c.Predicted, Math.Max(HeroConfidenceFloor, effectiveFloor)))
                 .ThenByDescending(CrowdBacked)
                 .ThenByDescending(HeroKey)
                 .ToList();
@@ -1652,9 +1646,9 @@ public class BuildFeedJobHandler(
         // reserve each later row's top-few candidates BEFORE the anchor fill so they survive. The
         // shared `used` set still guarantees no title repeats across the feed — reserved titles are
         // only WITHHELD from the greedy loved fill here, never pre-added, and remain free to place.
-        bool IsDeepCut(Candidate c) => c.Predicted >= Math.Max(6m, effectiveFloor)
+        bool IsDeepCut(Candidate c) => ForYouBar.Clears(c.Predicted, Math.Max(6m, effectiveFloor))
             && (c.Title.TmdbPopularity ?? 0m) < popThreshold;
-        bool IsNewForYou(Candidate c) => c.Predicted >= effectiveFloor
+        bool IsNewForYou(Candidate c) => ForYouBar.Clears(c.Predicted, effectiveFloor)
             && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900;
 
         var reserved = new HashSet<Guid>();
@@ -1824,7 +1818,7 @@ public class BuildFeedJobHandler(
                     // dealt, and their similarity to the anchor cannot have changed since.
                     if (candidatesById.TryGetValue(titleId, out var keptMember)
                         && !used.Contains(titleId)
-                        && keptMember.Predicted >= effectiveFloor)
+                        && ForYouBar.Clears(keptMember.Predicted, effectiveFloor))
                     {
                         members.Add(keptMember);
                     }
@@ -1836,7 +1830,7 @@ public class BuildFeedJobHandler(
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
                 var railPool = admittedPool
                     .Where(x => !used.Contains(x.Candidate.Title.Id) && !keptIds.Contains(x.Candidate.Title.Id)
-                        && !reserved.Contains(x.Candidate.Title.Id) && x.Candidate.Predicted >= effectiveFloor)
+                        && !reserved.Contains(x.Candidate.Title.Id) && ForYouBar.Clears(x.Candidate.Predicted, effectiveFloor))
                     .ToList();
 
                 // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
@@ -1867,7 +1861,7 @@ public class BuildFeedJobHandler(
             var inRadius = admissions.Count(a => radiusFloor is { } rf && a.Value.Similarity is { } sim && sim >= rf);
             anchorTrace.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{anchor.Name}: radius {radiusFloor:0.000}, {pulledNeighbours} eligible neighbours pulled, {inRadius} inside the radius, {admittedPool.Count} with shared evidence, {admittedPool.Count(x => x.Candidate.Predicted >= effectiveFloor)} at the {effectiveFloor:0.0} floor, {members.Count} dealt"));
+                $"{anchor.Name}: radius {radiusFloor:0.000}, {pulledNeighbours} eligible neighbours pulled, {inRadius} inside the radius, {admittedPool.Count} with shared evidence, {admittedPool.Count(x => ForYouBar.Clears(x.Candidate.Predicted, effectiveFloor))} at the {effectiveFloor:0.0} floor, {members.Count} dealt"));
             if (members.Count < RowMinMembers)
             {
                 capture.AnchorsPassedOver++;
@@ -1974,7 +1968,7 @@ public class BuildFeedJobHandler(
         // placed anywhere on this feed, so a swap can never seat a card another rail already shows.
         var heroSpares = heroPool
             .Concat(candidates
-                .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                .Where(c => c.Title.PosterPath != null && ForYouBar.Clears(c.Predicted, effectiveFloor))
                 .OrderByDescending(HeroKey))
             .Where(c => !used.Contains(c.Title.Id))
             .DistinctBy(c => c.Title.Id)
@@ -2251,7 +2245,7 @@ public class BuildFeedJobHandler(
         // therefore the honest way to spend a bounded number of calls on the titles most likely to
         // reach the page.
         var slice = candidates
-            .Where(c => c.Predicted >= effectiveFloor)
+            .Where(c => ForYouBar.Clears(c.Predicted, effectiveFloor))
             .OrderByDescending(rankKey)
             .ThenBy(c => c.Title.Id)
             .Take(PreAssemblyFitCandidates)
@@ -2833,7 +2827,7 @@ public class BuildFeedJobHandler(
     /// no migration.
     /// </para>
     /// </summary>
-    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
+    private static decimal DisplayRating(Candidate candidate) => ShownRating.Stored(candidate.Predicted);
 
     /// <summary>
     /// The RANKING score behind the card — predicted × the taste prior × the crowd term × freshness
