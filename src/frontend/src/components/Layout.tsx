@@ -114,18 +114,22 @@ export default function Layout() {
             <SyncStatusPill />
             <DropdownMenu>
               <DropdownMenuTrigger
-                // The name is visible only from `sm` up; a phone shows just the avatar, which needs a name too.
-                aria-label={session?.displayName ? `Account menu, ${session.displayName}` : "Account menu"}
+                // The name comes from one sr-only span, not an aria-label: axe's
+                // label-content-name-mismatch fails an aria-label that does not contain the visible
+                // text, and the visible initial + name ("T Test Founder") never matches. The avatar
+                // and the visible name are presentation of the same words; a phone shows only the
+                // avatar, and the sr-only span still names the button there.
                 className="flex items-center justify-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-2 py-1 hover:border-fa-frost/40 transition coarse:min-h-11 coarse:min-w-11"
               >
+                <span className="sr-only">{session?.displayName ? `Account menu, ${session.displayName}` : "Account menu"}</span>
                 {session?.avatarUrl ? (
                   <img src={session.avatarUrl} alt="" className="h-6 w-6 rounded-full object-cover" />
                 ) : (
-                  <span className="h-6 w-6 rounded-full bg-fa-ink-3 flex items-center justify-center fa-caption text-fa-frost">
+                  <span aria-hidden className="h-6 w-6 rounded-full bg-fa-ink-3 flex items-center justify-center fa-caption text-fa-frost">
                     {session?.displayName?.[0]?.toUpperCase() ?? "?"}
                   </span>
                 )}
-                <span className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
+                <span aria-hidden className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {/* Blend stays routable at /blend but is off the menu (FD-16 default, WS-10B CR-5). */}
