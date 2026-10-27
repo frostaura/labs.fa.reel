@@ -68,6 +68,11 @@ export interface LensPayload {
   mood: string | null;
   whenToWatch: string | null;
   generatedAt: string | null;
+  /**
+   * True when a lens pass that writes this title is queued (WS-1 task 7: the GET only reads, and
+   * queues the pass when the note is not current). Optional: an older server never sends it.
+   */
+  pending?: boolean;
 }
 
 /** The account's taste narrative — what Reel believes about you, and your correction to it. */
@@ -97,6 +102,11 @@ export interface FeedPayload {
   hero: FeedCard[];
   rows: FeedRow[];
   lockedRowCount: number;
+  /**
+   * The calibrator's band behind every "for you" number (WS-5; the same number Saved shows), 1dp.
+   * Null until the account's closed loop has pairs; absent from an older server.
+   */
+  expectedAbsoluteError?: number | null;
 }
 
 /** A genre rail the home page renders beneath the personalised rows; filled via /feed/more. */

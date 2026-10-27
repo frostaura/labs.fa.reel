@@ -33,7 +33,7 @@ export default function CrowdRatingBadge({ rating, votes, size = "sm" }: Props) 
     >
       <Star className={size === "lg" ? "h-3.5 w-3.5 fill-current" : "h-3 w-3 fill-current"} aria-hidden />
       {rating.toFixed(1)}
-      <span className="fa-overline text-fa-warning/60 font-normal">
+      <span className="fa-overline text-3 font-normal">
         crowd{count ? ` ${count}` : ""}
       </span>
     </span>

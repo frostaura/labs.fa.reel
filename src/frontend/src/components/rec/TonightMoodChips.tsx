@@ -1,4 +1,5 @@
 import { TONIGHT_MOODS, type TonightMood } from "../../lib/tonightMood";
+import { Button } from "../ui/button";
 
 /**
  * "Not tonight — something lighter."
@@ -26,13 +27,13 @@ export default function TonightMoodChips({
     // it can never be scrolled out of sight.
     <div className={`space-y-1.5 ${className}`} data-testid="tonight-mood-chips">
       <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
-        <span className="fa-overline shrink-0 text-fa-frost-dim mr-1">tonight</span>
+        <span className="fa-overline shrink-0 text-3 mr-1">tonight</span>
         {TONIGHT_MOODS.map((mood) => {
           const active = value === mood.id;
           return (
-            <button
+            <Button
               key={mood.id}
-              type="button"
+              variant="ghost"
               aria-pressed={active}
               data-testid={`mood-${mood.id}`}
               // Tapping the active chip clears it — the way back to the model's own order is the
@@ -40,19 +41,19 @@ export default function TonightMoodChips({
               onClick={() => onChange(active ? null : mood.id)}
               // 44 px tall on a coarse pointer (IREV3S-08 measured these at 24); a fine pointer keeps
               // the compact chip.
-              className={`fa-overline inline-flex min-h-11 shrink-0 items-center whitespace-nowrap rounded-full border px-3 py-1.5 transition [@media(pointer:fine)]:min-h-0 ${
+              className={`h-auto min-h-11 shrink-0 rounded-full border px-3 py-1.5 font-normal [@media(pointer:fine)]:min-h-0 ${
                 active
-                  ? "border-fa-frost/60 bg-fa-glass-strong text-fa-frost-bright"
-                  : "border-fa-edge bg-fa-glass text-fa-frost-dim hover:border-fa-frost/40 hover:text-fa-frost"
+                  ? "border-fa-frost/60 bg-fa-glass-strong text-fa-frost-bright hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+                  : "border-fa-edge bg-fa-glass text-3 hover:border-fa-frost/40 hover:bg-fa-glass hover:text-fa-frost"
               }`}
             >
-              {mood.label}
-            </button>
+              <span className="fa-overline">{mood.label}</span>
+            </Button>
           );
         })}
       </div>
       {value && (
-        <p className="fa-caption text-fa-frost-dim" data-testid="mood-note">
+        <p className="fa-caption text-3" data-testid="mood-note">
           reordered, not filtered — nothing has been removed
         </p>
       )}

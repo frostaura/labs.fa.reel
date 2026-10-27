@@ -51,6 +51,11 @@ export interface SavedQueueResponse {
   expectedAbsoluteError: number | null;
   /** Saves still without a prediction after this request's scoring budget was spent. */
   unscoredRemaining: number;
+  /**
+   * Saves the account's conditions (content rules or the maturity ceiling) keep out of `items`
+   * (WS-4). Optional: an older server sends every save and omits it.
+   */
+  heldOutByRules?: number;
   items: SavedQueueItem[];
 }
 

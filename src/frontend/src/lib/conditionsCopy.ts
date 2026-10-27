@@ -13,10 +13,17 @@
  *   "amelie" returns Amélie for an English-only account. Settings meanwhile said "only partly
  *   applies them", so the founder read two contradictory scope sentences.
  *
- * So the sentence does not enumerate which rules the lookup keeps — that list is exactly what
- * drifted twice — it says the lookup can show what the conditions exclude, which is true of every
- * leg. Ask Reel is "shaped", not "airtight": it keeps titles under the minimum behind a labelled
- * "under your bar" fence rather than dropping them.
+ * - "…Top-bar search looks titles up by name and only partly applies them, so it can show titles
+ *   your conditions exclude" (IR1S-06's fix): true until WS-3's tiered lookup (trust-v1 task 10,
+ *   FD-5's default) — both legs now hide what the conditions rule out and count it on a
+ *   "N matches hidden by your conditions" line, so "can show titles your conditions exclude" became
+ *   the false half.
+ *
+ * What the lookup still does differently is by design and stable, so it is named: it finds titles
+ * you have already seen (it badges them) and it does not apply the "for you" minimum (a name lookup
+ * has no prediction to hold to a floor). Everything else is hidden and counted. Ask Reel is "shaped",
+ * not "airtight": it keeps titles under the minimum behind a labelled "under your bar" fence rather
+ * than dropping them.
  */
 export const CONDITIONS_SCOPE_COPY =
-  "These shape the hero, every row and Ask Reel. Top-bar search looks titles up by name and only partly applies them, so it can show titles your conditions exclude.";
+  "These shape the hero, every row, Ask Reel and top-bar search. Search still finds titles you've seen and ignores the “for you” minimum; anything else your conditions rule out is counted, not shown.";

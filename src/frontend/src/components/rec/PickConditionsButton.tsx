@@ -5,6 +5,7 @@ import ConditionsEditor from "../settings/ConditionsEditor";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
 import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
+import { Button } from "../ui/button";
 
 /**
  * The conditions editor, reachable from the feed itself.
@@ -42,21 +43,20 @@ export default function PickConditionsButton({
     <Dialog open={open} onOpenChange={setOpen}>
       {trigger && (
         <DialogTrigger asChild>
-          <button
-            type="button"
+          <Button
             title="Set the conditions for tonight's picks — genres, ratings, years, languages"
             data-testid="open-conditions"
-            className="fa-overline inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-fa-edge bg-fa-glass px-2.5 py-2 text-fa-frost transition [@media(pointer:fine)]:min-h-0 hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+            className="h-auto min-h-11 gap-1.5 rounded-lg bg-fa-glass px-2.5 py-2 text-fa-frost [@media(pointer:fine)]:min-h-0 hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
           >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            Conditions
+            <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+            <span className="fa-overline">Conditions</span>
             {/* Counts SAVED conditions only — the browse toggles are a per-device view filter this
                 dialog cannot edit, so counting them here would send the user in to look for a control
                 that is not there. The chip row therefore legitimately carries more chips than this
                 badge counts; the label spells out which ones it means. */}
             {activeCount > 0 && (
               <span
-                className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fa-frost/20 px-1 text-fa-frost-bright tabular-nums"
+                className="fa-overline inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fa-frost/20 px-1 text-fa-frost-bright tabular-nums"
                 data-testid="conditions-count"
                 aria-label={`${activeCount} saved condition${activeCount === 1 ? "" : "s"}`}
                 title={`${activeCount} saved condition${activeCount === 1 ? "" : "s"} — browse toggles are counted separately`}
@@ -64,7 +64,7 @@ export default function PickConditionsButton({
                 {activeCount}
               </span>
             )}
-          </button>
+          </Button>
         </DialogTrigger>
       )}
       {/* Taller and wider than the default dialog: this is a form, not a confirmation, and the

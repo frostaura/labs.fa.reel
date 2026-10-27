@@ -1,3 +1,4 @@
+import { feedApi } from "../store/api/feed";
 import { savedApi } from "../store/api/saved";
 
 /**
@@ -14,12 +15,22 @@ import { savedApi } from "../store/api/saved";
  * post-watch strip, which owns that request, so the band is there on the surfaces that show feed
  * cards. On a surface that never asked (a deep-linked title page) the band is simply absent — an
  * unmeasured number is shown bare, which is the honest fallback; a rail card must never be the
- * thing that adds an API call to a page. The direct source is a `expectedAbsoluteError` field on
- * `/api/feed` itself (change request to WS-5); this hook prefers it the day it exists.
+ * thing that adds an API call to a page. `/api/feed` carries the same band itself (WS-5), so Home
+ * has it from its first answer; the recently-watched read is the fallback.
  */
 export function useForYouBand(fromFeed?: number | null): number | null {
-  const { data } = savedApi.endpoints.getRecentlyWatched.useQueryState();
-  return usableBand(fromFeed) ?? usableBand(data?.expectedAbsoluteError);
+  const { data: feed } = feedApi.endpoints.getFeed.useQueryState();
+  const { data: recent } = savedApi.endpoints.getRecentlyWatched.useQueryState();
+  return firstUsableBand(fromFeed, feed?.expectedAbsoluteError, recent?.expectedAbsoluteError);
+}
+
+/** The first band worth printing, in the order given. */
+export function firstUsableBand(...bands: (number | null | undefined)[]): number | null {
+  for (const band of bands) {
+    const usable = usableBand(band);
+    if (usable !== null) return usable;
+  }
+  return null;
 }
 
 /** A band worth printing: finite and positive. "± 0.0" would be the least honest number on screen. */

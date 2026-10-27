@@ -39,14 +39,14 @@ export default function CrossReferenceBand() {
           {sentence}
         </p>
         {coverage && (
-          <p className="fa-caption text-fa-frost-dim mt-1" data-testid="cross-reference-coverage">
+          <p className="fa-caption text-3 mt-1" data-testid="cross-reference-coverage">
             {coverage}
           </p>
         )}
       </div>
       <Link
         to="/track-record"
-        className="fa-caption text-fa-frost-dim shrink-0 underline underline-offset-2 hover:text-fa-frost-bright"
+        className="fa-caption text-3 shrink-0 underline underline-offset-2 hover:text-fa-frost-bright"
       >
         Track record
       </Link>

@@ -36,6 +36,7 @@ import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
 import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
+import { Button } from "../components/ui/button";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -142,7 +143,7 @@ export default function Home() {
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
               {feed?.generatedAt && (
-                <p className="fa-caption text-fa-frost-dim">
+                <p className="fa-caption text-3">
                   ranked for you · {formatRankedAt(feed.generatedAt)}
                 </p>
               )}
@@ -196,16 +197,15 @@ export default function Home() {
               />
             )}
             {hasFresherPicks && (
-              <button
-                type="button"
+              <Button
                 onClick={() => setAdoptedKey(latestKey)}
                 data-testid="adopt-fresh-picks"
                 title="Load the newly generated picks — this resets the rows below"
-                className="fa-overline inline-flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
+                className="h-auto min-h-11 shrink-0 gap-1.5 rounded-lg border-fa-frost/40 bg-fa-glass px-2.5 py-2 font-normal text-fa-frost hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
               >
-                <Sparkles className="h-3.5 w-3.5" />
-                New picks ready
-              </button>
+                <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                <span className="fa-overline">New picks ready</span>
+              </Button>
             )}
             {/* Refresh sits right after the conditions on a phone so it is never scrolled out of
                 reach, and last from `md`, at the end of the control strip where it has always been.
@@ -238,7 +238,7 @@ export default function Home() {
               ))}
             </div>
             {building && (
-              <p className="fa-body text-fa-frost-dim text-center">
+              <p className="fa-body text-3 text-center">
                 Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
               </p>
             )}
@@ -299,12 +299,12 @@ export default function Home() {
 
             {(feed?.lockedRowCount ?? 0) > 0 && (
               <section className="fa-card p-5 flex items-center gap-4">
-                <Lock className="h-5 w-5 text-fa-frost-dim shrink-0" />
+                <Lock className="h-5 w-5 text-3 shrink-0" />
                 <div>
                   <p className="fa-body text-fa-frost-bright">
                     {feed!.lockedRowCount} more personalised row{feed!.lockedRowCount === 1 ? "" : "s"} on the full feed
                   </p>
-                  <p className="fa-caption text-fa-frost-dim">
+                  <p className="fa-caption text-3">
                     The free shortlist gives you three picks a day — the paid feed unlocks every row, natural-language
                     search and the managed Trakt queue.
                   </p>

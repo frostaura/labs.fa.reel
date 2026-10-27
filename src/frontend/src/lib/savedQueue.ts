@@ -131,9 +131,26 @@ export function listSyncLabel(item: Pick<SavedQueueItem, "listSync">): ListSyncL
     case "offList":
       return {
         text: "not on Up Next",
-        title: "Saved here but not on the Trakt list — it was taken off on Trakt, or the write-back gave up.",
+        // Neutral on purpose (WS-4 CR-4): a save that came in from the Trakt watchlist was never
+        // written to Up Next, so "taken off on Trakt, or the write-back gave up" was false for it.
+        title: "Saved here; not on your Reel — Up Next list on Trakt.",
       };
     default:
       return null;
   }
+}
+
+/**
+ * The line that accounts for saves the conditions hold out (WS-4: a standing exclusion is airtight
+ * on every channel, Saved included, and the server reports how many it held back). Nothing may
+ * vanish unexplained — and when every save is held out, the shelf must not read as empty.
+ */
+export function heldOutLine(heldOut: number | null | undefined, shown: number): string | null {
+  if (!heldOut || heldOut <= 0) return null;
+  if (shown === 0) {
+    return heldOut === 1
+      ? "Your 1 save is hidden by your conditions."
+      : `All ${heldOut} of your saves are hidden by your conditions.`;
+  }
+  return heldOut === 1 ? "1 save is hidden by your conditions." : `${heldOut} saves are hidden by your conditions.`;
 }

@@ -4,6 +4,7 @@ import { useGetRecentlyWatchedQuery, useRateTitleMutation } from "../../store/ap
 import PosterImage from "../rec/PosterImage";
 import { dismiss, readDismissed } from "../../lib/postWatchDismissals";
 import { ratingDelta } from "../../lib/savedQueue";
+import { Button } from "../ui/button";
 
 const SCALE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
@@ -43,15 +44,16 @@ export default function PostWatchStrip() {
     return (
       <div className="fa-card px-4 py-3 flex items-center justify-between gap-3" data-testid="post-watch-settled">
         <p className="fa-body text-fa-frost-bright">{ratingDelta(settled.predicted, settled.actual)}</p>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={() => setSettled(null)}
-          className="fa-button-ghost"
+          className="h-11 w-11 shrink-0 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9"
           aria-label="Dismiss"
           data-testid="post-watch-settled-close"
         >
-          <X className="h-4 w-4" />
-        </button>
+          <X className="h-4 w-4" aria-hidden />
+        </Button>
       </div>
     );
   }
@@ -71,11 +73,16 @@ export default function PostWatchStrip() {
             <span className="tabular-nums">{item.predictedRating.toFixed(1)}</span> — what did you actually think?
           </p>
 
-          <div className="flex flex-wrap items-center gap-1" role="group" aria-label={`Rate ${item.name} out of 10`}>
+          {/* Two rows of five at 44 px on a touch screen (the cards' picker shape); one row of
+              compact squares under a mouse. */}
+          <div
+            className="grid max-w-[16rem] grid-cols-5 gap-1 [@media(pointer:fine)]:flex [@media(pointer:fine)]:max-w-none [@media(pointer:fine)]:flex-wrap [@media(pointer:fine)]:items-center"
+            role="group"
+            aria-label={`Rate ${item.name} out of 10`}
+          >
             {SCALE.map((value) => (
-              <button
+              <Button
                 key={value}
-                type="button"
                 disabled={isRating}
                 onClick={async () => {
                   try {
@@ -96,28 +103,29 @@ export default function PostWatchStrip() {
                 }}
                 aria-label={`${value} out of 10`}
                 data-testid={`post-watch-rate-${value}`}
-                className="fa-overline h-7 w-7 rounded-md border border-fa-edge bg-fa-glass text-fa-frost-dim tabular-nums transition hover:border-fa-frost/40 hover:text-fa-frost-bright disabled:opacity-50"
+                className="h-11 w-11 rounded-md bg-fa-glass p-0 font-normal text-3 tabular-nums hover:border-fa-frost/40 hover:text-fa-frost-bright [@media(pointer:fine)]:h-7 [@media(pointer:fine)]:w-7"
               >
-                {value}
-              </button>
+                <span className="fa-overline">{value}</span>
+              </Button>
             ))}
           </div>
 
-          <p className="fa-caption text-fa-frost-dim/70">
+          <p className="fa-caption text-3">
             Closing the loop — Reel only learns how wrong it was when you tell it.
           </p>
         </div>
 
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={() => setDismissed(dismiss(item.titleId))}
-          className="fa-button-ghost shrink-0"
+          className="h-11 w-11 shrink-0 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9"
           aria-label={`Dismiss the prompt for ${item.name}`}
           title="Not now. Hidden on this device only."
           data-testid="post-watch-dismiss"
         >
-          <X className="h-4 w-4" />
-        </button>
+          <X className="h-4 w-4" aria-hidden />
+        </Button>
       </div>
     </div>
   );

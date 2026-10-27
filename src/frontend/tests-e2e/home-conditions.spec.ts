@@ -19,7 +19,7 @@ const FIXTURES = {
     excludeGenres: ["documentary"], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
     minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
   },
-  // No floor at all, but the exact rules IR1S-06 showed the global lookup ignoring.
+  // No floor at all: the exact rules IR1S-06 showed the global lookup ignoring, which it now hides (FD-5).
   "no floor; romance, pre-2000 and non-English excluded": {
     excludeGenres: ["romance"], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
     minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: 2000, maxYear: null,
@@ -27,7 +27,7 @@ const FIXTURES = {
 };
 
 for (const [label, FILTERS] of Object.entries(FIXTURES)) {
-  test(`the conditions dialog says top-bar search can show excluded titles (${label})`, async ({ page }) => {
+  test(`the conditions dialog says top-bar search hides and counts what they rule out (${label})`, async ({ page }) => {
     await stubEventSource(page);
     // Registered first, so every specific mock below wins: nothing reaches the dev proxy.
     await page.route(
@@ -57,7 +57,8 @@ for (const [label, FILTERS] of Object.entries(FIXTURES)) {
     await page.getByTestId("open-conditions").click();
     const scope = page.getByTestId("conditions-scope");
     await expect(scope).toHaveText(`${CONDITIONS_SCOPE_COPY} Saving re-cuts the feed straight away.`);
-    await expect(scope).toContainText("can show titles your conditions exclude");
+    await expect(scope).toContainText("counted, not shown");
+    await expect(scope).not.toContainText("can show titles your conditions exclude");
     await expect(scope).not.toContainText("all search");
     await expect(scope).not.toContainText("Search applies them too");
   });

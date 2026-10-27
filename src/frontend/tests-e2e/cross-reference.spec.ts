@@ -282,12 +282,35 @@ test.describe("cross-reference pass", () => {
     expect(bandRequests).toBe(0);
   });
 
-  test("the track record shows the measurement that decided what a verdict may do", async ({ page }) => {
+  // The cross-reference block moved off /api/accuracy to /api/metrics/cross-reference (WS-5 task
+  // 11, G-10): Track record keeps the plain-words reading of the generation running now, and its
+  // statistics (the interval, which version is running) moved to /lab (KILL-11, WS-10B).
+  const { crossReference: XREF, ...ACCURACY } = ACCURACY_WITH_XREF;
+  const XREF_STATS = {
+    window: "90d",
+    population: { name: "Titles served under a cross-reference standing that you have since rated", selectionNote: "" },
+    crossReference: XREF,
+  };
+
+  /** Everything else on the page answers 404 (its own inline error), so nothing reaches the tripwire. */
+  async function bootPage(page: Page, path: string) {
     await stubEventSource(page);
+    await page.route(
+      (u) => u.pathname.startsWith("/api/"),
+      (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
+    );
     await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
     await mockJson(page, "**/api/sync/status", SYNC_IDLE);
-    await mockJson(page, "**/api/accuracy", ACCURACY_WITH_XREF);
-    await page.goto("/track-record");
+    await mockJson(page, "**/api/accuracy", ACCURACY);
+    await page.route(
+      (u) => u.pathname === "/api/metrics/cross-reference",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(XREF_STATS) })
+    );
+    await page.goto(path);
+  }
+
+  test("the track record says, in plain words, what the running pass was measured to do", async ({ page }) => {
+    await bootPage(page, "/track-record");
 
     const panel = page.getByTestId("cross-reference");
     await expect(panel).toBeVisible();
@@ -300,13 +323,21 @@ test.describe("cross-reference pass", () => {
     await expect(page.getByTestId("cross-reference-backtest")).toContainText(
       "caught 16% of the titles you went on to love"
     );
-    await expect(panel).toContainText("95% confidence 12.3–21.0%");
-    await expect(panel).toContainText("this is the version running now");
+    // The statistics are the lab's now, not the track record's.
+    await expect(panel).not.toContainText("95% confidence");
 
     // The online half answers where it can and refuses where it cannot — with the count, so the
     // refusal is checkable rather than mysterious.
     const rows = page.getByTestId("cross-reference-online-row");
     await expect(rows.filter({ hasText: "kept:" })).toContainText("31 rated since · averaging 7.10");
     await expect(rows.filter({ hasText: "ruled out:" })).toContainText("not yet answerable — 4 outcomes so far");
+  });
+
+  test("the lab carries the interval and names the version running now", async ({ page }) => {
+    await bootPage(page, "/lab");
+
+    const backtest = page.getByTestId("lab-xref-backtest").first();
+    await expect(backtest).toContainText("95% confidence 12.3–21.0%");
+    await expect(backtest).toContainText("running now");
   });
 });

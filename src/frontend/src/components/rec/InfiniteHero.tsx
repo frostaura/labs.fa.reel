@@ -47,7 +47,7 @@ export default function InfiniteHero({ seed, filter, mood = null, rows = 1 }: Pr
   if (hero.length === 0) {
     if (failed) return <RailRetryTile shape="inline" onRetry={retry} />;
     return (
-      <p className="fa-body text-fa-frost-dim text-center py-8">
+      <p className="fa-body text-3 text-center py-8">
         {exhausted ? "Nothing matches this filter — try widening it." : "Finding more…"}
       </p>
     );

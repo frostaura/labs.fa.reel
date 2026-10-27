@@ -158,7 +158,7 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
                 {/* Quiet on purpose: an admission, not an alarm. It sits under the why-line so the
                     pick is still the headline and the caveat is attached to it, not to the row. */}
                 {!rowIsReaching && reachingLabel(card) && (
-                  <p className="fa-caption text-fa-frost-dim" data-testid="hero-reaching-label">
+                  <p className="fa-caption text-3" data-testid="hero-reaching-label">
                     {reachingLabel(card)}
                   </p>
                 )}
