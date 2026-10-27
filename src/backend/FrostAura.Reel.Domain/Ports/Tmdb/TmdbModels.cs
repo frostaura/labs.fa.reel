@@ -60,7 +60,18 @@ public record TmdbTitleDetails(
     /// field). Read from the same hydration call; the parts come from
     /// <see cref="ITmdbClient.GetCollectionAsync"/>.
     /// </summary>
-    TmdbCollectionRef? Collection = null);
+    TmdbCollectionRef? Collection = null,
+    /// <summary>
+    /// A SHOW's creators (<c>created_by</c>: Breaking Bad → Vince Gilligan), in TMDB's order. A show's
+    /// creator is its auteur the way a film's director is, and TV crew rarely names a director, so
+    /// without this a show had no one to be "by". Empty for every movie (the movie details endpoint
+    /// carries no such field) and for a show TMDB lists no creator for. Read from the same hydration
+    /// call; hydration stores each as a creator credit.
+    /// </summary>
+    IReadOnlyList<TmdbCreator>? Creators = null);
+
+/// <summary>One person TMDB credits with creating a show: the TMDB person id, the name and the profile image path.</summary>
+public sealed record TmdbCreator(long Id, string Name, string? ProfilePath);
 
 /// <summary>A TMDB collection a movie belongs to: its id and display name.</summary>
 public sealed record TmdbCollectionRef(long Id, string Name);
