@@ -212,8 +212,9 @@ public static partial class GenreStandIns
 
     /// <summary>
     /// The overview phrases as one case-insensitive regular expression, valid in both .NET and Postgres
-    /// (ARE) syntax. The boundaries name the newline explicitly because Npgsql runs a .NET pattern
-    /// newline-sensitively, where a negated bracket never matches one; the text is matched with
+    /// (ARE) syntax. The boundaries name the newline explicitly, so a line break bounds a phrase even
+    /// where the engine runs newline-sensitively and a negated bracket does not match one (the
+    /// eligibility integration test pins a newline-bounded overview on Postgres); the text is matched with
     /// <see cref="RegexOptions.IgnoreCase"/> (<c>~*</c>), so <c>[^a-z]</c> also excludes capitals.
     /// </summary>
     public static string OverviewRegex(IEnumerable<string> phrases) =>
