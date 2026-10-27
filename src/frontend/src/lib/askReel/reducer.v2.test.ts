@@ -308,6 +308,66 @@ describe("an item question or a clarifying question never becomes the grid's row
     expect(answerRowIndex(s.turns)).toBe(1);
   });
 
+  /**
+   * The live half, found on the real server: "samurai films" came back NoneFound with one card in
+   * the under-bar tray and four relaxations, then "is the first one violent?" answered beside it —
+   * and the live screen dropped the tray, the relaxations and the none-found card (the hold only
+   * ever covered PICKS, so an answer made of trays was cleared at ask-time), while a reload put all
+   * of it back under the samurai reply. One answer, two screens, a reload apart.
+   */
+  const knockout = { kind: "ExcludeGenre", value: "comedy", contentFilterId: null, label: "excluded genre: comedy", wouldUnlock: 4 };
+  function noneFound(trays: { belowFloor?: AskCard[]; nearMiss?: AskCard[] }): ChatAction[] {
+    return [
+      { type: "userTurn", message: "samurai films", fresh: false },
+      { type: "assistant", data: { text: "None of your unseen samurai titles clears your bar." } },
+      ...(trays.belowFloor ? [{ type: "tray", data: { kind: "belowFloor", cards: trays.belowFloor } } as ChatAction] : []),
+      ...(trays.nearMiss ? [{ type: "tray", data: { kind: "nearMiss", cards: trays.nearMiss } } as ChatAction] : []),
+      { type: "noneFound", data: { supply: { knockouts: [knockout] } } },
+      { type: "done", data: done({ mode: "NoneFound", ...trays }) },
+    ];
+  }
+
+  it.each([
+    ["a tray", { belowFloor: [card(7)] }],
+    ["near misses", { nearMiss: [card(8)] }],
+    ["nothing but the reply", {}],
+  ] as [string, { belowFloor?: AskCard[]; nearMiss?: AskCard[] }][])(
+    "keeps a none-found answer made of %s on screen past an item question, as a reload does",
+    (_name, trays) => {
+      const s = run([
+        ...noneFound(trays),
+        { type: "userTurn", message: "is the first one violent?", fresh: false },
+        { type: "answer", data: { text: "Rated R; the facts don’t say how violent." } },
+        { type: "done", data: done({ mode: "Answer" }) },
+      ]);
+      expect(s.status).toBe("done");
+      expect(s.mode).toBe("NoneFound");
+      expect(s.knockouts.map((k) => k.label)).toEqual(["excluded genre: comedy"]);
+      expect(s.belowFloor.map((c) => c.titleId)).toEqual((trays.belowFloor ?? []).map((c) => c.titleId));
+      expect(s.nearMiss.map((c) => c.titleId)).toEqual((trays.nearMiss ?? []).map((c) => c.titleId));
+      expect(gridRowOf(s)).toBe(1);
+      expect(answerRowIndex(s.turns)).toBe(1);
+    },
+  );
+
+  it("still replaces a none-found answer with the next SEARCH's", () => {
+    // One field: the follow-up's mode. A search is the new answer, whatever the old one was made of.
+    const s = run([
+      ...noneFound({ belowFloor: [card(7)] }),
+      { type: "userTurn", message: "ninja movies", fresh: false },
+      { type: "assistant", data: { text: "Ninja picks." } },
+      { type: "picks", data: { cards: [card(1)] } },
+      { type: "done", data: done({ results: [card(1)], kept: 1 }) },
+    ]);
+    expect(s.mode).toBe("Picks");
+    expect(s.knockouts).toEqual([]);
+    expect(s.order).toEqual(["t1"]);
+    expect(s.belowFloor).toEqual([]);
+    // …and the tray it had is kept under its own reply, as the resume keeps it.
+    expect(s.turns[1].answer?.belowFloor.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(gridRowOf(s)).toBe(3);
+  });
+
   it("is minus one when the only reply is an item question's", () => {
     const s = run([
       { type: "userTurn", message: "is Heat violent?", fresh: true },

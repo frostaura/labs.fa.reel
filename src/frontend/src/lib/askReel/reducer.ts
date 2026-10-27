@@ -611,6 +611,19 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
  * So they now move with the grid: held while the grid is held, and released at the single moment
  * the grid is replaced (the first candidate of the new turn) or completed.
  */
+/**
+ * Is there an answer on screen for a new question to HOLD — picks, a tray, or an honest
+ * none-found? The hold used to be `order.length > 0`, which covered picks only: a none-found answer
+ * made of an under-bar tray, near misses or just the none-found card with its relaxations was
+ * cleared the moment anything was asked, so an item question about it ("is the first one
+ * violent?") wiped it live while a reload — the server replays the newest SEARCH, skipping an item
+ * question's — put all of it back (R1-32, found on the real server).
+ */
+function hasAnswer(state: State): boolean {
+  return state.order.length > 0 || state.belowFloor.length > 0 || state.nearMiss.length > 0 ||
+    state.unchecked.length > 0 || state.mode === "NoneFound";
+}
+
 function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "nearMiss" | "unchecked" | "mode" | "knockouts" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
   return {
     reason: null, paged: false, belowFloor: [], nearMiss: [], unchecked: [], mode: null, knockouts: [], droppedByFloor: null,
@@ -655,13 +668,13 @@ export function chatReducer(state: State, action: ChatAction): State {
             resumedTail: null, answeredQuery: "",
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
-            holdingPrevious: state.order.length > 0, arrived: 0,
+            holdingPrevious: hasAnswer(state), arrived: 0,
             // …and neither is the answer's own accounting, on exactly the same terms. See
             // {@link clearedAnswerDescription}.
-            ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
+            ...(hasAnswer(state) ? {} : clearedAnswerDescription()),
             // The held grid stays under the reply that produced it while this question runs, and
             // is frozen there as an earlier answer the moment this turn has something to show.
-            gridTurn: state.order.length > 0 ? gridRowOf(state) : null,
+            gridTurn: hasAnswer(state) ? gridRowOf(state) : null,
             turnDegraded: [], turnPlan: null,
           };
     }
@@ -706,8 +719,8 @@ export function chatReducer(state: State, action: ChatAction): State {
         appending: false, errorReason: null, activeTurnId: null, pageRefusal: null,
         turnConflict: null, turnConflictTerms: [],
         resumedTail: null, answeredQuery: "",
-        holdingPrevious: state.order.length > 0, arrived: 0,
-        ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
+        holdingPrevious: hasAnswer(state), arrived: 0,
+        ...(hasAnswer(state) ? {} : clearedAnswerDescription()),
         // The grid's row was the reply just dropped (the same question, being asked again), so the
         // answer it replaces is not frozen anywhere. A grid under an EARLIER row — an item question's
         // answer left it there — keeps that row, and is frozen there like any other earlier answer.
@@ -985,7 +998,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // grid, its trays, its accounting and the paging that extends it all stay exactly as they were.
       // Only over a grid that exists: with nothing on screen there is nothing to leave alone, and
       // the turn's own mode has to reach the page so it does not read as an empty search.
-      if (!state.appending && state.holdingPrevious && state.order.length > 0 && leavesGrid(action.data.mode)) {
+      if (!state.appending && state.holdingPrevious && leavesGrid(action.data.mode)) {
         return {
           ...state, status: "done", phase: null, holdingPrevious: false, pageRefusal: null,
           turns: markTurnReply(state.turns, flags), turnDegraded: [], turnPlan: null,
