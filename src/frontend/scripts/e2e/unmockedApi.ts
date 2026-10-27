@@ -99,3 +99,12 @@ export function parseHits(log: string): TripwireHit[] {
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as TripwireHit);
 }
+
+/**
+ * Where WebKit shard `shard` writes a harvest (UNMOCKED_API_FOUND): `found.json` →
+ * `found.json.webkit-3.json`. Each shard is its own Playwright run with its own reporter, so one
+ * shared path keeps only the last shard's findings.
+ */
+export function shardHarvestFile(file: string, shard: number): string {
+  return `${file}.webkit-${shard}.json`;
+}
