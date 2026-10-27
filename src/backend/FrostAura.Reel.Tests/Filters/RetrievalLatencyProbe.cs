@@ -231,7 +231,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
             var hard = new HardConstraints([new ConceptTerm($"{words} movies", [], [])], [], null, null, MediaScope.Any);
             var clock = Stopwatch.StartNew();
             var result = await retriever.RetrieveAsync(
-                new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 60) { Message = $"{words} movies" }, default);
+                new RetrievalQuery(accountId, hard, SoftPreferences.None, [], FrostAura.Reel.Application.Search.AskReel.Engine.AskReelEngine.RetrievalWant) { Message = $"{words} movies" }, default);
             (round == 1 ? total : warm).Add(clock.Elapsed.TotalMilliseconds);
             output.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,

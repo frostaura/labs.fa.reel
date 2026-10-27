@@ -391,70 +391,107 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     /// <summary>
-    /// R1-18: once the catalogue's evidence fills the request, the semantic and TMDB arms can only
-    /// re-rank what it already admits, so retrieval does not wait on them — it uses what has already
-    /// arrived and lets the rest finish in the background (warming the embedding and keyword caches).
-    /// WS-2 measured ~1.0 s of retrieve on nearly every turn waiting for arms recorded as skipped.
-    /// Each slow arm is its own case: an embedding that takes 5 s, a TMDB that takes 5 s.
+    /// R1-18: with a concept the semantic arm only re-ranks titles the catalogue's evidence admits — it
+    /// can never add one — so retrieval never waits for its embedding: it takes the vector if it has
+    /// arrived, else the reached labels' stand-in, and the call finishes in the background into the
+    /// cache. A cold concept text takes 1.2–2.7 s to embed, so the 1.0 s wait was spent on nearly
+    /// every turn for nothing (WS-2: retrieve ~1.0 s at the median, arm:semantic skipped). Filled or
+    /// thin, the answer is the same.
     /// </summary>
     [Theory]
-    [InlineData(RetrievalArms.Semantic)]
-    [InlineData(RetrievalArms.Tmdb)]
-    public async Task A_concept_the_catalogue_fills_waits_on_no_arm_that_could_only_re_rank(RetrievalArms slowArm)
+    [InlineData(4, 4)]
+    [InlineData(2, 20)]
+    public async Task A_concept_request_never_waits_for_the_semantic_embedding(int seeded, int want)
     {
         if (!Fixture.Available)
         {
             return;
         }
 
-        var label = $"fillword{Guid.NewGuid():N}"[..16];
+        var label = $"semword{Guid.NewGuid():N}"[..16];
         var accountId = await SeedAccountAsync();
-        var seeded = new List<Guid>();
-        for (var i = 0; i < 4; i++)
+        var ids = new List<Guid>();
+        for (var i = 0; i < seeded; i++)
         {
-            seeded.Add(await SeedTitleAsync(t => t.Keywords = [label]));
+            ids.Add(await SeedTitleAsync(t => t.Keywords = [label]));
         }
 
         var hard = new HardConstraints([new ConceptTerm(label, [], [])], [], null, null, MediaScope.Any);
         var result = await RetrieveWithScopesAsync(
-            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 4) { Arms = RetrievalArms.Catalogue | slowArm, Message = $"{label} movies" },
+            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], want) { Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic },
             new SlowEmbeddings(TimeSpan.FromSeconds(5)),
-            new SlowTmdbClient(TimeSpan.FromSeconds(5)));
+            new SlowTmdbClient(TimeSpan.Zero));
 
-        Assert.Equal(seeded.Order(), result.Candidates.Select(c => c.TitleId).Order());
-        var wait = slowArm == RetrievalArms.Semantic ? "semantic-wait" : "tmdb-wait";
-        Assert.True(result.Timings.ElapsedMs[wait] < 250, $"{wait} {result.Timings.ElapsedMs[wait]} ms");
-        Assert.Contains(slowArm == RetrievalArms.Semantic ? "semantic-late" : "tmdb-late", result.SkippedArms);
+        Assert.Equal(ids.Order(), result.Candidates.Select(c => c.TitleId).Order());
+        Assert.True(result.Timings.ElapsedMs["semantic-wait"] < 250, $"semantic-wait {result.Timings.ElapsedMs["semantic-wait"]} ms");
+        Assert.Contains("semantic-late", result.SkippedArms);
     }
 
     /// <summary>
-    /// The other side of R1-18: when the catalogue's evidence does NOT fill the request, the semantic
-    /// arm is still worth its budget, and an embedding that lands inside it is used.
+    /// R1-18, the TMDB side: TMDB can add titles the catalogue lacks, so it is still waited for while
+    /// the catalogue's evidence is thin — but not once it holds at least half the request
+    /// (<see cref="HybridRetriever.SufficientShare"/>), where TMDB would only re-rank and add
+    /// provisional titles the next turn can use. Filled, half-filled, and thin.
     /// </summary>
-    [Fact]
-    public async Task A_concept_the_catalogue_cannot_fill_still_waits_for_an_embedding_inside_its_budget()
+    [Theory]
+    [InlineData(4, 4, false)]
+    [InlineData(2, 4, false)]
+    [InlineData(1, 20, true)]
+    public async Task Tmdb_is_waited_for_only_while_the_catalogue_is_thin(int seeded, int want, bool waits)
     {
         if (!Fixture.Available)
         {
             return;
         }
 
-        var label = $"thinword{Guid.NewGuid():N}"[..16];
+        var label = $"tmdbword{Guid.NewGuid():N}"[..16];
         var accountId = await SeedAccountAsync();
-        var vector = UniqueVector();
-        await SeedTitleAsync(t => t.Keywords = [label], vector);
-        await SeedTitleAsync(t => t.Keywords = [label], vector);
+        for (var i = 0; i < seeded; i++)
+        {
+            await SeedTitleAsync(t => t.Keywords = [label]);
+        }
 
         var hard = new HardConstraints([new ConceptTerm(label, [], [])], [], null, null, MediaScope.Any);
         var result = await RetrieveWithScopesAsync(
-            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 20) { Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic },
-            new SlowEmbeddings(TimeSpan.FromMilliseconds(300)),
+            new RetrievalQuery(accountId, hard, SoftPreferences.None, [], want) { Arms = RetrievalArms.Catalogue | RetrievalArms.Tmdb, Message = $"{label} movies" },
+            new SlowEmbeddings(TimeSpan.Zero),
+            new SlowTmdbClient(waits ? TimeSpan.FromMilliseconds(300) : TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(seeded, result.Candidates.Count);
+        if (waits)
+        {
+            Assert.DoesNotContain("tmdb-late", result.SkippedArms);
+            Assert.True(result.Timings.ElapsedMs.ContainsKey("tmdb"), string.Join(", ", result.Timings.ElapsedMs.Keys));
+        }
+        else
+        {
+            Assert.True(result.Timings.ElapsedMs["tmdb-wait"] < 250, $"tmdb-wait {result.Timings.ElapsedMs["tmdb-wait"]} ms");
+            Assert.Contains("tmdb-late", result.SkippedArms);
+        }
+    }
+
+    /// <summary>
+    /// The other side of R1-18: without a concept the semantic arm is a FINDING arm (a mood, a
+    /// reference), so it keeps its budget, and an embedding that lands inside it is used.
+    /// </summary>
+    [Fact]
+    public async Task A_mood_request_still_waits_for_an_embedding_inside_its_budget()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var mood = $"moodword{Guid.NewGuid():N}"[..16];
+        var result = await RetrieveWithScopesAsync(
+            new RetrievalQuery(accountId, HardConstraints.None, new SoftPreferences([mood], [], []), [], 20) { Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic },
+            new SlowEmbeddings(TimeSpan.FromMilliseconds(700)),
             new SlowTmdbClient(TimeSpan.Zero));
 
         Assert.True(result.Timings.ElapsedMs.ContainsKey("semantic"), string.Join(", ", result.Timings.ElapsedMs.Keys));
-        Assert.DoesNotContain("semantic-late", result.SkippedArms);
         Assert.DoesNotContain("semantic", result.SkippedArms);
-        Assert.All(result.Candidates, c => Assert.NotNull(c.Similarity));
+        Assert.DoesNotContain("semantic-late", result.SkippedArms);
     }
 
     /// <summary>The retriever with a container behind its own scopes, so the TMDB arm really runs on one.</summary>
