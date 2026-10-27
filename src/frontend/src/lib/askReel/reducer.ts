@@ -624,6 +624,16 @@ function hasAnswer(state: State): boolean {
     state.unchecked.length > 0 || state.mode === "NoneFound";
 }
 
+/**
+ * Has THIS turn put a card on screen yet — a pick or a tray card? Never while the previous answer
+ * is still held: those cards are the earlier turn's, and "some cards unchecked" on this turn's
+ * reply would be a sentence about cards it never showed (PH-05).
+ */
+function turnShowsCards(state: State): boolean {
+  return !state.holdingPrevious &&
+    state.order.length + state.belowFloor.length + state.nearMiss.length + state.unchecked.length > 0;
+}
+
 function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "nearMiss" | "unchecked" | "mode" | "knockouts" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
   return {
     reason: null, paged: false, belowFloor: [], nearMiss: [], unchecked: [], mode: null, knockouts: [], droppedByFloor: null,
@@ -875,7 +885,7 @@ export function chatReducer(state: State, action: ChatAction): State {
           turns: markTurnReply([...state.turns, {
             role: "assistant", text: action.data.text, conflict: action.data.conflict,
             ...(action.data.degraded ? { degraded: true } : {}),
-          }], state.turnDegraded),
+          }], state.turnDegraded, turnShowsCards(state)),
         };
     case "candidate": {
       const c = action.data;
@@ -967,7 +977,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (state.appending) return state;
       return {
         ...state,
-        turns: markTurnReply([...state.turns, { role: "assistant", text: action.data.text, besideGrid: true }], state.turnDegraded),
+        turns: markTurnReply(
+          [...state.turns, { role: "assistant", text: action.data.text, besideGrid: true }], state.turnDegraded, turnShowsCards(state),
+        ),
       };
     case "clarify":
       // A question back, with the readings to choose between. Like an answer, it leaves the grid.
@@ -976,14 +988,14 @@ export function chatReducer(state: State, action: ChatAction): State {
         ...state,
         turns: markTurnReply(
           [...state.turns, { role: "assistant", text: action.data.question, clarifyOptions: action.data.options, besideGrid: true }],
-          state.turnDegraded,
+          state.turnDegraded, turnShowsCards(state),
         ),
       };
     case "degraded": {
       const turnDegraded = [...state.turnDegraded, ...action.data.what.filter((w) => !state.turnDegraded.includes(w))];
       // Marked only on a reply that belongs to THIS turn: with the question still the last row,
       // there is no reply yet and the flags wait for it.
-      const turns = !state.appending && state.turns.at(-1)?.role === "assistant" ? markTurnReply(state.turns, turnDegraded) : state.turns;
+      const turns = !state.appending && state.turns.at(-1)?.role === "assistant" ? markTurnReply(state.turns, turnDegraded, turnShowsCards(state)) : state.turns;
       return { ...state, turnDegraded, turns };
     }
     case "done": {
@@ -1001,7 +1013,8 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (!state.appending && state.holdingPrevious && leavesGrid(action.data.mode)) {
         return {
           ...state, status: "done", phase: null, holdingPrevious: false, pageRefusal: null,
-          turns: markTurnReply(state.turns, flags), turnDegraded: [], turnPlan: null,
+          // The grid it answers beside is an earlier turn's; this reply showed no card of its own.
+          turns: markTurnReply(state.turns, flags, false), turnDegraded: [], turnPlan: null,
           turnConflict: null, turnConflictTerms: [],
         };
       }
@@ -1040,6 +1053,20 @@ export function chatReducer(state: State, action: ChatAction): State {
       // to say ABOUT the answer. `AskReelReason.Empty` is true of the page and false of the grid
       // above it, so the accounting that was already there stands.
       const emptyPage = state.appending && pageIsExhausted(action.data);
+      // The under-floor tray belongs to the turn that produced it. A page appends its own tray
+      // to the previous one; a fresh answer replaces it.
+      // A v2 page streams its trays as `tray` frames and `done` may repeat them, so every merge is
+      // de-duplicated by title; a fresh answer's `done` lists win, falling back to what streamed.
+      const belowFloor = state.appending
+        ? mergeCards(state.belowFloor, action.data.belowFloor ?? [])
+        : mergeCards(action.data.belowFloor ?? [], streamedTrays.belowFloor);
+      // The near-miss tray follows the floor tray's rule: a page adds its own, an answer replaces.
+      const nearMiss = state.appending
+        ? mergeCards(state.nearMiss, action.data.nearMiss ?? [])
+        : mergeCards(action.data.nearMiss ?? [], streamedTrays.nearMiss);
+      const unchecked = state.appending
+        ? mergeCards(state.unchecked, action.data.unchecked ?? [])
+        : mergeCards(action.data.unchecked ?? [], streamedTrays.unchecked);
       return {
         ...state, byId, order, status: "done", shown, appending: false, pageRefusal: null,
         // This turn is finished work now, so the whole of `order` is frozen: nothing on screen may
@@ -1058,20 +1085,7 @@ export function chatReducer(state: State, action: ChatAction): State {
         // …and the row that question was asked in, on exactly the same terms. Together they are
         // the whole of what a page request says about what it extends (R3-02).
         pageTurnId: state.appending ? state.pageTurnId : state.activeTurnId,
-        // The under-floor tray belongs to the turn that produced it. A page appends its own tray
-        // to the previous one; a fresh answer replaces it.
-        // A v2 page streams its trays as `tray` frames and `done` may repeat them, so every merge is
-        // de-duplicated by title; a fresh answer's `done` lists win, falling back to what streamed.
-        belowFloor: state.appending
-          ? mergeCards(state.belowFloor, action.data.belowFloor ?? [])
-          : mergeCards(action.data.belowFloor ?? [], streamedTrays.belowFloor),
-        // The near-miss tray follows the floor tray's rule: a page adds its own, an answer replaces.
-        nearMiss: state.appending
-          ? mergeCards(state.nearMiss, action.data.nearMiss ?? [])
-          : mergeCards(action.data.nearMiss ?? [], streamedTrays.nearMiss),
-        unchecked: state.appending
-          ? mergeCards(state.unchecked, action.data.unchecked ?? [])
-          : mergeCards(action.data.unchecked ?? [], streamedTrays.unchecked),
+        belowFloor, nearMiss, unchecked,
         mode: state.appending ? state.mode : action.data.mode ?? streamedTrays.mode,
         // Offers are checked one by one: a malformed chip is dropped, never the answer it sits in.
         knockouts: state.appending
@@ -1080,8 +1094,11 @@ export function chatReducer(state: State, action: ChatAction): State {
             ? action.data.supply.knockouts.filter(isKnockout)
             : streamedTrays.knockouts,
         // A failed judge batch marks the reply it belongs to, so "some cards unchecked" sits on
-        // the bubble the cards answer. A page's reply was suppressed, so a page marks nothing.
-        turns: !state.appending && (judgeDegraded(flags) || flags.includes("plan")) ? markTurnReply(state.turns, flags) : state.turns,
+        // the bubble the cards answer — and only when this answer has a card on screen (PH-05).
+        // A page's reply was suppressed, so a page marks nothing.
+        turns: !state.appending && (judgeDegraded(flags) || flags.includes("plan"))
+          ? markTurnReply(state.turns, flags, order.length + belowFloor.length + nearMiss.length + unchecked.length > 0)
+          : state.turns,
         turnDegraded: [],
         // Finished work: nothing is pinned mid-stream any more, and the grid is this turn's — under
         // its own reply, the newest row — unless it is a page, which extends the grid where it is.

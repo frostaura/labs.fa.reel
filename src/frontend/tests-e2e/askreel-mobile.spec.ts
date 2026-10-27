@@ -182,6 +182,48 @@ test.describe("Ask Reel on a phone", () => {
     await expectComposerReachable(page, "320×568");
   });
 
+  test("the composer sits flush on the tab bar, with no strip of page between them", async ({ page }) => {
+    // PH-06. The composer was offset by a hard-coded 3.5rem (56 px) while the bar is as tall as its
+    // icon and label make it — 49 px in both engines — so a 7 px strip of page showed through
+    // between them, the footer's "Reel by FrostAura" in it. Measured, never assumed: the seam is
+    // asserted at every phone width, and on desktop, where the bar is gone, against the viewport.
+    // The settings read the page makes once it has settled; this test stays long enough to see it.
+    await mockJson(page, "**/api/settings/filters", {
+      excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+      minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+    });
+    await bootSearch(page);
+    await expect(page.getByTestId("askreel-composer")).toBeVisible();
+    const seam = () => page.evaluate(() => {
+      const form = document.querySelector<HTMLElement>("[data-testid='askreel-composer']")!.closest("form")!;
+      const bar = document.querySelector<HTMLElement>("[data-testid='mobile-tabbar']")!;
+      const f = form.getBoundingClientRect();
+      const b = bar.getBoundingClientRect();
+      // One pixel above the bar's top edge, mid-screen: that row must be the composer's own.
+      const above = document.elementFromPoint(window.innerWidth / 2, b.top - 1);
+      return {
+        gap: b.top - f.bottom, barVisible: b.height > 0, viewport: window.innerHeight, formBottom: f.bottom,
+        aboveIsComposer: !!above && form.contains(above),
+      };
+    });
+    for (const [width, height] of [[375, 812], [390, 844], [320, 568]] as const) {
+      await page.setViewportSize({ width, height });
+      await expect(page.getByTestId("mobile-tabbar")).toBeVisible();
+      await expect.poll(async () => Math.abs((await seam()).gap), { message: `${width}×${height}: composer-to-bar gap` })
+        .toBeLessThan(0.5);
+      expect((await seam()).aboveIsComposer, `${width}×${height}: the row above the bar is the composer`).toBe(true);
+    }
+    // One field varied: a bar 34 px taller — an iPhone's home-indicator inset, which a desktop
+    // engine reports as 0 — must carry the composer up with it. A new constant would pass the
+    // widths above and fail here.
+    await page.addStyleTag({ content: "[data-testid='mobile-tabbar'] { padding-bottom: 34px !important; }" });
+    await expect.poll(async () => Math.abs((await seam()).gap), { message: "taller bar: composer-to-bar gap" }).toBeLessThan(0.5);
+    // Desktop: no bar, so the composer is the bottom edge of the screen.
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(page.getByTestId("mobile-tabbar")).toBeHidden();
+    await expect.poll(async () => { const s = await seam(); return Math.abs(s.viewport - s.formBottom); }).toBeLessThan(0.5);
+  });
+
   test("the composer wraps and grows to four lines, and stops there", async ({ page }) => {
     // F6-18. It was a single-line `<input>`, 239 px wide at this viewport — about 36 characters of
     // a question the server accepts up to 1 000 of. A 200-character question measured
