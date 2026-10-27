@@ -170,8 +170,11 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
             .ToList();
 
         // FD-5: what the conditions hide among the strong matches — every catalogue title the term
-        // matches at a word start or better, minus those the conditions let through, plus any the
-        // maturity ceiling dropped from the shortlist.
+        // matches at a word start or better, minus those the conditions let through, plus every one
+        // of those the maturity ceiling holds out. Over ALL the strong matches, not the shortlist
+        // (R1-07): an over-ceiling title past the shortlist is just as hidden, and the global leg
+        // leaves catalogue titles to this count. Certifications come back grouped (a handful of
+        // rows) because the ceiling compares ordinals in memory.
         // Not for a two-character term: "12 matches for 'he' hidden" informs nobody.
         var hidden = 0;
         if (!shortTerm)
@@ -179,9 +182,14 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
             var strongInCatalogue = await db.Titles
                 .CountAsync(t => EF.Functions.ILike(t.Name, contains, "\\") && Regex.IsMatch(t.Name, wordStart, RegexOptions.IgnoreCase), ct);
             var strongAllowed = await eligibility.ContentFilteredTitles(accountId)
-                .CountAsync(t => EF.Functions.ILike(t.Name, contains, "\\") && Regex.IsMatch(t.Name, wordStart, RegexOptions.IgnoreCase), ct);
-            var overCeiling = matched.Count(x => x.Tier <= 2 && !EligibilityQueryBuilder.PassesMaturity(x.Title, maturityCeiling));
-            hidden = Math.Max(0, strongInCatalogue - strongAllowed) + overCeiling;
+                .Where(t => EF.Functions.ILike(t.Name, contains, "\\") && Regex.IsMatch(t.Name, wordStart, RegexOptions.IgnoreCase))
+                .GroupBy(t => t.Certification)
+                .Select(g => new { Certification = g.Key, Count = g.Count() })
+                .ToListAsync(ct);
+            var overCeiling = strongAllowed
+                .Where(g => !EligibilityQueryBuilder.PassesMaturity(g.Certification, maturityCeiling))
+                .Sum(g => g.Count);
+            hidden = Math.Max(0, strongInCatalogue - strongAllowed.Sum(g => g.Count)) + overCeiling;
         }
 
         // A person's surname is as much their name as their first name — "nolan" means Christopher
@@ -225,8 +233,9 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
     /// The global leg: one TMDB movie search and one show search, unioned, poster-less rows dropped,
     /// popularity-ordered, kept only where the row's own name carries the term at a word start or
     /// better (accents folded) — and judged by the account's conditions like the local leg (FD-5): a row
-    /// for a catalogue title passes only if the catalogue title does; any other row by
-    /// <see cref="StandingDiscoverPlan.Admits"/>. TMDB being down yields an empty list, never an error.
+    /// for a catalogue title passes only if the catalogue title does, maturity ceiling included; any
+    /// other row by <see cref="StandingDiscoverPlan.Admits"/> and, carrying no certification, by the
+    /// ceiling as an unrated title. TMDB being down yields an empty list, never an error.
     /// </summary>
     public async Task<TypeaheadGlobal> GlobalAsync(Guid accountId, ITmdbClient tmdb, string term, CancellationToken ct)
     {
@@ -257,6 +266,7 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
 
         var rows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct);
         var rules = FilterRuleSet.FromRows(rows);
+        var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
         var tmdbIds = hits.Select(h => (long?)h.Id).ToList();
         var known = await db.Titles
             .Where(t => t.TmdbId != null && tmdbIds.Contains(t.TmdbId))
@@ -265,9 +275,15 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         var knownIds = known.Select(k => k.Id).ToList();
         var allowedKnown = (await eligibility.ContentFilteredTitles(accountId)
                 .Where(t => knownIds.Contains(t.Id))
-                .Select(t => t.Id)
+                .Select(t => new { t.Id, t.Certification })
                 .ToListAsync(ct))
+            .Where(t => EligibilityQueryBuilder.PassesMaturity(t.Certification, maturityCeiling))
+            .Select(t => t.Id)
             .ToHashSet();
+
+        // A TMDB search row carries no certification, so under a ceiling it passes only where an
+        // unrated catalogue title would (R1-07): a kids' profile never sees an unknown title by accident.
+        var unratedPasses = EligibilityQueryBuilder.PassesMaturity((string?)null, maturityCeiling);
         var catalogue = known.ToDictionary(k => (k.MediaType == MediaType.Movie, k.TmdbId!.Value), k => k.Id);
 
         var kept = new List<GlobalTypeaheadRow>();
@@ -283,7 +299,7 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
             }
 
             var inCatalogue = catalogue.TryGetValue((hit.IsMovie, hit.Id), out var titleId);
-            var passes = inCatalogue ? allowedKnown.Contains(titleId) : StandingDiscoverPlan.Admits(rules, hit);
+            var passes = inCatalogue ? allowedKnown.Contains(titleId) : unratedPasses && StandingDiscoverPlan.Admits(rules, hit);
             if (!passes)
             {
                 // A catalogue title the conditions hide was already counted by the local leg (its

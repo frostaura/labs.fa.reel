@@ -127,6 +127,92 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         Assert.Empty(down.Rows);
     }
 
+    /// <summary>
+    /// R1-07, the exclusion matrix's maturity cell on both legs. Under a PG-13 ceiling an R-rated
+    /// catalogue title appears in neither leg and is counted once (by the local leg); a TMDB-only row
+    /// carries no certification, so under a ceiling that does not admit unrated titles it is held out
+    /// and counted by the global leg — exactly as <see cref="EligibilityQueryBuilder.PassesMaturity"/>
+    /// treats an unrated catalogue title. Under an adult ceiling the unrated row is shown and only
+    /// the NC-17 title is hidden; with no ceiling nothing is.
+    /// </summary>
+    [Theory]
+    [InlineData("PG-13", false, 1, 1)]
+    [InlineData("R", true, 1, 0)]
+    [InlineData(null, true, 0, 0)]
+    public async Task The_maturity_ceiling_hides_and_counts_in_both_legs(string? ceiling, bool unratedRowShown, int localHidden, int globalHidden)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = Token();
+        var accountId = await SeedAccountAsync(ceiling);
+        var allowedTmdbId = Random.Shared.NextInt64(1, long.MaxValue);
+        var overTmdbId = Random.Shared.NextInt64(1, long.MaxValue);
+        var allowed = await SeedTitleAsync($"{token} Family", votes: 500, tmdbId: allowedTmdbId, certification: "PG");
+        var over = await SeedTitleAsync($"{token} Adults Only", votes: 900, tmdbId: overTmdbId, certification: ceiling == "R" ? "NC-17" : "R");
+
+        var local = await LocalAsync(accountId, token);
+        Assert.Equal(ceiling is null ? [over, allowed] : [allowed], local.Titles.Select(t => t.TitleId));
+        Assert.Equal(localHidden, local.HiddenByConditions);
+
+        var tmdb = new SearchOnlyTmdbClient
+        {
+            MovieResults =
+            [
+                Item(overTmdbId, $"{token} Adults Only", "en", popularity: 90m),
+                Item(allowedTmdbId, $"{token} Family", "en", popularity: 80m),
+                Item(91, $"{token} Unrated Abroad", "en", popularity: 70m),
+            ],
+        };
+        await using var db = fixture.CreateContext(new AccountContext());
+        var global = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).GlobalAsync(accountId, tmdb, token, default);
+
+        var expected = new List<long>();
+        if (ceiling is null)
+        {
+            expected.Add(overTmdbId);
+        }
+
+        expected.Add(allowedTmdbId);
+        if (unratedRowShown)
+        {
+            expected.Add(91);
+        }
+
+        Assert.Equal(expected, global.Rows.Select(r => r.TmdbId));
+        Assert.Equal(globalHidden, global.HiddenByConditions);
+    }
+
+    /// <summary>
+    /// The local leg's maturity count covers every strong match the conditions let through, not only
+    /// the shortlist it ranked: an over-ceiling title past the shortlist is still hidden, so it must
+    /// still be counted — the global leg leaves catalogue titles to this count.
+    /// </summary>
+    [Fact]
+    public async Task An_over_ceiling_match_beyond_the_shortlist_is_still_counted()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = Token();
+        var accountId = await SeedAccountAsync("PG-13");
+        for (var i = 0; i < (TypeaheadSearch.TitleLimit * 3) + 2; i++)
+        {
+            await SeedTitleAsync($"{token} Saga {i}", votes: 10_000 - i, certification: "PG");
+        }
+
+        await SeedTitleAsync($"{token} Night", votes: 1, certification: "R");
+
+        var local = await LocalAsync(accountId, token);
+
+        Assert.Equal(TypeaheadSearch.TitleLimit, local.Titles.Count);
+        Assert.Equal(1, local.HiddenByConditions);
+    }
+
     private static string Token() => "zq" + Guid.NewGuid().ToString("N")[..8];
 
     private static TmdbListItem Item(long id, string name, string language, decimal popularity) =>
@@ -139,11 +225,12 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         return await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).LocalAsync(accountId, term, default);
     }
 
-    private async Task<Guid> SeedAccountAsync()
+    private async Task<Guid> SeedAccountAsync(string? maturityCeiling = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = new Account
         {
+            Settings = new AccountSettings { MaturityCeiling = maturityCeiling },
             Id = Guid.NewGuid(),
             TraktUserSlug = $"typeahead-{Guid.NewGuid():N}",
             Tier = AccountTier.Paid,
@@ -163,7 +250,7 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private async Task<Guid> SeedTitleAsync(string name, int votes, string[]? genres = null, long? tmdbId = null)
+    private async Task<Guid> SeedTitleAsync(string name, int votes, string[]? genres = null, long? tmdbId = null, string? certification = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -175,6 +262,7 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
             Name = name,
             Language = "en",
             Genres = genres ?? ["drama"],
+            Certification = certification,
             Year = 2010,
             TmdbVoteAverage = 7m,
             TmdbVoteCount = votes,

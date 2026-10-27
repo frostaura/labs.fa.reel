@@ -547,6 +547,16 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// <summary>In-memory maturity gate — apply after materializing (certification ordering is app logic).</summary>
     public static bool PassesMaturity(Title title, string? maturityCeiling)
     {
+        ArgumentNullException.ThrowIfNull(title);
+        return PassesMaturity(title.Certification, maturityCeiling);
+    }
+
+    /// <summary>
+    /// The same gate on a bare certification — for a row that is not a catalogue title (a TMDB lookup
+    /// hit carries none, so it passes only where an unrated title would) or a grouped count.
+    /// </summary>
+    public static bool PassesMaturity(string? certification, string? maturityCeiling)
+    {
         if (string.IsNullOrWhiteSpace(maturityCeiling))
         {
             return true;
@@ -558,7 +568,7 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             return true;
         }
 
-        var ordinal = Ml.TasteMath.CertificationOrdinal(title.Certification);
+        var ordinal = Ml.TasteMath.CertificationOrdinal(certification);
         // Unknown certifications pass only when the ceiling allows adult content — a kids'
         // profile must never see an unrated title by accident.
         return ordinal == 0 ? ceiling >= 4 : ordinal <= ceiling;
