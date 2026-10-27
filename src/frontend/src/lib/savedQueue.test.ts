@@ -3,10 +3,12 @@ import {
   heldOutLine,
   isSavedSort,
   listSyncLabel,
+  MANAGED_LIST_TOOLTIP,
   pinnedPick,
   predictionWithBand,
   queueBelowPin,
   ratingDelta,
+  SAVED_INTRO,
   savedAgo,
   tonightCandidates,
 } from "./savedQueue";
@@ -196,5 +198,33 @@ describe("heldOutLine (WS-4: Saved holds out what the conditions exclude)", () =
   it("says ALL of them when nothing is left to show, so a full shelf never reads as empty", () => {
     expect(heldOutLine(1, 0)).toBe("Your 1 save is hidden by your conditions.");
     expect(heldOutLine(3, 0)).toBe("All 3 of your saves are hidden by your conditions.");
+  });
+});
+
+describe("what Saved says about the managed list (R1-09)", () => {
+  // Watchlist intake (WS-4 task 8, WatchlistIntake: read-only) puts a Trakt watchlist entry on this
+  // shelf and never writes it to Up Next, so "anything saved here lands on it" was false for every
+  // imported save — the same card's own tooltip said "not on your Reel — Up Next list".
+  const intro = `${SAVED_INTRO.before} ${SAVED_INTRO.listName} ${SAVED_INTRO.after}`;
+
+  it("never says everything on the shelf lands on Up Next, or that the list mirrors the shelf", () => {
+    for (const copy of [MANAGED_LIST_TOOLTIP, intro]) {
+      expect(copy).not.toMatch(/anything saved here|everything here|in sync with this shelf/i);
+      expect(copy).not.toMatch(/what you save here syncs/i);
+    }
+  });
+
+  it("scopes the list to saves made in Reel and says watchlist imports stay off it", () => {
+    for (const copy of [MANAGED_LIST_TOOLTIP, intro]) {
+      expect(copy).toMatch(/what you save in Reel/i);
+      expect(copy).toMatch(/Trakt watchlist/);
+      expect(copy).toMatch(/stays? off (that|the) list/i);
+    }
+  });
+
+  it("agrees with the card that a save can be here and not on Up Next", () => {
+    // The offList card line is the fact; the header must leave room for it, not contradict it.
+    expect(listSyncLabel({ listSync: "offList" })!.title).toMatch(/^Saved here; not on your Reel — Up Next/);
+    expect(MANAGED_LIST_TOOLTIP).toMatch(/^Reel keeps a Trakt list called “Reel — Up Next”/);
   });
 });

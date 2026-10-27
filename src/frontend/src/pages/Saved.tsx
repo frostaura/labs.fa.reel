@@ -8,7 +8,7 @@ import PostWatchStrip from "../components/saved/PostWatchStrip";
 import PickConditionsButton from "../components/rec/PickConditionsButton";
 import { Button } from "../components/ui/button";
 import { formatRuntime } from "../lib/format";
-import { heldOutLine, pinnedPick, queueBelowPin, type SavedSort } from "../lib/savedQueue";
+import { heldOutLine, MANAGED_LIST_TOOLTIP, pinnedPick, queueBelowPin, SAVED_INTRO, type SavedSort } from "../lib/savedQueue";
 
 /**
  * The queue. Not a bookmark folder: an ordered answer to "what do I put on tonight", with the
@@ -67,7 +67,7 @@ export default function Saved() {
             target="_blank"
             rel="noreferrer"
             className="fa-button"
-            title="Reel keeps a Trakt list called “Reel — Up Next” in sync with this shelf. Anything saved here lands on it — and shows up in Plex, Kodi, Infuse and every Trakt-connected app."
+            title={MANAGED_LIST_TOOLTIP}
           >
             <ListChecks className="h-4 w-4" />
             Reel — Up Next on Trakt
@@ -81,10 +81,7 @@ export default function Saved() {
 
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <p className="fa-caption text-3 max-w-xl">
-          Your queue, in the order worth watching it. What you save here syncs to the managed{" "}
-          <span className="text-fa-frost">Reel — Up Next</span> list — visible in Plex, Kodi, Infuse
-          and every Trakt-connected app — and your Trakt watchlist lands here too. Watch something
-          and it leaves by itself.
+          {SAVED_INTRO.before} <span className="text-fa-frost">{SAVED_INTRO.listName}</span> {SAVED_INTRO.after}
         </p>
         <SavedSortControl
           value={sort}
