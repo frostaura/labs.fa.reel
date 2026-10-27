@@ -5,7 +5,6 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
-using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Endpoints;
@@ -76,16 +75,19 @@ public static class SyncEndpoints
         // Removes the Trakt history events for ONE title inside an explicit watched_at window —
         // the recovery tool for corruption like the show-object sync/history incident, where one
         // rating fabricated a play for every aired episode. DryRun (the default) only reports
-        // what would be removed.
+        // what would be removed. Founder-only through the shared route gate, never an inline tier
+        // comparison (J-11): the gate is what the authorisation matrix sees.
         group.MapPost("/history-cleanup", async (
             HistoryCleanupRequest request,
-            IReelDbContext db, IAccountContext accountContext, HttpContext http,
+            IReelDbContext db, HttpContext http,
             TraktTokenStore tokenStore, ITraktClient trakt, CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
+            var account = http.GatedAccount();
+
+            // The record's MediaType is non-nullable in C# only; a body without it binds to null.
+            if (string.IsNullOrWhiteSpace(request.MediaType))
             {
-                return EndpointHelpers.Forbidden("founder only");
+                return Results.BadRequest(new { error = "mediaType required" });
             }
 
             var title = await TitleEndpoints.ResolveTitleAsync(db, request.MediaType, request.TmdbId, ct);
@@ -171,6 +173,7 @@ public static class SyncEndpoints
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { dryRun = false, removed = history.Count, resyncQueued = true });
-        });
+        })
+        .RequireFounder();
     }
 }
