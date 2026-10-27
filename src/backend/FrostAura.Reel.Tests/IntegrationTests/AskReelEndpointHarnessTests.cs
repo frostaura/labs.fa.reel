@@ -267,13 +267,14 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             // snag through `failureCode`. `degraded` says the reply is the degraded copy rather than
             // an answer, and `mode` (null on a user row) says whether the answer was picks or an
             // honest none-found. v2 adds `act` and each answer's own cards and trays (`cards`,
-            // `belowFloor`, `nearMiss`, `unchecked`, `reason` — null on a user row), so a resumed
-            // thread renders every turn's cards under its own bubble. Every row carries all of them —
-            // present-but-null where they do not apply, so the client has one shape to read.
+            // `trays` — { belowFloor, nearMiss, unchecked }, nested as the chat UI reads them (R1-31) —
+            // and `reason`, null on a user row), so a resumed thread renders every turn's cards under
+            // its own bubble. Every row carries all of them — present-but-null where they do not
+            // apply, so the client has one shape to read.
             Assert.All(turns, turn => Assert.Equal(
                 [
-                    "act", "belowFloor", "cards", "degraded", "failureCode", "id", "judgeDegraded", "kind", "mode", "nearMiss",
-                    "reason", "role", "sequence", "status", "text", "unchecked",
+                    "act", "cards", "degraded", "failureCode", "id", "judgeDegraded", "kind", "mode",
+                    "reason", "role", "sequence", "status", "text", "trays",
                 ],
                 turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
 

@@ -32,6 +32,13 @@ public class AskReelV2UnitTests
             LastPresented = cards.Select(c => new PresentedRef(c.Id, new TurnHandle(c.Turn, c.Rank), $"Title {c.Rank}", 2020, MediaType.Movie)).ToList(),
         };
 
+    private static ConversationState ShownNamed(params (Guid Id, int Turn, int Rank, string Name)[] cards) =>
+        ConversationState.Empty with
+        {
+            Version = 1,
+            LastPresented = cards.Select(c => new PresentedRef(c.Id, new TurnHandle(c.Turn, c.Rank), c.Name, 2020, MediaType.Movie)).ToList(),
+        };
+
     // ── Reducer ─────────────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -145,6 +152,97 @@ public class AskReelV2UnitTests
         Assert.Equal([new TurnHandle(1, 1)], clean.References);
         Assert.Equal(["superheroes"], clean.Delta.Negations);
         Assert.Equal(["heist"], clean.Delta.Concepts);
+    }
+
+    /// <summary>
+    /// R1-30: "more like the second one" resolved once in six live runs — the planner, at effort none,
+    /// mostly returned no reference at all, and the turn then searched the topic instead. The rank a
+    /// pointer names is in the user's words, so the server guarantees it: a missing reference is filled
+    /// from the newest answer, and a reference at the wrong rank is moved to the named rank in the
+    /// answer the model chose. Which answer an "earlier" pointer means stays the model's call.
+    /// </summary>
+    [Theory]
+    [InlineData("more like the second one", TurnAct.Refine, "", "T2.2")]
+    [InlineData("More like the SECOND one!", TurnAct.Refine, "", "T2.2")]
+    [InlineData("is the first one violent?", TurnAct.ItemQuestion, "", "T2.1")]
+    [InlineData("less dark than the third film", TurnAct.CritiqueItem, "", "T2.3")]
+    [InlineData("more like the last one", TurnAct.Refine, "", "T2.3")]
+    [InlineData("more like #3", TurnAct.Refine, "", "T2.3")]
+    [InlineData("more like the second one", TurnAct.Refine, "T2.1", "T2.2")]
+    [InlineData("more like the second one", TurnAct.Refine, "T1.1", "T1.2")]
+    [InlineData("more like the second one you showed me first time round", TurnAct.Refine, "T1.2", "T1.2")]
+    [InlineData("more like the second one you showed me first time round", TurnAct.Refine, "", "")]
+    [InlineData("more like the fourth one", TurnAct.Refine, "", "")]
+    [InlineData("thanks, the second one was great", TurnAct.Chitchat, "", "")]
+    [InlineData("the second one sounds fun, now find me heist movies", TurnAct.NewRequest, "", "")]
+    [InlineData("more like the first and the third one", TurnAct.Refine, "T2.1,T2.3", "T2.1,T2.3")]
+    [InlineData("more heist movies", TurnAct.Refine, "", "")]
+    // A reference to a card the message NAMES is the model reading the user right, not a miscount: the
+    // ordinal is the other side of a comparison, and moving the reference answers the wrong card.
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "T2.3", "T2.3")]
+    [InlineData("Is PROMETHEUS any scarier than the first one", TurnAct.CritiqueItem, "T2.3", "T2.3")]
+    [InlineData("is Aliens scarier than the first film?", TurnAct.ItemQuestion, "T2.2", "T2.2")]
+    [InlineData("is Ronin tenser than the first one?", TurnAct.ItemQuestion, "T1.2", "T1.2")]
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "T2.2", "T2.1")]
+    [InlineData("is Aliens better than the first one?", TurnAct.ItemQuestion, "T2.3", "T2.1")]
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "", "T2.1")]
+    public void A_pointer_the_planner_missed_or_misranked_resolves_to_the_rank_the_user_named(
+        string message, TurnAct act, string modelReferences, string expected)
+    {
+        var state = ShownNamed(
+            (A, 2, 1, "Alien"), (B, 2, 2, "Aliens"), (C, 2, 3, "Prometheus"),
+            (Guid.NewGuid(), 1, 1, "Heat"), (Guid.NewGuid(), 1, 2, "Ronin"), (Guid.NewGuid(), 1, 3, "Thief"));
+        var given = modelReferences.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(h => TurnHandle.Parse(h)!.Value).ToArray();
+
+        var clean = PlanSanitizer.Clean(Plan(act, null, given), message, state, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(expected, string.Join(",", clean.References.Select(r => r.ToString())));
+    }
+
+    /// <summary>
+    /// R1-30, the judge's half: the judge is shown the request and the titles, never the screen, so a
+    /// bare "more like the second one" left it to guess which card was meant. Live, it guessed a card
+    /// from an EARLIER answer ("not a dog-training story" against McFarland, USA) and returned
+    /// none-found on every run. The request now names the titles the pointer resolved to, by name and
+    /// year; a reference the conversation no longer shows has no name to give and is left out, and a
+    /// turn with no reference adds nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("A", "Points at: McFarland, USA (2015)")]
+    [InlineData("B", "Points at: Pay It Forward (2000)")]
+    [InlineData("A,B", "Points at: McFarland, USA (2015), Pay It Forward (2000)")]
+    [InlineData("C", "Points at: A Dog's Journey")]
+    [InlineData("A,D", "Points at: McFarland, USA (2015)")]
+    [InlineData("D", null)]
+    [InlineData("", null)]
+    public void The_judge_is_told_which_titles_a_pointer_resolved_to(string references, string? expected)
+    {
+        var d = Guid.Parse("00000000-0000-0000-0000-00000000000d");
+        var ids = new Dictionary<string, Guid> { ["A"] = A, ["B"] = B, ["C"] = C, ["D"] = d };
+        var state = ConversationState.Empty with
+        {
+            Version = 2,
+            LastPresented =
+            [
+                new PresentedRef(B, new TurnHandle(2, 1), "Pay It Forward", 2000, MediaType.Movie),
+                new PresentedRef(A, new TurnHandle(2, 2), "McFarland, USA", 2015, MediaType.Movie),
+                new PresentedRef(C, new TurnHandle(1, 2), "A Dog's Journey", null, MediaType.Movie),
+            ],
+            Soft = new SoftPreferences([], [], references.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(r => ids[r]).ToList()),
+        };
+
+        var request = AskReelEngine.JudgeRequest("more like the second one", state);
+
+        Assert.StartsWith("Request: more like the second one", request, StringComparison.Ordinal);
+        if (expected is null)
+        {
+            Assert.DoesNotContain("Points at", request, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains(expected, request, StringComparison.Ordinal);
+            Assert.DoesNotContain(expected + ",", request, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -600,8 +698,71 @@ public class AskReelV2UnitTests
             AskReelEngine.ConditionsAnswer(standing, cost));
         // Unmeasured: the rules alone, no number invented.
         Assert.Equal("Your standing conditions: excludes: comedy; min year 2000.", AskReelEngine.ConditionsAnswer(standing, null));
+    }
+
+    /// <summary>
+    /// R1-12: "no conditions" never claims the whole catalogue. With no rows the English-only default
+    /// still binds, and with every language allowed the account's own footprint still does — so the
+    /// line names what is held back instead of "every unseen title in the catalogue".
+    /// </summary>
+    [Fact]
+    public void No_conditions_names_the_default_and_the_footprint_never_the_whole_catalogue()
+    {
+        var none = AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null);
         Assert.Equal(
-            "You have no standing conditions set, so every unseen title in the catalogue is open to you.",
-            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null));
+            "You have no standing conditions set. Reel's default still applies: English-language titles only, minus the ones "
+            + "you've seen, saved, dropped or marked not interested.",
+            none);
+
+        // Varied: the measured report changes nothing — a no-rules answer quotes no pool count.
+        Assert.Equal(none, AskReelEngine.ConditionsAnswer(
+            FilterRuleSet.FromRows([]), new FilterCostReport(5319, 4000, [new FilterCostRule("Language", "en", 900)], [])));
+
+        var everyLanguage = FilterRuleSet.FromRows(
+            [new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.Language, Value = FilterRuleSet.AllLanguages }]);
+        Assert.Equal(
+            "You have no standing conditions set. Nothing else is held back except titles you've seen, saved, dropped or marked not interested.",
+            AskReelEngine.ConditionsAnswer(everyLanguage, null));
+        Assert.DoesNotContain("every unseen title", none, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// R1-12: a maturity ceiling is a condition. Describe names it, so an account whose ONLY condition
+    /// is a ceiling is never told it has none — and, because the cost meter cannot apply a ceiling, no
+    /// pool count or marginal is quoted beside one.
+    /// </summary>
+    [Theory]
+    [InlineData("PG-13")]
+    [InlineData("R")]
+    public void A_maturity_ceiling_is_named_and_never_quoted_a_pool_the_meter_cannot_count(string ceiling)
+    {
+        var bare = AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null, ceiling);
+        Assert.Equal($"Your standing conditions: max maturity {ceiling}.", bare);
+        Assert.DoesNotContain("no standing conditions", bare, StringComparison.Ordinal);
+
+        var excluded = FilterRuleSet.FromRows([new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.ExcludeGenre, Value = "comedy" }]);
+        var cost = new FilterCostReport(5319, 421, [new FilterCostRule("ExcludeGenre", "comedy", 812)], []);
+        Assert.Equal(
+            $"Your standing conditions: excludes: comedy; max maturity {ceiling}.",
+            AskReelEngine.ConditionsAnswer(excluded, cost, ceiling));
+        Assert.Equal($"excludes: comedy; max maturity {ceiling}", AskReelStandingFilters.Describe(excluded, ceiling));
+        Assert.Equal("excludes: comedy", AskReelStandingFilters.Describe(excluded));
+    }
+
+    /// <summary>R1-12: the bar is a condition in the editor, so a bar-only account is told about it.</summary>
+    [Fact]
+    public void The_bar_is_named_as_a_condition_with_what_it_does()
+    {
+        Assert.Equal(
+            "Your only standing condition is your bar of 6.5: titles predicted under it, or not scored yet, are shown apart "
+            + "rather than as picks. Reel's default still applies: English-language titles only, minus the ones you've seen, saved, "
+            + "dropped or marked not interested.",
+            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null, bar: 6.5m));
+
+        var standing = FilterRuleSet.FromRows([new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.MinYear, Value = "2000" }]);
+        Assert.Equal(
+            "Your standing conditions: min year 2000. Your bar is 7.0: titles predicted under it, or not scored yet, are shown apart "
+            + "rather than as picks. They leave 12 unseen titles open to you, out of 50 in the catalogue.",
+            AskReelEngine.ConditionsAnswer(standing, new FilterCostReport(50, 12, [], []), bar: 7m));
     }
 }

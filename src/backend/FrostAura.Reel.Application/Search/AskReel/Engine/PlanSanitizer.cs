@@ -11,6 +11,9 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// eligibility and never stored in the state).</item>
 /// <item><b>Concepts</b> never a negation cue, never the whole message echoed back, never filler or a
 /// pointer ("the second one"), never a person or a title the plan names elsewhere.</item>
+/// <item><b>A pointer resolves to the rank the user named</b> ("the second one", "#3", "the last
+/// one"): filled from the newest answer when the plan named no handle, moved to that rank when it named
+/// one at another whose title the message does not name (R1-30).</item>
 /// <item><b>At most one clarifying question per conversation.</b></item>
 /// </list>
 /// </summary>
@@ -27,7 +30,7 @@ public static class PlanSanitizer
         }
 
         var shown = state.LastPresented.Select(p => p.Handle).ToHashSet();
-        var references = plan.References.Where(shown.Contains).ToList();
+        var references = Pointed(plan.Act, plan.References.Where(shown.Contains).ToList(), message, state.LastPresented);
 
         var words = AskReelIntentSanitizer.Words(message);
         var standingValues = standing.ExcludeGenres.Concat(standing.ExcludeKeywords).ToList();
@@ -60,6 +63,95 @@ public static class PlanSanitizer
             ClarifyQuestion = clarify,
             ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
         };
+    }
+
+    /// <summary>The acts a pointer at a card belongs to; anything else keeps the plan's references as they are.</summary>
+    private static readonly IReadOnlySet<TurnAct> PointingActs = new HashSet<TurnAct>
+    {
+        TurnAct.Refine, TurnAct.CritiqueItem, TurnAct.ItemQuestion,
+    };
+
+    /// <summary>
+    /// Words that say the pointer is at an EARLIER answer ("the second one you showed me first time
+    /// round", "the first one from before"). Which answer that is, is the model's to read from the
+    /// handles; with none named, nothing is filled.
+    /// </summary>
+    private static readonly IReadOnlySet<string> EarlierCues = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "earlier", "before", "previous", "previously", "originally", "round", "ago", "time",
+    };
+
+    /// <summary>
+    /// The references with the user's pointer honoured (R1-30). "More like the second one" resolved
+    /// once in six live runs: the planner — at effort none — mostly returned no handle at all, and the
+    /// turn then searched the conversation's topic instead of near the card. The RANK is in the user's
+    /// words, so it is never left to the model:
+    /// <list type="bullet">
+    /// <item>no handle named: the newest answer's card at that rank, unless the message points at an
+    /// earlier answer (that choice is the model's) or the newest answer has no card there;</item>
+    /// <item>exactly one handle named at another rank: the card at the named rank in the SAME answer,
+    /// when that answer has one — the model's choice of answer stands, its miscount does not;</item>
+    /// <item>exactly one handle whose card the message names by title: untouched. "Is Prometheus scarier
+    /// than the first film?" points at the first card only as the other side of a comparison; the
+    /// model reading Prometheus as the subject is right, and moving it would answer the wrong card;</item>
+    /// <item>two or more handles, a message with no pointer, or an act a pointer does not belong to:
+    /// untouched.</item>
+    /// </list>
+    /// </summary>
+    internal static List<TurnHandle> Pointed(
+        TurnAct act, List<TurnHandle> references, string message, IReadOnlyList<PresentedRef> presented)
+    {
+        if (!PointingActs.Contains(act) || references.Count > 1 || presented.Count == 0
+            || AskReelPointer.Ordinal(message) is not { } position)
+        {
+            return references;
+        }
+
+        if (references.Count == 0 && AskReelIntentSanitizer.Words(message).Any(EarlierCues.Contains))
+        {
+            return references;
+        }
+
+        if (references.Count == 1 && presented.FirstOrDefault(p => p.Handle == references[0]) is { } chosen
+            && NamesTitle(message, chosen.Name))
+        {
+            return references;
+        }
+
+        var answer = references.Count == 1 ? references[0].Turn : presented.Max(p => p.Handle.Turn);
+        var ranks = presented.Where(p => p.Handle.Turn == answer).Select(p => p.Handle.Rank).ToList();
+        if (ranks.Count == 0)
+        {
+            return references;
+        }
+
+        var rank = position == AskReelPointer.Last ? ranks.Max() : position;
+        return ranks.Contains(rank) ? [new TurnHandle(answer, rank)] : references;
+    }
+
+    /// <summary>
+    /// True when <paramref name="message"/> carries every word of <paramref name="title"/>, in order and
+    /// adjacent ("is Prometheus scarier…"). Whole words only: "Aliens" does not name "Alien".
+    /// </summary>
+    private static bool NamesTitle(string message, string title)
+    {
+        var name = AskReelIntentSanitizer.Words(title);
+        var words = AskReelIntentSanitizer.Words(message);
+        if (name.Count == 0 || name.Count > words.Count)
+        {
+            return false;
+        }
+
+        for (var start = 0; start + name.Count <= words.Count; start++)
+        {
+            var offset = start;
+            if (name.Select((w, i) => (w, i)).All(n => string.Equals(words[offset + n.i], n.w, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The words a message of at most this many is allowed to be its own topic in.</summary>

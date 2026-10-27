@@ -252,7 +252,11 @@ The resume payload:
                 // This answer's OWN cards and trays, replayed through the same projection as the
                 // top-level lists — null on a user row, a failure, or an answer older than the
                 // newest 12. A client renders each turn's cards under its own bubble from these.
-                "cards": null, "belowFloor": null, "nearMiss": null, "unchecked": null, "reason": null }],
+                // The trays are NESTED under `trays`, so their names never collide with the row's
+                // own flags (`unchecked` is also the client's judge-degraded marker).
+                "cards": null,
+                "trays": null,        // or { "belowFloor": [card], "nearMiss": [card], "unchecked": [card] }
+                "reason": null }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
   "nearMiss":    [ /* the near-miss tray */ ],
@@ -263,7 +267,7 @@ The resume payload:
     "excludedGenres":   ["comedy"],
     "excludedKeywords": ["anime"],
     "minYear": 2000, "maxYear": null,
-    "message": "Your conditions permanently exclude comedy and anime, …"
+    "message": "Your conditions exclude comedy and anime, …"
   },
   "removed": 0,          // stored cards the eligibility re-filter dropped, across BOTH lists
   "removedEarlier": 0,   // of those, already acted on when the answer was given (never "since")

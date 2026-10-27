@@ -410,4 +410,27 @@ public class AskReelConflictDetectionTests
         Assert.Contains(expected, qualified, StringComparison.Ordinal);
         Assert.DoesNotContain(",0", qualified, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// R1-29: the notice never calls a condition permanent. Conditions are editable (behind the
+    /// settings PIN) and Ask Reel itself offers to relax them, so "permanently exclude" was a false
+    /// claim on every collision. The notice says what the rule does and where to change it — whichever
+    /// list the rule lives in, and with or without the year half beside it.
+    /// </summary>
+    [Theory]
+    [InlineData("comedy", null, false, "Your conditions exclude comedy, so nothing you asked for there can appear.")]
+    [InlineData(null, "anime", false, "Your conditions exclude anime, so nothing you asked for there can appear.")]
+    [InlineData("comedy,romance", "anime", false, "Your conditions exclude comedy, romance and anime, so nothing you asked for there can appear.")]
+    [InlineData("comedy", null, true, "Your conditions exclude comedy, so nothing you asked for there can appear. Your conditions only allow titles from 2000 onwards")]
+    public void The_exclusion_notice_never_calls_an_editable_condition_permanent(
+        string? genres, string? keywords, bool yearCollides, string expectedLead)
+    {
+        var rules = FilterRuleSet.Create(genres?.Split(','), null, keywords?.Split(','), null, null, 2000, null);
+        var message = AskReelStandingFilters.Message(
+            genres?.Split(',') ?? [], keywords?.Split(',') ?? [], yearCollides, rules);
+
+        Assert.StartsWith(expectedLead, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("permanent", message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("You can change that under Conditions.", message, StringComparison.Ordinal);
+    }
 }

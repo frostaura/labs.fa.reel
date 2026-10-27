@@ -157,7 +157,7 @@ public sealed partial class LiveSearchExpansionService
     /// has no Horror genre at all and an exclusion blind to those is blind to TV horror. The two
     /// therefore disagree by construction, and the gap is real on screen: a title whose
     /// <c>Genres</c> says drama and whose keywords say "black comedy" passes the SQL filter for an
-    /// account that permanently excludes comedy, and then gets captioned by this pipeline as "a
+    /// account that excludes comedy, and then gets captioned by this pipeline as "a
     /// comedy title". It reached the outside channel under a notice stating that comedy can never
     /// appear.</para>
     ///

@@ -22,8 +22,8 @@ namespace FrostAura.Reel.Application.Search;
 /// would be stating a stale number as a current one, which is the failure this whole record exists
 /// to avoid. The live frame carries them; the row does not.</para>
 /// </summary>
-/// <param name="ExcludedGenres">Genres the turn asked for that the account permanently excludes.</param>
-/// <param name="ExcludedKeywords">Words the turn asked for that the account permanently avoids.</param>
+/// <param name="ExcludedGenres">Genres the turn asked for that the account's conditions exclude.</param>
+/// <param name="ExcludedKeywords">Words the turn asked for that the account's conditions avoid.</param>
 /// <param name="MinYear">
 /// The account's standing lower year bound — present ONLY when the year is what collided. An account
 /// with a year window has one on every turn, so storing it unconditionally would put a year chip on

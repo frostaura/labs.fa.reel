@@ -1071,9 +1071,18 @@ public static class SearchEndpoints
                 // This answer's own cards and trays; null for a user row, a failure, or an answer
                 // older than the newest ResumedTurnCards.
                 cards = perTurn.TryGetValue(t.Id, out var own) ? own.Cards : null,
-                belowFloor = perTurn.TryGetValue(t.Id, out var ownFloor) ? ownFloor.BelowFloor : null,
-                nearMiss = perTurn.TryGetValue(t.Id, out var ownNear) ? ownNear.NearMiss ?? [] : null,
-                @unchecked = perTurn.TryGetValue(t.Id, out var ownUnchecked) ? ownUnchecked.Unchecked ?? [] : null,
+                // The trays NESTED under `trays`, as the chat UI reads them (R1-31): flat on the row,
+                // `unchecked` collided with the row's own judge-degraded flag in the client's turn
+                // shape, and the client — built against the nested contract — read nothing, so an
+                // earlier answer lost "· N in its trays" on every resume.
+                trays = perTurn.TryGetValue(t.Id, out var ownTrays)
+                    ? new
+                    {
+                        belowFloor = ownTrays.BelowFloor,
+                        nearMiss = ownTrays.NearMiss ?? [],
+                        @unchecked = ownTrays.Unchecked ?? [],
+                    }
+                    : null,
                 reason = perTurn.TryGetValue(t.Id, out var ownReason) ? ownReason.Reason : null,
             }),
             cards = replay.Cards,
@@ -1421,14 +1430,32 @@ public static class SearchEndpoints
 
         try
         {
-            using var document = System.Text.Json.JsonDocument.Parse(json);
-            return document.RootElement.Clone();
+            if (System.Text.Json.Nodes.JsonNode.Parse(json) is not System.Text.Json.Nodes.JsonObject notice)
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                return document.RootElement.Clone();
+            }
+
+            // R1-29: a notice stored before the fix calls the conditions PERMANENT, which they never
+            // were (they are editable behind the PIN). The row is history and stays as it is; what a
+            // resume hands back is the notice as the product states it now.
+            if (notice["message"] is System.Text.Json.Nodes.JsonValue value
+                && value.TryGetValue<string>(out var message)
+                && message.Contains(LegacyPermanentNotice, StringComparison.Ordinal))
+            {
+                notice["message"] = message.Replace(LegacyPermanentNotice, "Your conditions exclude", StringComparison.Ordinal);
+            }
+
+            return notice;
         }
         catch (System.Text.Json.JsonException)
         {
             return null;
         }
     }
+
+    /// <summary>The pre-R1-29 opening of a stored conflict notice, rewritten on every read.</summary>
+    private const string LegacyPermanentNotice = "Your conditions permanently exclude";
 
     /// <summary>How many earlier answers' cards the model may refer back to.</summary>
     private const int PresentedAnswers = 3;

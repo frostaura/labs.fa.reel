@@ -105,7 +105,7 @@ public sealed partial class LiveSearchExpansionService
         text = NoneFoundCopy.Again(text, PreviousReply(input.History));
 
         // A collision with the account's own conditions is the likeliest reason nothing is left,
-        // so it leads: "Your conditions permanently exclude comedy and romance…" before the counts.
+        // so it leads: "Your conditions exclude comedy and romance…" before the counts.
         if (conflictMessage is { Length: > 0 })
         {
             text = $"{conflictMessage} {text}";

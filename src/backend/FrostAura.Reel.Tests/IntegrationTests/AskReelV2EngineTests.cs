@@ -150,6 +150,110 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(["answer", "done"], events.Select(e => e.Event).TakeLast(2));
     }
 
+    /// <summary>
+    /// R1-12, through the engine: "what are my conditions?" reads the account's maturity ceiling and
+    /// bar, so an account whose only conditions are those two is told about them — never that it has
+    /// no conditions — and no pool count is quoted that the meter could not apply the ceiling to.
+    /// Varied: the same account with no ceiling falls back to the rules-only answer with the count.
+    /// </summary>
+    [Theory]
+    [InlineData("PG-13", 0, "Your standing conditions: max maturity PG-13.")]
+    [InlineData("PG-13", 6.5, "Your standing conditions: max maturity PG-13. Your bar is 6.5:")]
+    [InlineData(null, 6.5, "Your only standing condition is your bar of 6.5:")]
+    public async Task The_conditions_tool_names_the_ceiling_and_the_bar_and_quotes_no_count_under_a_ceiling(
+        string? ceiling, double bar, string expectedLead)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
+            account.Settings.MaturityCeiling = ceiling;
+            await db.SaveChangesAsync();
+        }
+
+        if (bar > 0)
+        {
+            await SeedBarAsync(accountId, (decimal)bar);
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.ItemQuestion) with { Tools = [new ToolRequest(AskTool.Conditions)] });
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input("what are my conditions?"), accountId, emit, CancellationToken.None);
+
+        var text = Assert.Single(events, e => e.Event == "answer").Data.GetProperty("text").GetString()!;
+        Assert.StartsWith(expectedLead, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("no standing conditions", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("every unseen title", text, StringComparison.Ordinal);
+        if (ceiling is not null)
+        {
+            Assert.DoesNotContain("open to you, out of", text, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(0, judge.Batches);
+        Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
+        Assert.Contains(events, e => e.Event == "phase" && e.Data.ToString().Contains("Reading your conditions", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// R1-30, through the engine: a planner that names NO handle for "more like the second one" (what
+    /// the live planner did five times in six) still searches near the newest answer's second card —
+    /// the plan frame names T1.2, the state carries that title as the reference, and it is not shown
+    /// again. Varied: "the last one" lands on the newest answer's last card.
+    /// </summary>
+    [Theory]
+    [InlineData("more like the second one", 1)]
+    [InlineData("more like the last one", 2)]
+    public async Task A_pointer_the_planner_left_unresolved_still_searches_near_the_card_it_names(string message, int index)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 6));
+        var presented = ids.Take(3).Select((id, i) => new PresentedCard(1, i + 1, id, $"V2 Yes {i}", 2010, MediaType.Movie)).ToList();
+        var conversationId = await SeedConversationAsync(
+            accountId,
+            ConversationState.Empty with
+            {
+                Version = 1,
+                Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])] },
+            });
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.Refine));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(
+            Input(message) with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = ids.Take(3).ToList() },
+            accountId, emit, CancellationToken.None);
+
+        var expected = presented[index];
+        // The judge never sees the screen, so it is told which title the pointer resolved to; left to
+        // read "the second one" itself, the live judge picked a card from another answer (R1-30).
+        Assert.NotEmpty(judge.Requests);
+        Assert.All(judge.Requests, r => Assert.Contains($"Points at: {expected.Name} (2010)", r, StringComparison.Ordinal));
+        Assert.All(
+            presented.Where(p => p.TitleId != expected.TitleId),
+            p => Assert.All(judge.Requests, r => Assert.DoesNotContain(p.Name + " (", r, StringComparison.Ordinal)));
+        var plan = Assert.Single(events, e => e.Event == "plan").Data;
+        Assert.Equal([$"T1.{index + 1}"], plan.GetProperty("references").EnumerateArray().Select(r => r.GetString()));
+        var state = ConversationStateJson.Read(outcome.ConversationStateJson);
+        Assert.NotNull(state);
+        Assert.Contains(expected.TitleId, state.Soft.ReferenceTitleIds);
+        Assert.DoesNotContain(
+            events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray()),
+            c => c.GetProperty("titleId").GetGuid() == expected.TitleId);
+    }
+
     /// <summary>Task 4: "how many X are left?" is the supply tool — counts only, no cards, no judge.</summary>
     [Fact]
     public async Task A_how_many_question_is_answered_from_the_supply_with_no_cards()
@@ -554,6 +658,69 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// R1-31: a resume hands back every earlier answer's OWN trays, nested under <c>trays</c> as the
+    /// chat UI reads them — so an earlier answer still says "· N in its trays" after a reload. The two
+    /// answers carry different near-miss counts (2, then 3), so a payload that repeated the newest
+    /// answer's trays on every row, or the top-level trays, would fail.
+    /// </summary>
+    [Fact]
+    public async Task A_resume_returns_each_earlier_answers_own_trays_nested_under_trays()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var first = Topic();
+        var second = Topic();
+        var planner = new ScriptedPlanner(input => Plan(
+            TurnAct.NewRequest,
+            ConversationStateDelta.None with { Concepts = [input.Message.StartsWith(first, StringComparison.Ordinal) ? first : second] }));
+        using var factory = api.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting(AskReelEngineOptions.Setting, AskReelEngineOptions.V2);
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IAskReelPlanner>();
+                services.AddSingleton<IAskReelPlanner>(planner);
+                services.RemoveAll<IRequestJudgeModel>();
+                services.AddSingleton<IRequestJudgeModel>(new NameJudge());
+                services.RemoveAll<ITmdbClient>();
+                services.AddSingleton<ITmdbClient, SilentTmdbClient>();
+            });
+        });
+        var (_, client) = await SignInAsync(factory, $"ask-v2-trays-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await SeedTopicalAsync(first, ("V2 Yes", 2), ("V2 Partial", 2));
+            await SeedTopicalAsync(second, ("V2 Yes", 1), ("V2 Partial", 3));
+            var opened = await AskAsync(client, new { query = $"{first} movies", clientTurnId = Guid.NewGuid() });
+            var conversationId = opened.Single(f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
+            await AskAsync(client, new { query = $"{second} movies", conversationId, clientTurnId = Guid.NewGuid() });
+
+            var resumed = await client.GetFromJsonAsync<JsonElement>($"/api/search/conversations/{conversationId}");
+
+            var rows = resumed.GetProperty("turns").EnumerateArray().ToList();
+            var answers = rows.Where(t => t.GetProperty("role").GetString() == "assistant").ToList();
+            Assert.Equal(2, answers.Count);
+            int Tray(JsonElement row, string kind) => row.GetProperty("trays").GetProperty(kind).GetArrayLength();
+            Assert.Equal([2, 3], answers.Select(a => Tray(a, "nearMiss")));
+            Assert.Equal([2, 1], answers.Select(a => a.GetProperty("cards").GetArrayLength()));
+            Assert.All(answers, a => Assert.Equal(0, Tray(a, "belowFloor")));
+            Assert.All(answers, a => Assert.Equal(0, Tray(a, "unchecked")));
+            // Nested, never flat: a flat `unchecked` collides with the client's judge-degraded flag.
+            Assert.All(answers, a => Assert.False(a.TryGetProperty("nearMiss", out _)));
+            Assert.All(answers, a => Assert.False(a.TryGetProperty("unchecked", out _)));
+            Assert.All(rows.Where(t => t.GetProperty("role").GetString() == "user"),
+                u => Assert.Equal(JsonValueKind.Null, u.GetProperty("trays").ValueKind));
+            // The earlier answer's near misses are its own titles, not the newest answer's.
+            Assert.All(answers[0].GetProperty("trays").GetProperty("nearMiss").EnumerateArray(),
+                c => Assert.StartsWith("V2 Partial", c.GetProperty("name").GetString(), StringComparison.Ordinal));
+            Assert.Equal(3, resumed.GetProperty("nearMiss").GetArrayLength());
+        }
+    }
+
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The catalogue arms these tests read match a concept by its own words; nothing to resolve.</summary>
@@ -857,6 +1024,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         public int Batches => Volatile.Read(ref _batches);
 
+        /// <summary>The request text every batch was judged against.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<string> Requests { get; } = new();
+
         public bool IsAvailable => true;
 
         public string ModelId => "name-judge";
@@ -866,6 +1036,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         public Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct)
         {
             Interlocked.Increment(ref _batches);
+            Requests.Enqueue(input.Request);
             var verdicts = input.Titles.Select(t =>
             {
                 var satisfies = t.Name.StartsWith("V2 Yes", StringComparison.Ordinal) ? Satisfies.Yes
