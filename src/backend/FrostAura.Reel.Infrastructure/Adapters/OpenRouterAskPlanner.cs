@@ -244,8 +244,9 @@ public sealed class OpenRouterAskPlanner(
         "[\"ninja\"]); never a mood, never a person, never a title, never a word the user negated. genres = genre slugs " +
         "the user names as a requirement (\"comedies\" -> [\"comedy\"]). people = named directors or actors. " +
         "minYear/maxYear: a decade means both bounds (\"80s\" -> 1980, 1989). media = movie when the message says " +
-        "film(s)/movie(s), tv when it says show(s)/series/tv, any ONLY when it asks for both, unchanged when it names " +
-        "neither; mediaFilter is the app's own filter, applied by the server — never copy it into media. " +
+        "film(s)/movie(s), tv when it says show(s)/series/tv as the KIND of title (\"zombie shows\", \"a show\") — " +
+        "never the verb in \"show me\"/\"show us\", which names no medium — any ONLY when it asks for both, " +
+        "unchanged when it names neither; mediaFilter is the app's own filter, applied by the server — never copy it into media. " +
         "moods = soft feelings (\"feel-good\", \"cosy\", \"tense\"). directions = attribute steers: attribute is one of " +
         "darkness, pacing, complexity, intensity, humor, optimism; trend more|less (\"funnier\" -> humor more). " +
         "negations = ONLY words the user says they do not want, copied from their message (\"no superheroes please\" " +
@@ -262,7 +263,8 @@ public sealed class OpenRouterAskPlanner(
         "EXAMPLES: \"ninja movies\" -> {act:NewRequest, concepts:[ninja], media:movie, tools:[search_catalog]}. " +
         "\"samurai films\" -> {act:NewRequest, concepts:[samurai], media:movie}. \"Liam Neeson movies\" -> " +
         "{act:NewRequest, people:[{name:Liam Neeson, role:cast}], media:movie, tools:[filmography]}. \"zombie shows\" -> " +
-        "{act:NewRequest, concepts:[zombie], media:tv}. " +
+        "{act:NewRequest, concepts:[zombie], media:tv}. \"show me samurai films\" -> {act:NewRequest, concepts:[samurai], " +
+        "media:movie}. \"show me something feel-good\" -> {act:NewRequest, moods:[feel-good], media:unchanged}. " +
         "\"feel-good movie\" -> {act:NewRequest, moods:[feel-good], media:movie}. \"no superheroes please\" -> " +
         "{act:Refine, negations:[superheroes], media:unchanged}. \"like John Wick but funnier\" -> {act:NewRequest, " +
         "referenceNames:[John Wick], directions:[{attribute:humor, trend:more}], tools:[similar_to]}. \"none of the " +

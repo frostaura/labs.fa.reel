@@ -296,6 +296,19 @@ public class AskReelV2UnitTests
     [InlineData("samurai, no tv shows", MediaScope.Any, MediaScope.Movies)]
     [InlineData("not a movie, a series", MediaScope.Any, MediaScope.Shows)]
     [InlineData("samurai, no tv shows", null, MediaScope.Movies)]
+    // "show" in "show me" / "show us" is the verb, never the medium: the defect's own requests
+    // phrased as a command, a mood that names no medium ("any" stands), and a noun "show" that
+    // happens to be followed by "me" (a determiner owns it).
+    [InlineData("show me samurai films", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("can you show me Liam Neeson movies", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("show me submarine movies", null, MediaScope.Movies)]
+    [InlineData("Show us some kaiju films please", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("show me something feel-good", MediaScope.Any, MediaScope.Any)]
+    [InlineData("show me something feel-good", null, null)]
+    [InlineData("please show us a show about chefs", MediaScope.Any, MediaScope.Shows)]
+    [InlineData("a cosy show me and my wife can watch", MediaScope.Any, MediaScope.Shows)]
+    [InlineData("show me samurai, no tv shows", MediaScope.Any, MediaScope.Movies)]
+    [InlineData("I loved those films, show me more", null, MediaScope.Movies)]
     public void The_users_own_media_word_survives_a_plan_that_left_media_unset(string message, MediaScope? planned, MediaScope? expected)
     {
         var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Media = planned });
@@ -340,6 +353,18 @@ public class AskReelV2UnitTests
             Assert.Equal(concepts, plan.Delta.Concepts);
             Assert.Equal(media, plan.Delta.Media);
         }
+    }
+
+    /// <summary>A plan no model wrote reads "show me" as the verb too (HREV1-ASK-02 follow-on).</summary>
+    [Theory]
+    [InlineData("show me time travel movies", MediaScope.Movies)]
+    [InlineData("show me something feel-good", null)]
+    [InlineData("show us zombie series", MediaScope.Shows)]
+    public void A_plan_no_model_wrote_reads_show_me_as_the_verb(string message, MediaScope? media)
+    {
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.ProviderUnavailable, null, false), LlmCallMeta.None);
+        Assert.Equal(media, FallbackPlans.CarriedForward(failed, message, ConversationState.Empty).Delta.Media);
+        Assert.Equal(media, FallbackPlans.Keyless(message, ConversationState.Empty).Delta.Media);
     }
 
     [Theory]
@@ -693,6 +718,9 @@ public class AskReelV2UnitTests
         Assert.False(schema.GetProperty("strict").GetBoolean());
         Assert.Equal(["act"], schema.GetProperty("schema").GetProperty("required").EnumerateArray().Select(r => r.GetString()));
         Assert.Contains("Omit EVERY other field that would be empty", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+        // "show me" is the verb: the media line must not send "show me something feel-good" to tv.
+        Assert.Contains("never the verb in \"show me\"/\"show us\"", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("\"show me samurai films\" -> {act:NewRequest, concepts:[samurai], media:movie}", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -766,6 +794,20 @@ public class AskReelV2UnitTests
     [InlineData("The runtime fact says it is 197 minutes long.", null)]
     [InlineData("The keywords and overview identify Blade of the 47 Ronin as a samurai film; the facts don't identify it as a ninja film.", null)]
     [InlineData("On the Beach runs 134 minutes.", "On the Beach runs 134 minutes.")]
+    // The idiom "in fact" cites nothing, and an answer using it is kept; a citation still is not.
+    [InlineData("In fact, Heat runs 170 minutes.", "In fact, Heat runs 170 minutes.")]
+    [InlineData("Yes, it is rated R, in fact for strong violence.", "Yes, it is rated R, in fact for strong violence.")]
+    [InlineData("As a matter of fact, Heat does not feature ninjas.", "As a matter of fact, Heat does not feature ninjas.")]
+    [InlineData("It in fact doesn't feature ninjas.", "It in fact doesn't feature ninjas.")]
+    [InlineData("All the President's Men dramatises the facts of the Watergate case.", "All the President's Men dramatises the facts of the Watergate case.")]
+    [InlineData("Despite the fact that it is long, Heat runs 170 minutes.", "Despite the fact that it is long, Heat runs 170 minutes.")]
+    [InlineData("It in fact shows a heist.", "It in fact shows a heist.")]
+    [InlineData("In fact, the facts say it runs 99 minutes.", null)]
+    [InlineData("According to the facts, Page Eight runs 99 minutes.", null)]
+    [InlineData("The given facts list no rating.", null)]
+    [InlineData("Facts provided don't mention a rating.", null)]
+    [InlineData("Its keywords mark it as a heist film.", null)]
+    [InlineData("Based on the data, it runs 99 minutes.", null)]
     public void An_answer_is_two_plain_sentences_at_most(string raw, string? expected) =>
         Assert.Equal(expected, OpenRouterAskAnswerer.Clean(raw));
 

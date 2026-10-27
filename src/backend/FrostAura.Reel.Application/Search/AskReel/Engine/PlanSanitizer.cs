@@ -79,7 +79,8 @@ public static class PlanSanitizer
             return planned;
         }
 
-        var words = AskReelIntentSanitizer.ScopedWords(message);
+        // "Show me samurai films": the verb "show" names no medium (AskReelCarry.WithoutShowVerb).
+        var words = AskReelIntentSanitizer.ScopedWords(AskReelCarry.WithoutShowVerb(message));
         if (words.Any(w => AlsoCues.Contains(w.Word))
             || words.Zip(words.Skip(1)).Any(p => p.First.Word == "as" && p.Second.Word == "well"))
         {
@@ -99,7 +100,7 @@ public static class PlanSanitizer
 
         static Retrieval.MediaScope? Named(IEnumerable<string> said)
         {
-            var media = AskReelCarry.MediaNamed(string.Join(' ', said));
+            var media = AskReelCarry.MediaIn(said);
             return media.Count == 0 ? null : Retrieval.MediaScopes.From(media);
         }
     }

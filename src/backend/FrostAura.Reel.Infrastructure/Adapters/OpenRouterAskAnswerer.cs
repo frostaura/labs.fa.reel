@@ -135,12 +135,16 @@ public sealed class OpenRouterAskAnswerer(
     }
 
     /// <summary>
-    /// Words that cite the answer's INPUT as a source: "the facts", "the runtime fact", "its
-    /// keywords", "the overview says", "the data". The viewer never sees a fact sheet, so an answer
-    /// that quotes one answers nobody.
+    /// Words that cite the answer's INPUT as a source: "the facts", "the runtime fact", "the given
+    /// facts", "facts provided", "its keywords", "the overview says", "the data". The viewer never
+    /// sees a fact sheet, so an answer that quotes one answers nobody. "Fact" alone is not a
+    /// citation: the idiom "in fact" / "as a matter of fact", "the fact that…" and "the facts of the
+    /// case" are kept — dropping them threw away right answers for the generic fact line.
     /// </summary>
     private static readonly System.Text.RegularExpressions.Regex PipelineTalk = new(
-        @"\b(?:facts?|keywords?|overview|fact\s+sheet|the\s+data|details\s+(?:given|listed|provided))\b",
+        @"\b(?:keywords?|overview|fact\s+sheet|the\s+data|details\s+(?:given|listed|provided))\b"
+        + @"|\b(?:the|these|those|its|given|provided|listed|supplied)\s+(?:[a-z]+\s+)?facts?\b(?!\s+(?:of|that)\b)"
+        + @"|\bfacts\s+(?:say|says|said|state|states|list|lists|given|provided|listed|supplied|indicate|indicates|mention|mentions)\b",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
         TimeSpan.FromMilliseconds(100));
 
