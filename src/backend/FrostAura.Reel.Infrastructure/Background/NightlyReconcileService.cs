@@ -27,6 +27,8 @@ namespace FrostAura.Reel.Infrastructure.Background;
 /// It also runs the FEATURE-SCHEMA SWEEP, once at startup and again on every nightly pass. That one
 /// is NOT gated: an artifact trained against a superseded <see cref="FeatureSchema"/> version is
 /// unscoreable by construction, and leaving it Active would keep the account modelless and silent.
+/// Nor is the RECIPE SCORE REPAIR (<see cref="RecipeScoreRepair"/>), once at startup: it is free, and
+/// the retrain that would otherwise retire the misserved scores is behind the paid switch.
 /// </para>
 /// </summary>
 public sealed class NightlyReconcileService(
@@ -40,6 +42,11 @@ public sealed class NightlyReconcileService(
         // stale across a DEPLOY (it is a compile-time constant), so sweeping here — synchronously,
         // during host start-up — closes the window in which a request could load one.
         await SweepStaleSchemaArtifactsAsync(stoppingToken);
+
+        // Ungated too, and for the same reason: what it corrects changed across a deploy. It costs
+        // nothing (rows dropped, rescored free on demand), and the retrain that would retire those
+        // rows otherwise sits behind the paid switch below, so with that off they were served forever.
+        await RepairRecipeScoresAsync(stoppingToken);
 
         // Also before the reconcile loop's gate, for the same reason: what makes a snapshot
         // untrusted only changes across a DEPLOY (a guard or a gate that got stricter), so start-up
@@ -262,7 +269,8 @@ public sealed class NightlyReconcileService(
     /// Queues one retrain for every account whose Active artifact was trained with an older
     /// <see cref="TrainingRecipe"/> (HREV2-RET-02: leave-one-out pools a tree could read the label
     /// back out of). The artifact is NOT superseded: serving keeps describing the user the way it was
-    /// trained (<see cref="FeatureVectorBuilder.IncludeShowRollups"/> follows it) until the retrain
+    /// trained (<see cref="FeatureVectorBuilder.IncludeShowRollups"/> and
+    /// <see cref="FeatureVectorBuilder.OutOfFoldPools"/> follow it) until the retrain
     /// replaces it, so the account is never left without a model. TrainJobHandler does not debounce a
     /// recipe change. Best-effort, like the other start-up sweeps.
     /// </summary>
@@ -312,6 +320,29 @@ public sealed class NightlyReconcileService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Recipe retrain sweep failed; the current artifacts keep serving with their own recipe.");
+        }
+    }
+
+    /// <summary>
+    /// Drops the scores an Active artifact on an older <see cref="TrainingRecipe"/> was misserved with
+    /// (<see cref="RecipeScoreRepair"/>), once per artifact. Best-effort, like the other start-up
+    /// sweeps: a failure leaves those rows served until the artifact is retrained, never the host down.
+    /// </summary>
+    private async Task RepairRecipeScoresAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = CreateSystemScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            foreach (var repaired in await RecipeScoreRepair.RunAsync(db, ct))
+            {
+                logger.LogWarning(
+                    "Recipe score repair for {AccountId}: {Repair}.", repaired.AccountId, RecipeScoreRepair.Describe(repaired));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Recipe score repair failed; scores written with the wrong pools stay served until the artifact is retrained.");
         }
     }
 
