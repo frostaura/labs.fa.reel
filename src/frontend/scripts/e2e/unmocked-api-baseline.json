@@ -2,7 +2,6 @@
   "askreel-continuity.spec.ts \u203a Ask Reel \u2014 Back from Home returns to the answer \u203a Back after leaving via the header mark lands on /search with the same cards": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -11,7 +10,6 @@
   "askreel-continuity.spec.ts \u203a Ask Reel \u2014 Back from Home returns to the answer \u203a Back after leaving via the tab bar lands on /search with the same cards": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -20,7 +18,6 @@
   "askreel-continuity.spec.ts \u203a Ask Reel \u2014 Back from Home returns to the answer \u203a the app root is replaced, not pushed, so Back is never a redirect loop": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -30,7 +27,6 @@
   "askreel-continuity.spec.ts \u203a Ask Reel \u2014 leaving the page and coming back shows the thread as it is \u203a a paged answer survives Home and Back at its paged size": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -39,7 +35,6 @@
   "askreel-continuity.spec.ts \u203a Ask Reel \u2014 the thread survives leaving the page \u203a Home then Back restores the same answer, in the same order, with its why-lines": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -105,6 +100,9 @@
   "askreel-negation.spec.ts \u203a Ask Reel \u2014 the collision notice stays with its answer \u203a the stopped turn's own collision is shown with the stopped turn": [
     "GET /api/settings/filters"
   ],
+  "askreel-render.spec.ts \u203a standing conditions on /search \u203a every condition is named, and the editor is one tap away": [
+    "GET /api/search/filter-chips"
+  ],
   "askreel-trust.spec.ts \u203a Ask Reel \u2014 WS-2 review round 1 \u203a a none-found answer renders even when one relaxation offer is malformed": [
     "GET /api/settings/filters"
   ],
@@ -114,7 +112,6 @@
   "card-quick-actions.spec.ts \u203a card quick actions \u203a hover reveals Not for me + Save; Not for me fires the reaction and removes only that card, in place": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -123,7 +120,6 @@
   "card-quick-actions.spec.ts \u203a card quick actions \u203a press-and-hold opens the picker instead of dismissing, and the hold's own click never fires the default": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -132,7 +128,6 @@
   "card-quick-actions.spec.ts \u203a card quick actions \u203a right-click opens the four-way picker and posts the reason that was chosen": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -141,28 +136,12 @@
   "card-quick-actions.spec.ts \u203a card quick actions \u203a the rating popover posts the score in place and retires the card": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "cross-reference.spec.ts \u203a cross-reference pass \u203a a Trakt poll cannot steal the pill from a run in progress": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band counts through the pool while the pass runs": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band renders nothing at all when the server has nothing honest to say": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band reports what it found and never implies a demotion": [
     "GET /api/accuracy",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
@@ -174,40 +153,34 @@
   ],
   "digest-blend.spec.ts \u203a weekly digest rail \u203a hides itself entirely while the week's digest is empty": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "digest-blend.spec.ts \u203a weekly digest rail \u203a renders 'New & high for you this week' from the digest payload": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "filter-cost-meter.spec.ts \u203a filter cost meter \u203a a suggestion chip applies its rule to the draft and saves nothing on its own": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "filter-cost-meter.spec.ts \u203a filter cost meter \u203a shows what the current rules leave, badges each excluded genre, and notes the other rules": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "filter-cost-meter.spec.ts \u203a filter cost meter \u203a the counts follow the draft as chips move, before anything is saved": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "gating.spec.ts \u203a entitlement gating \u203a founder tier renders rows without the upsell": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -217,7 +190,6 @@
   "gating.spec.ts \u203a entitlement gating \u203a free tier sees the 3-pick shortlist and the locked-rows upsell": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -227,7 +199,6 @@
   "gating.spec.ts \u203a entitlement gating \u203a free tier typing /lab lands on home \u2014 the model lab is a founder instrument": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -236,326 +207,240 @@
   ],
   "hero-honesty.spec.ts \u203a hero honesty label \u203a a 6.6 pick beside one that cleared the bar says it is reaching, and names the bar": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-honesty.spec.ts \u203a hero honesty label \u203a a lone reaching pick is the whole row: the status line says it, the card does not repeat it": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-honesty.spec.ts \u203a hero honesty label \u203a an 8.1 pick carries no caveat at all": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-honesty.spec.ts \u203a hero honesty label \u203a one pick over the bar retires the row-level band but not that pick's neighbours' labels": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-honesty.spec.ts \u203a hero honesty label \u203a the whole row reaching is said once, on the status line, and on no card": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-layout.spec.ts \u203a hero at 1024\u00d7768 \u203a every title and badge sits inside its card, and the actions never cover text": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 1024\u00d7768 \u203a the lens clause is off the card and the hook is held to two lines": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 1440\u00d7900 \u203a every title and badge sits inside its card, and the actions never cover text": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 1440\u00d7900 \u203a the lens clause is off the card and the hook is held to two lines": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 390\u00d7844 \u203a every title and badge sits inside its card, and the actions never cover text": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 390\u00d7844 \u203a the lens clause is off the card and the hook is held to two lines": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 834\u00d71194 \u203a every title and badge sits inside its card, and the actions never cover text": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a hero at 834\u00d71194 \u203a the lens clause is off the card and the hook is held to two lines": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a narrow screens \u203a the card stacks: art above, text below it, actions in a visible row at the bottom": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (confident, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (confident, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (reaching, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (reaching, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (confident, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (confident, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (reaching, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (reaching, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
   "hero-layout.spec.ts \u203a title contrast at 1440 \u203a every one of 20 hero titles is at least 4.5:1 over near-white art": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-layout.spec.ts \u203a title contrast at 390 \u203a every one of 20 hero titles is at least 4.5:1 over near-white art": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a Not for me acts instead of navigating, and takes only that hero slide": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a Save takes the hero pick to the queue without navigating": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a rating from the hero posts the score, logs the watch, and retires the card": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a the four-way reason picker is the same one the rails offer": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a the hero carries all three actions, revealed on hover like the rail cards": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a a failing /feed/more \u203a Retry is one more request for that rail only": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a a failing /feed/more \u203a backs off, stops at four requests per rail, and ends in a Retry tile with no shimmer": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a a cold Home at 1440\u00d7900 asks for at most 2 pages and no genre rail": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a a cold Home at 390\u00d7844 asks for at most 2 pages and no genre rail": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a a genre rail fills once the user scrolls to it": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a with no personalised rows at 1440\u00d7900, exactly the genre rails near the fold fetch": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a with no personalised rows at 390\u00d7844, exactly the genre rails near the fold fetch": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a with one personalised row at 1440\u00d7900, exactly the genre rails near the fold fetch": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a lazy rails \u203a with one personalised row at 390\u00d7844, exactly the genre rails near the fold fetch": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a leaving a rail while its request is out \u203a navigating away mid-request schedules nothing more": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a leaving a rail while its request is out \u203a switching the medium mid-request retires the old hero; only the new one pages": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a page-wide exclusions \u203a every rail sends what the rest of the page shows, under one page token": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-rails-paging.spec.ts \u203a page-wide exclusions \u203a the hero's first top-up already excludes the rows below it": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "hero-two-rows.spec.ts \u203a one row where two rows would be wrong \u203a a phone gets a single row \u2014 rank 2 is to the right of rank 1, not under it": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a one row where two rows would be wrong \u203a a tablet gets one row of two side-by-side cards, not one card at 92%": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a one row where two rows would be wrong \u203a on a tablet every dot is a real resting place: five cards, five distinct snap positions": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a one row where two rows would be wrong \u203a the free tier keeps its three-card single row": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a two-row hero at desktop width \u203a DOM order is still rank order, so the row reads and tabs top-to-bottom by rank": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a two-row hero at desktop width \u203a one scroll container: a horizontal scroll moves both rows by the same delta": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a two-row hero at desktop width \u203a rank 2 sits under rank 1 and rank 3 opens the next column": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "hero-two-rows.spec.ts \u203a two-row hero at desktop width \u203a the dots count columns, not cards \u2014 five picks in two rows are three dots": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
@@ -594,6 +479,9 @@
   ],
   "onboarding.spec.ts \u203a onboarding build-up \u203a the trainer's Degraded frame for too few ratings becomes the counts once the poll lands": [
     "GET /api/feed"
+  ],
+  "phone-targets.spec.ts \u203a phone targets on WS-10A routes \u203a Saved has no interactive element under 44 px": [
+    "GET /api/titles/movie/:id/providers"
   ],
   "pin.spec.ts \u203a settings PIN \u203a a PIN-configured account is locked until the correct PIN unlocks it": [
     "GET /api/billing/status",
@@ -699,7 +587,6 @@
   ],
   "title-actions.spec.ts \u203a title detail states \u203a a 404 renders within one second of the navigation that asked for it": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
@@ -708,7 +595,6 @@
     "GET /api/accuracy",
     "GET /api/digest/current",
     "GET /api/feed/continue-watching",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -726,61 +612,51 @@
   ],
   "tonight-mood.spec.ts \u203a lens copy on the cards \u203a a hero with no copy keeps the templated why-line it always had": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a lens copy on the cards \u203a the hero leads with the hook, and the lens clause stays in the detail view": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a 'something heavy' and 'something cerebral' each lead with their own": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a 'something light' puts the light pick first without a request": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a 'switch my brain off' ranks the undemanding first and the demanding last": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a a title with no extracted texture keeps its place rather than being ranked on a guess": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a it re-sorts and never filters \u2014 every card is still on the page": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a tapping the active chip puts the page back exactly as it was": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a the four chips sit above the hero": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
   "tonight-mood.spec.ts \u203a tonight-mood chips \u203a the mood does not survive a reload \u2014 it is about tonight, not a standing preference": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
@@ -788,7 +664,6 @@
     "GET /api/digest/current",
     "GET /api/feed",
     "GET /api/feed/continue-watching",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -798,7 +673,6 @@
   "typeahead-global.spec.ts \u203a global typeahead \u2014 beyond your catalogue \u203a sparse local results grow the flagged TMDB group, reachable by keyboard": [
     "GET /api/accuracy",
     "GET /api/digest/current",
-    "GET /api/feed/cross-reference",
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -806,31 +680,21 @@
   ],
   "visible-recalibration.spec.ts \u203a visible recalibration \u203a a feed-scores-updated frame changes the numbers without remounting a single row": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "visible-recalibration.spec.ts \u203a visible recalibration \u203a a stale or malformed frame leaves the page alone": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "visible-recalibration.spec.ts \u203a visible recalibration \u203a a sync that found nothing says so, rather than reverting to a timestamp": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a the model-learned band renders its sentence and dismisses per retrain": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ],
   "visible-recalibration.spec.ts \u203a visible recalibration \u203a the sync pill says what the sync did, then what it did to the page": [
     "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
   ]

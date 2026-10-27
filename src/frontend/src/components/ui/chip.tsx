@@ -20,7 +20,8 @@ export const Chip = React.forwardRef<HTMLButtonElement, ChipProps>(
       aria-pressed={selected}
       data-state={selected ? "on" : "off"}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-caption transition",
+        // 44 px tall under touch, compact under a mouse (see ui/button).
+        "inline-flex items-center justify-center gap-1.5 rounded-full border px-3 py-1 text-caption transition coarse:min-h-11 coarse:min-w-11",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60 focus-visible:ring-offset-1 focus-visible:ring-offset-fa-ink",
         "disabled:pointer-events-none disabled:opacity-50",
         selected

@@ -49,4 +49,29 @@ describe("reloadOnceForNewBuild", () => {
     expect(reloadOnceForNewBuild(1_000, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
   });
+
+  it("never reloads while the document is leaving: the failed import is the departure's, not a deploy's", () => {
+    const reload = vi.fn();
+    expect(reloadOnceForNewBuild(1_000, reload, true)).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    // And it spent no guard: the next genuine failure still gets its one reload.
+    expect(reloadOnceForNewBuild(2_000, reload, false)).toBe(true);
+  });
+});
+
+describe("isLeaving", () => {
+  it("is set by beforeunload for the leaving window, and cleared by a return from the back/forward cache", async () => {
+    vi.resetModules();
+    const listeners = new Map<string, () => void>();
+    vi.stubGlobal("window", { addEventListener: (type: string, fn: () => void) => listeners.set(type, fn) });
+    const { isLeaving, LEAVING_WINDOW_MS } = await import("./deployReload");
+    const now = Date.now();
+    expect(isLeaving(now)).toBe(false);
+    listeners.get("beforeunload")!();
+    expect(isLeaving(Date.now())).toBe(true);
+    expect(isLeaving(Date.now() + LEAVING_WINDOW_MS + 1)).toBe(false);
+    listeners.get("beforeunload")!();
+    listeners.get("pageshow")!();
+    expect(isLeaving(Date.now())).toBe(false);
+  });
 });

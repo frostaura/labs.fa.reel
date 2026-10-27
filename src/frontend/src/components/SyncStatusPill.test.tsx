@@ -3,6 +3,7 @@ import { cleanup, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SyncStatusPill from "./SyncStatusPill";
 import { idleStatus, makeStore, renderWithStore, seedSyncStatus } from "../test/renderWithStore";
+import { axeViolations } from "../test/axe";
 
 /**
  * The pill as rendered (WS-9 task 11). The rules themselves are pinned in lib/syncPill.test.ts;
@@ -76,5 +77,32 @@ describe("SyncStatusPill", () => {
       })
     );
     expect(screen.getByRole("status").textContent).toBe("Sync status: Cross-reference failed");
+  });
+
+  it("breaks no axe rule in its idle, reconnect and operator-alert states", async () => {
+    for (const status of [
+      idleStatus(),
+      idleStatus({ connectionStatus: "RefreshFailed" }),
+      idleStatus({
+        alerts: [
+          { code: "job_failures", since: new Date().toISOString(), raisedAt: new Date().toISOString(), reasonCode: null, provider: null, count: 6, threshold: 5, kinds: [{ kind: "DeltaSync", count: 6 }] },
+        ],
+      }),
+    ]) {
+      const { container, unmount } = await renderPill(status);
+      expect(await axeViolations(container)).toEqual([]);
+      unmount();
+    }
+  });
+
+  it("shows an operator alert by its fixed label", async () => {
+    await renderPill(
+      idleStatus({
+        alerts: [
+          { code: "provider_refused", since: new Date().toISOString(), raisedAt: new Date().toISOString(), reasonCode: "payment_required", provider: "OpenRouter", count: null, threshold: null, kinds: null },
+        ],
+      })
+    );
+    expect(screen.getByRole("status").textContent).toBe("Sync status: Model provider refusing Reel");
   });
 });

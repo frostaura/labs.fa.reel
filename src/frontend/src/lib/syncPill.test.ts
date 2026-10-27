@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "../store/generated/openapi";
-import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
+import type { JobFailure, OperatorAlert, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import {
   ACTIVE_POLL_MS,
   AGED_FAILURE_MS,
@@ -402,5 +402,85 @@ describe("UnrecognisedState (status v2)", () => {
     const s = status({ pipelineStage: "Degraded", degradedReason: "UnrecognisedState" });
     expect(healthIssues(s, false)).toEqual([]);
     expect(pill(s)).toMatchObject({ mode: "health", tone: "ok", reconnect: false, label: "Synced 3m ago" });
+  });
+});
+
+describe("operator alerts (WS-6 `alerts`, Founder tier only)", () => {
+  const alert = (overrides: Partial<OperatorAlert> = {}): OperatorAlert => ({
+    code: "job_failures",
+    since: "2026-10-24T11:00:00Z",
+    raisedAt: "2026-10-24T11:20:00Z",
+    reasonCode: null,
+    provider: null,
+    count: 7,
+    threshold: 5,
+    kinds: [
+      { kind: "DeltaSync", count: 4 },
+      { kind: "CrossReference", count: 2 },
+      { kind: "BuildFeed", count: 1 },
+      { kind: "SeedCatalog", count: 1 },
+    ],
+    ...overrides,
+  });
+
+  it("job failures across Reel are a warning naming the worst kinds in fixed copy", () => {
+    const view = pill(status({ alerts: [alert()] }))!;
+    expect(view).toMatchObject({ mode: "health", tone: "warn", label: "Jobs failing across Reel", reconnect: false });
+    expect(view.lines[0]).toBe(
+      "7 job attempts failed in the last hour, across every account (the alert fires at 5). Most: Trakt sync 4, Cross-reference 2, Picks build 1, and more."
+    );
+  });
+
+  it("a refused provider is danger, says which and since when, and outranks a sync the user started", () => {
+    const view = pill(
+      status({
+        activeJob: job(),
+        alerts: [alert({ code: "provider_refused", provider: "Tmdb", reasonCode: "unauthorized", since: "2026-10-24T11:50:00Z", count: null, threshold: null, kinds: null })],
+      })
+    )!;
+    expect(view).toMatchObject({ mode: "health", tone: "danger", label: "TMDB refusing Reel" });
+    expect(view.lines[0]).toBe(
+      "A provider rejected Reel's credentials (401). Reel stopped calling TMDB 10m ago, for every account, until the key or the account is fixed."
+    );
+  });
+
+  it("is not repeated when the provider-health breaker already reports that provider down", () => {
+    const s = status({
+      providerHealth: {
+        state: "Down",
+        checkedAt: null,
+        breakers: [{ provider: "OpenRouter", purpose: null, state: "Open", reasonCode: "payment_required", since: "", retryAt: null }],
+      },
+      alerts: [alert({ code: "provider_refused", provider: "OpenRouter", reasonCode: "payment_required", count: null, threshold: null, kinds: null })],
+    });
+    expect(healthIssues(s, false).map((i) => i.label)).toEqual(["Model provider down"]);
+  });
+
+  it("names the model provider without its brand when no breaker covers it", () => {
+    const s = status({ alerts: [alert({ code: "provider_refused", provider: "OpenRouter", reasonCode: "payment_required", kinds: null })] });
+    expect(pill(s)?.label).toBe("Model provider refusing Reel");
+  });
+
+  it("an unknown code, an unknown job kind and missing counts read as generic copy, never as identifiers", () => {
+    const issues = healthIssues(
+      status({
+        alerts: [
+          alert({ code: "disk_full" }),
+          alert({ count: null, threshold: null, kinds: [{ kind: "QuantumDefrag", count: 3 }] }),
+        ],
+      }),
+      false
+    );
+    expect(issues.map((i) => [i.tone, i.label])).toEqual([
+      ["warn", "Operator alert"],
+      ["warn", "Jobs failing across Reel"],
+    ]);
+    expect(issues[1].detail).toBe("Job attempts are failing across every account. Most: A background job 3.");
+    expect(JSON.stringify(issues)).not.toMatch(/disk_full|QuantumDefrag/);
+  });
+
+  it("no alerts, an empty list or a v1 payload without the field raise nothing", () => {
+    expect(healthIssues(status({ alerts: [] }), false)).toEqual([]);
+    expect(healthIssues(status(), false)).toEqual([]);
   });
 });

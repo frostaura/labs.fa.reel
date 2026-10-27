@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { SESSION_FOUNDER, expectHolds, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * The data router (WS-9, R1-54). The app moved from `<BrowserRouter>` to `createBrowserRouter`, so
@@ -83,6 +84,9 @@ async function bootSettings(page: Page) {
   await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
   await mockJson(page, "**/api/preferences/tags", []);
   await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  // The genre chips come from the catalogue (WS-3), so without this the page offers only the
+  // genres already saved and there is no "war" chip to dirty the draft with.
+  await mockFilterChips(page);
   await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150 });
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: ["horror"],
@@ -124,3 +128,28 @@ test("Back with an unsaved draft asks first; Cancel keeps the page and its draft
   await page.goBack();
   await expect(page).toHaveURL(/\/saved$/);
 });
+
+test("leaving while a page's code is still loading goes where you asked, not back to that page (IREV3S-03)", async ({ page }) => {
+  await boot(page);
+  await page.goto("/saved");
+  await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+
+  // Hold Taste DNA's code in flight, then leave by a document navigation while it loads. WebKit
+  // rejects the abandoned import with "Importing a module script failed", the words a redeploy's
+  // missing chunk produces, and the page used to answer with its one-shot reload: that reload
+  // cancelled the navigation and put the reader back on /dna.
+  let held = false;
+  await page.route(/\/src\/pages\/TasteDna\.tsx/, async (route) => {
+    held = true;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await route.continue().catch(() => undefined);
+  });
+  await page.locator("header").getByRole("link", { name: "Taste DNA" }).first().click();
+  await expect(page).toHaveURL(/\/dna$/);
+  await expect.poll(() => held).toBe(true);
+
+  await page.goto("/saved");
+  await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+  await expectHolds(() => expect(page).toHaveURL(/\/saved$/), 2_500);
+});
+

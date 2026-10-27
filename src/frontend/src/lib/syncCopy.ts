@@ -1,3 +1,5 @@
+import type { components } from "../store/generated/openapi";
+
 /**
  * Fixed copy for the header sync pill, per job kind. Kinds are the short SSE names the status API
  * carries on every job (`sseKind`, computed by the backend's `JobVisibilityPolicy`); unknown kinds
@@ -306,6 +308,49 @@ export const FAILURE_NOUN_FALLBACK = "A background job";
 
 export function failureNoun(sseKind: string | null | undefined): string {
   return (sseKind && FAILURE_NOUNS[sseKind]) || FAILURE_NOUN_FALLBACK;
+}
+
+/**
+ * `JobKind` (the persisted enum name) → its short SSE kind, mirroring the backend's
+ * `JobVisibilityPolicy.SseKind`. Only the operator alert carries a bare `JobKind`; every job and
+ * failure on the status payload already carries its `sseKind`. Typed against the generated enum, so
+ * a kind added on the backend fails `tsc` here instead of reading as the fallback unnoticed.
+ */
+const SSE_KIND_OF: Record<components["schemas"]["JobKind"], string> = {
+  FullIngest: "ingest",
+  DeltaSync: "delta",
+  FullReconcile: "reconcile",
+  HydrateCatalog: "hydrate",
+  EnrichCatalog: "enrich",
+  Train: "train",
+  Evaluate: "evaluate",
+  BuildFeed: "feed",
+  RefreshAvailability: "availability",
+  BuildDigest: "digest",
+  BuildTasteNarrative: "narrative",
+  PersonaliseTitles: "lens",
+  SeedCatalog: "seed",
+  CrossReference: "xref",
+};
+
+/** What a job kind is called, from its `JobKind` name; an unknown kind reads as the fallback. */
+export function jobKindNoun(kind: string | null | undefined): string {
+  const sse = kind && Object.hasOwn(SSE_KIND_OF, kind) ? SSE_KIND_OF[kind as keyof typeof SSE_KIND_OF] : null;
+  return failureNoun(sse);
+}
+
+/** Provider names as the header says them; the model provider is never named by brand. */
+const PROVIDER_NAMES: Record<string, string> = {
+  Trakt: "Trakt",
+  Tmdb: "TMDB",
+  OpenRouter: "the model provider",
+};
+
+export const PROVIDER_FALLBACK = "a provider";
+
+/** In-sentence form ("Reel stopped calling the model provider"); capitalise it to lead a label. */
+export function providerName(provider: string | null | undefined): string {
+  return (provider && PROVIDER_NAMES[provider]) || PROVIDER_FALLBACK;
 }
 
 /**

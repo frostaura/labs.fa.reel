@@ -35,7 +35,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
           {...props}
           aria-describedby={describedBy}
           className={cn(
-            "h-9 rounded-control border border-fa-edge bg-fa-glass px-3 text-sm text-1 placeholder:text-3 transition",
+            "h-9 rounded-control border border-fa-edge bg-fa-glass px-3 text-sm text-1 placeholder:text-3 transition coarse:min-h-11",
             "focus-visible:outline-none focus-visible:border-fa-frost/60 focus-visible:ring-2 focus-visible:ring-fa-frost/30",
             "disabled:cursor-not-allowed disabled:opacity-50",
             error && "border-fa-danger/60",
