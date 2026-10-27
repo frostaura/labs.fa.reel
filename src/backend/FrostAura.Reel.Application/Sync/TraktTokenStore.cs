@@ -30,11 +30,17 @@ public class TraktTokenStore(
     // dies early, so this is purely about not burning refreshes (and rate budget) for nothing.
     private static readonly TimeSpan RefreshAhead = TimeSpan.FromDays(2);
 
+    /// <summary>
+    /// A usable access token, or a <see cref="TraktRelinkRequiredException"/> when only a re-link can
+    /// produce one: a link already marked Revoked fails here as
+    /// <see cref="TraktConnectionRevokedException"/>, before any read or refresh, so a job queued by
+    /// "Sync now" fails once as unauthorized instead of retrying an answer that cannot change.
+    /// </summary>
     public async Task<string> GetValidAccessTokenAsync(TraktConnection connection, CancellationToken ct = default)
     {
         if (connection.Status == ConnectionStatus.Revoked)
         {
-            throw new InvalidOperationException($"Trakt connection {connection.Id} is revoked — re-link required.");
+            throw new TraktConnectionRevokedException(connection.AccountId, connection.Id);
         }
 
         if (connection.ExpiresAt - DateTime.UtcNow > RefreshAhead)
@@ -61,7 +67,7 @@ public class TraktTokenStore(
             {
                 return await RefreshAndPersistAsync(connection, ct);
             }
-            catch (Exception ex) when (ex is not TraktTokenUnreadableException && storedExpiry > DateTime.UtcNow)
+            catch (Exception ex) when (ex is not TraktRelinkRequiredException && storedExpiry > DateTime.UtcNow)
             {
                 // A *proactive* refresh is an optimization, not a hard requirement: if Trakt rejects
                 // it (e.g. a transient 429) while the current token is still valid, fall back to that
@@ -103,7 +109,7 @@ public class TraktTokenStore(
     {
         if (connection.Status == ConnectionStatus.Revoked)
         {
-            throw new InvalidOperationException($"Trakt connection {connection.Id} is revoked — re-link required.");
+            throw new TraktConnectionRevokedException(connection.AccountId, connection.Id);
         }
 
         var gate = RefreshLocks.GetOrAdd(connection.AccountId, _ => new SemaphoreSlim(1, 1));

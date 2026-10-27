@@ -35,11 +35,11 @@ public class FullIngestJobHandler(
         {
             await RunAsync(job, ct);
         }
-        catch (TraktTokenUnreadableException ex)
+        catch (TraktRelinkRequiredException ex)
         {
-            // A token no key ring here can decrypt fails identically on every attempt; the token
-            // store has already marked the connection Revoked, so the poll stops re-enqueuing it and
-            // the user is asked to re-link. Fail once (R1-27).
+            // A token no key ring here can decrypt, or a link already marked Revoked, fails
+            // identically on every attempt; the connection is Revoked, so the poll stops
+            // re-enqueuing it and the user is asked to re-link. Fail once (R1-27, HREV1-PLAT-4).
             throw new NonRetryableJobException(ex.Message, ex);
         }
     }

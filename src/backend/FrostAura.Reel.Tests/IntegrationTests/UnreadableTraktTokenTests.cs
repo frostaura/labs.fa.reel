@@ -115,6 +115,76 @@ public class UnreadableTraktTokenTests(PostgresFixture fixture)
         Assert.Equal(ConnectionStatus.Active, (await read.TraktConnections.SingleAsync(c => c.AccountId == accountId)).Status);
     }
 
+    /// <summary>
+    /// HREV1-PLAT-4: "Sync now" on a link already marked Revoked queued a DeltaSync that failed all
+    /// three attempts with a plain InvalidOperationException, recorded as reason "error" rather than
+    /// the "unauthorized" the reconnect state reads, and each futile attempt fed the job-failure
+    /// alert. A Revoked link fails the same way an unreadable token does: once, as unauthorized.
+    /// The fixture varies the status only (Revoked against the RefreshFailed and Active controls,
+    /// which must stay retryable) and the expiry, which decides whether the store would read the
+    /// access token straight off the row or go to refresh.
+    /// </summary>
+    [Theory]
+    [InlineData(ConnectionStatus.Revoked, 60, true)]
+    [InlineData(ConnectionStatus.Revoked, 1, true)]
+    [InlineData(ConnectionStatus.RefreshFailed, 60, false)]
+    [InlineData(ConnectionStatus.Active, 60, false)]
+    public async Task A_revoked_link_fails_sync_once_as_unauthorized(ConnectionStatus status, int expiresInDays, bool relinkRequired)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAsync(now, expiresInDays, accessReadable: true, refreshReadable: true, status);
+
+        await using var db = Pinned(accountId);
+        var delta = new DeltaSyncJobHandler(
+            db, new StubTraktClient(), TokenStore(db), null!, null!, null!, null!, null!, new RecordingEventHub(),
+            new ConfigurationBuilder().Build(), NullLogger<DeltaSyncJobHandler>.Instance);
+        var ingest = new FullIngestJobHandler(db, TokenStore(db), null!, new RecordingEventHub(), NullLogger<FullIngestJobHandler>.Instance);
+
+        foreach (var (handler, kind) in new (IJobHandler, JobKind)[] { (delta, JobKind.DeltaSync), (ingest, JobKind.FullIngest) })
+        {
+            var job = new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = kind, EnqueuedAt = now };
+            var failure = await Record.ExceptionAsync(() => handler.ExecuteAsync(job, CancellationToken.None));
+
+            Assert.NotNull(failure);
+            Assert.Equal(relinkRequired, JobRunnerService.IsNonRetryable(failure));
+            if (relinkRequired)
+            {
+                Assert.IsType<TraktConnectionRevokedException>(failure.InnerException);
+                Assert.Equal(JobFailureReason.Unauthorized, JobFailureReason.Classify(failure.Message));
+            }
+        }
+
+        // The token store never touched the row's status: a Revoked link stays Revoked until a
+        // re-link, and a RefreshFailed or Active one is not escalated by a failure it did not cause.
+        await using var read = fixture.CreateContext(new AccountContext());
+        Assert.Equal(status, (await read.TraktConnections.SingleAsync(c => c.AccountId == accountId)).Status);
+    }
+
+    [Fact]
+    public async Task A_reactive_refresh_on_a_revoked_link_is_the_relink_failure_too()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAsync(now, expiresInDays: 60, accessReadable: true, refreshReadable: true, ConnectionStatus.Revoked);
+
+        await using var db = Pinned(accountId);
+        var connection = await db.TraktConnections.SingleAsync(c => c.AccountId == accountId);
+
+        var failure = await Assert.ThrowsAsync<TraktConnectionRevokedException>(
+            () => TokenStore(db).ForceRefreshAsync(connection, "stale", CancellationToken.None));
+        Assert.IsAssignableFrom<TraktRelinkRequiredException>(failure);
+        Assert.Equal(JobFailureReason.Unauthorized, JobFailureReason.Classify(failure.Message));
+    }
+
     public static TheoryData<string, int> RelinkedUnderneath => new()
     {
         // Which stale secret fails to decrypt, and days until the stale access token expires. A far
@@ -170,7 +240,7 @@ public class UnreadableTraktTokenTests(PostgresFixture fixture)
         // Not the re-link failure: that would fail the job for good and tell the user, who has just
         // re-linked, to re-link again. A stale read is an ordinary, retryable miss, or (when the
         // re-linked access token is still valid) no miss at all.
-        Assert.False(failure is TraktTokenUnreadableException, failure?.Message);
+        Assert.False(failure is TraktRelinkRequiredException, failure?.Message);
         Assert.True(failure is not null || token!.StartsWith("relinked-access-", StringComparison.Ordinal), token);
 
         await using (var read = fixture.CreateContext(new AccountContext()))
@@ -224,7 +294,8 @@ public class UnreadableTraktTokenTests(PostgresFixture fixture)
         return services.BuildServiceProvider(validateScopes: true);
     }
 
-    private async Task<Guid> SeedAsync(DateTime now, int expiresInDays, bool accessReadable, bool refreshReadable)
+    private async Task<Guid> SeedAsync(
+        DateTime now, int expiresInDays, bool accessReadable, bool refreshReadable, ConnectionStatus status = ConnectionStatus.Active)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = new Account
@@ -244,7 +315,7 @@ public class UnreadableTraktTokenTests(PostgresFixture fixture)
             AccessTokenEncrypted = (accessReadable ? hostRing : lostRing).Protect("access-" + Guid.NewGuid().ToString("N")),
             RefreshTokenEncrypted = (refreshReadable ? hostRing : lostRing).Protect("refresh-" + Guid.NewGuid().ToString("N")),
             ExpiresAt = now.AddDays(expiresInDays),
-            Status = ConnectionStatus.Active,
+            Status = status,
         });
         await db.SaveChangesAsync();
         return account.Id;
