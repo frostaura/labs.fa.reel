@@ -344,9 +344,12 @@ public sealed class AskReelEngine(
         // WS-3 CR-2b: the single-pass FilterCostMeter, the same numbers the Conditions editor shows).
         if (tools.Contains(AskTool.Conditions) && plan.References.Count == 0)
         {
-            await PhaseAsync(turn, "searching", "Counting what your conditions leave");
+            await PhaseAsync(turn, "searching", "Reading your conditions");
+            var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
             FilterCostReport? cost = null;
-            if (turn.Standing.Rules().Count > 0)
+            // The meter cannot apply a maturity ceiling (it lives on the account, not in the rule
+            // set), so under one its pool count would be a number this answer cannot stand behind.
+            if (turn.Standing.Rules().Count > 0 && string.IsNullOrWhiteSpace(ceiling))
             {
                 try
                 {
@@ -358,7 +361,7 @@ public sealed class AskReelEngine(
                 }
             }
 
-            return await AnswerAsync(turn, plan, next, ConditionsAnswer(turn.Standing, cost), null, ct);
+            return await AnswerAsync(turn, plan, next, ConditionsAnswer(turn.Standing, cost, ceiling, turn.Floor), null, ct);
         }
 
         var titleId = ConversationStateReducer.ResolveHandles(plan.References, state.LastPresented).FirstOrDefault();
@@ -445,17 +448,33 @@ public sealed class AskReelEngine(
     /// "What are my conditions?" (§4.4 <c>conditions()</c>): the rules, the pool they leave, and the
     /// rules costing the most, each with how many titles relaxing it ALONE would open — marginals,
     /// which do not sum, so they are never added up. With no measurement, the rules alone.
+    ///
+    /// <para><b>Every sentence here is a claim the user can check (R1-12).</b> The maturity ceiling
+    /// and the bar are conditions in the editor, so they are named; an account with neither and no
+    /// rules still has the English-only default and its own footprint (watched, rated, saved, dropped,
+    /// not interested), so "no conditions" never claims the whole catalogue is open. Under a ceiling no pool
+    /// count is given, because the meter cannot apply one.</para>
     /// </summary>
-    internal static string ConditionsAnswer(FilterRuleSet standing, FilterCostReport? cost)
+    internal static string ConditionsAnswer(
+        FilterRuleSet standing, FilterCostReport? cost, string? maturityCeiling = null, decimal bar = 0m)
     {
-        var described = AskReelStandingFilters.Describe(standing);
+        var described = AskReelStandingFilters.Describe(standing, maturityCeiling);
+        const string BarDoes = "titles predicted under it, or not scored yet, are shown apart rather than as picks";
+        var barred = bar > 0m;
+        var barLine = barred ? FormattableString.Invariant($" Your bar is {bar:0.0}: {BarDoes}.") : string.Empty;
         if (described is not { Length: > 0 })
         {
-            return "You have no standing conditions set, so every unseen title in the catalogue is open to you.";
+            var lead = barred
+                ? FormattableString.Invariant($"Your only standing condition is your bar of {bar:0.0}: {BarDoes}.")
+                : "You have no standing conditions set.";
+            var baseline = standing.AllLanguagesAllowed
+                ? " Nothing else is held back except titles you've seen, saved, dropped or marked not interested."
+                : " Reel's default still applies: English-language titles only, minus the ones you've seen, saved, dropped or marked not interested.";
+            return lead + baseline;
         }
 
-        var text = $"Your standing conditions: {described}.";
-        if (cost is not { } report)
+        var text = $"Your standing conditions: {described}.{barLine}";
+        if (cost is not { } report || !string.IsNullOrWhiteSpace(maturityCeiling))
         {
             return text;
         }

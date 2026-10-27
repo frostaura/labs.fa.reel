@@ -600,8 +600,71 @@ public class AskReelV2UnitTests
             AskReelEngine.ConditionsAnswer(standing, cost));
         // Unmeasured: the rules alone, no number invented.
         Assert.Equal("Your standing conditions: excludes: comedy; min year 2000.", AskReelEngine.ConditionsAnswer(standing, null));
+    }
+
+    /// <summary>
+    /// R1-12: "no conditions" never claims the whole catalogue. With no rows the English-only default
+    /// still binds, and with every language allowed the account's own footprint still does — so the
+    /// line names what is held back instead of "every unseen title in the catalogue".
+    /// </summary>
+    [Fact]
+    public void No_conditions_names_the_default_and_the_footprint_never_the_whole_catalogue()
+    {
+        var none = AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null);
         Assert.Equal(
-            "You have no standing conditions set, so every unseen title in the catalogue is open to you.",
-            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null));
+            "You have no standing conditions set. Reel's default still applies: English-language titles only, minus the ones "
+            + "you've seen, saved, dropped or marked not interested.",
+            none);
+
+        // Varied: the measured report changes nothing — a no-rules answer quotes no pool count.
+        Assert.Equal(none, AskReelEngine.ConditionsAnswer(
+            FilterRuleSet.FromRows([]), new FilterCostReport(5319, 4000, [new FilterCostRule("Language", "en", 900)], [])));
+
+        var everyLanguage = FilterRuleSet.FromRows(
+            [new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.Language, Value = FilterRuleSet.AllLanguages }]);
+        Assert.Equal(
+            "You have no standing conditions set. Nothing else is held back except titles you've seen, saved, dropped or marked not interested.",
+            AskReelEngine.ConditionsAnswer(everyLanguage, null));
+        Assert.DoesNotContain("every unseen title", none, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// R1-12: a maturity ceiling is a condition. Describe names it, so an account whose ONLY condition
+    /// is a ceiling is never told it has none — and, because the cost meter cannot apply a ceiling, no
+    /// pool count or marginal is quoted beside one.
+    /// </summary>
+    [Theory]
+    [InlineData("PG-13")]
+    [InlineData("R")]
+    public void A_maturity_ceiling_is_named_and_never_quoted_a_pool_the_meter_cannot_count(string ceiling)
+    {
+        var bare = AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null, ceiling);
+        Assert.Equal($"Your standing conditions: max maturity {ceiling}.", bare);
+        Assert.DoesNotContain("no standing conditions", bare, StringComparison.Ordinal);
+
+        var excluded = FilterRuleSet.FromRows([new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.ExcludeGenre, Value = "comedy" }]);
+        var cost = new FilterCostReport(5319, 421, [new FilterCostRule("ExcludeGenre", "comedy", 812)], []);
+        Assert.Equal(
+            $"Your standing conditions: excludes: comedy; max maturity {ceiling}.",
+            AskReelEngine.ConditionsAnswer(excluded, cost, ceiling));
+        Assert.Equal($"excludes: comedy; max maturity {ceiling}", AskReelStandingFilters.Describe(excluded, ceiling));
+        Assert.Equal("excludes: comedy", AskReelStandingFilters.Describe(excluded));
+    }
+
+    /// <summary>R1-12: the bar is a condition in the editor, so a bar-only account is told about it.</summary>
+    [Fact]
+    public void The_bar_is_named_as_a_condition_with_what_it_does()
+    {
+        Assert.Equal(
+            "Your only standing condition is your bar of 6.5: titles predicted under it, or not scored yet, are shown apart "
+            + "rather than as picks. Reel's default still applies: English-language titles only, minus the ones you've seen, saved, "
+            + "dropped or marked not interested.",
+            AskReelEngine.ConditionsAnswer(FilterRuleSet.FromRows([]), null, bar: 6.5m));
+
+        var standing = FilterRuleSet.FromRows([new ContentFilter { Id = Guid.NewGuid(), Kind = FilterKind.MinYear, Value = "2000" }]);
+        Assert.Equal(
+            "Your standing conditions: min year 2000. Your bar is 7.0: titles predicted under it, or not scored yet, are shown apart "
+            + "rather than as picks. They leave 12 unseen titles open to you, out of 50 in the catalogue.",
+            AskReelEngine.ConditionsAnswer(standing, new FilterCostReport(50, 12, [], []), bar: 7m));
     }
 }
