@@ -189,6 +189,50 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         }
     }
 
+    /// <summary>
+    /// HREV1-RET-11 (refuted round 2): typing past the namesake ("bluey book", "bluey's big play") left
+    /// Bluey itself out of the word-start-filtered rows, so nothing was hidden by genre and the sparse
+    /// spin-offs were listed again. The namesake is judged from every row TMDB returned, shown or not;
+    /// a row with a genre the namesake lacks is still judged on its own.
+    /// </summary>
+    [Theory]
+    [InlineData(" book", new long[0], 1)]
+    [InlineData("'s big play", new long[0], 1)]
+    [InlineData(": turtleboy", new long[0], 1)]
+    [InlineData(" heist", new[] { 500006L }, 0)]
+    public async Task Typing_past_a_genre_hidden_namesake_still_hides_its_sparse_spin_offs(string suffix, long[] shown, int hidden)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = Token();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.Language, "en");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "animation");
+        var tmdb = new SearchOnlyTmdbClient
+        {
+            ShowResults =
+            [
+                Row(82728, false, token, [16, 35, 10751, 10762], popularity: 90m),
+                Row(500001, false, $"{token} Book Reads", [10762], popularity: 80m),
+                Row(500003, false, $"{token}: Turtleboy (Auslan)", [], popularity: 60m),
+            ],
+            MovieResults =
+            [
+                Row(500002, true, $"{token}'s Big Play", [10751], popularity: 70m),
+                Row(500006, true, $"{token} Heist", [80], popularity: 30m),
+            ],
+        };
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var global = await new TypeaheadSearch(db, new EligibilityQueryBuilder(db)).GlobalAsync(accountId, tmdb, token + suffix, default);
+
+        Assert.Equal(shown, global.Rows.Select(r => r.TmdbId));
+        Assert.Equal(hidden, global.HiddenByConditions);
+    }
+
     [Fact]
     public void A_row_extends_its_namesake_only_at_a_word_boundary_and_with_a_subset_of_its_genres()
     {

@@ -293,14 +293,17 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         // carry the term at a word start is not what the user is looking up, and is neither shown nor
         // counted as hidden.
         var looked = hits.Where(hit => TierOf(hit.Name, trimmed) <= MatchTier.WordStart).ToList();
-        var verdicts = looked.ToDictionary(
+        var verdicts = hits.ToDictionary(
             hit => (hit.IsMovie, hit.Id),
             hit => catalogue.TryGetValue((hit.IsMovie, hit.Id), out var id)
                 ? allowedKnown.Contains(id)
                 : unratedPasses && StandingDiscoverPlan.Admits(rules, hit));
 
         // The rows an excluded GENRE hides, by their own TMDB data: the canonical Bluey (animation).
-        var hiddenByGenre = looked
+        // Read from EVERY row TMDB returned, not only the ones the term names at a word start: typing
+        // past the namesake ("bluey book") leaves Bluey itself out of `looked`, and its sparse spin-offs
+        // were listed again (HREV1-RET-11).
+        var hiddenByGenre = hits
             .Where(hit => !verdicts[(hit.IsMovie, hit.Id)] && StandingDiscoverPlan.BreaksExcludedGenre(rules, hit))
             .ToList();
 
