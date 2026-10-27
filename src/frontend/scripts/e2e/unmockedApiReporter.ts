@@ -78,7 +78,9 @@ export default class UnmockedApiReporter implements Reporter {
     this.ran.add(key);
   }
 
-  onEnd(result: FullResult): { status: FullResult["status"] } | undefined {
+  // Async because Playwright's Reporter types a status override as a Promise; a plain object was
+  // honoured only because the runner happens to await it (`npm run typecheck:e2e` caught it).
+  async onEnd(result: FullResult): Promise<{ status: FullResult["status"] } | undefined> {
     if (!existsSync(this.logFile)) {
       console.log(`unmocked-api: the tripwire log ${this.logFile} does not exist, so no call can be vouched for.`);
       return { status: "failed" };

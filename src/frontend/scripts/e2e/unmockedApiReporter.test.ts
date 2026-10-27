@@ -45,7 +45,7 @@ describe("UnmockedApiReporter", () => {
     writeFileSync(logFile, lines.map(([at, method, p]) => JSON.stringify({ at, method, path: p })).join("\n") + "\n");
   }
 
-  it("blames a call on the test the worker had started, even when the begin message arrives after the call", () => {
+  it("blames a call on the test the worker had started, even when the begin message arrives after the call", async () => {
     // Process clock: the reporter is built at 1000 and receives each begin message 20 ms after the
     // worker started that test. The second test's first call lands at 1505: after the worker began
     // it (1500), before the reporter heard so (1520). Timed on receipt it would be blamed on "first".
@@ -59,13 +59,13 @@ describe("UnmockedApiReporter", () => {
     hits([1_505, "GET", "/api/feed"]);
     process.env.UNMOCKED_API_FOUND = path.join(dir, "found.json");
 
-    expect(reporter.onEnd(passed)).toEqual({ status: "failed" });
+    await expect(reporter.onEnd(passed)).resolves.toEqual({ status: "failed" });
     expect(JSON.parse(readFileSync(process.env.UNMOCKED_API_FOUND, "utf8"))).toEqual({
       "fixture.spec.ts › suite › second": ["GET /api/feed"],
     });
   });
 
-  it("passes a run whose only calls are baselined, and never fails on a baselined call it did not see", () => {
+  it("passes a run whose only calls are baselined, and never fails on a baselined call it did not see", async () => {
     const t0 = Date.now() + 1_000;
     const reporter = new UnmockedApiReporter({ logFile });
     reporter.onBegin(config, {} as Suite);
@@ -81,12 +81,12 @@ describe("UnmockedApiReporter", () => {
     const [method, route] = calls[0].split(" ");
     hits([t0 + 10, method, route.replace(":id", "42")]);
 
-    expect(reporter.onEnd(passed)).toBeUndefined();
+    await expect(reporter.onEnd(passed)).resolves.toBeUndefined();
   });
 
-  it("fails closed when the tripwire log is missing", () => {
+  it("fails closed when the tripwire log is missing", async () => {
     const reporter = new UnmockedApiReporter({ logFile: path.join(dir, "absent.jsonl") });
     reporter.onBegin(config, {} as Suite);
-    expect(reporter.onEnd(passed)).toEqual({ status: "failed" });
+    await expect(reporter.onEnd(passed)).resolves.toEqual({ status: "failed" });
   });
 });
