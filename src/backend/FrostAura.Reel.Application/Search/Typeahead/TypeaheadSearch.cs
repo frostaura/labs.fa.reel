@@ -5,6 +5,7 @@ using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Search.Typeahead;
@@ -234,8 +235,10 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
     /// popularity-ordered, kept only where the row's own name carries the term at a word start or
     /// better (accents folded) — and judged by the account's conditions like the local leg (FD-5): a row
     /// for a catalogue title passes only if the catalogue title does, maturity ceiling included; any
-    /// other row by <see cref="StandingDiscoverPlan.Admits"/> and, carrying no certification, by the
-    /// ceiling as an unrated title. TMDB being down yields an empty list, never an error.
+    /// other row by <see cref="StandingDiscoverPlan.Admits"/>, by the ceiling as an unrated title (it
+    /// carries no certification) and, under ExcludeGenre rules, only when its genres are known and it
+    /// is not a sparsely-tagged spin-off of a row an excluded genre hides
+    /// (<see cref="UnprovenUnderGenreRules"/>). TMDB being down yields an empty list, never an error.
     /// </summary>
     public async Task<TypeaheadGlobal> GlobalAsync(Guid accountId, ITmdbClient tmdb, string term, CancellationToken ct)
     {
@@ -286,20 +289,28 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         var unratedPasses = EligibilityQueryBuilder.PassesMaturity((string?)null, maturityCeiling);
         var catalogue = known.ToDictionary(k => (k.MediaType == MediaType.Movie, k.TmdbId!.Value), k => k.Id);
 
+        // TMDB's search is loose (it matches alternative titles and cast); a row whose own name does not
+        // carry the term at a word start is not what the user is looking up, and is neither shown nor
+        // counted as hidden.
+        var looked = hits.Where(hit => TierOf(hit.Name, trimmed) <= MatchTier.WordStart).ToList();
+        var verdicts = looked.ToDictionary(
+            hit => (hit.IsMovie, hit.Id),
+            hit => catalogue.TryGetValue((hit.IsMovie, hit.Id), out var id)
+                ? allowedKnown.Contains(id)
+                : unratedPasses && StandingDiscoverPlan.Admits(rules, hit));
+
+        // The rows an excluded GENRE hides, by their own TMDB data: the canonical Bluey (animation).
+        var hiddenByGenre = looked
+            .Where(hit => !verdicts[(hit.IsMovie, hit.Id)] && StandingDiscoverPlan.BreaksExcludedGenre(rules, hit))
+            .ToList();
+
         var kept = new List<GlobalTypeaheadRow>();
         var hidden = 0;
-        foreach (var hit in hits)
+        foreach (var hit in looked)
         {
-            // TMDB's search is loose (it matches alternative titles and cast); a row whose own name
-            // does not carry the term at a word start is not what the user is looking up, and is
-            // neither shown nor counted as hidden.
-            if (TierOf(hit.Name, trimmed) > MatchTier.WordStart)
-            {
-                continue;
-            }
-
-            var inCatalogue = catalogue.TryGetValue((hit.IsMovie, hit.Id), out var titleId);
-            var passes = inCatalogue ? allowedKnown.Contains(titleId) : unratedPasses && StandingDiscoverPlan.Admits(rules, hit);
+            var inCatalogue = catalogue.ContainsKey((hit.IsMovie, hit.Id));
+            var passes = verdicts[(hit.IsMovie, hit.Id)]
+                && (inCatalogue || !UnprovenUnderGenreRules(rules, hit, hiddenByGenre));
             if (!passes)
             {
                 // A catalogue title the conditions hide was already counted by the local leg (its
@@ -328,6 +339,51 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
         }
 
         return new TypeaheadGlobal(kept, hidden);
+    }
+
+    /// <summary>
+    /// True when a TMDB row beyond the catalogue cannot be shown to clear the account's ExcludeGenre
+    /// rules, so the global leg hides it (FD-5 fails closed, as an unknown language or an unrated title
+    /// does): a row TMDB left with no genre at all, or one whose name extends a row an excluded genre
+    /// hides in the same lookup and whose genres are a subset of that row's. A list row has no keywords
+    /// to judge by, and TMDB tags spin-offs sparsely: "bluey" listed Bluey Book Reads (Kids only),
+    /// Bluey's Big Play (Family only) and Bluey: Turtleboy (none) to an account excluding animation,
+    /// while Bluey itself was hidden (HREV1-RET-11). A row with a genre its sibling lacks is a different
+    /// title as far as TMDB's data says — Bluey (2015), a drama — and is judged on its own.
+    /// </summary>
+    internal static bool UnprovenUnderGenreRules(
+        FilterRuleSet rules, Domain.Ports.Tmdb.TmdbListItem row, IReadOnlyList<Domain.Ports.Tmdb.TmdbListItem> hiddenByGenre)
+    {
+        if (rules.ExcludeGenres.Count == 0)
+        {
+            return false;
+        }
+
+        var slugs = TmdbGenres.MapToSlugs(row.IsMovie, row.GenreIds);
+        if (slugs.Length == 0)
+        {
+            return true;
+        }
+
+        var name = Fold(row.Name.ToLowerInvariant()).Trim();
+        foreach (var sibling in hiddenByGenre)
+        {
+            if (sibling.IsMovie == row.IsMovie && sibling.Id == row.Id)
+            {
+                continue;
+            }
+
+            var stem = Fold(sibling.Name.ToLowerInvariant()).Trim();
+            var extends = stem.Length > 0
+                && name.StartsWith(stem, StringComparison.Ordinal)
+                && (name.Length == stem.Length || !char.IsLetterOrDigit(name[stem.Length]));
+            if (extends && slugs.All(TmdbGenres.MapToSlugs(sibling.IsMovie, sibling.GenreIds).Contains))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
