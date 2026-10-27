@@ -32,7 +32,7 @@ public sealed class TokenRefreshService(
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 var tokenStore = scope.ServiceProvider.GetRequiredService<TraktTokenStore>();
                 var cutoff = DateTime.UtcNow.AddDays(30);
