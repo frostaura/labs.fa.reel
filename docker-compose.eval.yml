@@ -68,6 +68,8 @@ services:
       ConnectionStrings__Postgres: Host=host.docker.internal;Port=5434;Database=${EVAL_DATABASE:-reel_eval};Username=reel;Password=reel_eval
       Database__AutoMigrateOnStartup: "true"
       JWT_SECRET: ${EVAL_JWT_SECRET:?EVAL_JWT_SECRET is required}
+      # WS-8 Founder allow-list (K-10, FD-11); blank on the eval stack.
+      FOUNDER_TRAKT_SLUGS: ${FOUNDER_TRAKT_SLUGS:-}
       # Model and catalogue keys: the eval stack's own, never the founder's (§7 rule 1).
       OPENROUTER_API_KEY: ${EVAL_OPENROUTER_API_KEY:?EVAL_OPENROUTER_API_KEY is required (the eval key, not the founder key)}
       OPENROUTER_MODEL: ${EVAL_OPENROUTER_MODEL:-openai/gpt-6-luna}
@@ -143,6 +145,7 @@ services:
       INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
       INTERLEAVE_ENABLED: ${INTERLEAVE_ENABLED:-}
       INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      INTERLEAVE_SINCE: ${INTERLEAVE_SINCE:-}
       INTERLEAVE_POLICY_A: ${INTERLEAVE_POLICY_A:-}
       INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
       JWT_ACCESS_TOKEN_EXPIRY_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRY_MINUTES:-15}

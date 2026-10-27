@@ -188,11 +188,12 @@ ci-design-ratchet:
 ci-vite-proxy:
 	cd src/frontend && node ../../deploy/ci/vite-proxy-probe.mjs
 
-# The dev-server specs in both engines (Safari is where the founder's installed PWA runs), with service
+# The dev-server specs in both engines (Safari is where the founder's installed PWA runs; WebKit runs in
+# batches of at most 40 tests per browser, because one WebKit browser hangs on its 64th page), with service
 # workers blocked by the Playwright config; then the *.preview.spec.ts specs against the production
 # build (Chromium), which test the real service worker (WS-9 CR-3). PW_PORT keeps parallel runs apart.
 ci-e2e:
-	cd src/frontend && CI=1 npx --no-install playwright test --project=chromium --project=webkit
+	cd src/frontend && CI=1 npm run test:e2e
 	cd src/frontend && CI=1 npx --no-install playwright test -c playwright.preview.config.ts
 
 # The accessibility spec alone, in both engines (WS-9 CR-4): the full axe rule set per route against

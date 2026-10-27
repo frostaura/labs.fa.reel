@@ -142,6 +142,7 @@ services:
       INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
       INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
       INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      INTERLEAVE_SINCE: ${INTERLEAVE_SINCE:-}
       KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
       # WS-2 Ask Reel engine: v1 (default) or v2; anything else reads as v1. v1 stays selectable through the soak.

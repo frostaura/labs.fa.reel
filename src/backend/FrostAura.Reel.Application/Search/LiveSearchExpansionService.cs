@@ -47,7 +47,7 @@ public sealed partial class LiveSearchExpansionService(
     PersonalisationContext personalisation,
     OnDemandScorer scorer,
     ExposureLog exposures,
-    LexicalSearchService lexical,
+    Retrieval.KeylessTextSearch lexical,
     ICatalogWorkCoordinator coordinator,
     IMemoryCache cache,
     ILogger<LiveSearchExpansionService> logger,

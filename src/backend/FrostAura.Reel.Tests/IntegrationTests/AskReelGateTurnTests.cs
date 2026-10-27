@@ -563,7 +563,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
     /// <summary>
     /// IREV2-SYS-02 wired through the turn (WS-1 CR-1): a degraded reading replies with the copy for
-    /// ITS cause — a spent allowance names the midnight-UTC reset, a 402 names the empty account, a 401
+    /// ITS cause — a spent allowance names the reset at the account's midnight, a 402 names the empty account, a 401
     /// the rejected key — never "try again in a moment", and the cause rides as its own
     /// <c>plan-cause:</c> token beside <c>plan</c>, so history still reads the turn as plan-failed.
     /// </summary>
@@ -1495,7 +1495,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            new LexicalSearchService(eligibility),
+            Application.Search.Retrieval.KeylessTextSearch.Offline(db, eligibility),
             new CatalogWorkCoordinator(),
             cache ?? new MemoryCache(new MemoryCacheOptions()),
             NullLogger<LiveSearchExpansionService>.Instance,

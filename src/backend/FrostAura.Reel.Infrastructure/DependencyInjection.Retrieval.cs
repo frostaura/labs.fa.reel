@@ -22,9 +22,7 @@ public static partial class DependencyInjection
         services.AddScoped<Application.Search.FilterCostMeter>();
         // Catalogue counts behind the conditions editor's genre chips (H-7), cached catalogue-wide.
         services.AddScoped<Application.Search.Retrieval.FilterChipCounts>();
-        services.AddScoped<Application.Search.LexicalSearchService>();
-        // Keyless search on the full-text arm and the shared concept resolver (task 12); it replaces
-        // LexicalSearchService once the v1 keyless path switches to it.
+        // Keyless search on the full-text arm and the shared concept resolver (task 12).
         services.AddScoped<Application.Search.Retrieval.KeylessTextSearch>();
         // The search box's lookup: tiered local leg, condition-judged global leg (FD-5).
         services.AddScoped<Application.Search.Typeahead.TypeaheadSearch>();

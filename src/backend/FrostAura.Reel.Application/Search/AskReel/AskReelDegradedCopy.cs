@@ -21,7 +21,7 @@ public static class AskReelDegradedCopy
     /// <summary>The lead of a search turn whose plan the day's plan allowance refused.</summary>
     public const string PlanBudgetSpentReply =
         "Today's allowance for reading requests closely is used up, so I searched on the words you typed. "
-        + "It resets at midnight UTC.";
+        + "It resets at midnight in your account's time zone.";
 
     /// <summary>
     /// The lead for a search turn whose plan degraded: <see cref="PlanBudgetSpentReply"/> for a spent

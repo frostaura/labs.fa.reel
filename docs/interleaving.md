@@ -53,6 +53,7 @@ the wrong instrument for a founder watching his own product.
 | --- | --- | --- |
 | `INTERLEAVE_MSPRT_TAU` | `0.15` | mixing sd on the preference rate — aims the test at a 65/35 effect |
 | `INTERLEAVE_ALPHA` | `0.05` | the always-valid type-I ceiling |
+| `INTERLEAVE_SINCE` | unset | the experiment's start, an ISO-8601 UTC instant: only slates served from then count, and the challenger keeps the weights it had then instead of refitting |
 
 Simulated, not merely asserted (`MsprtSimulationTests`): 10,000 null runs peeking after every single
 slate cross α **2.6%** of the time against a stated 5%, and **0.6%** against a stated 1%. Power at a

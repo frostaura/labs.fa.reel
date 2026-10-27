@@ -16,7 +16,7 @@ public sealed record KeylessHit(Title Title, double MatchScore, IReadOnlyList<st
 /// Search with no model key (program task 12, C-9): the full-text arm and the facet SQL over the
 /// resolved concepts, inside the account's eligibility — the same arms and the same concept resolver
 /// the hybrid retriever runs, so a keyless install and a keyed one agree on what "heist" means. It
-/// replaces <c>LexicalSearchService</c>, whose hand-written 30-word concept table and unindexed
+/// replaced <c>LexicalSearchService</c>, whose hand-written 30-word concept table and unindexed
 /// <c>ILIKE</c> scans over names, overviews and keywords answered "ninja movies" with American Ninja
 /// Warrior.
 ///

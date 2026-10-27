@@ -44,7 +44,7 @@ public sealed partial class LiveSearchExpansionService
         var nothingToSearch = pointer is not null
             ? KeylessUnsearched.Pointer
             : reading.Positive.Count == 0 ? KeylessUnsearched.NoPositiveWords : KeylessUnsearched.None;
-        List<LexicalSearchService.LexicalResult> hits = [];
+        List<Retrieval.KeylessHit> hits = [];
         using (timings.Stage(AskStageTimings.Discover))
         {
             if (nothingToSearch == KeylessUnsearched.None)

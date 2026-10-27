@@ -61,7 +61,7 @@ namespace FrostAura.Reel.Application.Ml;
 /// half of the same fix.</item>
 /// <item><b><c>isUnscripted</c>.</b> The aggregate of the five genre slots below, so a tree can
 /// split "any unscripted format" once instead of five times. Deliberately a SCALAR rather than a
-/// <c>genre:unscripted</c> slot: <c>Genres</c> is also read by <c>LexicalSearchService</c> as the
+/// <c>genre:unscripted</c> slot: <c>Genres</c> is also read by <c>KeylessTextSearch</c> as the
 /// searchable genre vocabulary, so a pseudo-slug there would become a search facet matching no
 /// title's actual genre list.</item>
 /// <item><b>Five unscripted genre slots APPENDED</b> — <c>reality</c>, <c>soap</c>,
