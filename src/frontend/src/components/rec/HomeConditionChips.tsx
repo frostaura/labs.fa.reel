@@ -96,7 +96,9 @@ export default function HomeConditionChips({
   if (!filters) {
     if (strip) return null;
     return (
-      <div className={`${ONE_LINE} ${className}`} aria-hidden data-testid="conditions-summary-pending" />
+      // The same element the chips render into (same type, same place), so the resize observer
+      // attached to it on the first frame keeps watching once they arrive.
+      <div ref={rowRef} className={`${ONE_LINE} ${className}`} aria-hidden data-testid="conditions-summary-pending" />
     );
   }
   if (strip && conditions.length === 0 && views.length === 0) return null;
@@ -234,7 +236,7 @@ const PILL =
  * a margin for the focus ring, so a measuring pass never widens the page.
  */
 const ONE_LINE =
-  "flex flex-nowrap items-center h-11 [@media(pointer:fine)]:h-6 overflow-x-clip [overflow-clip-margin:4px]";
+  "flex flex-nowrap items-center h-11 [@media(pointer:fine)]:h-5 overflow-x-clip [overflow-clip-margin:4px]";
 
 /** Room kept at the line's end for "+N more" (it reads "+13 more" at its widest). */
 const MORE_RESERVE_PX = 72;

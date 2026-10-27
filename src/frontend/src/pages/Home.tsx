@@ -145,7 +145,7 @@ export default function Home() {
     // Card actions (save, not for me, rate) raise their undo toast through this provider (F-19).
     <CardUndoProvider>
       <div className="space-y-5 md:space-y-6">
-        <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-2 md:gap-x-3">
           {/* A fixed basis from `md`, so whether the controls wrap under the title is decided by the
               viewport and not by the "ranked for you" stamp, which arrives with the feed after the
               header has painted (it re-wrapped the header at 834 and moved everything below, HREV1-D04).

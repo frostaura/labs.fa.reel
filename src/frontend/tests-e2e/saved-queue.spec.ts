@@ -261,9 +261,12 @@ test.describe("saved queue", () => {
       // A Saved visit that never skips adds no conditions read.
       expect(filterReads).toBe(0);
 
+      await expect(page.getByTestId("watch-tonight-heading")).toHaveText("watch tonight");
       await page.getByTestId("not-tonight").click();
       await expect(page.getByTestId("watch-tonight")).toContainText("Coherence");
       await expect(page.getByTestId("watch-tonight-reason")).toHaveText(expected);
+      // Reel did not choose this one for tonight; the heading stops saying it did.
+      await expect(page.getByTestId("watch-tonight-heading")).toHaveText("next in your queue");
       // With the server's own pin bar, the client needs no conditions read at all.
       if (pinBar != null) expect(filterReads).toBe(0);
     });

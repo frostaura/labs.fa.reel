@@ -171,6 +171,7 @@ export default function Saved() {
             <WatchTonightCard
               item={pinned}
               reason={pinReason}
+              advanced={skipCount > 0 && !pinned.watchTonight}
               expectedAbsoluteError={band}
               hasNext={skipCount + 1 < candidateCount}
               onNotTonight={() => setSkipCount((n) => n + 1)}

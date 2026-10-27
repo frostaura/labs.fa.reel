@@ -16,6 +16,12 @@ interface Props {
    * a pin "Not tonight" advanced to (`advancedPinLine`). Null draws no line.
    */
   reason: string | null;
+  /**
+   * True once "Not tonight" has moved the pin off the server's own pick. The card then heads itself
+   * "next in your queue", not "watch tonight": it is the next candidate, and Reel has not chosen it
+   * for tonight (HREV1-D05).
+   */
+  advanced?: boolean;
   expectedAbsoluteError: number | null;
   /** Whether another candidate exists behind this one, so "Not tonight" is worth offering. */
   hasNext: boolean;
@@ -29,7 +35,7 @@ interface Props {
  * and no decision. Everything on it is there to make the decision, not to describe the title: what
  * it is, why it won, how long it runs, and where to press play.
  */
-export default function WatchTonightCard({ item, reason, expectedAbsoluteError, hasNext, onNotTonight }: Props) {
+export default function WatchTonightCard({ item, reason, advanced = false, expectedAbsoluteError, hasNext, onNotTonight }: Props) {
   const location = useLocation();
   // "Started watching" is CLIENT-SIDE ONLY and deliberately so. Recording watch intent server-side
   // would need either a new UserTitleReaction kind or a column on ManagedListItem, both of which are
@@ -43,7 +49,9 @@ export default function WatchTonightCard({ item, reason, expectedAbsoluteError, 
   return (
     <section className="fa-card p-4 sm:p-5" data-testid="watch-tonight">
       <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="fa-overline text-fa-frost">watch tonight</h2>
+        <h2 className="fa-overline text-fa-frost" data-testid="watch-tonight-heading">
+          {advanced ? "next in your queue" : "watch tonight"}
+        </h2>
         {hasNext && (
           <Button
             variant="ghost"

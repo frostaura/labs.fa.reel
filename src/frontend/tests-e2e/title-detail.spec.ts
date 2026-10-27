@@ -79,7 +79,7 @@ const similar = (n: number) => ({
 async function bootTitle(
   page: Page,
   overrides: Record<string, unknown> = {},
-  options: { more?: () => { hang: boolean; body: unknown } } = {}
+  options: { more?: () => { hang: boolean; body: unknown }; beforeGoto?: (page: Page) => Promise<void> } = {}
 ) {
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
@@ -108,6 +108,7 @@ async function bootTitle(
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(answer.body) });
     }
   );
+  await options.beforeGoto?.(page);
   await page.goto(`/title/${String(title.mediaType).toLowerCase()}/${title.tmdbId}`);
   await expect(page.getByTestId("title-detail")).toBeVisible();
 }
@@ -238,11 +239,10 @@ test.describe("title detail", () => {
   });
 
   test("a failed where-to-watch read says so, with a retry, instead of vanishing (HREV1-D11)", async ({ page }) => {
-    await bootTitle(page);
-    // Registered after bootTitle's mock, so it wins: the first read fails as it did while TMDB was
-    // unreachable from the API, the retry succeeds.
+    // Registered after bootTitle's own providers mock (so it wins) and before the page loads: the
+    // first read fails as it did while TMDB was unreachable from the API, the retry succeeds.
     let calls = 0;
-    await page.route((u) => u.pathname === "/api/titles/movie/2001/providers", async (route) => {
+    await bootTitle(page, {}, { beforeGoto: (p) => p.route((u) => u.pathname === "/api/titles/movie/2001/providers", async (route) => {
       calls += 1;
       if (calls === 1) return route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
       return route.fulfill({
@@ -250,8 +250,7 @@ test.describe("title detail", () => {
         body: JSON.stringify({ region: "US", attribution: "x", tmdbWatchPage: "https://www.themoviedb.org/movie/2001/watch",
           providers: [{ provider: "Netflix", logoPath: null, kinds: ["Flatrate"], linkKind: "direct", url: "https://www.netflix.com/search?q=x", displayPriority: 1 }] }),
       });
-    });
-    await page.reload();
+    }) });
     const failed = page.getByTestId("where-to-watch-failed");
     await expect(failed).toContainText("Couldn't load where to watch");
     await expect(page.getByTestId("where-to-watch")).toHaveCount(0);
