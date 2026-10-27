@@ -32,6 +32,13 @@ public class AskReelV2UnitTests
             LastPresented = cards.Select(c => new PresentedRef(c.Id, new TurnHandle(c.Turn, c.Rank), $"Title {c.Rank}", 2020, MediaType.Movie)).ToList(),
         };
 
+    private static ConversationState ShownNamed(params (Guid Id, int Turn, int Rank, string Name)[] cards) =>
+        ConversationState.Empty with
+        {
+            Version = 1,
+            LastPresented = cards.Select(c => new PresentedRef(c.Id, new TurnHandle(c.Turn, c.Rank), c.Name, 2020, MediaType.Movie)).ToList(),
+        };
+
     // ── Reducer ─────────────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -170,10 +177,21 @@ public class AskReelV2UnitTests
     [InlineData("the second one sounds fun, now find me heist movies", TurnAct.NewRequest, "", "")]
     [InlineData("more like the first and the third one", TurnAct.Refine, "T2.1,T2.3", "T2.1,T2.3")]
     [InlineData("more heist movies", TurnAct.Refine, "", "")]
+    // A reference to a card the message NAMES is the model reading the user right, not a miscount: the
+    // ordinal is the other side of a comparison, and moving the reference answers the wrong card.
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "T2.3", "T2.3")]
+    [InlineData("Is PROMETHEUS any scarier than the first one", TurnAct.CritiqueItem, "T2.3", "T2.3")]
+    [InlineData("is Aliens scarier than the first film?", TurnAct.ItemQuestion, "T2.2", "T2.2")]
+    [InlineData("is Ronin tenser than the first one?", TurnAct.ItemQuestion, "T1.2", "T1.2")]
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "T2.2", "T2.1")]
+    [InlineData("is Aliens better than the first one?", TurnAct.ItemQuestion, "T2.3", "T2.1")]
+    [InlineData("is Prometheus scarier than the first film?", TurnAct.ItemQuestion, "", "T2.1")]
     public void A_pointer_the_planner_missed_or_misranked_resolves_to_the_rank_the_user_named(
         string message, TurnAct act, string modelReferences, string expected)
     {
-        var state = Shown((A, 2, 1), (B, 2, 2), (C, 2, 3), (Guid.NewGuid(), 1, 1), (Guid.NewGuid(), 1, 2), (Guid.NewGuid(), 1, 3));
+        var state = ShownNamed(
+            (A, 2, 1, "Alien"), (B, 2, 2, "Aliens"), (C, 2, 3, "Prometheus"),
+            (Guid.NewGuid(), 1, 1, "Heat"), (Guid.NewGuid(), 1, 2, "Ronin"), (Guid.NewGuid(), 1, 3, "Thief"));
         var given = modelReferences.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(h => TurnHandle.Parse(h)!.Value).ToArray();
 
         var clean = PlanSanitizer.Clean(Plan(act, null, given), message, state, FilterRuleSet.FromRows([]));
