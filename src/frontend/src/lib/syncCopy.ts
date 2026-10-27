@@ -25,8 +25,13 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
   hydrate: {
     title: "Enriching your library",
     lines: [
-      "Artwork and trailers for every title",
-      "Global popularity — the baseline your model must beat",
+      // HydrateCatalog walks the titles the account has watched or rated (TitleHydrator), not the
+      // whole catalogue, so "every title" over-claimed (R1-46).
+      "Artwork and trailers for the titles in your library",
+      // TMDB popularity is the eval harness's primary baseline (EvalHarness, PassedGate), but the
+      // gate only records: a model that loses to it still ships. "Must beat" was the same lie the
+      // evaluate explainer already dropped (R1-46).
+      "Global popularity — the baseline your model is measured against",
       "Cast & crew graph that powers your affinities",
       "Fetched once, then shared across all of Reel",
     ],
