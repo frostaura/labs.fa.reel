@@ -260,9 +260,19 @@ public static class MetricsEndpoints
                 deadLetters = await db.TraktOutbox.CountAsync(o => o.Status == OutboxStatus.DeadLetter, ct),
             };
 
+            // External API usage is per account, and the ledger is not IAccountScoped (catalogue-wide
+            // work writes rows with no account), so no query filter scopes it — this does. A
+            // non-founder sees its own calls only; the founder, who runs the system and pays every
+            // provider, also sees every other account's and the catalogue-wide rows. Filtered on the
+            // day alone, a Free account was shown the founder's daily OpenRouter and Trakt counts
+            // (HREV1-PLAT-3). The tier is read from the row: billing changes it without a new cookie.
+            var seesAllUsage = await db.Accounts
+                .Where(a => a.Id == accountId)
+                .Select(a => a.Tier)
+                .FirstOrDefaultAsync(ct) == AccountTier.Founder;
             var weekAgo = DateTime.UtcNow.Date.AddDays(-7);
             var usage = await db.ExternalApiUsages
-                .Where(u => u.Day >= weekAgo)
+                .Where(u => u.Day >= weekAgo && (seesAllUsage || u.AccountId == accountId))
                 .OrderBy(u => u.Day)
                 .Select(u => new { provider = u.Provider.ToString(), u.Day, u.CallCount })
                 .ToListAsync(ct);
