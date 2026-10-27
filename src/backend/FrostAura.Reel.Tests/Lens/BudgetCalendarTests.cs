@@ -64,8 +64,13 @@ public class BudgetCalendarTests
         Assert.Equal(The26th, calendar.DayFor(account, ApiUsagePurpose.AskPlan));
     }
 
+    /// <summary>
+    /// The ceiling check reads the zone every time and the recorder stamps with what it read (R1-14
+    /// residual): a zone changed between two calls counts from the second one, and the row the
+    /// recorder writes after a check lands on that check's day without a read of its own.
+    /// </summary>
     [Fact]
-    public async Task A_zone_is_read_once_and_forgetting_it_reads_the_new_one()
+    public async Task The_ceiling_check_reads_the_zone_fresh_and_the_recorder_stamps_with_it()
     {
         var account = Guid.NewGuid();
         var zones = new Dictionary<Guid, string?> { [account] = "Africa/Johannesburg" };
@@ -73,13 +78,20 @@ public class BudgetCalendarTests
         var calendar = new BudgetCalendar(source, new FixedTime(LateEvening));
 
         Assert.Equal(The27th, await calendar.TodayAsync(account, default));
-        zones[account] = "UTC";
         Assert.Equal(The27th, calendar.DayFor(account, ApiUsagePurpose.Lens));
         Assert.Equal(1, source.Reads);
 
-        calendar.Forget(account);
+        // Changed in settings: the very next check sees it, and the row after it follows.
+        zones[account] = "UTC";
         Assert.Equal(The26th, await calendar.TodayAsync(account, default));
+        Assert.Equal(The26th, calendar.DayFor(account, ApiUsagePurpose.Lens));
         Assert.Equal(2, source.Reads);
+
+        // And back the other way, so a calendar that only ever drops a day cannot pass.
+        zones[account] = "Africa/Johannesburg";
+        Assert.Equal(The27th, await calendar.TodayAsync(account, default));
+        Assert.Equal(The27th, calendar.DayFor(account, ApiUsagePurpose.AskPlan));
+        Assert.Equal(3, source.Reads);
     }
 
     [Fact]

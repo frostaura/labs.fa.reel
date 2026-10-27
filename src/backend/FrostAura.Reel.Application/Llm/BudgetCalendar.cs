@@ -29,29 +29,38 @@ namespace FrostAura.Reel.Application.Llm;
 /// settings jsonb, written by <c>PUT /api/settings</c>, not a column), resolved by
 /// <see cref="Domain.Tenancy.AccountTimeZone.Resolve"/> — the same rule the settings API reports
 /// as <c>effectiveTimeZone</c>. An unknown or unreadable zone, and an account that has none, all
-/// mean UTC — the behaviour before this change. A zone is cached for <see cref="ZoneLifetime"/>;
-/// <see cref="Forget"/> drops it at once when the account changes it.</para>
+/// mean UTC — the behaviour before this change.</para>
+///
+/// <para><b>Fresh before the call, cached after it.</b> <see cref="TodayAsync"/> — what every
+/// per-account ceiling is checked on before its call is sent — reads the zone every time, and leaves
+/// it behind for <see cref="DayFor"/>, the recorder's synchronous hot path, which stamps the row once
+/// the call returns. A zone changed in settings therefore counts from the account's very next call,
+/// and the row lands on the day its ceiling was checked on. The cache used to serve both for ten
+/// minutes, and nothing in the settings API told it the zone had moved, so a change kept the old
+/// zone's day for up to ten minutes (R1-14 residual). The read is one primary-key lookup in front of
+/// a model call that takes hundreds of milliseconds.</para>
 /// </summary>
 public interface IBudgetCalendar
 {
     /// <summary>
     /// Today's ledger day for a call: the account-local date when <paramref name="accountId"/> is
-    /// set and <paramref name="purpose"/> has a per-account ceiling, the UTC date otherwise. Never
-    /// blocks on a cached account; an uncached one is read once.
+    /// set and <paramref name="purpose"/> has a per-account ceiling, the UTC date otherwise. Uses the
+    /// zone the account's last <see cref="TodayAsync"/> read, without blocking; one not read within
+    /// <see cref="BudgetCalendar.ZoneLifetime"/> is read here.
     /// </summary>
     DateTime DayFor(Guid? accountId, string? purpose);
 
-    /// <summary>Today in the account's time zone — the day its per-account ceilings are counted on.</summary>
+    /// <summary>
+    /// Today in the account's time zone — the day its per-account ceilings are counted on. Always
+    /// reads the zone the account has now.
+    /// </summary>
     Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct);
-
-    /// <summary>Drops a cached zone, so the account's next call reads the zone it now has.</summary>
-    void Forget(Guid accountId);
 }
 
 /// <inheritdoc />
 public sealed class BudgetCalendar : IBudgetCalendar
 {
-    /// <summary>How long a read zone is trusted before it is read again.</summary>
+    /// <summary>How long <see cref="DayFor"/> trusts a zone read before it reads it itself.</summary>
     public static readonly TimeSpan ZoneLifetime = TimeSpan.FromMinutes(10);
 
     /// <summary>A calendar that is always UTC: for code built by hand, which has no accounts table to read.</summary>
@@ -99,14 +108,8 @@ public sealed class BudgetCalendar : IBudgetCalendar
     }
 
     /// <inheritdoc />
-    public async Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct)
-    {
-        var now = _time.GetUtcNow();
-        return LocalDay(now, Cached(accountId, now) ?? await ReadAsync(accountId, ct));
-    }
-
-    /// <inheritdoc />
-    public void Forget(Guid accountId) => _zones.TryRemove(accountId, out _);
+    public async Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct) =>
+        LocalDay(_time.GetUtcNow(), await ReadAsync(accountId, ct));
 
     private TimeZoneInfo? Cached(Guid account, DateTimeOffset now) =>
         _zones.TryGetValue(account, out var entry) && now - entry.ReadAt < ZoneLifetime ? entry.Zone : null;
@@ -116,7 +119,7 @@ public sealed class BudgetCalendar : IBudgetCalendar
 
     /// <summary>
     /// The synchronous read, for the recorder's hot path. Practically never taken: every per-account
-    /// ceiling is checked (<see cref="TodayAsync"/>) before its call is sent, which caches the zone
+    /// ceiling is checked (<see cref="TodayAsync"/>) before its call is sent, which leaves the zone
     /// the recorder then stamps the row with.
     /// </summary>
     private TimeZoneInfo Read(Guid account)
@@ -149,7 +152,6 @@ public sealed class BudgetCalendar : IBudgetCalendar
         _zones[account] = (zone, _time.GetUtcNow());
         return zone;
     }
-
 }
 
 /// <summary>Where an account's IANA zone id is read from. Null means the account has none.</summary>

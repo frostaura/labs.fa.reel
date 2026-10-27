@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -111,6 +112,49 @@ public class BudgetDayTimeZoneTests(PostgresFixture fixture, ReelApiFactory api)
 
         Assert.Null(await source.ZoneIdAsync(accountId, default));
         Assert.Equal(new DateTime(2026, 10, 26), (await new BudgetCalendar(source, lateEvening).TodayAsync(accountId, default)).Date);
+    }
+
+    /// <summary>
+    /// The host's OWN calendar — the singleton the gate and the recorder share — follows a zone
+    /// change at once (R1-14 residual). The calendar caches a zone so the recorder's hot path never
+    /// reads the database, and nothing in the settings API tells it the zone moved; before this, a
+    /// change kept counting the account's spend on the old zone's day for up to ten minutes. The
+    /// tests above build a fresh calendar per assertion and so could never see that cache.
+    ///
+    /// <para>Kiritimati (+14) and Pago Pago (−11) are 25 hours apart, so their dates differ at every
+    /// instant and the test needs no pinned clock: a stale zone is a wrong date whenever it runs. The
+    /// third step clears the zone, which must return the account to the UTC day just as promptly.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_zone_changed_through_the_settings_api_moves_the_hosts_calendar_at_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await api.SeedAccountAsync($"budget-tz-move-{Guid.NewGuid():N}");
+        using var client = await api.CreateSignedInClientAsync(accountId);
+        var calendar = api.Services.GetRequiredService<IBudgetCalendar>();
+        var clock = api.Services.GetRequiredService<TimeProvider>();
+
+        foreach (var zone in new[] { "Pacific/Kiritimati", "Pacific/Pago_Pago", string.Empty })
+        {
+            using (var set = await client.PutAsJsonAsync("/api/settings", new { timeZone = zone }))
+            {
+                Assert.Equal(HttpStatusCode.OK, set.StatusCode);
+            }
+
+            var expected = AccountTimeZone.Resolve(zone.Length == 0 ? null : zone);
+            var before = BudgetCalendar.LocalDay(clock.GetUtcNow(), expected);
+            var today = await calendar.TodayAsync(accountId, default);
+            var stamped = calendar.DayFor(accountId, ApiUsagePurpose.AskPlan);
+            var after = BudgetCalendar.LocalDay(clock.GetUtcNow(), expected);
+
+            // The ceiling is counted, and the row stamped, on the day of the zone the account has NOW.
+            Assert.Contains(today, new[] { before, after });
+            Assert.Contains(stamped, new[] { before, after });
+        }
     }
 
     private sealed class FixedTime(DateTimeOffset now) : TimeProvider
