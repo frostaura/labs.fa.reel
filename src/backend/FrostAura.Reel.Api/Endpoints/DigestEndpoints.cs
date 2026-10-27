@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;

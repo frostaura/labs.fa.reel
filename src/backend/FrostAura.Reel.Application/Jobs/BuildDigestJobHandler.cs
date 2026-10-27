@@ -174,15 +174,15 @@ public sealed class BuildDigestJobHandler(
         // The account's own For-you bar binds the digest like every other suggestion surface (XM-05):
         // no card under it, under the strict floor or the relaxed one. A bar at or above the digest's
         // own 7.0 leaves nothing to relax into; a bar between the floors is where relaxing stops.
-        var bar = await Saved.ForYouBar.ReadAsync(db, accountId, ct);
+        var bar = await ForYouBar.ReadAsync(db, accountId, ct);
         var strictShown = bar is { } high && high > MinPredictedRating ? high : MinPredictedRating;
         var relaxedShown = bar is { } mid && mid > RelaxedMinPredictedRating ? mid : RelaxedMinPredictedRating;
-        var qualified = scores.Where(kv => kv.Value >= MinPredictedRating && Saved.ForYouBar.Clears(kv.Value, bar)).ToList();
+        var qualified = scores.Where(kv => kv.Value >= MinPredictedRating && ForYouBar.Clears(kv.Value, bar)).ToList();
         var selected = qualified;
         string? degradedReason = null;
         if (qualified.Count < ThinDigestCount && relaxedShown < strictShown)
         {
-            var relaxed = scores.Where(kv => kv.Value >= RelaxedMinPredictedRating && Saved.ForYouBar.Clears(kv.Value, bar)).ToList();
+            var relaxed = scores.Where(kv => kv.Value >= RelaxedMinPredictedRating && ForYouBar.Clears(kv.Value, bar)).ToList();
             if (relaxed.Count > qualified.Count)
             {
                 selected = relaxed;
@@ -205,7 +205,7 @@ public sealed class BuildDigestJobHandler(
 
         var items = picks
             .Select(kv => new DigestItem(
-                kv.Key, decimal.Round(kv.Value, 2, MidpointRounding.AwayFromZero), reasons[kv.Key], degradedReason,
+                kv.Key, ShownRating.Stored(kv.Value), reasons[kv.Key], degradedReason,
                 reasons[kv.Key] == DigestReasons.NewOnProvider ? arrivals[kv.Key] : null))
             .ToList();
 
@@ -316,7 +316,7 @@ public sealed class BuildDigestJobHandler(
         string? topHook = null)
     {
         var culture = System.Globalization.CultureInfo.InvariantCulture;
-        var rating = Saved.ForYouBar.Shown(top.PredictedRating).ToString("0.0", culture);
+        var rating = ForYouBar.Shown(top.PredictedRating).ToString("0.0", culture);
         var others = itemCount - 1;
 
         var title = topName is { Length: > 0 } name

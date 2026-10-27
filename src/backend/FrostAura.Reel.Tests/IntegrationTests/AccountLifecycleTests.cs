@@ -281,7 +281,8 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
     /// R1-15: a changed zone reaches the budget calendar on the next call, not up to
     /// <see cref="BudgetCalendar.ZoneLifetime"/> later. The calendar here is the production one, fed by
     /// a zone source that reads <c>AccountSettings.TimeZone</c>, at a fixed noon UTC — when Kiritimati
-    /// (+14:00) is already on the next date. PUTs that leave the zone as it is drop nothing.
+    /// (+14:00) is already on the next date. Since WS-1's R1-14 residual the ceiling check reads the
+    /// zone fresh on every call, so no settings PUT has to tell the calendar anything.
     /// </summary>
     [Fact]
     public async Task A_changed_time_zone_reaches_the_budget_calendar_at_once()
@@ -292,7 +293,7 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
         }
 
         var noon = new DateTimeOffset(2026, 10, 27, 12, 0, 0, TimeSpan.Zero);
-        var calendar = new ForgetCountingCalendar(noon);
+        var calendar = new SettingsZoneCalendar(noon);
         await using var host = api.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
         {
             services.RemoveAll<IBudgetCalendar>();
@@ -311,40 +312,29 @@ public class AccountLifecycleTests(PostgresFixture fixture, ReelApiFactory api) 
 
         await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Pacific/Kiritimati\"}");
         Assert.Equal(new DateTime(2026, 10, 28), await budgets.TodayAsync(accountId, CancellationToken.None));
-        Assert.Equal(1, calendar.Forgets);
 
         // Another screen's PUT, and one re-sending the zone it already has, change no zone.
         await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"region\":\"GB\"}");
         await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Pacific/Kiritimati\"}");
-        Assert.Equal(1, calendar.Forgets);
+        Assert.Equal(new DateTime(2026, 10, 28), await budgets.TodayAsync(accountId, CancellationToken.None));
 
         // A refused zone changes nothing either; clearing it goes back to UTC at once.
         await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"Mars/Olympus_Mons\"}");
-        Assert.Equal(1, calendar.Forgets);
+        Assert.Equal(new DateTime(2026, 10, 28), await budgets.TodayAsync(accountId, CancellationToken.None));
         await EdgeSecurityTests.SendAsync(host, "PUT", "/api/settings", cookie, body: "{\"timeZone\":\"\"}");
-        Assert.Equal(2, calendar.Forgets);
         Assert.Equal(new DateTime(2026, 10, 27), await budgets.TodayAsync(accountId, CancellationToken.None));
     }
 
-    /// <summary>The production <see cref="BudgetCalendar"/> at a fixed instant, counting <see cref="Forget"/>.</summary>
-    private sealed class ForgetCountingCalendar(DateTimeOffset now) : IBudgetCalendar
+    /// <summary>The production <see cref="BudgetCalendar"/> at a fixed instant, reading the zone from settings.</summary>
+    private sealed class SettingsZoneCalendar(DateTimeOffset now) : IBudgetCalendar
     {
         private BudgetCalendar inner = new(zones: null);
-        private int forgets;
-
-        public int Forgets => Volatile.Read(ref forgets);
 
         public void Attach(IServiceScopeFactory scopes) => inner = new BudgetCalendar(new SettingsZones(scopes), new FixedClock(now));
 
         public DateTime DayFor(Guid? accountId, string? purpose) => inner.DayFor(accountId, purpose);
 
         public Task<DateTime> TodayAsync(Guid accountId, CancellationToken ct) => inner.TodayAsync(accountId, ct);
-
-        public void Forget(Guid accountId)
-        {
-            Interlocked.Increment(ref forgets);
-            inner.Forget(accountId);
-        }
     }
 
     /// <summary>Reads the zone where WS-8's M7 stores it, <c>AccountSettings.TimeZone</c>.</summary>
