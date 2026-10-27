@@ -331,6 +331,60 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task No_romance_removes_soap_shows_and_shows_whose_romance_is_only_in_the_overview()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV1-RET-09, on the founder snapshot: Chesapeake Shores ("deals with an old romance";
+        // keywords only "based on novel or book", "hometown"), The L Word (drama + soap), If Loving You
+        // Is Wrong (soap) and Roswell, New Mexico ("teenage crush") were all eligible under "no romance".
+        var accountId = await SeedAccountAsync();
+        var oldRomance = await SeedTitleAsync(t =>
+        {
+            t.MediaType = MediaType.Show;
+            t.Keywords = ["based on novel or book", "hometown"];
+            t.Overview = "Abby O'Brien returns home and deals with an old romance.";
+        });
+        var teenageCrush = await SeedTitleAsync(t =>
+        {
+            t.MediaType = MediaType.Show;
+            t.Genres = ["science-fiction", "fantasy", "drama"];
+            t.Overview = "She discovers a shocking truth about her teenage Crush.";
+        });
+        var newlineBounded = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Overview = "Two doctors.\nIn love, at last."; });
+        var soapDrama = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama", "soap"]; });
+        var soapOnly = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["soap"]; });
+
+        // Near misses that stay: the stem inside another word, a FILM with a romance overview (TMDB tags
+        // films with romance itself, and this one says drama), and a show with no overview at all.
+        var bromance = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Overview = "A bromance between two crushed rivals, lovely."; });
+        var romanceOverviewFilm = await SeedTitleAsync(t => t.Overview = "Deals with an old romance.");
+        var noOverview = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Overview = null; });
+        var mine = new[] { oldRomance, teenageCrush, newlineBounded, soapDrama, soapOnly, bromance, romanceOverviewFilm, noOverview };
+
+        // Inert without a romance rule: an unrelated exclusion leaves every one eligible.
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "horror");
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        var expected = new HashSet<Guid> { bromance, romanceOverviewFilm, noOverview };
+        Assert.Equal(expected, (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        // The draft-rules path (the cost meter's and the supply knockouts' builder) reads the same rule.
+        await using var db = fixture.CreateContext(new AccountContext());
+        var rules = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        var drafted = await new EligibilityQueryBuilder(db)
+            .EligibleTitles(accountId, rules)
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync();
+        Assert.Equal(expected, drafted.ToHashSet());
+    }
+
+    [Fact]
     public async Task Genres_neither_taxonomy_has_and_trakt_alias_genres_are_excluded_on_both_media()
     {
         if (!fixture.Available)

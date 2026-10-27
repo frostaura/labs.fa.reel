@@ -570,9 +570,10 @@ public sealed record StandingDiscoverPlan(
     /// True when a TMDB list row for a title NOT in the catalogue passes the conditions the row
     /// carries data for — the same calls the eligibility builder makes: an unknown language is not
     /// English, an unrated title fails a crowd floor, an undated title passes a year window, an
-    /// excluded genre (or its alias) on the row's genre ids fails, a keyword rule matches the name or
-    /// overview. A list row has no keywords and no certification, so stand-in keywords, keyword-label
-    /// exclusions and the maturity ceiling are NOT checked here: a pass makes the item
+    /// excluded genre (or its alias) on the row's genre ids fails, an excluded genre's overview stand-in
+    /// (<see cref="GenreStandIns.OverviewPhrases"/>, on the media it applies to) fails, a keyword rule
+    /// matches the name or overview. A list row has no keywords and no certification, so stand-in
+    /// keywords, keyword-label exclusions and the maturity ceiling are NOT checked here: a pass makes the item
     /// <see cref="TmdbDiscoveryVerdict.Provisional"/>, never eligible, and the caller re-judges it
     /// through the eligibility builder once hydrated.
     /// </summary>
@@ -595,23 +596,12 @@ public sealed record StandingDiscoverPlan(
             return false;
         }
 
+        if (BreaksExcludedGenre(rules, item))
+        {
+            return false;
+        }
+
         var slugs = TmdbGenres.MapToSlugs(item.IsMovie, item.GenreIds);
-        var excluded = rules.ExcludeGenres
-            .SelectMany(g => GenreStandIns.AliasesOf(g).Append(g))
-            .ToHashSet(StringComparer.Ordinal);
-        if (slugs.Any(excluded.Contains))
-        {
-            return false;
-        }
-
-        // Composite exclusions the row carries data for: anime is animation in Japanese.
-        if (excluded.Contains(GenreStandIns.AnimeSlug)
-            && slugs.Contains(GenreStandIns.AnimeGenre)
-            && string.Equals(language, GenreStandIns.AnimeLanguage, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
         if (rules.IncludeGenres.Count > 0 && !slugs.Any(rules.IncludeGenres.Contains))
         {
             return false;
@@ -620,6 +610,42 @@ public sealed record StandingDiscoverPlan(
         var name = item.Name.ToLowerInvariant();
         var overview = item.Overview?.ToLowerInvariant() ?? string.Empty;
         return !rules.ExcludeKeywords.Any(k => name.Contains(k, StringComparison.Ordinal) || overview.Contains(k, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// True when the row's own data shows it breaks one of the account's ExcludeGenre rules: an excluded
+    /// genre or alias on its genre ids, the anime composite (animation in Japanese), or an overview
+    /// stand-in on the media it applies to. The genre half of <see cref="Admits"/>, exposed so a caller
+    /// can tell a row hidden by an excluded GENRE from one hidden by any other rule.
+    /// </summary>
+    public static bool BreaksExcludedGenre(FilterRuleSet rules, TmdbListItem item)
+    {
+        if (rules.ExcludeGenres.Count == 0)
+        {
+            return false;
+        }
+
+        var slugs = TmdbGenres.MapToSlugs(item.IsMovie, item.GenreIds);
+        var excluded = rules.ExcludeGenres
+            .SelectMany(g => GenreStandIns.AliasesOf(g).Append(g))
+            .ToHashSet(StringComparer.Ordinal);
+        if (slugs.Any(excluded.Contains))
+        {
+            return true;
+        }
+
+        // Composite exclusions the row carries data for: anime is animation in Japanese.
+        var language = item.OriginalLanguage?.Trim().ToLowerInvariant();
+        if (excluded.Contains(GenreStandIns.AnimeSlug)
+            && slugs.Contains(GenreStandIns.AnimeGenre)
+            && string.Equals(language, GenreStandIns.AnimeLanguage, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // The overview stand-ins (romance on TV): the one stand-in a list row carries the data for.
+        var medium = item.IsMovie ? MediaType.Movie : MediaType.Show;
+        return rules.ExcludeGenres.Any(g => GenreStandIns.MediaFor(g).Contains(medium) && GenreStandIns.MatchesOverview(g, item.Overview));
     }
 
     private static int? Max(int? a, int? b) => a is null ? b : b is null ? a : Math.Max(a.Value, b.Value);

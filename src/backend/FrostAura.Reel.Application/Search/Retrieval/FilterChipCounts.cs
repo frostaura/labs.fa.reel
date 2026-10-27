@@ -35,9 +35,10 @@ public sealed record FilterChipReport(int MinTitles, IReadOnlyList<FilterChip> C
 /// <para><b>What a count means.</b> The titles an ExcludeGenre of that slug would REMOVE — exactly
 /// <see cref="FilterBreaches.ExcludedGenre"/>, the predicate the eligibility builder applies — so the
 /// number on a chip is the number that chip actually controls: the genre tag, its alias genres (Trakt's
-/// <c>children</c> counts under family, <c>suspense</c> under thriller), the anime composite
-/// (animation in Japanese) and the TV stand-in keywords. Alias slugs are folded into their target and
-/// never listed on their own. Counts are catalogue-wide, not per account: a chip's reach does not
+/// <c>children</c> counts under family, <c>suspense</c> under thriller, <c>soap</c> under romance), the
+/// anime composite (animation in Japanese) and the TV stand-ins (keywords, and romance's overview
+/// phrases). A name-only alias is folded into its target and never listed on its own; soap, a genre in
+/// its own right, keeps its own chip too. Counts are catalogue-wide, not per account: a chip's reach does not
 /// depend on what the viewer has seen.</para>
 ///
 /// <para><b>One pass.</b> Every title is projected to the bitmask of chips it falls under and grouped
@@ -63,7 +64,12 @@ public sealed class FilterChipCounts(IReelDbContext db, IMemoryCache cache)
             return cached;
         }
 
-        var aliasSlugs = GenreStandIns.Aliases.Values.SelectMany(a => a).ToHashSet(StringComparer.Ordinal);
+        // A name-only alias (children, suspense) is folded into its target; one that is a genre in its
+        // own right (soap) keeps its chip — "no soaps" is a condition of its own.
+        var aliasSlugs = GenreStandIns.Aliases.Values
+            .SelectMany(a => a)
+            .Where(a => !GenreStandIns.AliasesWithTheirOwnChip.Contains(a))
+            .ToHashSet(StringComparer.Ordinal);
         var tagged = await db.Titles
             .SelectMany(t => t.Genres)
             .Distinct()
