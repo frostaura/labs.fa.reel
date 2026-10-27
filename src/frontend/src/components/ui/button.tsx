@@ -13,7 +13,11 @@ import { cn } from "../../lib/utils";
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control text-sm font-medium transition " +
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60 focus-visible:ring-offset-1 focus-visible:ring-offset-fa-ink " +
-    "disabled:pointer-events-none disabled:opacity-50",
+    "disabled:pointer-events-none disabled:opacity-50 " +
+    // A 44 × 44 target on any touch-first pointer, whatever the size below says (IREV3S-08, O-15);
+    // min-height and min-width outrank a caller's `h-7 w-7`, so dense rows stay compact under a mouse
+    // only. An inline `link` button is the one exception (WCAG 2.5.8's inline-text carve-out).
+    "coarse:min-h-11 coarse:min-w-11",
   {
     variants: {
       variant: {
@@ -22,7 +26,7 @@ const buttonVariants = cva(
         destructive: "border border-fa-danger/40 bg-fa-danger/10 text-fa-danger hover:bg-fa-danger/20",
         outline: "border border-fa-edge bg-transparent text-2 hover:bg-fa-glass hover:text-1 hover:border-fa-edge-strong",
         ghost: "text-2 hover:text-1 hover:bg-fa-glass",
-        link: "text-1 underline-offset-4 hover:underline",
+        link: "text-1 underline-offset-4 hover:underline coarse:min-h-0 coarse:min-w-0",
         /** A compact rounded action, e.g. a suggestion or a filter shortcut. A chip that is ON or OFF is `<Chip>`. */
         chip: "rounded-full border border-fa-edge bg-fa-glass text-2 hover:text-1 hover:border-fa-edge-strong",
       },
@@ -31,7 +35,7 @@ const buttonVariants = cva(
         sm: "px-3 py-1.5 text-xs",
         lg: "px-6 py-2.5",
         chip: "px-3 py-1 text-caption",
-        /** Square, for an icon with an aria-label. 36 px; `icon-sm` is 28 px for dense rows. */
+        /** Square, for an icon with an aria-label. 36 px; `icon-sm` is 28 px for dense rows. Both are 44 px under touch. */
         icon: "h-9 w-9 p-0",
         "icon-sm": "h-7 w-7 p-0",
       },

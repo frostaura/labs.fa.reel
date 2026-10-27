@@ -323,6 +323,93 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
             truth);
     }
 
+    [Fact]
+    public async Task Truth_and_builder_agree_on_the_anime_composite_on_both_media()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-3 CR-3 (H-7): anime is a composite exclusion — animation whose original language is Japanese
+        // (case-insensitive), on films and shows alike. Every language is opted in so the language rule
+        // cannot hold a Japanese title out for the composite; the keyword stand-in still applies on its own.
+        var account = await SeedAccountAsync((FilterKind.ExcludeGenre, "anime"), (FilterKind.Language, "*"));
+        var t = new Dictionary<string, Guid>
+        {
+            ["movie-japanese-animation"] = await SeedTitleAsync(genres: ["animation", "action"], language: "ja"),
+            ["show-japanese-animation"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["animation"], language: "JA"),
+            ["movie-anime-keyword"] = await SeedTitleAsync(genres: ["animation"], keywords: ["anime"], language: "en"),
+            // In: animation in another language, a Japanese title that is not animation, and no language at all.
+            ["movie-english-animation"] = await SeedTitleAsync(genres: ["animation"], language: "en"),
+            ["movie-japanese-drama"] = await SeedTitleAsync(genres: ["drama"], language: "ja"),
+            ["show-animation-no-language"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["animation"], language: null),
+        };
+
+        var (builder, truth) = await BothAsync(account, t.Values);
+
+        Assert.Equal(builder, truth);
+        Assert.Equal(
+            new[] { "movie-english-animation", "movie-japanese-drama", "show-animation-no-language" }.Select(k => t[k]).ToHashSet(),
+            truth);
+    }
+
+    /// <summary>
+    /// The conditions editor's "These rules leave N of M titles" and Ask Reel's conditions() tool read
+    /// WS-3's <see cref="FilterCostMeter"/>, a third statement of the rule (one grouped statement over the
+    /// whole catalogue). Its eligible count must equal the SQL truth's — except for one ledgered defect,
+    /// found by `askreel.mjs check --db --api` on the eval snapshot (API 3,706 vs truth 3,507): a title with
+    /// NO crowd rating does not register as breaking the crowd floor in the meter's bitmask (SQL's
+    /// NOT(NULL &gt;= floor) is NULL, so the bit stays clear), while the builder, the serving path and the
+    /// truth hold it out ("no score fails a floor that exists", FD-7's default). The 199 such titles on
+    /// the snapshot are exactly the gap. This test fails the day the meter is fixed, so the allowance is
+    /// removed rather than outliving the defect (owner WS-3; change request in the WS-7 wave-B report).
+    /// </summary>
+    [Fact]
+    public async Task The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var account = await SeedAccountAsync((FilterKind.MinCrowdRating, "6.0"), (FilterKind.Language, "*"));
+        await SeedTitleAsync(tmdb: null, trakt: null); // unrated: breaks the floor on every statement but the meter's
+        await SeedTitleAsync(tmdb: 0m, trakt: 0m);     // "0" is no rating too
+        await SeedTitleAsync(tmdb: 7.5m);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var scoped = new AccountContext();
+        scoped.SetAccount(account);
+        var rules = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == account).ToListAsync());
+        var meter = await new FilterCostMeter(db, new EligibilityQueryBuilder(db), scoped, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())).MeasureAsync(account, rules);
+
+        var truthEligible = await ScalarAsync($"SELECT count(*) FROM ({Bind(await ReadTruthAsync("truth", "_eligible.sql"), account)}) e");
+        var unratedCrowdOnly = await ScalarAsync(
+            $"SELECT count(*) FROM (SELECT r.\"Id\" FROM ({Bind(await ReadTruthAsync("supply", "rules.sql"), account)}) r "
+            + "GROUP BY r.\"Id\" HAVING count(*) = 1 AND bool_and(r.\"Kind\" = 'MinCrowdRating')) solo "
+            + "JOIN \"Titles\" t ON t.\"Id\" = solo.\"Id\" "
+            + "WHERE coalesce(nullif(t.\"TmdbVoteAverage\", 0), nullif(t.\"TraktRating\", 0)) IS NULL");
+
+        Assert.True(unratedCrowdOnly >= 2, "the fixture's unrated titles did not reach the crowd-only knockout");
+        Assert.True(
+            meter.Eligible != truthEligible,
+            "The cost meter now agrees with the truth on unrated titles — WS-3 fixed the ledgered defect: delete this allowance and assert equality.");
+        Assert.Equal(truthEligible + unratedCrowdOnly, meter.Eligible);
+    }
+
+    private async Task<int> ScalarAsync(string sql)
+    {
+        await using var connection = new NpgsqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static Task<string> ReadTruthAsync(string folder, string file) =>
+        File.ReadAllTextAsync(Path.Combine(RepoRoot(), "eval", "askreel", folder, file));
+
     /// <summary>
     /// The eligible ids among <paramref name="titles"/> by every statement of the rule: the persisted
     /// builder overload and the <see cref="FilterRuleSet"/> overload (each through the in-memory maturity

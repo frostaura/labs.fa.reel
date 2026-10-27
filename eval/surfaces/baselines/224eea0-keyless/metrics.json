@@ -49,7 +49,12 @@
   "httpErrors": 0,
   "surfacesWithoutData": [],
   "complete": true,
+  "uncitableWhyLines": null,
+  "citableChecked": null,
+  "citableUnscored": null,
   "copyClaimsChecked": null,
+  "falseCopyClaims": null,
+  "unregisteredCopyClaims": null,
   "randomCosineP90": 0.3897419804180855,
   "exposuresWritten": 134,
   "costUsd": 0,
@@ -81,7 +86,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "feed-row": {
    "blocks": 2,
@@ -105,7 +113,10 @@
    "anchored": 6,
    "evidencePass": 6,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "more": {
    "blocks": 4,
@@ -129,7 +140,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "genre-rail": {
    "blocks": 8,
@@ -153,7 +167,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "similar": {
    "blocks": 5,
@@ -177,7 +194,10 @@
    "anchored": 6,
    "evidencePass": 6,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "digest": {
    "blocks": 1,
@@ -202,7 +222,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "saved": {
    "blocks": 1,
@@ -224,7 +247,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "watch-tonight": {
    "blocks": 1,
@@ -248,7 +274,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "person": {
    "blocks": 5,
@@ -291,7 +320,10 @@
     "American Gangster (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
     "Robin Hood (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)",
     "The Mummy (person:5c78a9da-708a-45f7-93f1-d9a61eb79727)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "typeahead": {
    "blocks": 10,
@@ -330,10 +362,14 @@
     "Severance (typeahead:severance)",
     "Dune: Part Two (typeahead:dune)",
     "Dune (typeahead:dune)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   }
  },
  "hedges": [],
+ "uncitable": [],
  "repeats": [],
  "ledger": [
   {

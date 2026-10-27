@@ -23,7 +23,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
   const providers = cardProviders(card.providers);
 
   return (
-    <div className="group relative w-44 sm:w-48 shrink-0" data-testid="rec-card">
+    <div className="group relative w-card shrink-0" data-testid="rec-card">
       <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-has-[a:focus-visible]:ring-2 group-has-[a:focus-visible]:ring-fa-frost/60">
         <PosterImage path={card.posterPath} alt={card.name} />
         {/* The shared stack owns the null/NaN guards, the no-overlap layout and the scrim — the
@@ -54,7 +54,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
             {card.name}
           </Link>
         </p>
-        <p className="fa-caption text-fa-frost-dim">
+        <p className="fa-caption text-3">
           {[card.year, formatRuntime(card.runtimeMinutes)].filter(Boolean).join(" · ")}
         </p>
         {/* The lens's own first clause when copy has been written for this account and title;
@@ -73,7 +73,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
                 key={chip.text}
                 title={chip.description}
                 aria-label={chip.description}
-                className="max-w-full truncate rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption leading-tight text-fa-frost-dim"
+                className="max-w-full truncate rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption leading-tight text-3"
                 data-testid="card-evidence-chip"
               >
                 {chip.text}

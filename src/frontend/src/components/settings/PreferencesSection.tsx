@@ -17,7 +17,11 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import ConditionsEditor from "./ConditionsEditor";
-import { pinFailureText } from "../ui/save-outcome";
+import { SAVE_FAILED_TEXT } from "../ui/save-outcome";
+import { Button } from "../ui/button";
+import { pinAttemptText } from "../../lib/pinLockout";
+import { COARSE_TAP } from "../../lib/tapTarget";
+import { cn } from "../../lib/cn";
 
 /**
  * Content preferences on the Settings screen: the shared {@link ConditionsEditor} plus the PIN that
@@ -71,9 +75,10 @@ export default function PreferencesSection() {
       // the unlock store, which no longer holds the raw PIN at all.
       await setPinMutation({ pin: newPin, currentPin: pinConfigured ? currentPin : undefined }).unwrap();
     } catch (error: unknown) {
-      // A 423 is the wrong current PIN; a 400 is the server's rule; anything else is a failed
-      // request — which used to read "Wrong current PIN." too, on a 500 or a dropped connection.
-      setPinError(pinFailureText(error, "Wrong current PIN — nothing changed."));
+      // A 423 is the wrong current PIN; a 429 is the five-wrong-PINs pause, with how long; a 400 is
+      // the server's rule; anything else is a failed request — which used to read "Wrong current
+      // PIN." too, on a 500 or a dropped connection.
+      setPinError(pinAttemptText(error, "Wrong current PIN — nothing changed.", SAVE_FAILED_TEXT));
       return;
     }
     // Hold the unlock through the change: `pinConfigured` flips true on the session refetch, and
@@ -92,7 +97,7 @@ export default function PreferencesSection() {
     try {
       await removePin({ pin: removePinEntry }).unwrap();
     } catch (error: unknown) {
-      setRemoveError(pinFailureText(error, "Wrong PIN — it's still set."));
+      setRemoveError(pinAttemptText(error, "Wrong PIN — it's still set.", SAVE_FAILED_TEXT));
       return;
     }
     // Nothing is locked any more, so a lingering unlock token is just stale state — drop it.
@@ -145,7 +150,7 @@ export default function PreferencesSection() {
                 onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ""))}
                 placeholder="current PIN"
                 aria-label="Current settings PIN"
-                className="fa-input w-28 tabular-nums"
+                className={cn("fa-input w-28 tabular-nums", COARSE_TAP)}
                 data-testid="current-pin-input"
               />
             )}
@@ -158,18 +163,15 @@ export default function PreferencesSection() {
               placeholder={pinConfigured ? "new PIN" : "set PIN"}
               data-testid="new-pin-input"
               aria-label={pinConfigured ? "New settings PIN" : "Set a settings PIN"}
-              className="fa-input w-28 tabular-nums"
+              className={cn("fa-input w-28 tabular-nums", COARSE_TAP)}
             />
-            <button onClick={submitPin} className="fa-button" data-testid="pin-submit">
+            <Button onClick={submitPin} className={COARSE_TAP} data-testid="pin-submit">
               {pinConfigured ? "Change PIN" : "Set PIN"}
-            </button>
+            </Button>
             {pinConfigured && (
-              <button
-                onClick={() => setRemoveOpen(true)}
-                className="fa-button-ghost text-fa-danger"
-              >
+              <Button variant="ghost" onClick={() => setRemoveOpen(true)} className={cn("text-fa-danger hover:text-fa-danger", COARSE_TAP)}>
                 Remove
-              </button>
+              </Button>
             )}
             {flash && <span className="fa-caption text-fa-success">{flash}</span>}
             {pinError && (
@@ -210,7 +212,7 @@ export default function PreferencesSection() {
               onKeyDown={(e) => e.key === "Enter" && confirmRemove()}
               placeholder="PIN"
               aria-label="Confirm your settings PIN"
-              className="fa-input w-28 tabular-nums"
+              className={cn("fa-input w-28 tabular-nums", COARSE_TAP)}
               data-testid="remove-pin-input"
             />
             {removeError && (
@@ -220,17 +222,18 @@ export default function PreferencesSection() {
             )}
           </div>
           <DialogFooter>
-            <button onClick={() => setRemoveOpen(false)} className="fa-button-ghost">
+            <Button variant="ghost" onClick={() => setRemoveOpen(false)} className={COARSE_TAP}>
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="destructive"
               onClick={confirmRemove}
               disabled={removePinEntry.length < 4}
-              className="fa-button border-fa-danger/50 bg-fa-danger/15 text-fa-danger hover:bg-fa-danger/25 disabled:opacity-50"
+              className={COARSE_TAP}
               data-testid="remove-pin-confirm"
             >
               Remove PIN
-            </button>
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

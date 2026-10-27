@@ -4,13 +4,18 @@ import { useGetSessionQuery, useStartTraktAuthMutation } from "../store/api";
 import { hasSessionFlag } from "../lib/sessionFlag";
 import { rememberOauthState } from "../lib/traktOauth";
 import Footer from "../components/Footer";
+import { Button } from "../components/ui/button";
+import { COARSE_TAP } from "../lib/tapTarget";
+import reelMark from "../assets/brand/reel-mark.svg";
 
 /**
  * What happens after "Sign in", in three plain steps. This replaces the fanned mock posters and the
  * invented "Neon Static" pick (8.4 for you, 7.9 crowd, "streaming now"): every title and number in
  * that card was made up, which is exactly the kind of claim this product exists not to make
- * (KILL-10). The brand mark and real app screenshots are a parent-level deliverable (P2); until they
- * arrive, the page says what Reel does instead of drawing a pick that does not exist.
+ * (KILL-10). The page carries the Reel mark — the shipped product mark the app header and the tab
+ * icon already use (O-19) — and no studio artwork. Real app screenshots are a parent-level brand
+ * deliverable that has not arrived; until it does, the page says what Reel does instead of drawing a
+ * pick that does not exist.
  */
 const STEPS: { title: string; body: string }[] = [
   {
@@ -72,6 +77,8 @@ export default function Landing() {
       <main className="flex-1 flex items-center justify-center px-4 sm:px-6">
         <div className="w-full min-w-0 max-w-3xl text-center space-y-8 reel-rise">
           <div className="space-y-4 max-w-xl mx-auto">
+            {/* Decorative beside the wordmark it sits on: the heading already says "Reel". */}
+            <img src={reelMark} alt="" aria-hidden className="mx-auto h-16 w-16" data-testid="landing-mark" />
             <h1 className="text-5xl font-light tracking-wide text-fa-frost-bright">Reel</h1>
             <p className="text-lg text-fa-frost/90 leading-relaxed">
               Link your Trakt profile; get live, explainable picks you haven&apos;t seen yet —
@@ -80,14 +87,16 @@ export default function Landing() {
           </div>
           <HowItWorks />
           <div className="space-y-3">
-            <button
+            <Button
+              variant="primary"
+              size="lg"
               onClick={handleSignIn}
               disabled={isLoading || isStarting}
-              className="fa-button-primary text-base px-6 py-3"
+              className={`text-base py-3 ${COARSE_TAP}`}
             >
               <Clapperboard className="h-5 w-5" />
               {isStarting ? "Opening Trakt…" : "Sign in with Trakt"}
-            </button>
+            </Button>
             {isError && (
               <p className="fa-caption text-fa-danger">
                 Couldn&apos;t reach the sign-in service. Try again in a moment.

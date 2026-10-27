@@ -19,6 +19,9 @@
 | Watched or rated titles on Saved and the Watch-tonight pin | 0 | <= 0 | pass |
 | Surfaces answering with an HTTP error | 0 | <= 0 | pass |
 | Trakt calls from the eval stack | 0 | <= 0 | pass |
+| Why-lines with a clause citing a push IsCitable rejects | — | <= 0 | no data |
+| False copy claims (claims audit) | — | <= 0 | no data |
+| Claim-shaped copy the claims register does not cover | — | <= 0 | no data |
 
 | Metric | Value |
 |---|---|
@@ -32,7 +35,8 @@
 | Rendered why-lines hedging against their own pick | 0 |
 | Why-lines with non-Latin script | 0 |
 | Watched or rated titles on Saved / Watch tonight | 0 |
-| False copy claims | not measured yet (task 9) |
+| Why-lines with a clause IsCitable rejects (of whyThis lines checked; unscored) | not recorded (recording predates contributions) |
+| False copy claims (claims audit; of registered claims; unregistered) | not recorded (recording predates the claims audit) |
 
 ## Per surface
 

@@ -14,7 +14,7 @@ export default function PredictedRatingBadge({ rating, size = "sm" }: Props) {
       title="Predicted from your ratings"
     >
       {rating.toFixed(1)}
-      <span className="fa-overline text-fa-frost-dim font-normal">for you</span>
+      <span className="fa-overline text-3 font-normal">for you</span>
     </span>
   );
 }

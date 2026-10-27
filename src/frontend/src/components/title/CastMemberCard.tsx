@@ -23,7 +23,7 @@ export default function CastMemberCard({ member }: { member: CreditPerson }) {
         {profileUrl(member.profilePath) ? (
           <img src={profileUrl(member.profilePath)!} alt={member.name} loading="lazy" className="h-full w-full object-cover" />
         ) : (
-          <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim">
+          <div className="h-full w-full flex items-center justify-center fa-caption text-3">
             {member.name.split(" ").map((w) => w[0]).slice(0, 2).join("")}
           </div>
         )}
@@ -36,7 +36,7 @@ export default function CastMemberCard({ member }: { member: CreditPerson }) {
       {/* Two-line clamp, not a single-line truncate: most credit names are two words, and the
           old truncate cut "Benedict Cumberbatch" to "Benedict Cumberb…" on every chip. */}
       <p className="fa-caption text-fa-frost group-hover:text-fa-frost-bright line-clamp-2" title={member.name}>{member.name}</p>
-      {member.character && <p className="fa-caption text-fa-frost-dim/70 truncate">{member.character}</p>}
+      {member.character && <p className="fa-caption text-3 truncate">{member.character}</p>}
     </Link>
   );
 }

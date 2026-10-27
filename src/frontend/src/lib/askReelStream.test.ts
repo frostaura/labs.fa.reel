@@ -283,6 +283,31 @@ describe("streamAskReel — the turn record", () => {
     expect(withKeepalive.map((e) => e.event)).toEqual(["done"]);
   });
 
+  it("carries_the_wait_a_429_asks_for_from_the_body_or_the_header", async () => {
+    // WS-8's turn limiter answers 429 `ask_rate_*` with `retryAfterSeconds` in the body and the same
+    // number in `Retry-After`. The body wins; the header is the fallback when the body is lost.
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify({ error: "…", code: "ask_rate_minute", retryAfterSeconds: 41 }),
+      { status: 429, headers: { "Retry-After": "41" } },
+    ))));
+    const fromBody = await streamAskReel({ query: "q", clientTurnId: "t" }, () => {}, new AbortController().signal)
+      .catch((e: unknown) => e);
+    expect((fromBody as AskStreamError).status).toBe(429);
+    expect((fromBody as AskStreamError).code).toBe("ask_rate_minute");
+    expect((fromBody as AskStreamError).retryAfterSeconds).toBe(41);
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("<html>429</html>", { status: 429, headers: { "Retry-After": "3600" } }))));
+    const fromHeader = await streamAskReel({ query: "q", clientTurnId: "t" }, () => {}, new AbortController().signal)
+      .catch((e: unknown) => e);
+    expect((fromHeader as AskStreamError).code).toBeNull();
+    expect((fromHeader as AskStreamError).retryAfterSeconds).toBe(3600);
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("{}", { status: 500 }))));
+    const none = await streamAskReel({ query: "q", clientTurnId: "t" }, () => {}, new AbortController().signal)
+      .catch((e: unknown) => e);
+    expect((none as AskStreamError).retryAfterSeconds).toBeNull();
+  });
+
   it("carries_the_servers_stable_code_on_a_400_404_and_409", async () => {
     // The prose in `error` is the user's and may change; `code` is the client's and does not.
     // Fixture variation: the three codes the client acts on differently, plus a body that is not

@@ -606,6 +606,16 @@ public class GoldenPromptTests
     }
 
     [Fact]
+    public void A_title_typeset_with_a_curly_apostrophe_or_accent_is_the_same_title()
+    {
+        // Slot run, 2026-10-26: the model wrote "Finder’s Fee" for the fact sheet's "Finder's Fee"
+        // and the whole narrative was refused as an invention.
+        var facts = Facts with { RecentLoves = [.. Facts.RecentLoves, new LovedFact("Finder's Fee", 2001, 9)] };
+        Assert.Null(TasteNarrativeService.Ungrounded(
+            "You watch crime more than anything. Lately Finder’s Fee landed hard for you.", facts));
+    }
+
+    [Fact]
     public void A_title_the_facts_do_not_contain_is_still_an_invention_wherever_it_sits()
     {
         // The opener fix must not become a hole: masking the first WORD of a sentence cannot be

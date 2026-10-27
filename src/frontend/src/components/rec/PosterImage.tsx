@@ -17,8 +17,14 @@ export default function PosterImage({ path, alt, size = "w342", eager = false, c
 
   if (!url || failed) {
     return (
-      <div className={`reel-poster flex items-center justify-center bg-gradient-to-br from-fa-ink-2 to-fa-ink-3 ${className}`}>
-        <span className="text-2xl font-light text-fa-frost-dim select-none">
+      // The initials are decoration: the fallback is named by `alt` like the image it stands in for,
+      // so a link around it is named "Open Heat", not "Open Heat H" (axe label-content-name-mismatch).
+      <div
+        role="img"
+        aria-label={alt}
+        className={`reel-poster flex items-center justify-center bg-gradient-to-br from-fa-ink-2 to-fa-ink-3 ${className}`}
+      >
+        <span className="text-2xl font-light text-3 select-none" aria-hidden>
           {alt.split(" ").slice(0, 2).map((w) => w[0]).join("")}
         </span>
       </div>

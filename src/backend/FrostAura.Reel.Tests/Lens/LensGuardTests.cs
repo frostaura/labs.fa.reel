@@ -139,12 +139,32 @@ public class LensGuardTests
 
     // ── Voice ───────────────────────────────────────────────────────────────────────────────
 
-    [Fact]
-    public void A_third_person_leak_is_refused()
+    [Theory]
+    [InlineData("This matches their taste for slow procedurals.")]
+    [InlineData("It sits close to their favourites: grounded, procedural, patient.")]
+    [InlineData("The user favours slow procedurals, and this is one.")]
+    [InlineData("For the viewer's taste in heists this is a natural next step.")]
+    [InlineData("They usually rate heist films highly, so this should land.")]
+    [InlineData("They tend to like a crew picture; this is one.")]
+    [InlineData("They rated the first one well, and this keeps its register.")]
+    public void A_third_person_leak_about_the_viewer_is_refused(string lens)
     {
-        Assert.Equal(
-            LensRejectionReasons.ThirdPerson,
-            LensGuards.Inspect(Note(lens: "This matches their taste for slow procedurals."), "Some Film"));
+        Assert.Equal(LensRejectionReasons.ThirdPerson, LensGuards.Inspect(Note(lens: lens), "Some Film"));
+    }
+
+    /// <summary>
+    /// A lens describes a story, and its characters are "they" (slot run, 2026-10-26: 4 of 10 notes
+    /// refused for exactly this, every one addressed to the viewer). The rule is about who the note
+    /// talks ABOUT the viewer as, not about every pronoun in a premise.
+    /// </summary>
+    [Theory]
+    [InlineData("You get a dark legal power struggle: Patty Hewes takes on Ellen Parsons as her protégée, and the series sets up their complicated mentor-protégé bond.")]
+    [InlineData("You usually lean toward brisk action, so this is a quieter change: two old friends go camping, and the road gives them room to face what life has done to their friendship.")]
+    [InlineData("A former hit man, his wife and daughter flee their compound for a rumoured sanctuary; as they drive north he teaches her to survive.")]
+    [InlineData("Siblings find a box of toys and begin developing special talents, drawing their parents into a strange new world with them.")]
+    public void Characters_in_the_third_person_are_not_a_voice_leak(string lens)
+    {
+        Assert.Null(LensGuards.Inspect(Note(lens: lens), "Some Film"));
     }
 
     [Fact]
@@ -169,6 +189,31 @@ public class LensGuardTests
         Assert.Equal(
             LensRejectionReasons.RestatedNumber,
             LensGuards.Inspect(Note(hook: "A near-perfect ten out of ten for your taste."), "Some Film"));
+    }
+
+    /// <summary>
+    /// Slot run, 2026-10-26: two of ten notes were refused for "a 1920s Los Angeles hospital" and
+    /// "in the 1940s" — the premise's era, which the overview gives the writer. A decade or a year
+    /// cannot be mistaken for a 1–10 prediction; a score still can.
+    /// </summary>
+    [Theory]
+    [InlineData("You get a fantasy journey nested inside a 1920s Los Angeles hospital.")]
+    [InlineData("In the 1940s, a boy finds he can move between two centuries in one mansion.")]
+    [InlineData("Set in 1944, it keeps the pressure on a single night.")]
+    [InlineData("It wears its '90s thriller influences openly.")]
+    [InlineData("A sun-bleached 80s crime story, told without nostalgia.")]
+    public void An_era_or_a_year_is_not_a_restated_number(string lens)
+    {
+        Assert.Null(LensGuards.Inspect(Note(lens: lens), "Some Film"));
+    }
+
+    [Theory]
+    [InlineData("Reel has this at 8 for you, in the 1990s register you like.")]
+    [InlineData("Expect a 7.6 kind of night.")]
+    [InlineData("It lands within 0.9 of what you usually give a heist.")]
+    public void A_score_beside_an_era_is_still_refused(string lens)
+    {
+        Assert.Equal(LensRejectionReasons.RestatedNumber, LensGuards.Inspect(Note(lens: lens), "Some Film"));
     }
 
     [Fact]

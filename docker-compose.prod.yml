@@ -54,6 +54,8 @@ services:
       JWT_AUDIENCE: ${JWT_AUDIENCE:-frostaura-reel-app}
       JWT_ACCESS_TOKEN_EXPIRY_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRY_MINUTES:-15}
       JWT_REFRESH_TOKEN_EXPIRY_DAYS: ${JWT_REFRESH_TOKEN_EXPIRY_DAYS:-30}
+      # Trakt slugs whose sign-in is granted the Founder tier (K-10, FD-11); blank grants nobody.
+      FOUNDER_TRAKT_SLUGS: ${FOUNDER_TRAKT_SLUGS:-}
       # Edge security (docs/deployment.md#edge-security): the proxies whose X-Forwarded-* the API
       # believes, the per-account Ask turn limits (FD-8) and the key-ring certificate (J-12).
       TRUSTED_PROXY_NETWORKS: "${TRUSTED_PROXY_NETWORKS:-127.0.0.0/8,::1/128,172.16.0.0/12}"
@@ -111,6 +113,7 @@ services:
       INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
       INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
       INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      INTERLEAVE_SINCE: ${INTERLEAVE_SINCE:-}
       KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
       # WS-2 Ask Reel engine: v1 (default) or v2; anything else reads as v1. v1 stays selectable through the soak.

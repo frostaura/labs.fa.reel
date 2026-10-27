@@ -41,7 +41,7 @@ public sealed class DataRepairStartupService(
 
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = scopeFactory.CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             LastResults = await DataRepairs.RunAllAsync(db, DateTime.UtcNow, cancellationToken);
             foreach (var result in LastResults)

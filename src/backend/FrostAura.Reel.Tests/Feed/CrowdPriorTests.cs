@@ -54,7 +54,30 @@ public class CrowdPriorTests
         var title = Both((decimal?)trakt, traktVotes, (decimal?)tmdb, tmdbVotes);
 
         Assert.Null(CrowdPrior.ShrunkScoreOf(title));
-        Assert.Equal(1d, CrowdPrior.FactorFor(title));
+        Assert.Equal(1d, CrowdPrior.FactorForScore(CrowdPrior.ShrunkScoreOf(title)));
+
+        // The score term is neutral; the volume term is not: no votes is the least evidence there is.
+        Assert.Equal(1d - CrowdPrior.VolumeSwing, CrowdPrior.FactorFor(title), 9);
+    }
+
+    [Theory]
+    [InlineData(0, 0.90)]
+    [InlineData(150, 0.90)]
+    [InlineData(1_500, 1.00)]
+    [InlineData(15_000, 1.10)]
+    [InlineData(2_000_000, 1.10)]
+    public void The_volume_term_is_log_linear_around_the_pivot_and_bounded(int votes, double expected)
+    {
+        Assert.Equal(expected, CrowdPrior.VolumeFactorFor(votes), 9);
+    }
+
+    [Fact]
+    public void Among_equal_scores_the_better_voted_title_ranks_first()
+    {
+        // The founder's own data (task 9): his mean rating climbs from 5.4 under 300 TMDB votes to 7.8
+        // above 10,000, while the shrinkage puts 7.0 on 400 and 7.0 on 40,000 almost level.
+        Assert.True(CrowdPrior.VolumeFactorFor(40_000) > CrowdPrior.VolumeFactorFor(400));
+        Assert.True(CrowdPrior.VolumeFactorFor(1_000) < 1d && CrowdPrior.VolumeFactorFor(2_000) > 1d);
     }
 
     [Theory]

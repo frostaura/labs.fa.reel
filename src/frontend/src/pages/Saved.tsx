@@ -5,8 +5,10 @@ import SavedSortControl from "../components/saved/SavedSortControl";
 import SavedQueueCard from "../components/saved/SavedQueueCard";
 import WatchTonightCard from "../components/saved/WatchTonightCard";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
+import PickConditionsButton from "../components/rec/PickConditionsButton";
+import { Button } from "../components/ui/button";
 import { formatRuntime } from "../lib/format";
-import { pinnedPick, queueBelowPin, type SavedSort } from "../lib/savedQueue";
+import { heldOutLine, pinnedPick, queueBelowPin, type SavedSort } from "../lib/savedQueue";
 
 /**
  * The queue. Not a bookmark folder: an ordered answer to "what do I put on tonight", with the
@@ -20,6 +22,7 @@ export default function Saved() {
   // "Not tonight" is session-scoped and client-side: it advances to the next candidate and records
   // nothing against the title. Reset whenever the shelf itself changes underneath it.
   const [skipCount, setSkipCount] = useState(0);
+  const [conditionsOpen, setConditionsOpen] = useState(false);
 
   // The scoring backfill is budgeted per request, so a queue longer than the budget arrives with
   // some cards unscored. Top up while the number is FALLING and stop the moment it stalls — a title
@@ -49,6 +52,7 @@ export default function Saved() {
   const band = data?.expectedAbsoluteError ?? null;
   const pinned = pinnedPick(items, budget, skipCount);
   const rest = queueBelowPin(items, pinned);
+  const heldOut = heldOutLine(data?.heldOutByRules, items.length);
   const candidateCount = items.filter(
     (i) => i.availableNow && i.predictedRating != null && i.runtimeMinutes != null && i.runtimeMinutes <= budget
   ).length;
@@ -76,10 +80,11 @@ export default function Saved() {
       <PostWatchStrip />
 
       <div className="flex items-end justify-between gap-4 flex-wrap">
-        <p className="fa-caption text-fa-frost-dim max-w-xl">
-          Your queue, in the order worth watching it. Everything here syncs to the managed{" "}
+        <p className="fa-caption text-3 max-w-xl">
+          Your queue, in the order worth watching it. What you save here syncs to the managed{" "}
           <span className="text-fa-frost">Reel — Up Next</span> list — visible in Plex, Kodi, Infuse
-          and every Trakt-connected app. Watch something and it leaves by itself.
+          and every Trakt-connected app — and your Trakt watchlist lands here too. Watch something
+          and it leaves by itself.
         </p>
         <SavedSortControl
           value={sort}
@@ -95,16 +100,15 @@ export default function Saved() {
       {isError && !data ? (
         <div className="fa-card p-8 text-center space-y-3" role="alert" data-testid="saved-error">
           <p className="fa-body text-fa-frost">Couldn&apos;t load your queue — nothing has changed on it.</p>
-          <button
-            type="button"
+          <Button
             onClick={() => void refetch()}
             disabled={isFetching}
-            className="fa-button min-h-11 mx-auto"
+            className="min-h-11 mx-auto"
             data-testid="saved-retry"
           >
-            <RotateCw className="h-4 w-4" />
+            <RotateCw className="h-4 w-4" aria-hidden />
             {isFetching ? "Retrying…" : "Retry"}
-          </button>
+          </Button>
         </div>
       ) : isLoading ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4" aria-busy="true" data-testid="saved-loading">
@@ -114,13 +118,24 @@ export default function Saved() {
             <div key={i} className="reel-poster reel-shimmer" />
           ))}
         </div>
+      ) : items.length === 0 && heldOut ? (
+        // Every save is held out by the conditions: the shelf is full, not empty, and says so.
+        <div className="fa-card p-8 text-center space-y-3" data-testid="saved-all-held-out">
+          <p className="fa-body text-fa-frost">{heldOut}</p>
+          <p className="fa-caption text-3">
+            Your conditions apply everywhere, Saved included. Change them to see these saves again.
+          </p>
+          <Button onClick={() => setConditionsOpen(true)} className="min-h-11 mx-auto" data-testid="saved-held-out-change">
+            Change conditions
+          </Button>
+        </div>
       ) : items.length === 0 ? (
         <div className="fa-card p-8 text-center" data-testid="saved-empty">
-          <p className="fa-body text-fa-frost-dim">
+          <p className="fa-body text-3">
             Nothing in the queue yet — hit “Save for later” on any pick and it lands here and on your
             Trakt list.
           </p>
-          <p className="fa-caption text-fa-frost-dim/70 mt-2">
+          <p className="fa-caption text-3 mt-2">
             Once there are a few, Reel pins the one worth putting on tonight.
           </p>
         </div>
@@ -131,10 +146,10 @@ export default function Saved() {
           {isError && (
             <div className="fa-card p-3 flex items-center justify-between gap-3" role="alert" data-testid="saved-stale">
               <p className="fa-caption text-fa-frost">Couldn&apos;t refresh — this is the queue as it last loaded.</p>
-              <button type="button" onClick={() => void refetch()} disabled={isFetching} className="fa-button min-h-11">
-                <RotateCw className="h-4 w-4" />
+              <Button onClick={() => void refetch()} disabled={isFetching} className="min-h-11">
+                <RotateCw className="h-4 w-4" aria-hidden />
                 Retry
-              </button>
+              </Button>
             </div>
           )}
           {pinned ? (
@@ -148,8 +163,8 @@ export default function Saved() {
             // No pin is a real answer, and the shelf says which rule could not be met rather than
             // relaxing one and pinning something the user cannot actually watch tonight.
             <div className="fa-card p-4" data-testid="watch-tonight-empty">
-              <p className="fa-overline text-fa-frost-dim mb-1">watch tonight</p>
-              <p className="fa-body text-fa-frost-dim">
+              <p className="fa-overline text-3 mb-1">watch tonight</p>
+              <p className="fa-body text-3">
                 {skipCount > 0
                   ? "That's everything in the queue that's streaming now and fits tonight."
                   : `Nothing in your queue is streaming right now and under ${formatRuntime(budget)}.`}
@@ -158,9 +173,23 @@ export default function Saved() {
           )}
 
           {remaining > 0 && (
-            <p className="fa-caption text-fa-frost-dim/70" data-testid="saved-unscored">
+            <p className="fa-caption text-3" data-testid="saved-unscored">
               Scoring {remaining} more {remaining === 1 ? "save" : "saves"} — they’ll get their number
               shortly.
+            </p>
+          )}
+
+          {heldOut && (
+            <p className="fa-caption text-3 flex flex-wrap items-center gap-x-1" data-testid="saved-held-out">
+              {heldOut}
+              <Button
+                variant="link"
+                onClick={() => setConditionsOpen(true)}
+                className="h-auto min-h-11 p-0 text-xs font-normal text-fa-frost underline underline-offset-2 [@media(pointer:fine)]:min-h-0"
+                data-testid="saved-held-out-change"
+              >
+                Change conditions
+              </Button>
             </p>
           )}
 
@@ -181,6 +210,17 @@ export default function Saved() {
             ))}
           </div>
         </>
+      )}
+
+      {/* The same conditions dialog Home opens; a save re-reads the shelf. Mounted only while open,
+          so the shelf itself never adds a conditions read to the page. */}
+      {conditionsOpen && (
+        <PickConditionsButton
+          trigger={false}
+          open
+          onOpenChange={setConditionsOpen}
+          onSaved={() => void refetch()}
+        />
       )}
     </div>
   );

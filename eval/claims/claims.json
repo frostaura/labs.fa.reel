@@ -1,0 +1,1631 @@
+{
+  "note": "The user-facing claims register (program WS-7 task 9). scripts/eval/claims.mjs extracts every claim-shaped string a user can read (frontend copy through the TypeScript compiler, the backend's user-facing C# literals) and holds the tree to this file: every extracted string must be registered here, either in a claim family or in notClaims; every registered text must still be in the tree (an edited claim is re-audited, never silently dropped); every family names its owner and the tests that fail when the claim and the code diverge, and every test named must exist. A family is 'true' (checked against the code, pinned by its tests), 'false' (the code does not do what the copy says: a defect owned by 'owner', counted by the surface harness as a false copy claim until the copy or the code changes), or 'unverified' (the sweep could not establish it from the code; the owner owes the test). Audited 2026-10-26 against build/trust-v1 @ 20429ff.",
+  "families": [
+    {
+      "id": "saved-leaves-on-watch",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "A saved title the user then watches or rates leaves Saved, the Watch-tonight pin and the managed Trakt list with no action from the user.",
+      "evidence": "SaveConsumption: the queue read filters consumed saves at once; ManagedListReconciler.RevokeConsumedAsync and the in-app rating path revoke them and queue ListRemove / RemoveFromWatchlist.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::Consumed_saves_never_render_and_everything_else_does",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::The_reconciler_revokes_watched_and_rated_saves_with_their_list_rows",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Rating_a_saved_title_revokes_the_save_and_takes_it_off_the_list"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "Watch something and it leaves by itself."
+        },
+        {
+          "file": "src/frontend/src/components/saved/WatchTonightCard.tsx",
+          "text": "it leaves the queue by itself once Trakt reports the watch"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Sync/OutboxDispatcher.cs",
+          "text": "picks you saved, auto-removed once watched"
+        }
+      ]
+    },
+    {
+      "id": "saved-syncs-to-managed-list",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "Saving a title queues it onto the managed Trakt list ('Reel — Up Next'); what Trakt-connected apps then show is theirs.",
+      "evidence": "The save endpoint queues ListAdd and AddToWatchlist (SaveConsumption remarks); the list-sync state is pending exactly while a ListAdd waits. Plex / Kodi / Infuse visibility is third-party behaviour and is not checkable here.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::List_sync_is_pending_only_while_a_list_add_is_actually_waiting"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "Reel keeps a Trakt list called"
+        },
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "Everything here syncs to the managed"
+        },
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "list — visible in Plex, Kodi, Infuse and every Trakt-connected app."
+        }
+      ]
+    },
+    {
+      "id": "push-only-the-weekly-digest",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "The only push notification Reel sends is the weekly digest, on Fridays, and none when the week has nothing to show.",
+      "evidence": "BuildDigestJobHandler is the only type that takes IWebPushSender; WeeklyDigestService enqueues BuildDigest only on Friday at or after 16:00 UTC (WeeklyDigestService.cs, not unit-testable as written: CR to WS-4 to expose the window predicate).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::Only_the_weekly_digest_job_can_send_a_push_notification",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/DigestJobHandlerTests.cs::A_week_with_nothing_above_the_relaxed_floor_sends_no_push_at_all"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/settings/PushOptIn.tsx",
+          "text": "One notification on Fridays when your"
+        },
+        {
+          "file": "src/frontend/src/sw.ts",
+          "text": "Your weekly picks are ready."
+        }
+      ]
+    },
+    {
+      "id": "digest-high-for-you",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "The digest says 'high for you' only when every card cleared the bar; a relaxed week is retitled and says why.",
+      "evidence": "BuildDigestJobHandler records the relaxation; digestCopy retitles a relaxed digest. The digest's own 7.0 floor is not the account's For-you bar (XM-05), which the copy does not claim.",
+      "tests": [
+        "src/frontend/src/lib/digestCopy.test.ts::claims 'high for you' only when the build met the bar",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/DigestJobHandlerTests.cs::A_thin_week_relaxes_the_floor_and_records_why"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/digestCopy.ts",
+          "text": "New & high for you this week"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildDigestJobHandler.cs",
+          "text": "of this week's arrivals cleared the"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildDigestJobHandler.cs",
+          "text": "for you, plus … more this week"
+        }
+      ]
+    },
+    {
+      "id": "movie-rating-logs-a-play",
+      "owner": "WS-10A",
+      "verdict": "false",
+      "assertion": "Rating a movie also logs a play on the user's Trakt history, cleared if the rating is removed.",
+      "evidence": "ReactionEndpoints logs a play (AddToHistory) only for a movie the user has NOT watched; an already-watched movie gets the rating alone. The popover shows this line for every movie.",
+      "defect": "The line is unconditional on TitleDetail for movies; it should be shown only when the movie is unwatched (or say 'if you haven't logged it, also logs a play…').",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Already_watched_movie_gets_the_rating_only",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Unrating_a_movie_reverses_the_reel_logged_play"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "text": "Also logs a play on your Trakt history"
+        }
+      ]
+    },
+    {
+      "id": "show-rating-leaves-history-alone",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "Rating a show sends the rating to Trakt and never touches episode history.",
+      "evidence": "ReactionEndpoints enqueues AddRating alone for shows.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RatingReversibilityTests.cs::Show_rating_enqueues_the_rating_alone_and_never_touches_watched_state"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "text": "Ratings sync to Trakt — your episode history is never touched."
+        }
+      ]
+    },
+    {
+      "id": "free-tier-upsell",
+      "owner": "WS-10A",
+      "verdict": "false",
+      "assertion": "The paid feed unlocks every row, natural-language search and the managed Trakt queue.",
+      "evidence": "Only FeedEndpoints gates by tier (free gets three hero cards and locked rows). Ask Reel (SearchEndpoints) and Saved (SavedEndpoints) are not tier-gated; WS-10B corrected the same claim in planCopy.ts ('never claims Paid unlocks Ask Reel or the Trakt queue').",
+      "defect": "Home.tsx's locked-rows card repeats the retired claim. Reuse planCopy's PAID_ADDS wording.",
+      "tests": [
+        "src/frontend/src/components/settings/planCopy.test.ts::never claims Paid unlocks Ask Reel or the Trakt queue"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Home.tsx",
+          "text": "The free shortlist gives you three picks a day"
+        }
+      ]
+    },
+    {
+      "id": "plan-lines",
+      "owner": "WS-10B",
+      "verdict": "true",
+      "assertion": "Free includes taste DNA, the track record, the three-pick shortlist, Ask Reel and Saved; Paid adds the rows, endless pages, genre rails and on-demand rebuilds; Founder has everything.",
+      "evidence": "FeedEndpoints: isPaid gates rows, row pages (/more) and rebuilds; nothing else checks the tier except founder tooling.",
+      "tests": [
+        "src/frontend/src/components/settings/planCopy.test.ts::Free lists what Free has and what Paid adds",
+        "src/frontend/src/components/settings/planCopy.test.ts::Paid and Founder each get their own line"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/settings/planCopy.ts",
+          "text": "Founder access — everything unlocked."
+        },
+        {
+          "file": "src/frontend/src/components/settings/planCopy.ts",
+          "text": "on top of everything in Free."
+        },
+        {
+          "file": "src/frontend/src/components/settings/planCopy.ts",
+          "text": "Free includes …. Paid adds …."
+        },
+        {
+          "file": "src/frontend/src/pages/TasteDna.tsx",
+          "text": "always yours, always free"
+        }
+      ]
+    },
+    {
+      "id": "first-model-tonight-below-the-floor",
+      "owner": "WS-10B",
+      "verdict": "false",
+      "assertion": "With no model yet, any number of ratings means Reel trains the first model tonight.",
+      "evidence": "The nightly reconcile queues account enrichment, which chains a Train for a modelless account, but TrainJobHandler refuses below the training floor ('Not enough ratings to train yet — N of M needed'). RatePicker prints the promise from the first rating, without reading notEnoughRatings.",
+      "defect": "RatePicker's no-model line must say how many more ratings the first model needs while the floor is unmet (the status carries notEnoughRatings), and promise 'tonight' only once it is met.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/EnrichCatalogJobHandlerTests.cs::Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "text": "in — Reel trains your first model tonight."
+        }
+      ]
+    },
+    {
+      "id": "verdict-goes-into-tonights-retrain",
+      "owner": "WS-10A",
+      "verdict": "false",
+      "assertion": "A rating that over- or under-called the prediction goes into tonight's retrain.",
+      "evidence": "The nightly retrain runs only when RetrainGate says one is owed (10 new ratings, a 14-day-old artifact or a calibration breach). One rating changes none of these on its own; the rating is used at the next retrain, whenever that is.",
+      "defect": "verdictFollowUp promises a retrain the gate does not perform. Say 'that goes into your next retrain' or read the server's retrain outlook (SyncSummary already does).",
+      "tests": [
+        "src/frontend/src/lib/verdictCopy.test.ts"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/verdictCopy.ts",
+          "text": "noted — that goes into tonight's retrain"
+        },
+        {
+          "file": "src/frontend/src/lib/verdictCopy.ts",
+          "text": "under-called it — that goes into tonight's retrain"
+        }
+      ]
+    },
+    {
+      "id": "retrain-threshold",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "With a model, reaching the new-ratings threshold means the nightly pass retrains; the post-sync message says when.",
+      "evidence": "RetrainGate.EvaluateAsync returns NewRatings at >= RETRAIN_MIN_NEW_RATINGS (default 10); SyncEndpoints sends the same key with the same default as retrain.minNewRatings; SyncSummary's 'retraining tonight at' reads RetrainGate.OutlookAsync. CR to WS-4: SyncEndpoints should read RetrainGate.Threshold rather than repeat the key and default.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_retrain_threshold_the_status_reports_is_the_one_the_nightly_gate_applies"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "text": "That's enough — Reel retrains tonight on"
+        },
+        {
+          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "text": "and Reel retrains tonight."
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "retraining tonight at"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Sync/SyncSummary.cs",
+          "text": "retraining tonight at"
+        }
+      ]
+    },
+    {
+      "id": "model-readiness-timing",
+      "owner": "WS-10B",
+      "verdict": "true",
+      "assertion": "An account that has rated enough gets its first model, or its next one, in tonight's refresh at the latest.",
+      "evidence": "NightlyReconcileService queues an account-scoped EnrichCatalog per active account; EnrichCatalog chains a Train for an account with no active model or with ratings newer than it. The lines are shown only in the floor-met wait (isAwaitingModel).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/EnrichCatalogJobHandlerTests.cs::Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new",
+        "src/frontend/src/lib/modelReadiness.test.ts::is the floor-met park, with or without the PipelineFailed reason"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel builds your first model in tonight's refresh at the latest"
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel rebuilds your model in tonight's refresh at the latest"
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "that's enough for Reel to build your model."
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "and Reel builds your model."
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel needs a few more of your ratings before it can build your model"
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "rate a few more and Reel trains your model."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Rate a few more titles and Reel trains your model."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/TrainJobHandler.cs",
+          "text": "Not enough ratings to train yet"
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Almost there — Reel needs a few more of your ratings."
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "You've rated enough — your model is next."
+        }
+      ]
+    },
+    {
+      "id": "exclusions-are-airtight",
+      "owner": "WS-5",
+      "verdict": "false",
+      "assertion": "A crossed-out genre, a language outside the list, the crowd floor, the For-you bar and 'not interested' hide those titles from what Reel recommends.",
+      "evidence": "The exclusion matrix holds every rule on most surfaces but ledgers open leaks: XM-01 person pages (WS-5), XM-02 Saved and the pin (WS-4), XM-03 late rules on the materialised feed (WS-5), XM-04 the stored digest (WS-4), XM-05 the digest ignores the For-you bar (WS-4), XM-06 Ask v1 unchecked cards under the bar (WS-2), XM-07 the relaxed feed bar (WS-5). Each copy line is false exactly on its ledgered cells.",
+      "defect": "False until MatrixLedger is empty for the rule a line names; the leaks are owned per XM id (WS-5 owns the family as the owner of most cells).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::Truth_and_builder_agree_on_every_rule_with_explicit_conditions"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+          "text": "hides every title in a crossed-out one."
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+          "text": "Hide titles the community scores below this."
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+          "text": "What the model thinks you'll give it. 0 = show everything."
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+          "text": "Only recommend titles in these languages. English only by default."
+        },
+        {
+          "file": "src/frontend/src/lib/cardUndo.ts",
+          "text": "won’t be picked for you again."
+        }
+      ]
+    },
+    {
+      "id": "conditions-scope",
+      "owner": "WS-10A",
+      "verdict": "true",
+      "assertion": "The conditions shape the hero, every row and Ask Reel; the top-bar lookup applies the content rules but not the For-you bar, so it can show a title the conditions exclude.",
+      "evidence": "MatrixCells: lookups hold every rule exclusion and are not gated by the bar (NotGated cells).",
+      "tests": [
+        "src/frontend/src/lib/conditionsCopy.test.ts::says the top-bar lookup can show titles the conditions exclude",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/conditionsCopy.ts",
+          "text": "These shape the hero, every row and Ask Reel."
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionSummary.tsx",
+          "text": "Nothing set — everything is fair game."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/Retrieval/SupplyReporter.cs",
+          "text": "only these genres: …"
+        }
+      ]
+    },
+    {
+      "id": "cost-meter-counts",
+      "owner": "WS-3",
+      "verdict": "false",
+      "assertion": "The conditions editor's 'These rules leave N of M titles' is the number of titles the rules leave.",
+      "evidence": "FilterCostMeter (7b59843) counts a title with no crowd rating as passing the crowd floor: in its bitmask projection NOT(NULL >= floor) is NULL, so the breach bit stays clear, while EligibilityQueryBuilder, the serving path and the SQL truth hold it out (FD-7 default). On the eval snapshot with the founder's rules: meter 3,706 eligible vs truth 3,507 — the 199 unrated titles that break only the floor; the crowd marginal is 3,396 vs 3,595 and every other marginal is inflated by the unrated titles it shares (askreel.mjs check --db reel_ws7 --api).",
+      "defect": "Make the meter's crowd bit treat a missing rating as a breach (coalesce the comparison to true, as the builder's predicate does), then delete the allowance in the parity test.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/filterCost.ts",
+          "text": "These rules leave … of … titles"
+        }
+      ]
+    },
+    {
+      "id": "never-seen-picks",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "Picks are titles you have not seen, each with a predicted rating for you.",
+      "evidence": "The zero-footprint rule holds on every suggestion surface for the standing case (matrix: watched, rated, not interested, dropped, saved); late footprint on the stored digest is XM-04, which the landing line does not cover (it describes picks).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Landing.tsx",
+          "text": "get live, explainable picks you haven't seen yet"
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "You’ve watched or rated everything this thread found."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/FeedStarvationDiagnostic.cs",
+          "text": "title in the catalogue is one you have already seen, rated or dismissed."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/FeedStarvationDiagnostic.cs",
+          "text": "Your content filters together leave"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/FeedStarvationDiagnostic.cs",
+          "text": "each leave … you have not already seen. Relax one to see picks again."
+        }
+      ]
+    },
+    {
+      "id": "every-pick-has-a-reason",
+      "owner": "WS-10B",
+      "verdict": "false",
+      "assertion": "Every pick comes with why it was picked.",
+      "evidence": "Since IREV3S-01 ExplanationTemplater ships NO line when nothing citable moved the prediction ('the honest rendering of nothing verifiable to say'), and an unjudged Ask card carries no reason. Every pick does carry a predicted rating and an explainable waterfall on its title page.",
+      "defect": "The landing and onboarding lines promise a reason on every pick; say 'a predicted rating, and why when there is a reason worth naming', or point at the title page's breakdown.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SurfaceHarness/CitableClauseCatalogueTests.cs::Every_rendered_clause_is_recognised_as_its_own_feature_and_no_other"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Landing.tsx",
+          "text": "Each with a predicted rating for you, why it was picked, and where to watch it."
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "every pick comes with the reason and a predicted rating."
+        }
+      ]
+    },
+    {
+      "id": "predictions-are-explainable",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "Every prediction is a model score from the user's ratings, with its contributions stored for the breakdown.",
+      "evidence": "TitleScore.ContributionsJson is written with every score (TitleScoreWriter: 'the number and its contributions are always replaced together').",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SurfaceHarness/CitableClauseCatalogueTests.cs::The_catalogue_carries_the_rule_samples_and_vectors_the_templater_generates"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Every prediction stays explainable"
+        },
+        {
+          "file": "src/frontend/src/components/rec/PredictedRatingBadge.tsx",
+          "text": "Predicted from your ratings"
+        },
+        {
+          "file": "src/frontend/src/lib/scoreBadges.ts",
+          "text": "for you from your ratings"
+        },
+        {
+          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "text": "Reel predicted … for you"
+        },
+        {
+          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "text": "why … for you"
+        },
+        {
+          "file": "src/frontend/src/pages/TitleDetail.tsx",
+          "text": "From … … to … for you"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ExplanationTemplater.cs",
+          "text": "is in this — a … for you on average"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ExplanationTemplater.cs",
+          "text": "Runs on the … mood that made … land for you"
+        }
+      ]
+    },
+    {
+      "id": "typical-miss",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "'Give or take' is what predictions for this user have typically been off by.",
+      "evidence": "The band is RatingCalibrator.ExpectedAbsoluteError — the calibrated MAE over the account's own closed-loop pairs — served as expectedAbsoluteError (SavedEndpoints, null when the account has no pairs, so no '±0.0' is ever printed); scoreChipDescription shows the 'give or take' clause only for a positive band.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/Ml/RatingCalibratorTests.cs::The_fit_reports_what_the_ui_needs_to_show_a_band",
+        "src/frontend/src/lib/scoreBadges.test.ts"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/scoreBadges.ts",
+          "text": "give or take … — what predictions for you have typically been off by"
+        },
+        {
+          "file": "src/frontend/src/components/saved/SavedQueueCard.tsx",
+          "text": "Predicted rating, and what predictions for you are typically off by"
+        },
+        {
+          "file": "src/frontend/src/components/saved/WatchTonightCard.tsx",
+          "text": "Predicted rating, and what predictions for you are typically off by"
+        }
+      ]
+    },
+    {
+      "id": "narrative-before-every-pick",
+      "owner": "WS-10B",
+      "verdict": "false",
+      "assertion": "Reel reads the taste narrative before every pick it makes.",
+      "evidence": "The model that scores every pick never reads AccountTasteNarratives; the narrative reaches only the LLM passes through PersonalisationContext's persona (cross-reference judge, rerank, lens, Ask), and only when they run (keyless or out of allowance, never).",
+      "defect": "Say what reads it: 'The written passes (cross-reference, the lens and Ask Reel) read this…'.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_scoring_model_never_reads_the_taste_narrative"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+          "text": "Reel reads this before every pick it makes for you."
+        }
+      ]
+    },
+    {
+      "id": "narrative-and-dna",
+      "owner": "WS-1",
+      "verdict": "unverified",
+      "assertion": "The taste profile is rewritten only when taste has genuinely moved; DNA reads every rating with recent ones weighted a little more; a dismissal teaches a genre or tone only when the user says which; pockets come from 7+ ratings or rewatches and each feeds tonight's picks.",
+      "evidence": "BuildFeedJobHandler.EnqueueNarrativeIfProfileMovedAsync gates the rewrite on the profile hash; the DNA, dislike and pocket statements were not traced to their code inside this sweep.",
+      "tests": [
+        "src/frontend/src/components/dna/TastePockets.test.ts"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Rewritten only when your taste has genuinely moved"
+        },
+        {
+          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+          "text": "your taste has moved since"
+        },
+        {
+          "file": "src/frontend/src/components/title/LensBlock.tsx",
+          "text": "Written before your taste last moved"
+        },
+        {
+          "file": "src/frontend/src/pages/TasteDna.tsx",
+          "text": "every title you've ever rated counts"
+        },
+        {
+          "file": "src/frontend/src/pages/TasteDna.tsx",
+          "text": "Everything below is read straight from your ratings"
+        },
+        {
+          "file": "src/frontend/src/pages/TasteDna.tsx",
+          "text": "your taste DNA is built from the titles you've rated"
+        },
+        {
+          "file": "src/frontend/src/components/dna/DislikePanel.tsx",
+          "text": "a dismissal only teaches me a genre or a tone when you say which"
+        },
+        {
+          "file": "src/frontend/src/components/dna/TastePockets.tsx",
+          "text": "pockets of taste, found from every title you rated 7 or higher or watched twice."
+        },
+        {
+          "file": "src/frontend/src/lib/tastePockets.ts",
+          "text": "% of your taste weight"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Turning your ratings into a description of what you actually like"
+        },
+        {
+          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+          "text": "what Reel believes about your taste"
+        }
+      ]
+    },
+    {
+      "id": "sync-cadence-and-state",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "Trakt is polled automatically every few minutes for an active account; first sync pulls the whole history; the pill names a stopped sync honestly.",
+      "evidence": "TraktDeltaPollService ticks every minute and polls an account idle up to 48 h at the hot interval and up to 30 days at the default one (minutes); past 30 days idle it polls every 6 h, which an account reading this line is not.",
+      "tests": [
+        "src/frontend/src/lib/syncPill.test.ts",
+        "src/frontend/src/lib/syncCopy.test.ts"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Runs automatically every few minutes"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Pulling everything you've ever watched and rated"
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Pulling in everything you've ever watched…"
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Trakt stopped accepting Reel's sign-in, so nothing syncs until you reconnect."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "couldn't reach Trakt after every retry."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Ratings or list changes couldn't reach Trakt after every retry."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Every model call is being refused."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "It will try again shortly."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Queued — starts shortly."
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel has lost access to your Trakt account"
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Building your model stopped on Reel's side. Nothing you've rated is lost."
+        },
+        {
+          "file": "src/frontend/src/store/onboardingSlice.ts",
+          "text": "Reel no longer has access to your Trakt account."
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "something needs a look — the sync status in the header says what"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Today's call budget is spent."
+        }
+      ]
+    },
+    {
+      "id": "pipeline-stage-descriptions",
+      "owner": "WS-9",
+      "verdict": "unverified",
+      "assertion": "The pipeline stage captions describe what each job does (artwork for every title, plot embeddings, ranking by predicted rating, freshness and variety, popularity as the baseline the model must beat).",
+      "evidence": "Stage captions are WS-9's syncCopy; the promotion gate compares against a popularity baseline (IRankingPolicy 'the eval harness's baseline comparator'). The other captions were not traced job by job in this sweep.",
+      "tests": [
+        "src/frontend/src/lib/syncCopy.test.ts"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Artwork and trailers for every title"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Global popularity — the baseline your model must beat"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Fitting a fresh model on your ratings"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Plot embeddings place each title in your taste space"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Scoring eligible titles with your model"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Ranking by predicted rating, freshness and variety"
+        },
+        {
+          "file": "src/frontend/src/lib/syncCopy.ts",
+          "text": "Checking every eligible title against the ones you've actually rated"
+        },
+        {
+          "file": "src/frontend/src/pages/TrackRecord.tsx",
+          "text": "A second pass reads every eligible title beside the ones you have actually rated"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/Interleaving/IRankingPolicy.cs",
+          "text": "today's served order."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/Interleaving/IRankingPolicy.cs",
+          "text": "the eval harness's baseline comparator."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/Interleaving/IRankingPolicy.cs",
+          "text": "calibrated order otherwise."
+        }
+      ]
+    },
+    {
+      "id": "track-record-is-the-internal-measure",
+      "owner": "WS-10B",
+      "verdict": "unverified",
+      "assertion": "The track record's numbers are the ones the engine is judged on internally.",
+      "evidence": "Bias and average miss on the account's own pairs are what RetrainGate's calibration breach reads; model promotion reads NDCG@10 (EvalHarness), which the page does not show. 'The same numbers' holds for the retrain gate and not for promotion.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_retrain_threshold_the_status_reports_is_the_one_the_nightly_gate_applies"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/TrackRecord.tsx",
+          "text": "These are the same numbers the engine is judged on internally"
+        },
+        {
+          "file": "src/frontend/src/pages/TrackRecord.tsx",
+          "text": "A model that meant what it said would have the two bars level in every band."
+        },
+        {
+          "file": "src/frontend/src/lib/trackRecordCopy.ts",
+          "text": "every one it scores that you then rate lands here."
+        },
+        {
+          "file": "src/frontend/src/components/saved/PostWatchStrip.tsx",
+          "text": "Reel only learns how wrong it was when you tell it."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "Reel's number may never have been on your screen."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "Your ratings of titles that reached you through Reel"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "Counts only what the exposure log recorded since it began"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "for the same titles count only when they came after Reel showed them."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "Only about 2% of ratings are made in the app"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
+          "text": "It corroborates the offline backtest; it never gates anything."
+        },
+        {
+          "file": "src/frontend/src/pages/Lab.tsx",
+          "text": "0 = every band lands where it promised"
+        },
+        {
+          "file": "src/frontend/src/lib/trackRecordCopy.ts",
+          "text": "Within one point on … of what you rate"
+        }
+      ]
+    },
+    {
+      "id": "lab-diagnostics",
+      "owner": "WS-5",
+      "verdict": "unverified",
+      "assertion": "The founder-only lab panels describe the interleaving experiment and the cross-reference backtest as they run.",
+      "evidence": "Founder-only (Lab route). Interleaving runs only once FD-4 is answered; whether the panel renders only while it runs was not established in this sweep.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/InterleavingIntegrationTests.cs",
+        "src/backend/FrostAura.Reel.Tests/CrossReference/CrossReferenceBacktestTests.cs"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/lab/InterleavePanel.tsx",
+          "text": "Every Fresh build drafts each row alternately from both rankers."
+        },
+        {
+          "file": "src/frontend/src/components/lab/InterleavePanel.tsx",
+          "text": "a sanity check only"
+        },
+        {
+          "file": "src/frontend/src/components/lab/CrossReferenceStats.tsx",
+          "text": "Every prompt generation's offline backtest"
+        },
+        {
+          "file": "src/frontend/src/pages/Lab.tsx",
+          "text": "model p@10 (display only)"
+        },
+        {
+          "file": "src/frontend/src/pages/Lab.tsx",
+          "text": "to fit the first model on your ratings."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/CrossReference/DiscriminationMetrics.cs",
+          "text": "False-rule-out and true-rule-out are within 5 points of each other"
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-trays-and-supply",
+      "owner": "WS-2",
+      "verdict": "true",
+      "assertion": "Ask Reel's picks clear the bar; what does not is shown apart and says why; a none-found reply states counts and relaxations that equal the catalogue truth.",
+      "evidence": "AskReelEngine places a card in picks only when the judge says it satisfies and it clears the bar; NoneFoundCopy's counts are SupplyReporter's, pinned to the eval's SQL truth.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelV2EngineTests.cs::A_search_turn_streams_picks_per_batch_and_places_every_verdict",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/SupplyTruthParityTests.cs::Supply_truth_equals_the_reporter_on_every_bucket_and_every_knockout"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "Reel judged these a match for what you asked, but they score under your bar"
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "These scored under your bar, or have no score from your model yet"
+        },
+        {
+          "file": "src/frontend/src/components/askReel/RelaxationChip.tsx",
+          "text": "would unlock"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/NoneFoundCopy.cs",
+          "text": "would unlock"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/NoneFoundCopy.cs",
+          "text": "no score from your model yet."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/NoneFoundCopy.cs",
+          "text": "no score from your model yet, so your"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "more have no score from your model yet"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/TurnComposer.cs",
+          "text": "that I know of — there are none left for you."
+        },
+        {
+          "file": "src/frontend/src/lib/askReel/copy.ts",
+          "text": "No picks matched everything you asked."
+        },
+        {
+          "file": "src/frontend/src/lib/askReel/copy.ts",
+          "text": "matching them to your taste"
+        },
+        {
+          "file": "src/frontend/src/lib/askReel/copy.ts",
+          "text": "for you…"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/TurnComposer.cs",
+          "text": "I couldn't check every card against your request this time — those are marked."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/LiveSearchExpansionService.Keyless.cs",
+          "text": "a keyword match only, marked as unchecked."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/LiveSearchExpansionService.Keyless.cs",
+          "text": "your message only names what to skip — so I haven’t searched."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/AskReelDegradedCopy.cs",
+          "text": "Today's allowance for reading requests closely is used up"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/TurnComposer.cs",
+          "text": "I find films and shows for you"
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-permanently-excludes",
+      "owner": "WS-2",
+      "verdict": "false",
+      "assertion": "The user's conditions PERMANENTLY exclude a genre.",
+      "evidence": "Conditions are editable in Settings at any time (ConditionsEditor), and Ask Reel itself offers to relax them (RelaxationChip); nothing about the exclusion is permanent. The year lines in the same method state the window correctly.",
+      "defect": "Drop 'permanently': 'Your conditions exclude …, so nothing you asked for there can appear — change them in Settings.'",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::Truth_and_builder_agree_on_every_rule_with_explicit_conditions"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions permanently exclude"
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-year-window",
+      "owner": "WS-2",
+      "verdict": "true",
+      "assertion": "A request outside the account's year window is told which window its conditions allow.",
+      "evidence": "AskReelStandingFilters reads the account's MinYear/MaxYear rows; the eligibility truth pins the inclusive year window.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::Truth_and_builder_agree_on_shows_and_the_first_aired_year_arm"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions only allow titles from … to …"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions only allow titles from … onwards"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions only allow titles up to …"
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-thread-state",
+      "owner": "WS-2B",
+      "verdict": "unverified",
+      "assertion": "Thread states are described as they are: deleted or aged-out threads, transcript-only threads, a stopped question that did not replace the answer, a page that no longer matches its answer.",
+      "evidence": "Client-side states of the chat UI; the retention window ('aged out') is WS-6's retention job, not traced here.",
+      "tests": [
+        "src/frontend/src/lib/askReel/useAskReelChat.test.ts::resumes the last conversation when the page loads with no seed"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "It was deleted, or it aged out."
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "Transcript only — this thread predates saved results."
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "the last question never replaced it."
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "the question you stopped never replaced it."
+        },
+        {
+          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "text": "That's everything on this thread"
+        },
+        {
+          "file": "src/frontend/src/lib/askReel/paging.ts",
+          "text": "That page no longer matches its answer"
+        }
+      ]
+    },
+    {
+      "id": "local-only-state",
+      "owner": "WS-10A",
+      "verdict": "true",
+      "assertion": "Some choices stay on this device or session and are never saved to the account: the Movies/TV and availability toggles, a dismissed post-watch strip, a skipped Watch-tonight candidate.",
+      "evidence": "The Movies/TV and availability toggles live in localStorage per scope (browseFilter.ts); a dismissed post-watch strip in localStorage (postWatchDismissals.ts); 'Not tonight' only bumps a counter in Saved.tsx's component state, and 'Started watching' is component state whose own comment says it reaches neither the model, the list nor Trakt. None of them calls the API.",
+      "tests": [
+        "src/frontend/src/lib/browseFilter.test.ts::remembers a filter across a reload",
+        "src/frontend/src/lib/postWatchDismissals.test.ts::remembers a dismissal per title across a reload"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/components/rec/HomeConditionChips.tsx",
+          "text": "This browser only — set by the Movies/TV and availability toggles"
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionSummary.tsx",
+          "text": "This browser only — set by the Movies/TV and availability toggles"
+        },
+        {
+          "file": "src/frontend/src/components/saved/PostWatchStrip.tsx",
+          "text": "Not now. Hidden on this device only."
+        },
+        {
+          "file": "src/frontend/src/components/saved/WatchTonightCard.tsx",
+          "text": "This lasts for the session only — nothing is recorded against the title."
+        },
+        {
+          "file": "src/frontend/src/components/saved/WatchTonightCard.tsx",
+          "text": "Noted here only"
+        },
+        {
+          "file": "src/frontend/src/components/saved/WatchTonightCard.tsx",
+          "text": "Marks it as tonight's pick on this device. Reel does not log a play from here; that comes back from Trakt."
+        }
+      ]
+    },
+    {
+      "id": "failure-states-change-nothing",
+      "owner": "WS-9",
+      "verdict": "unverified",
+      "assertion": "A failed action says it changed nothing (still hidden, still on, still off, nothing charged), and the optimistic UI rolls back to match.",
+      "evidence": "Optimistic-UI rollback is the components' own; only cardUndo's copy is unit-tested here. The billing lines are true while billing is off (BillingEndpoints refuses before any provider call).",
+      "tests": [
+        "src/frontend/src/lib/cardUndo.test.ts::says a failed undo changed nothing and offers to try again"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/cardUndo.ts",
+          "text": "is still hidden from your picks"
+        },
+        {
+          "file": "src/frontend/src/components/dna/DislikePanel.tsx",
+          "text": "— it's still on the list."
+        },
+        {
+          "file": "src/frontend/src/components/settings/PreferenceTags.tsx",
+          "text": "— it's still on."
+        },
+        {
+          "file": "src/frontend/src/components/settings/PushOptIn.tsx",
+          "text": "Couldn't turn notifications on — they're still off."
+        },
+        {
+          "file": "src/frontend/src/components/settings/PushOptIn.tsx",
+          "text": "Couldn't turn notifications off — they're still on."
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Couldn't start a sync — nothing changed."
+        },
+        {
+          "file": "src/frontend/src/components/settings/BillingCard.tsx",
+          "text": "Nothing was charged."
+        },
+        {
+          "file": "src/frontend/src/components/settings/BillingCard.tsx",
+          "text": "Couldn't open checkout — nothing was charged."
+        },
+        {
+          "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+          "text": "Your unsaved changes are kept — unlock to save them."
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Nothing is lost — this page moves on by itself if the sync gets further."
+        }
+      ]
+    },
+    {
+      "id": "onboarding-moves-on-by-itself",
+      "owner": "WS-10B",
+      "verdict": "true",
+      "assertion": "The onboarding page advances by itself when the model is ready, so the user can close it and come back.",
+      "evidence": "onboardingSlice applies the status poll as authoritative and lifts the awaiting-model wait when the Train it waited for lands; the page renders from that state with no user action.",
+      "tests": [
+        "src/frontend/src/store/onboardingSlice.test.ts::the train the page was waiting for lifts awaitingModel forward",
+        "src/frontend/src/store/onboardingSlice.test.ts::poll data advances a stalled show (poll is authoritative)"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "this page moves on by itself when it's ready."
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Nothing to do but wait — this page moves on by itself when the model is ready"
+        },
+        {
+          "file": "src/frontend/src/components/RequireAuth.tsx",
+          "text": "This page loads as soon as you're back online."
+        }
+      ]
+    },
+    {
+      "id": "account-and-email",
+      "owner": "WS-8",
+      "verdict": "true",
+      "assertion": "Signing in with Trakt is the whole account; billing is off, so a stored receipt address is sent nothing.",
+      "evidence": "TraktOAuthService creates the account on first sign-in; BillingEndpoints answers 'Billing isn't switched on yet.' while billing is off; the codebase has no email sender. 'Never shared' cannot be proven by code and is a policy promise owned by WS-8.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::Nothing_in_the_app_can_send_an_email"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Landing.tsx",
+          "text": "Your Trakt account is your Reel account — nothing else to create."
+        },
+        {
+          "file": "src/frontend/src/pages/Settings.tsx",
+          "text": "Where your plan receipts go. Optional; never shared."
+        },
+        {
+          "file": "src/frontend/src/pages/Settings.tsx",
+          "text": "Reel sends nothing to it — paid plans are switched off."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Api/Endpoints/BillingEndpoints.cs",
+          "text": "Billing isn't switched on yet."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Api/Endpoints/BillingEndpoints.cs",
+          "text": "You're already on a paid plan."
+        }
+      ]
+    },
+    {
+      "id": "tonights-picks-and-the-bar",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "When nothing clears the bar, the hero says it is reaching and the build records why; deep cuts and new-for-you rows are what they are named.",
+      "evidence": "BuildFeedJobHandler relaxes the floor and records degradedReason ('relaxed to … for this build'); heroConfidence states the shortfall only for a measured card. The feed bar relaxation itself is XM-07 (exclusions-are-airtight).",
+      "tests": [
+        "src/frontend/src/lib/heroConfidence.test.ts::is true only for a pick the server measured and found short"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Reaching a bit — nothing cleared my usual … bar tonight"
+        },
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Reaching a bit — nothing cleared my usual bar tonight"
+        },
+        {
+          "file": "src/frontend/src/lib/heroConfidence.ts",
+          "text": "Nothing cleared your usual… bar tonight"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+          "text": "floor left only"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+          "text": "Tonight's picks are short on"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Api/Endpoints/FeedEndpoints.cs",
+          "text": "Deep cuts — under-the-radar, high for you"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Api/Endpoints/FeedEndpoints.cs",
+          "text": "New & for you"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/FeedPaginator.cs",
+          "text": "great … titles for you"
+        },
+        {
+          "file": "src/frontend/src/pages/Home.tsx",
+          "text": "ranked for you · …"
+        },
+        {
+          "file": "src/frontend/src/pages/Blend.tsx",
+          "text": "eligible for you both"
+        }
+      ]
+    },
+    {
+      "id": "saved-queue-order-and-pin",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "Saved sorts streaming-now first, then best for you, then shortest; the pin is the best available title that fits tonight, and says so when nothing reaches the bar.",
+      "evidence": "SavedQueue sort and WatchTonight selection; the pin's reason owns up to the bar (R1-18).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/Saved/SavedQueueTests.cs::Tonight_puts_available_first_then_best_then_shortest",
+        "src/backend/FrostAura.Reel.Tests/Saved/SavedQueueTests.cs::Watch_tonight_takes_the_best_available_title_that_fits_the_budget",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::The_watch_tonight_reason_names_no_provider_the_card_hides_and_owns_up_to_the_bar"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Streaming now first, then best for you, then shortest"
+        },
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Best for you"
+        },
+        {
+          "file": "src/frontend/src/lib/savedQueue.ts",
+          "text": "Highest predicted rating first"
+        },
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "Once there are a few, Reel pins the one worth putting on tonight."
+        },
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "That's everything in the queue that's streaming now and fits tonight."
+        },
+        {
+          "file": "src/frontend/src/pages/Saved.tsx",
+          "text": "they’ll get their number shortly."
+        },
+        {
+          "file": "src/frontend/src/components/saved/SavedQueueCard.tsx",
+          "text": "Not on a subscription or free service in your region right now."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Saved/SavedQueue.cs",
+          "text": "Highest-predicted thing in your queue that's"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Saved/SavedQueue.cs",
+          "text": "The only thing in your queue that's … and fits tonight — "
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Saved/SavedQueue.cs",
+          "text": "Nothing in your queue that's streaming and fits tonight reaches"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Saved/SavedQueue.cs",
+          "text": "The only thing in your queue that's … and fits tonight is under"
+        }
+      ]
+    },
+    {
+      "id": "model-trained-on-your-ratings",
+      "owner": "WS-5",
+      "verdict": "true",
+      "assertion": "The model is trained on the account's own ratings and stays when nothing new arrived.",
+      "evidence": "TrainJobHandler fits per account on its labels and short-circuits when no ratings or inputs changed.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/EnrichCatalogJobHandlerTests.cs::Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Model trained on your ratings"
+        },
+        {
+          "file": "src/frontend/src/pages/Onboarding.tsx",
+          "text": "Your model learns from what you've rated"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/TrainJobHandler.cs",
+          "text": "no new ratings and no changed inputs, so the current model stays."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Jobs/TrainJobHandler.cs",
+          "text": "no ratings or reactions since it was trained, so the current model stays."
+        },
+        {
+          "file": "src/frontend/src/lib/modelReadiness.ts",
+          "text": "Reel is reading your taste from what you've watched and rated."
+        },
+        {
+          "file": "src/frontend/src/pages/RatePicker.tsx",
+          "text": "You watched these and never told me what you thought"
+        }
+      ]
+    }
+  ],
+  "notClaims": [
+    {
+      "file": "src/frontend/src/components/SyncStatusPill.tsx",
+      "text": "Sync status: …",
+      "reason": "accessible name of a status control"
+    },
+    {
+      "file": "src/frontend/src/components/dna/ShareCard.tsx",
+      "text": "reel — your taste, decoded",
+      "reason": "brand line on the share image"
+    },
+    {
+      "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+      "text": "Your taste, in words",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/components/rec/HomeConditionChips.tsx",
+      "text": "show everything again",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/components/settings/ConditionSummary.tsx",
+      "text": "show everything again",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/components/rec/RefreshPicksButton.tsx",
+      "text": "Refresh — sync Trakt and regenerate picks",
+      "reason": "button label naming its action"
+    },
+    {
+      "file": "src/frontend/src/components/rows/ContinueWatchingRow.tsx",
+      "text": "Drop — remove from Continue Watching",
+      "reason": "button label naming its action"
+    },
+    {
+      "file": "src/frontend/src/components/saved/SavedQueueCard.tsx",
+      "text": "from Saved",
+      "reason": "button label naming its action"
+    },
+    {
+      "file": "src/frontend/src/components/search/ConversationSwitcher.tsx",
+      "text": "Nothing here yet — ask something.",
+      "reason": "empty state"
+    },
+    {
+      "file": "src/frontend/src/components/search/ConversationSwitcher.tsx",
+      "text": "Confirm delete: …",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/components/search/ConversationSwitcher.tsx",
+      "text": "Delete conversation: …",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+      "text": "Leave a box empty for open-ended.",
+      "reason": "input instruction"
+    },
+    {
+      "file": "src/frontend/src/components/settings/PreferencesSection.tsx",
+      "text": "Unlocked · …m",
+      "reason": "status label"
+    },
+    {
+      "file": "src/frontend/src/components/settings/PreferencesSection.tsx",
+      "text": "Remove the settings PIN?",
+      "reason": "confirmation question"
+    },
+    {
+      "file": "src/frontend/src/components/settings/PushOptIn.tsx",
+      "text": "Weekly digest notifications",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/components/settings/PushOptIn.tsx",
+      "text": "Notifications are blocked for this site in your browser settings",
+      "reason": "instruction about the browser's own state"
+    },
+    {
+      "file": "src/frontend/src/components/settings/useLeaveGuard.ts",
+      "text": "Leave without saving them?",
+      "reason": "confirmation question"
+    },
+    {
+      "file": "src/frontend/src/components/ui/save-outcome.ts",
+      "text": "The minimum predicted rating",
+      "reason": "field name"
+    },
+    {
+      "file": "src/frontend/src/lib/cardUndo.ts",
+      "text": "Couldn’t undo — …",
+      "reason": "error wrapper; the reason text carries the claim"
+    },
+    {
+      "file": "src/frontend/src/lib/filterCost.ts",
+      "text": "Allow every language",
+      "reason": "option label"
+    },
+    {
+      "file": "src/frontend/src/lib/modelReadiness.ts",
+      "text": "Reel hasn't built your model yet. …",
+      "reason": "state statement read straight from the status"
+    },
+    {
+      "file": "src/frontend/src/lib/modelReadiness.ts",
+      "text": "Reel is training your model.",
+      "reason": "state statement read straight from the running job"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "First sync with Trakt",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Syncing with Trakt",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Training your model",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Reading every title",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Building tonight's picks",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Writing your taste profile",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Writing tonight's notes",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Writing your weekly digest",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "putting tonight's picks together",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Checking your model",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Rewriting your taste profile",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/lib/syncCopy.ts",
+      "text": "Your taste story",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/lib/syncPill.ts",
+      "text": "Sync needs attention",
+      "reason": "status label"
+    },
+    {
+      "file": "src/frontend/src/lib/syncPill.ts",
+      "text": "Not synced yet",
+      "reason": "status label"
+    },
+    {
+      "file": "src/frontend/src/pages/Lab.tsx",
+      "text": "Train + evaluate",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/pages/Landing.tsx",
+      "text": "Reel reads your taste",
+      "reason": "headline"
+    },
+    {
+      "file": "src/frontend/src/pages/Onboarding.tsx",
+      "text": "Reading your taste…",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/pages/Onboarding.tsx",
+      "text": "Teaching your model…",
+      "reason": "stage name"
+    },
+    {
+      "file": "src/frontend/src/pages/Onboarding.tsx",
+      "text": "Your taste DNA is ready.",
+      "reason": "state statement"
+    },
+    {
+      "file": "src/frontend/src/pages/Onboarding.tsx",
+      "text": "Couldn't start a sync: …",
+      "reason": "error wrapper"
+    },
+    {
+      "file": "src/frontend/src/pages/Onboarding.tsx",
+      "text": "See tonight's picks",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/pages/RatePicker.tsx",
+      "text": "Sharpen your taste",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/pages/Settings.tsx",
+      "text": "Last synced with Trakt ….",
+      "reason": "state statement read from the status"
+    },
+    {
+      "file": "src/frontend/src/pages/Settings.tsx",
+      "text": "Not synced with Trakt yet.",
+      "reason": "state statement read from the status"
+    },
+    {
+      "file": "src/frontend/src/pages/TasteDna.tsx",
+      "text": "your taste DNA",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/pages/TasteDna.tsx",
+      "text": "Your taste DNA",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/pages/TitleDetail.tsx",
+      "text": "Not interested — undo",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/pages/TitleDetail.tsx",
+      "text": "Dropped — undo",
+      "reason": "button label"
+    },
+    {
+      "file": "src/frontend/src/pages/TrackRecord.tsx",
+      "text": "What Reel learned since last retrain",
+      "reason": "heading"
+    },
+    {
+      "file": "src/frontend/src/pages/TrackRecord.tsx",
+      "text": "Retrained … · bias … · average miss …",
+      "reason": "figures read from the API"
+    },
+    {
+      "file": "src/frontend/src/pages/TrackRecord.tsx",
+      "text": "See your taste profile",
+      "reason": "link label"
+    },
+    {
+      "file": "src/frontend/src/store/onboardingSlice.ts",
+      "text": "Something went wrong during sync.",
+      "reason": "error fallback"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Api/Endpoints/DevEndpoints.cs",
+      "text": "noCascade issues sessions for an already-linked dev account only",
+      "reason": "developer-only endpoint message"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Api/PreMigrationBackup.cs",
+      "text": "no answer from the backup sidecar within",
+      "reason": "operator message"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+      "text": "Assembling tonight's picks",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+      "text": "kept tonight's picks — … score",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+      "text": "feed unchanged — kept tonight's picks",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+      "text": "skipped — train a model first",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildTasteNarrativeJobHandler.cs",
+      "text": "Reading your ratings",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/CrossReferenceJobHandler.cs",
+      "text": "everything eligible is already cross-referenced at prompt",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/CrossReferenceJobHandler.cs",
+      "text": "stopped at today's cross-reference ceiling before judging anything",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/DeltaSyncJobHandler.cs",
+      "text": "Pulling your ratings…",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/EnrichCatalogJobHandler.cs",
+      "text": "Learning plots · paused for today's token ceiling",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/EnrichCatalogJobHandler.cs",
+      "text": "Reading the mood · paused for today's token ceiling",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/HydrateCatalogJobHandler.cs",
+      "text": "catalogue titles today",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/TrainJobHandler.cs",
+      "text": "Teaching your model",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ml/EvalHarness.cs",
+      "text": "DISPLAY ONLY — the gate reads NDCG@10",
+      "reason": "internal metric description (evaluation ledger)"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ml/EvalHarness.cs",
+      "text": "EligibilityQueryBuilder.ContentFilteredTitles + PassesMaturity",
+      "reason": "internal metric description (evaluation ledger)"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ranking/ExplanationTemplater.cs",
+      "text": "Strong fit with your taste profile.",
+      "reason": "the retired stub sentence, kept as a constant the guards and the harness detect (never rendered: the stub gate counts it)"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ranking/Interleaving/TransparentBlendPolicy.cs",
+      "text": "the 75% and 80% origins are never read by the fit",
+      "reason": "internal policy description"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ranking/Interleaving/TransparentBlendPolicy.cs",
+      "text": "so interleaving on live traffic remains the judge for FD-4.",
+      "reason": "internal policy description"
+    },
+    {
+      "file": "src/frontend/src/components/askReel/RelaxationChip.tsx",
+      "text": "Conditions for tonight's picks",
+      "reason": "heading of the conditions dialog"
+    },
+    {
+      "file": "src/frontend/src/components/rec/PickConditionsButton.tsx",
+      "text": "Conditions for tonight's picks",
+      "reason": "heading of the conditions dialog"
+    },
+    {
+      "file": "src/frontend/src/components/rec/PickConditionsButton.tsx",
+      "text": "Set the conditions for tonight's picks — genres, ratings, years, languages",
+      "reason": "button label naming its action"
+    },
+    {
+      "file": "src/frontend/src/components/settings/ConditionsEditor.tsx",
+      "text": "Conditions for tonight's picks",
+      "reason": "heading of the conditions dialog"
+    },
+    {
+      "file": "src/frontend/src/components/rec/RefreshPicksButton.tsx",
+      "text": "Pull the latest from Trakt, then regenerate tonight's picks",
+      "reason": "button tooltip naming its action"
+    }
+  ]
+}

@@ -31,6 +31,9 @@ export interface Waterfall {
   end: number;
 }
 
+/** WS-5's name for the model's minor features, summed into one step (OnDemandScorer's PredictionWaterfall). */
+const OTHER_FEATURES = "otherFeatures";
+
 /** Steps smaller than this are noise at one decimal: they are folded into "everything else". */
 export const WATERFALL_MIN_STEP = 0.05;
 
@@ -46,8 +49,12 @@ export function predictionWaterfall(
   const end = waterfall.baseline + steps.reduce((sum, s) => sum + s.value, 0);
   if (Math.abs(end - predictedRating) > LANDING_TOLERANCE) return null;
 
-  const shown = steps.filter((s) => Math.abs(s.value) >= WATERFALL_MIN_STEP);
-  const rest = steps.filter((s) => Math.abs(s.value) < WATERFALL_MIN_STEP).reduce((sum, s) => sum + s.value, 0);
+  // WS-5's walk already folds the model's minor features into one "otherFeatures" step; it joins the
+  // steps too small to draw, so the walk never shows two "everything else" lines.
+  const isRest = (s: { feature: string; value: number }) =>
+    s.feature === OTHER_FEATURES || Math.abs(s.value) < WATERFALL_MIN_STEP;
+  const shown = steps.filter((s) => !isRest(s));
+  const rest = steps.filter(isRest).reduce((sum, s) => sum + s.value, 0);
   const out: WaterfallStep[] = shown.map((s) => ({ label: featureLabel(s.feature), value: s.value }));
   // The small steps are hidden, not dropped: their sum is one honest line when it is itself visible.
   if (Math.abs(rest) >= WATERFALL_MIN_STEP) out.push({ label: "everything else", value: rest });

@@ -147,4 +147,13 @@ public class AskReelGateTests
     [InlineData("no-model", true)]
     public void A_failed_judge_is_read_off_the_flags(string? flags, bool judgeFailed) =>
         Assert.Equal(judgeFailed, SearchTurnDegraded.JudgeFailed(flags));
+    /// <summary>XM-06: an unjudged card the bar holds back is the floor tray's — under the bar, or unscored while one is set.</summary>
+    [Theory]
+    [InlineData(5.9, 6.0, SearchTurnCardTier.BelowFloor)]
+    [InlineData(null, 6.0, SearchTurnCardTier.BelowFloor)]
+    [InlineData(5.96, 6.0, SearchTurnCardTier.Unchecked)]
+    [InlineData(null, 0.0, SearchTurnCardTier.Unchecked)]
+    [InlineData(3.0, 0.0, SearchTurnCardTier.Unchecked)]
+    public void An_unjudged_card_the_bar_holds_back_goes_to_the_floor_tray(double? predicted, double floor, string tier) =>
+        Assert.Equal(tier, AskReelGate.UncheckedTier((decimal?)predicted, (decimal)floor));
 }

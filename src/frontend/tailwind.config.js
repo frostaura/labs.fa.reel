@@ -1,3 +1,5 @@
+import plugin from "tailwindcss/plugin";
+
 /** A colour token as Tailwind needs it: the RGB channels from index.css plus Tailwind's alpha slot. */
 const channel = (name) => `rgb(var(--c-${name}) / <alpha-value>)`;
 
@@ -128,5 +130,14 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // `coarse:` is any touch-first pointer (a phone, a tablet, a touch laptop) and `fine:` a mouse
+    // or trackpad. Every ui/ control is a 44 × 44 target under `coarse:` (IREV3S-08, O-15; WCAG
+    // 2.5.5) and keeps its compact size under a mouse. Prefer these to hand-written
+    // `[@media(pointer:coarse)]:` arbitrary variants.
+    plugin(({ addVariant }) => {
+      addVariant("coarse", "@media (pointer: coarse)");
+      addVariant("fine", "@media (pointer: fine)");
+    }),
+  ],
 };

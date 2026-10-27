@@ -8,6 +8,8 @@ import {
 import LoadFailed from "../ui/load-failed";
 import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 /**
  * What Reel believes about your taste, in words — and your correction to it.
@@ -97,16 +99,16 @@ export default function TasteNarrativePanel() {
             : "Reel can’t write this without a language model configured."}
         </p>
         {data?.writerAvailable && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={() => regenerate()}
             disabled={queueing || data.regenerating}
             data-testid="narrative-regenerate"
-            className="fa-button-ghost inline-flex items-center gap-2 disabled:opacity-50"
+            className={COARSE_TAP}
           >
             <RefreshCw className={`h-4 w-4 ${data.regenerating ? "animate-spin" : ""}`} />
             {data.regenerating ? "Writing…" : "Write it now"}
-          </button>
+          </Button>
         )}
       </section>
     );
@@ -132,26 +134,26 @@ export default function TasteNarrativePanel() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {!editing && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={() => setEditing(true)}
               data-testid="narrative-edit"
-              className="fa-button-ghost inline-flex items-center gap-2"
+              className={COARSE_TAP}
             >
               <Pencil className="h-4 w-4" /> Edit
-            </button>
+            </Button>
           )}
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={() => regenerate()}
             disabled={queueing || data.regenerating || !data.writerAvailable}
             data-testid="narrative-regenerate"
             title="Rewrite from scratch — this clears your edits"
-            className="fa-button-ghost inline-flex items-center gap-2 disabled:opacity-50"
+            className={COARSE_TAP}
           >
             <RefreshCw className={`h-4 w-4 ${data.regenerating ? "animate-spin" : ""}`} />
             {data.regenerating ? "Writing…" : "Regenerate"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -169,37 +171,36 @@ export default function TasteNarrativePanel() {
             Reel reads this before every pick it makes for you. Correcting it here changes what it looks for.
           </p>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
+            <Button
               disabled={saving}
               data-testid="narrative-save"
               onClick={() => void commit(draft)}
-              className="fa-button border-fa-frost/40 text-fa-frost disabled:opacity-50"
+              className={`border-fa-frost/40 text-fa-frost ${COARSE_TAP}`}
             >
               {saving ? "Saving…" : "Save"}
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
               data-testid="narrative-cancel"
               onClick={() => {
                 setDraft(data.text ?? "");
                 setSaveFailure(null);
                 setEditing(false);
               }}
-              className="fa-button-ghost"
+              className={COARSE_TAP}
             >
               Cancel
-            </button>
+            </Button>
             {data.isEdited && (
-              <button
-                type="button"
+              <Button
+                variant="ghost"
                 data-testid="narrative-revert"
                 title="Drop your edits and go back to what Reel wrote"
                 onClick={() => void commit(null)}
-                className="fa-button-ghost inline-flex items-center gap-2"
+                className={COARSE_TAP}
               >
                 <Undo2 className="h-4 w-4" /> Revert to Reel’s version
-              </button>
+              </Button>
             )}
           </div>
           <SaveStatus message={saveFailure?.message ?? null} onRetry={saveFailure?.retry} retrying={saving} testId="narrative-save-status" />

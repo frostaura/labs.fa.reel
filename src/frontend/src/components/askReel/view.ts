@@ -1,5 +1,5 @@
 import { floorPartition, type ChatStatus } from "../../lib/askReel/reducer";
-import { floorHeldBack, footnote, formatFloor, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage } from "../../lib/askReel/copy";
+import { failureCopy, floorHeldBack, footnote, formatFloor, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage } from "../../lib/askReel/copy";
 import { answerRowIndex } from "../../lib/askReel/transcript";
 import { pageRefusalMessage } from "../../lib/askReel/paging";
 import { skeletonCount, type AskReelChat } from "../../lib/askReel/useAskReelChat";
@@ -110,7 +110,7 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
     showsTurnConflict: !!turnConflictMessage && streaming && !chat.appending,
     pickCount, keptWholeAnswer, footnoteText, showsProvenance, stoppedText, refusalText,
     footnoteInSlot: chat.gridRow >= turns.length - 1,
-    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length),
+    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title),
   };
 }
 
@@ -119,12 +119,13 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
  * the two live regions never talk over each other. Two counts, because they mean two different
  * things and folding them together is F4-05.
  */
-function announce(status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number): string {
+function announce(status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number, failure: string): string {
   if (status === "streaming") return "";
   // The refusal is what the region says while it stands (R5-04): the state underneath is the one
   // the screen was already in, and announcing THAT again says nothing about the gesture that failed.
   if (refusal) return refusal;
-  if (status === "error") return "Search hit a snag.";
+  // The failure's own title — a turn limit is announced as one, not as a crash.
+  if (status === "error") return `${failure}.`;
   if (status === "blocked") return "That question is still being answered.";
   if (status === "stopped") return stopped;
   // An honest "nothing left" is announced as one, not as "No matches": the reply beside it gives

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
@@ -366,6 +367,34 @@ public class InterleavingIntegrationTests(PostgresFixture fixture)
             Assert.Equal(1d, reconfigured.AlwaysValidP);
             Assert.Contains(reconfigured.Standings, s => s.PolicyId == CalibratedModelPolicy.Id && s.Team is null);
         }
+
+        // INTERLEAVE_SINCE (D-14): an experiment started on day 5 counts only the slates served from
+        // then — days 5, 6 (B, B) and 7 (both): two decided for B, one tie.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var frozen = await new InterleaveSummaryQuery(
+                    db, new InterleaveOptions { Enabled = true, Since = served.AddDays(5) })
+                .ComputeAsync(accountId, served.AddDays(9), CancellationToken.None);
+
+            Assert.Equal(3, frozen.Slates);
+            Assert.Equal(0, frozen.WinsA);
+            Assert.Equal(2, frozen.WinsB);
+            Assert.Equal(1, frozen.Ties);
+            Assert.Equal(served.AddDays(5), frozen.FirstSlateAt);
+        }
+    }
+
+    [Fact]
+    public void The_experiment_start_is_read_invariant_and_in_utc()
+    {
+        var configuration = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [InterleaveOptions.SinceKey] = "2026-11-02T00:00:00+02:00" })
+            .Build();
+        Assert.Equal(new DateTime(2026, 11, 1, 22, 0, 0, DateTimeKind.Utc), InterleaveOptions.From(configuration).Since);
+        Assert.Equal(DateTimeKind.Utc, InterleaveOptions.From(configuration).Since!.Value.Kind);
+        Assert.Null(InterleaveOptions.From(new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [InterleaveOptions.SinceKey] = "next tuesday" })
+            .Build()).Since);
     }
 
     private static ExposureEvent NewExposure(

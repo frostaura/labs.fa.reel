@@ -117,6 +117,15 @@ public interface ITmdbClient
         DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
         TmdbDiscoverOptions? options = null, CancellationToken ct = default);
 
+    /// <summary>
+    /// A movie collection and its parts (<c>/collection/{id}</c>), for the Similar rail's
+    /// collection-first seed (WS-5 task 10): the id comes from <see cref="TmdbTitleDetails.Collection"/>.
+    /// Null when TMDB 404s the id. The default answers "no collection", which is what an in-memory
+    /// fake means; the HTTP adapter overrides it.
+    /// </summary>
+    Task<TmdbCollection?> GetCollectionAsync(long collectionId, CancellationToken ct = default) =>
+        Task.FromResult<TmdbCollection?>(null);
+
     /// <summary>Watch providers for one title in one region (JustWatch-powered; attribution required).</summary>
     Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default);
 }

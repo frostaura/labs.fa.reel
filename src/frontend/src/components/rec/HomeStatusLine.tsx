@@ -82,7 +82,7 @@ export default function HomeStatusLine({
   if (segments.length === 0) return null;
 
   return (
-    <p className={`fa-caption text-fa-frost-dim ${className}`} data-testid="home-status-line">
+    <p className={`fa-caption text-3 ${className}`} data-testid="home-status-line">
       {segments.map((segment, index) => (
         <Fragment key={segment.key}>
           {index > 0 && <span aria-hidden> · </span>}

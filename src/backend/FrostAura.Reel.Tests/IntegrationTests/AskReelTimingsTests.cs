@@ -330,7 +330,7 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            new LexicalSearchService(eligibility),
+            Application.Search.Retrieval.KeylessTextSearch.Offline(db, eligibility),
             new CatalogWorkCoordinator(),
             new MemoryCache(new MemoryCacheOptions()),
             log ?? (ILogger<LiveSearchExpansionService>)NullLogger<LiveSearchExpansionService>.Instance);

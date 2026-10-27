@@ -294,7 +294,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            new LexicalSearchService(eligibility),
+            Application.Search.Retrieval.KeylessTextSearch.Offline(db, eligibility),
             new CatalogWorkCoordinator(),
             cache,
             log);

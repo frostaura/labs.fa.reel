@@ -233,6 +233,38 @@ public static class HardConstraintFilter
         return Expression.Lambda<Func<Title, bool>>(body, parameter);
     }
 
+    /// <summary>
+    /// A SOFT match (a mood, never a requirement): a keyword overlapping <paramref name="exactLabels"/>
+    /// or a genre in <paramref name="genres"/> as an exclusion of it reads (stand-ins included). No
+    /// name arm: a mood is not a word to find in titles' names ("Small Town Crime" is not cosy). Null
+    /// when there is nothing to match on, so the caller skips the query rather than reading "anything".
+    /// </summary>
+    public static Expression<Func<Title, bool>>? SoftPredicate(IReadOnlyCollection<string> exactLabels, IReadOnlyList<string> genres)
+    {
+        var arms = new List<Expression<Func<Title, bool>>>();
+        if (exactLabels.Count > 0)
+        {
+            var holder = new LabelHolder([.. exactLabels]);
+            arms.Add(t => t.Keywords.Any(k => holder.Labels.Contains(k)));
+        }
+
+        foreach (var genre in Clean(genres))
+        {
+            arms.Add(FilterBreaches.ExcludedGenre(genre));
+        }
+
+        if (arms.Count == 0)
+        {
+            return null;
+        }
+
+        var parameter = Expression.Parameter(typeof(Title), "t");
+        var body = arms
+            .Select(arm => new ParameterSwap(arm.Parameters[0], parameter).Visit(arm.Body))
+            .Aggregate(Expression.OrElse);
+        return Expression.Lambda<Func<Title, bool>>(body, parameter);
+    }
+
     private static Expression<Func<Title, bool>> PersonPredicate(IReelDbContext db, PersonConstraint person)
     {
         var anyRole = person.Role == PersonRole.Any;

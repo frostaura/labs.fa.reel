@@ -1,4 +1,5 @@
 import { SAVED_SORTS, SAVED_SORT_META, type SavedSort } from "../../lib/savedQueue";
+import { Button } from "../ui/button";
 
 /**
  * The queue's order, as four explicit choices rather than a dropdown. Each carries the promise it
@@ -22,23 +23,23 @@ export default function SavedSortControl({
       {SAVED_SORTS.map((sort) => {
         const active = sort === value;
         return (
-          <button
+          <Button
             key={sort}
-            type="button"
+            variant="ghost"
             onClick={() => onChange(sort)}
             aria-pressed={active}
             title={SAVED_SORT_META[sort].hint}
             data-testid={`saved-sort-${sort}`}
             // 44 px tall on any coarse pointer (IREV3S-08 measured these at 22 px on a phone); a
             // fine pointer keeps the compact segment.
-            className={`fa-overline inline-flex min-h-11 items-center rounded-md px-2.5 py-1.5 transition [@media(pointer:fine)]:min-h-0 ${
+            className={`h-auto min-h-11 rounded-md px-2.5 py-1.5 font-normal [@media(pointer:fine)]:min-h-0 ${
               active
-                ? "bg-fa-frost/15 text-fa-frost-bright"
-                : "text-fa-frost-dim hover:bg-fa-glass-strong hover:text-fa-frost"
+                ? "bg-fa-frost/15 text-fa-frost-bright hover:bg-fa-frost/15 hover:text-fa-frost-bright"
+                : "text-3 hover:bg-fa-glass-strong hover:text-fa-frost"
             }`}
           >
-            {SAVED_SORT_META[sort].label}
-          </button>
+            <span className="fa-overline">{SAVED_SORT_META[sort].label}</span>
+          </Button>
         );
       })}
     </div>

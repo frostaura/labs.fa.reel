@@ -23,11 +23,15 @@ import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
 import TastePockets from "../components/dna/TastePockets";
 import DivergingBars from "../components/dna/DivergingBars";
 import LoadFailed from "../components/ui/load-failed";
+import { CHART_CHROME, CHART_SERIES, seriesColour } from "../design/chartPalette";
+import { Button } from "../components/ui/button";
+import { COARSE_TAP } from "../lib/tapTarget";
 
-const FROST = "#A4D4F4";
-const FROST_DIM = "#5C8AB4";
-const GRID = "rgba(164,212,244,0.12)";
-const DRIFT_COLORS = ["#A4D4F4", "#7CE3B6", "#F6C667", "#C4B5FD", "#FDA4AF"];
+// From the chart palette (WS-9): every series holds 3:1 on every ink surface, and the axis colour is
+// the AA tertiary text the rest of the page uses.
+const FROST = CHART_SERIES[0];
+const FROST_DIM = CHART_CHROME.axis;
+const GRID = CHART_CHROME.grid;
 
 /** Counts are whole numbers and shares are percentages — a tooltip reading "ratings: 12.00" was a
  *  float format applied to an integer (P1, integer counts). */
@@ -88,7 +92,7 @@ export default function TasteDna() {
         <p className="fa-body text-fa-frost">
           Nothing to read yet — your taste DNA is built from the titles you&apos;ve rated, and there are none so far.
         </p>
-        <Link to="/rate" className="fa-button-primary inline-flex" data-testid="dna-empty-rate">
+        <Link to="/rate" className={`fa-button-primary inline-flex ${COARSE_TAP}`} data-testid="dna-empty-rate">
           Rate a few titles
         </Link>
       </section>
@@ -138,14 +142,9 @@ export default function TasteDna() {
           </p>
         </div>
         <div className="shrink-0 text-right space-y-1">
-          <button
-            onClick={share}
-            disabled={sharing}
-            data-testid="dna-share"
-            className="fa-button-ghost flex items-center gap-2 disabled:opacity-50"
-          >
+          <Button variant="ghost" onClick={share} disabled={sharing} data-testid="dna-share" className={COARSE_TAP}>
             <Share2 className="h-4 w-4" /> {sharing ? "Rendering…" : "Share card"}
-          </button>
+          </Button>
           {shareError && (
             <p role="alert" className="fa-caption text-fa-danger" data-testid="dna-share-error">
               {shareError}
@@ -250,7 +249,7 @@ export default function TasteDna() {
                 <Line
                   key={genre}
                   dataKey={genre}
-                  stroke={DRIFT_COLORS[index]}
+                  stroke={seriesColour(index)}
                   strokeWidth={2}
                   dot={false}
                   name={genre.replace("-", " ")}

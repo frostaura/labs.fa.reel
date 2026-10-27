@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { Link } from "react-router";
 import { X } from "lucide-react";
@@ -7,6 +6,7 @@ import type { AppDispatch, RootState } from "../store";
 import { verdictDismissed } from "../store/verdictSlice";
 import { verdictBand, verdictCopy } from "../lib/verdictCopy";
 import { Button } from "./ui/button";
+import { ToastPortal } from "./ui/toast-stack";
 
 /** Long enough to read a two-clause sentence, short enough not to sit on top of the page. */
 const DISMISS_AFTER_MS = 9000;
@@ -23,42 +23,15 @@ const DISMISS_AFTER_MS = 9000;
  * a scorecard stops meaning anything. Over-promises get the warning edge, hits get the success one,
  * and the wording carries the rest.</p>
  *
- * <p><b>Why a portal, attached lazily.</b> The commonest place to rate is the title detail modal,
- * which is a Radix dialog — and Radix marks every other child of <c>body</c> <c>aria-hidden</c>
- * while it is open. Rendered inside the layout tree, this live region would be announced to nobody
- * at exactly the moment it has something to say. So the toast portals to its own host, and that
- * host is appended to <c>body</c> only once a verdict exists — after the dialog has already taken
- * its snapshot of what to hide, which is why the toast stays in the accessibility tree. Being
- * reachable by role in a test is a side effect; the accessibility is the reason.</p>
+ * <p>It sits in the shared toast column (ui/toast-stack), which is portalled to <c>body</c> and
+ * attached lazily so the live region is still announced over the title detail modal — the commonest
+ * place to rate — and stays clickable there. A card undo raised by the same rating stacks above it
+ * instead of hiding under it.</p>
  */
 export default function VerdictToast() {
   const verdict = useSelector((state: RootState) => state.verdict.current);
   const dispatch = useDispatch<AppDispatch>();
   const shownKey = verdict?.shownKey;
-  const hasVerdict = verdict != null;
-
-  // The host element is CREATED once and ATTACHED only while a verdict is on screen. Both halves
-  // matter, for different reasons.
-  //
-  // Radix's scroll lock sets `pointer-events: none` on <body> and re-enables it only inside the
-  // dialog, so a toast portalled to <body> renders but cannot be clicked while the title modal is
-  // open — which is the commonest place to rate, and therefore the commonest place this toast
-  // appears. Re-enabling pointer events on the host is what makes the dismiss button and the
-  // track-record link usable at all.
-  const [host] = useState<HTMLElement | null>(() => {
-    if (typeof document === "undefined") return null;
-    const element = document.createElement("div");
-    element.style.pointerEvents = "auto";
-    return element;
-  });
-
-  useEffect(() => {
-    if (!host || !hasVerdict) return;
-    document.body.appendChild(host);
-    return () => {
-      host.remove();
-    };
-  }, [host, hasVerdict]);
 
   useEffect(() => {
     if (shownKey == null) return;
@@ -67,40 +40,41 @@ export default function VerdictToast() {
     // Keyed on shownKey so a second rating restarts the clock instead of inheriting the first's.
   }, [shownKey, dispatch]);
 
-  if (!verdict || !host) return null;
+  if (!verdict) return null;
 
   const band = verdictBand(verdict.delta);
   const missed = band === "over" || band === "under";
 
-  return createPortal(
-    <div
-      role="status"
-      aria-live="polite"
-      data-testid="verdict-toast"
-      className={`fixed inset-x-4 bottom-24 z-50 mx-auto max-w-md rounded-xl border px-4 py-3 shadow-lg backdrop-blur-md md:bottom-6 ${
-        missed ? "border-fa-warning/50 bg-fa-ink/95" : "border-fa-success/50 bg-fa-ink/95"
-      }`}
-    >
-      <div className="flex items-start gap-3">
-        <p className="fa-body text-fa-frost-bright flex-1">{verdictCopy(verdict, verdict.actual)}</p>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => dispatch(verdictDismissed())}
-          aria-label="Dismiss"
-          className="-mr-1.5 -mt-1 shrink-0 text-fa-frost-dim"
-        >
-          <X className="h-4 w-4" />
-        </Button>
-      </div>
-      <Link
-        to="/track-record"
-        onClick={() => dispatch(verdictDismissed())}
-        className="fa-caption text-fa-frost hover:text-fa-frost-bright underline underline-offset-2 mt-1 inline-block"
+  return (
+    <ToastPortal>
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="verdict-toast"
+        className={`rounded-xl border px-4 py-3 shadow-lg backdrop-blur-md ${
+          missed ? "border-fa-warning/50 bg-fa-ink/95" : "border-fa-success/50 bg-fa-ink/95"
+        }`}
       >
-        See the track record
-      </Link>
-    </div>,
-    host
+        <div className="flex items-start gap-3">
+          <p className="fa-body text-fa-frost-bright flex-1">{verdictCopy(verdict, verdict.actual)}</p>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => dispatch(verdictDismissed())}
+            aria-label="Dismiss"
+            className="-mr-1.5 -mt-1 shrink-0 text-fa-frost-dim"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <Link
+          to="/track-record"
+          onClick={() => dispatch(verdictDismissed())}
+          className="fa-caption text-fa-frost hover:text-fa-frost-bright underline underline-offset-2 mt-1 inline-block"
+        >
+          See the track record
+        </Link>
+      </div>
+    </ToastPortal>
   );
 }

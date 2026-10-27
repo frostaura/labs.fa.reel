@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Sparkles } from "lucide-react";
 import { useCreateCheckoutMutation, useGetBillingStatusQuery } from "../../store/api";
 import { isPaidTier, planLine } from "./planCopy";
+import { Button } from "../ui/button";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 /**
  * Plan + upgrade. Rendered only while billing is configured on the server (Settings decides): the
@@ -42,9 +44,9 @@ export default function BillingCard() {
       ) : (
         <>
           <p className="fa-caption text-fa-frost-dim" data-testid="plan-line">{planLine(data.tier)}</p>
-          <button onClick={upgrade} disabled={isLoading} className="fa-button-primary inline-flex items-center gap-2 disabled:opacity-50">
+          <Button variant="primary" onClick={upgrade} disabled={isLoading} className={COARSE_TAP}>
             <Sparkles className="h-4 w-4" /> {isLoading ? "Opening…" : "Upgrade"}
-          </button>
+          </Button>
           {failure && (
             <p role="alert" className="fa-caption text-fa-danger" data-testid="checkout-failure">
               {failure}

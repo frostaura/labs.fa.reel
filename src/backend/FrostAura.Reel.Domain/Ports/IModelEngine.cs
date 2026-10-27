@@ -37,4 +37,13 @@ public interface IModelEngine
     /// feed pages, so paging doesn't re-deserialize the artifact on every fetch.
     /// </summary>
     ScoredRow[] ScoreWithContributionsCached(Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5);
+
+    /// <summary>
+    /// One row's score with EVERY feature's contribution in the score's own units (rating points for
+    /// this regressor), decomposed so the score minus their sum is one start shared by every row —
+    /// the three add up exactly. The prediction waterfall (F-25) needs that additivity; the card
+    /// bars (<see cref="ScoreWithContributions"/>) are normalised to the largest contribution and do
+    /// not have it. Null from an engine that cannot decompose its score.
+    /// </summary>
+    ScoredRow? ExplainCached(Guid modelKey, byte[] artifactBytes, float[] features, string[] featureNames) => null;
 }

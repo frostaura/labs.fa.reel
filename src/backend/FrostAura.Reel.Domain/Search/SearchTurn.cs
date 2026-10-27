@@ -156,6 +156,13 @@ public static class SearchTurnMode
     /// <summary>Ask Reel v2: an answer in words — an item question, a count, small talk — with the grid untouched.</summary>
     public const string Answer = "Answer";
 
+    /// <summary>
+    /// Whether a turn of this mode answers BESIDE the grid rather than replacing it — an
+    /// <see cref="Answer"/> or a <see cref="Clarify"/> shows no cards, so the answer on screen is
+    /// still the search before it (the live client's rule, and the resume's).
+    /// </summary>
+    public static bool LeavesGrid(string? stored) => Parse(stored) is Answer or Clarify;
+
     /// <summary>The stored mode, or <see cref="Picks"/> for null and anything unknown.</summary>
     public static string Parse(string? stored) =>
         string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound
@@ -203,6 +210,16 @@ public static class SearchTurnDegraded
     /// request and nothing checked a card against it; both halves of the turn are degraded.
     /// </summary>
     public const string NoModel = "no-model";
+
+    /// <summary>
+    /// The prefix of a retrieval-arm note, written as <c>arm:{name}</c> (<c>arm:semantic</c>,
+    /// <c>arm:tmdb-late</c>, <c>arm:provisional</c> …) — an arm the turn asked for that contributed
+    /// nothing, so the cards were fused without it (§4.10). Stored on the row only, so a thin
+    /// retrieval is a query; it is never sent in <c>done.degraded</c> and neither <see cref="PlanFailed"/>
+    /// nor <see cref="JudgeFailed"/> reads it, because the reply and every card on screen are still
+    /// exactly what they claim to be.
+    /// </summary>
+    public const string ArmPrefix = "arm:";
 
     /// <summary>The value of <see cref="SearchTurn.ReasoningEffort"/> when no effort parameter was sent.</summary>
     public const string ProviderDefaultEffort = "provider-default";

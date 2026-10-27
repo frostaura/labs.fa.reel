@@ -1,6 +1,7 @@
 import { Fragment, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Sparkles } from "lucide-react";
 import CardTray from "./CardTray";
+import PillButton from "./PillButton";
 import { ConflictNotice, RetryButton } from "./parts";
 import { earlierAnswerSummary, failedTurnMessage, showsConflictPill } from "../../lib/askReel/copy";
 import { answerHasCards, bubbleOverflows, questionFor, showsInlineFailure, type ChatTurn, type TurnAnswer } from "../../lib/askReel/transcript";
@@ -155,16 +156,16 @@ export default function Transcript({
         {turn.clarifyOptions && turn.clarifyOptions.length > 0 && i === lastIndex && (
           <div className="flex flex-wrap gap-2 pl-8" data-testid="askreel-clarify-options">
             {turn.clarifyOptions.map((option) => (
-              <button
+              <PillButton
                 key={option}
-                type="button"
+                tone="accent"
                 data-testid="askreel-clarify-option"
                 onClick={() => send(option, false)}
                 disabled={streaming}
-                className="fa-caption inline-flex min-h-11 items-center rounded-full border border-fa-frost/25 px-4 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+                className="whitespace-normal py-2 text-left"
               >
                 {option}
-              </button>
+              </PillButton>
             ))}
           </div>
         )}
@@ -241,15 +242,14 @@ function UserBubble({ text }: { text: string }) {
         </span>
       </p>
       {clampable && (
-        <button
-          type="button"
+        <PillButton
+          tone="quiet"
           data-testid="askreel-bubble-toggle"
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
         >
           {expanded ? "Show less" : "Show more"}
-        </button>
+        </PillButton>
       )}
     </div>
   );

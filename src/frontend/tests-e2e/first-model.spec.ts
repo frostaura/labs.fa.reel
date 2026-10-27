@@ -69,6 +69,8 @@ async function shell(page: Page, status: unknown, session: Record<string, unknow
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, ...session });
   await mockJson(page, "**/api/sync/status", status);
+  // Track record's cross-reference band: nothing judged yet.
+  await page.route("**/api/feed/cross-reference", (route) => route.fulfill({ status: 204 }));
 }
 
 /**

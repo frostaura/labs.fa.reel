@@ -1,6 +1,7 @@
 .PHONY: up down build test lint lint-backend lint-frontend e2e docker-build docker-ready docker-down release-validation qa \
 	ci ci-backend ci-frontend ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit \
-	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-vite-proxy ci-e2e ci-trivy ci-compose ci-docker
+	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-design-ratchet ci-vite-proxy ci-e2e ci-a11y \
+	ci-trivy ci-compose ci-docker
 
 # Compose needs these two before it will interpolate (both are `:?` required in the compose
 # files). Real values live in .env locally / Portainer in prod; these defaults exist so
@@ -107,7 +108,7 @@ ci: ci-backend ci-frontend ci-trivy ci-compose ci-docker
 
 ci-backend: ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit
 
-ci-frontend: ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-vite-proxy ci-e2e
+ci-frontend: ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-design-ratchet ci-vite-proxy ci-e2e
 
 ci-format:
 	$(DOTNET) format $(SLN) --verify-no-changes --verbosity minimal
@@ -175,18 +176,32 @@ ci-frontend-build:
 ci-knip:
 	cd src/frontend && npx --no-install knip
 
+# WS-9's design ratchet (WS-9 CR-4): raw colours, arbitrary values and the other counted debts may
+# only fall. A count above scripts/design-ratchet-baseline.json is a failure; lowering the baseline is the owner's
+# last step after paying a debt down (`npm run design:baseline`), never a way to pass this gate.
+ci-design-ratchet:
+	cd src/frontend && npm run design:ratchet
+
 # The dev proxy must not make a LAN caller look like this machine (J-1; WS-8 review 2026-10-24): the
 # dev server listens on loopback unless VITE_HOST opts in, and every proxy entry sets xfwd so the API's
 # loopback guard sees the real client. Starts the repo's own Vite config against a local echo server.
 ci-vite-proxy:
 	cd src/frontend && node ../../deploy/ci/vite-proxy-probe.mjs
 
-# The dev-server specs in both engines (Safari is where the founder's installed PWA runs), with service
+# The dev-server specs in both engines (Safari is where the founder's installed PWA runs; WebKit runs in
+# batches of at most 40 tests per browser, because one WebKit browser hangs on its 64th page), with service
 # workers blocked by the Playwright config; then the *.preview.spec.ts specs against the production
 # build (Chromium), which test the real service worker (WS-9 CR-3). PW_PORT keeps parallel runs apart.
 ci-e2e:
-	cd src/frontend && CI=1 npx --no-install playwright test --project=chromium --project=webkit
+	cd src/frontend && CI=1 npm run test:e2e
 	cd src/frontend && CI=1 npx --no-install playwright test -c playwright.preview.config.ts
+
+# The accessibility spec alone, in both engines (WS-9 CR-4): the full axe rule set per route against
+# tests-e2e/a11y-baseline.json, keyboard paths and reduced motion. `ci-e2e` already runs it with
+# everything else, so `ci` does not list it twice; this target is the quick local check after a
+# surface change.
+ci-a11y:
+	cd src/frontend && CI=1 npx --no-install playwright test tests-e2e/a11y.spec.ts --project=chromium --project=webkit
 
 # Known-vulnerable dependencies and committed secrets across the whole tree. HIGH and CRITICAL with
 # a fix available fail the gate. (Misconfiguration scanning joins once the images run non-root.)

@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { mockJson } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * Every call Home makes around its picks, answered with the account's "nothing to say" shape, so a
@@ -18,6 +19,8 @@ export async function mockHomeChrome(
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [], degradedReason: null });
   await mockJson(page, "**/api/saved/recently-watched", overrides.recentlyWatched ?? { expectedAbsoluteError: null, items: [] });
   await mockJson(page, "**/api/settings/filters", overrides.filters ?? { languages: ["*"] });
+  // The conditions editor (opened from the Home chips) builds its genre chips from the catalogue.
+  await mockFilterChips(page);
   await mockJson(
     page,
     "**/api/accuracy",

@@ -2,6 +2,7 @@ import { RefreshCw } from "lucide-react";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../store";
 import { useRebuildFeedMutation, useTriggerSyncMutation } from "../../store/api";
+import { Button } from "../ui/button";
 
 /**
  * On-demand "pull from Trakt, then regenerate tonight's picks". Enqueues a DeltaSync immediately
@@ -39,16 +40,15 @@ export default function RefreshPicksButton({ onRequested }: { onRequested?: () =
   };
 
   return (
-    <button
-      type="button"
+    <Button
       onClick={refresh}
       disabled={busy}
       aria-label={busy ? "Refreshing your picks" : "Refresh — sync Trakt and regenerate picks"}
       title="Pull the latest from Trakt, then regenerate tonight's picks"
       data-testid="refresh-picks"
-      className="inline-flex min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded-lg border border-fa-edge bg-fa-glass p-1.5 text-fa-frost transition hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright disabled:opacity-50 disabled:pointer-events-none"
+      className="h-auto min-h-11 min-w-11 md:min-h-0 md:min-w-0 rounded-lg bg-fa-glass p-1.5 text-fa-frost hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
     >
-      <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
-    </button>
+      <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} aria-hidden />
+    </Button>
   );
 }

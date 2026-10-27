@@ -182,9 +182,9 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
         // singleton every chat adapter records into); a purpose of this test's own.
         var purpose = $"probe-metrics-{Guid.NewGuid():N}";
         var calls = api.Services.GetRequiredService<FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics>();
-        calls.Record(purpose, lengthFinishes: 2, attempts: 2, fallback: true);
-        calls.Record(purpose, lengthFinishes: 0, attempts: 3, fallback: true);
-        calls.Record(purpose, lengthFinishes: 0, attempts: 1, fallback: false);
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Truncated, lengthFinishes: 2, attempts: 2);
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.ProviderError, lengthFinishes: 0, attempts: 3);
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
 
         using (client)
         {

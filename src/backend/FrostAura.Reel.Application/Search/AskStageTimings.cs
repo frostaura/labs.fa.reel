@@ -92,6 +92,9 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: the retrieval tool (§4.2 step 2).</summary>
     public const string Retrieve = "retrieve";
 
+    /// <summary>v2: a mood request's text embedded ahead of retrieval, so the semantic arm has it (see AskReelEngine.WarmMoodAsync).</summary>
+    public const string RetrieveEmbed = "retrieve.embed";
+
     /// <summary>Ask Reel v2: every judge batch, first sent to last returned (§4.2 step 3).</summary>
     public const string Judge = "judge";
 
@@ -113,7 +116,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Plan, PlanContext, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
+            Plan, PlanContext, RetrieveEmbed, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
         ];
 
     /// <summary>

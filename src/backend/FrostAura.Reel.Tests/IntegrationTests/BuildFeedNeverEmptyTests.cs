@@ -34,8 +34,8 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// residual head saturating its clamp (covered arithmetically in <c>OnlineResidualSaturationTests</c>),
 /// which pushed every prediction ~3 points down until nothing could clear the account's
 /// MinPredictedRating. This test pins the structural half: whatever the model's output scale does,
-/// a build with a healthy candidate pool must never produce zero cards, and when the floor has to be
-/// relaxed to achieve that the snapshot must SAY so instead of rendering a blank page.
+/// a build with a healthy candidate pool must never produce a SILENT blank: when the account's own
+/// "for you" bar holds every card back, the snapshot says so (the bar itself holds — FD-4, XM-07).
 ///
 /// <b>Frozen anchors.</b> "Because you loved The Great Wall / The Bone Collector" never changed,
 /// because the anchors were the strict top of a rating-first order that a large rating history
@@ -63,24 +63,20 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     private const decimal UnreachableFloor = 9.9m;
 
     [Fact]
-    public async Task A_healthy_pool_never_builds_an_empty_feed_and_says_why_the_floor_was_relaxed()
+    public async Task A_bar_nothing_clears_deals_no_card_under_it_and_says_so()
     {
         if (!Fixture.Available)
         {
             return;
         }
 
+        // The structural half of the empty-feed defect, re-stated under FD-4's default (XM-07): the
+        // bar is the user's, so a build whose healthy pool holds nothing above it deals nothing below
+        // it — and the page is never SILENTLY empty: the reason names the bar. Until 2026-10-26 the
+        // build relaxed the bar to the shortlist's 80th percentile here and dealt the cards under it.
         var accountId = await SeedAccountAsync();
         await SeedLovedTitlesAsync(accountId, 12);
         await SeedEligibleTitlesAsync(80);
-
-        // A hard CONTENT rule alongside the soft floor, so the test can prove the relaxation is
-        // surgical: documentaries are excluded outright and a mass of them is the most attractive
-        // thing in the pool, so a build that relaxed indiscriminately would surface them.
-        var excludedGenre = $"doc-{Guid.NewGuid():N}";
-        await SeedEligibleTitlesAsync(40, genre: excludedGenre);
-        await AddContentFilterAsync(accountId, FilterKind.ExcludeGenre, excludedGenre);
-
         await SeedActiveArtifactAsync(accountId);
         await AddContentFilterAsync(accountId, FilterKind.MinPredictedRating, ContentFilterRules.FormatRating(UnreachableFloor));
 
@@ -90,19 +86,113 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
 
-        // The candidate pool was healthy by construction — so zero cards is a pipeline failure, not
-        // an honest verdict, exactly as the relaxation ladder in LiveSearchExpansionService holds.
-        Assert.NotEmpty(items);
-        Assert.Contains(items, i => i.Row == FeedRowKind.Hero);
-
-        // And the user is told, rather than left staring at picks that quietly ignore their setting.
+        Assert.All(items, i => Assert.True(i.PredictedRating >= UnreachableFloor, $"{i.PredictedRating} is under the bar"));
         Assert.NotNull(snapshot.DegradedReason);
         Assert.Contains("9.9", snapshot.DegradedReason);
+        Assert.DoesNotContain("relaxed", snapshot.DegradedReason);
+    }
 
-        // Relaxing the SOFT floor must never relax a HARD content rule with it.
-        var shownIds = items.Select(i => i.TitleId).ToList();
-        var shownGenres = await db.Titles.Where(t => shownIds.Contains(t.Id)).Select(t => t.Genres).ToListAsync();
-        Assert.All(shownGenres, g => Assert.DoesNotContain(excludedGenre, g));
+    [Fact]
+    public async Task A_preserve_build_over_unchanged_inputs_stops_before_the_pool_and_a_changed_input_runs_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Task 13: the fingerprint of everything the build reads decides the no-op before the pool
+        // refresh, the scoring and the assembly run — and a user action still gets a real build.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        using var processCache = new MemoryCache(new MemoryCacheOptions());
+
+        await RunBuildAsync(accountId, fitCache: processCache);
+        await RunBuildAsync(accountId, fitCache: processCache);
+
+        List<FeedBuildStat> stats;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            stats = await db.FeedBuildStats.Where(s => s.AccountId == accountId).OrderBy(s => s.BuiltAt).ToListAsync();
+        }
+
+        Assert.Equal(2, stats.Count);
+        Assert.Equal(FeedBuildOutcome.Fresh, stats[0].Mode);
+        Assert.Equal(FeedBuildOutcome.NoOp, stats[1].Mode);
+        Assert.Equal(0, stats[1].ShortlistCount); // nothing was scored
+        Assert.Equal(stats[0].FeedSnapshotId, stats[1].FeedSnapshotId);
+
+        // A new condition is an input: the next build runs in full (Fresh, because the user changed
+        // what may appear — the filter save's own reason).
+        await AddContentFilterAsync(accountId, FilterKind.ExcludeKeyword, $"kw-{Guid.NewGuid():N}");
+        await RunBuildAsync(accountId, fitCache: processCache);
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var third = await verify.FeedBuildStats.Where(s => s.AccountId == accountId).OrderByDescending(s => s.BuiltAt).FirstAsync();
+        Assert.True(third.ShortlistCount > 0);
+    }
+
+    [Fact]
+    public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // WS-6: the pill reads a frame and a five-second poll of the row. The build published its
+        // steps without writing them, so a poll read "Scouting fresh candidates" for the whole run;
+        // and the long assembly (fit judgement, why pass) reported nothing at all.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        var jobId = Guid.NewGuid();
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.SyncJobs.Add(new SyncJob
+            {
+                Id = jobId,
+                AccountId = accountId,
+                Kind = JobKind.BuildFeed,
+                EnqueuedAt = DateTime.UtcNow,
+                Status = JobStatus.Running,
+                AttemptCount = 1,
+                StartedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var hub = new RowReadingHub(Fixture, jobId);
+        await RunBuildAsync(accountId, events: hub, persistedJobId: jobId);
+
+        Assert.Contains(hub.Frames, f => f.Published == "Writing why-lines");
+        Assert.Contains(hub.Frames, f => f.Published == "Judging fit for tonight's picks");
+        Assert.All(hub.Frames, f => Assert.Equal(f.Published, f.OnRow));
+    }
+
+    /// <summary>On every progress frame, reads the job row through a separate context — what a poll would see.</summary>
+    private sealed class RowReadingHub(PostgresFixture fixture, Guid jobId) : IPipelineEventHub
+    {
+        public List<(string? Published, string? OnRow)> Frames { get; } = [];
+
+        public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data)
+        {
+            if (type != PipelineEventTypes.JobProgress)
+            {
+                return;
+            }
+
+            using var poll = fixture.CreateContext(new AccountContext());
+            Frames.Add((data["message"] as string, poll.SyncJobs.AsNoTracking().Single(j => j.Id == jobId).ProgressMessage));
+        }
+
+        public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
+            Guid accountId, long? lastEventId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
     }
 
     [Fact]
@@ -664,7 +754,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         // Nothing was cached: a fallback replayed for six hours is how one truncated batch became
         // 281 Cache-sourced stub exposures.
         Assert.All(items, i => Assert.False(fitCache.TryGetValue(
-            FeedPaginator.FitKey(accountId, i.TitleId, FeedPaginator.RowKeyFor(i.Row, i.AnchorTitleId)), out _)));
+            FeedPaginator.FitKey(((ISearchAgent)agent).CacheSalt(ApiUsagePurpose.RerankFeed), accountId, i.TitleId, FeedPaginator.RowKeyFor(i.Row, i.AnchorTitleId)), out _)));
 
         var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
         Assert.NotEmpty(exposures);
@@ -973,7 +1063,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     private async Task RunBuildAsync(
-        Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null)
+        Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null,
+        IPipelineEventHub? events = null, Guid? persistedJobId = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -1010,20 +1101,22 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
             new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
             fitCache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
-            new NoopEventHub(),
+            events ?? new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
-        await handler.ExecuteAsync(
-            new SyncJob
+        // A persisted job is read through the handler's own context, as the runner hands it over.
+        var job = persistedJobId is { } jobId
+            ? await db.SyncJobs.SingleAsync(j => j.Id == jobId)
+            : new SyncJob
             {
                 Id = Guid.NewGuid(),
                 AccountId = accountId,
                 Kind = JobKind.BuildFeed,
                 EnqueuedAt = DateTime.UtcNow,
                 TriggerReason = triggerReason,
-            },
-            CancellationToken.None);
+            };
+        await handler.ExecuteAsync(job, CancellationToken.None);
     }
 
     private async Task<Guid> SeedAccountAsync()

@@ -15,7 +15,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-default gap-2 select-none items-center rounded-sm px-2 py-1.5 text-sm text-fa-frost",
+      "flex cursor-default gap-2 select-none items-center coarse:min-h-11 rounded-sm px-2 py-1.5 text-sm text-fa-frost",
       "outline-none focus:bg-fa-glass data-[state=open]:bg-fa-glass",
       inset && "pl-8",
       className
@@ -80,7 +80,7 @@ const DropdownMenuItem = React.forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-fa-frost",
+      "relative flex cursor-default select-none items-center coarse:min-h-11 gap-2 rounded-sm px-2 py-1.5 text-sm text-fa-frost",
       "outline-none transition-colors focus:bg-fa-glass focus:text-fa-frost-bright",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       inset && "pl-8",
@@ -98,7 +98,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
   <DropdownMenuPrimitive.CheckboxItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm text-fa-frost",
+      "relative flex cursor-default select-none items-center coarse:min-h-11 rounded-sm py-1.5 pl-8 pr-2 text-sm text-fa-frost",
       "outline-none transition-colors focus:bg-fa-glass focus:text-fa-frost-bright",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
@@ -123,7 +123,7 @@ const DropdownMenuRadioItem = React.forwardRef<
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm text-fa-frost",
+      "relative flex cursor-default select-none items-center coarse:min-h-11 rounded-sm py-1.5 pl-8 pr-2 text-sm text-fa-frost",
       "outline-none transition-colors focus:bg-fa-glass focus:text-fa-frost-bright",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className

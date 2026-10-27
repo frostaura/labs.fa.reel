@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubAskReel, stubEventSource } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * Ask Reel's rendering, measured rather than described.
@@ -101,6 +102,9 @@ async function boot(
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
   await mockJson(page, "**/api/settings/filters", opts.filters ?? FILTERS);
+  // The Conditions editor the strip opens asks for its genre chips and its cost meter (WS-10B CR-2).
+  await mockFilterChips(page);
+  await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
   await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
   await mockJson(page, "**/api/feed/continue-watching", []);
   const server = opts.server;

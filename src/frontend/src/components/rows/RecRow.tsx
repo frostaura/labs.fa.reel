@@ -28,7 +28,7 @@ interface Props {
 /** A skeleton poster card trailing the rail while the next page resolves. */
 function ShimmerCard() {
   return (
-    <div className="snap-start w-44 sm:w-48 shrink-0" aria-hidden data-testid="rail-skeleton">
+    <div className="snap-start w-card shrink-0" aria-hidden data-testid="rail-skeleton">
       <div className="reel-poster reel-shimmer" />
     </div>
   );
@@ -69,12 +69,12 @@ export default function RecRow({
             <span className="fa-status-orb bg-fa-frost" aria-hidden />
             <span className="fa-section-title text-sm">{title}</span>
           </span>
-          <span className="fa-caption text-fa-frost-dim">more in this genre →</span>
+          <span className="fa-caption text-3">more in this genre →</span>
         </div>
       ) : caption ? (
         <div className="space-y-1">
           <h2 className="fa-section-title text-base">{title}</h2>
-          <p className="fa-caption text-fa-frost-dim" data-testid="rail-caption">
+          <p className="fa-caption text-3" data-testid="rail-caption">
             {caption}
           </p>
         </div>
@@ -82,9 +82,12 @@ export default function RecRow({
         <h2 className="fa-section-title text-base">{title}</h2>
       )}
 
+      {/* Bleeds through the gutter to the edge of whatever it sits in (WS-9, O-9): the first card
+          lines up with the heading, the row scrolls out to the edge, the fades sit in the gutter. */}
       <FadeScrollRow
+        bleed
         onNearEnd={loadMore}
-        className="flex gap-4 overflow-x-auto snap-x pb-2 -mx-1 px-1 [scrollbar-width:thin]"
+        className="flex gap-4 overflow-x-auto snap-x pb-2 [scrollbar-width:thin]"
       >
         {items.map((card) => (
           <div key={card.titleId} className="snap-start">

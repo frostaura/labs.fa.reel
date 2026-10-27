@@ -514,6 +514,58 @@ public class LensPipelineTests(PostgresFixture fixture)
         NullLogger<LensService>.Instance);
 
     [Fact]
+    public async Task A_name_the_overview_or_a_credited_character_gives_the_writer_is_not_an_invented_person()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Slot run, 2026-10-26: a lens on Glass named the overview's David Dunn, the catalogue also
+        // holds a real person called David Dunn, and the note was refused as an invented credit.
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Glass", 2019);
+        // A capitalised nonce word, so each run's names are unique and still read as one proper noun.
+        var suffix = "Q" + new string(Guid.NewGuid().ToString("N")[..6].Select(c => (char)('a' + (c % 26))).ToArray());
+        string Name(string person) => $"{person} {suffix}";
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            var title = await seed.Titles.SingleAsync(t => t.Id == titleId);
+            title.Overview = $"{Name("David Dunn")} pursues Kevin Crumb, a man with twenty-four personalities.";
+            Person PersonNamed(string name) => new() { Id = Guid.NewGuid(), TmdbId = Random.Shared.Next(1, int.MaxValue), Name = name };
+            var actor = PersonNamed(Name("Samuel Jackson"));
+            seed.Persons.AddRange(PersonNamed(Name("David Dunn")), PersonNamed(Name("Elijah Price")), PersonNamed(Name("Denis Villeneuve")), actor);
+            seed.TitleCredits.Add(new TitleCredit
+            {
+                Id = Guid.NewGuid(),
+                TitleId = titleId,
+                PersonId = actor.Id,
+                Role = CreditRole.Actor,
+                CastOrder = 0,
+                CharacterName = Name("Elijah Price"),
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var built = await new LensInputBuilder(db, new RatingCalibrationService(db, deps.Cache)).BuildAsync(accountId, [titleId], default);
+        var credited = built.CreditedNames[titleId];
+        var verifier = new LensVerifier(db);
+
+        var given = new LensNote(
+            $"You get a tense clash: {Name("David Dunn")} hunts a volatile target while {Name("Elijah Price")} pulls the strings.",
+            "Give this an evening if you want a slow-burn superhero puzzle.", null, [], "tense", "tonight-alone");
+        Assert.Null((await verifier.VerifyAsync(accountId, "Glass", given, credited, default)).Reason);
+
+        // A real person the writer was never given is still an invented credit.
+        var invented = given with { Lens = $"You get the patience of {Name("Denis Villeneuve")} in a comic-book frame." };
+        Assert.StartsWith(
+            LensRejectionReasons.InventedPerson,
+            (await verifier.VerifyAsync(accountId, "Glass", invented, credited, default)).Reason);
+    }
+
+    [Fact]
     public async Task A_failed_generation_is_negatively_cached_for_six_hours_and_then_tried_again()
     {
         if (!fixture.Available)
@@ -618,6 +670,53 @@ public class LensPipelineTests(PostgresFixture fixture)
         Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, other, hash, default)).Source);
         var fresh = await deps.Lens.ResolveAsync(accountId, titleId, hash, default);
         Assert.Equal(LensService.RequestOutcome.Current, await deps.Lens.RequestAsync(accountId, titleId, hash, fresh, default));
+    }
+
+    [Fact]
+    public async Task A_pass_an_open_queued_writes_the_opened_titles_only_unless_a_build_landed_since()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Task 7's acceptance, "three opens of an uncached title add at most 1 ledger call", failed
+        // on the slot: the open's pass also wrote the day's whole selection, ten paid calls, because
+        // that selection was cold. The day's titles are the Fresh build's pass to write; an open's
+        // pass writes what was opened — unless a Fresh build landed after it was queued, whose own
+        // enqueue the one-per-account index then absorbed into it.
+        var accountId = await SeedAccountAsync();
+        await SeedSnapshotAsync(accountId, heroCount: 3, rails: 1, perRail: 3, generatedAt: DateTime.UtcNow.AddHours(-1));
+        var opened = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var handler = new PersonaliseTitlesJobHandler(
+            db, deps.Features, deps.Facts, deps.Lens, NullLogger<PersonaliseTitlesJobHandler>.Instance);
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+        var none = new ResolvedLens(null, LensSource.None, hash, null);
+
+        for (var open = 0; open < 3; open++)
+        {
+            Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, opened, hash, none, default));
+        }
+
+        var job = await db.SyncJobs.SingleAsync(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles);
+        await handler.ExecuteAsync(job, CancellationToken.None);
+        await CompleteAsync(db, job);
+        Assert.Equal([opened], await WrittenAsync(db, accountId));
+
+        // A Fresh build lands after the next open queued its pass: the pass now carries the day.
+        var second = await SeedTitleAsync("Sicario", 2015);
+        Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, second, hash, none, default));
+        var job2 = await db.SyncJobs.SingleAsync(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles && j.Status == JobStatus.Pending);
+        await db.FeedSnapshots.Where(x => x.AccountId == accountId)
+            .ExecuteUpdateAsync(x => x.SetProperty(f => f.Status, SnapshotStatus.Superseded));
+        await SeedSnapshotAsync(accountId, heroCount: 2, rails: 0, perRail: 0, generatedAt: job2.EnqueuedAt.AddSeconds(1));
+        await handler.ExecuteAsync(job2, CancellationToken.None);
+        await CompleteAsync(db, job2);
+        var written = await WrittenAsync(db, accountId);
+        Assert.Equal(4, written.Count); // the two opened titles and the new snapshot's two heroes
+        Assert.Contains(second, written);
     }
 
     [Fact]
@@ -1184,15 +1283,22 @@ public class LensPipelineTests(PostgresFixture fixture)
         return title.Id;
     }
 
+    private static async Task<List<Guid>> WrittenAsync(ReelDbContext db, Guid accountId) =>
+        await db.TitleLensCopies
+            .Where(c => c.AccountId == accountId && c.Status == LensStatus.Done)
+            .Select(c => c.TitleId)
+            .Distinct()
+            .ToListAsync();
+
     /// <summary>An Active snapshot with a hero and the requested rails, so selection has shape to read.</summary>
-    private async Task SeedSnapshotAsync(Guid accountId, int heroCount, int rails, int perRail)
+    private async Task SeedSnapshotAsync(Guid accountId, int heroCount, int rails, int perRail, DateTime? generatedAt = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var snapshot = new FeedSnapshot
         {
             Id = Guid.NewGuid(),
             AccountId = accountId,
-            GeneratedAt = DateTime.UtcNow,
+            GeneratedAt = generatedAt ?? DateTime.UtcNow,
             Status = SnapshotStatus.Active,
         };
         db.FeedSnapshots.Add(snapshot);

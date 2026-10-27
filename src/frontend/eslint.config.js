@@ -66,6 +66,9 @@ const MIGRATED = [
   "src/main.tsx",
   "src/components/{Layout,Footer,MobileTabBar,RealtimeSync,RequireAuth,RequireFounder,SyncStatusPill,VerdictToast,FadeScrollRow,ErrorBoundary,OfflineBanner,UpdatePrompt,SignOutCleanup,NavigationGuard}.tsx",
   "src/components/search/UndoToast.tsx",
+  // WS-10A's surfaces, migrated in trust-v1 wave B (design ratchet at zero on every 10A file).
+  "src/components/{rec,rows,saved,title}/**/*.{ts,tsx}",
+  "src/pages/{Home,TitleDetail,Person,Saved}.tsx",
 ];
 
 export default tseslint.config(

@@ -318,7 +318,7 @@ test.describe("saved queue", () => {
  * the "Nothing in the queue yet" empty state.
  */
 test.describe("saved states", () => {
-  async function serveSaved(page: Page, items: unknown[]) {
+  async function serveSaved(page: Page, items: unknown[], extra: Record<string, unknown> = {}) {
     await mockJson(page, "**/api/saved", {
       managedListUrl: "https://trakt.tv/lists/42",
       sort: "tonight",
@@ -326,6 +326,7 @@ test.describe("saved states", () => {
       expectedAbsoluteError: 1.9,
       unscoredRemaining: 0,
       items,
+      ...extra,
     });
   }
 
@@ -403,5 +404,26 @@ test.describe("saved states", () => {
     await page.goto("/saved");
     await expect(page.getByTestId("saved-empty")).toBeVisible();
     await expect(page.getByTestId("saved-error")).toHaveCount(0);
+  });
+
+  // WS-4: Saved holds out what the conditions exclude and reports how many. Nothing vanishes
+  // unexplained, and a shelf of held-out saves never reads as empty.
+  test("saves the conditions hold out are counted, with the way to change them one tap away", async ({ page }) => {
+    await bootSaved(page);
+    await mockJson(page, "**/api/settings/filters", { excludeGenres: ["horror"], languages: ["en"] });
+    await mockJson(page, "**/api/search/filter-chips", { minTitles: 50, chips: [] });
+    await serveSaved(page, shelf(["onList"], [true]), { heldOutByRules: 2 });
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-held-out")).toContainText("2 saves are hidden by your conditions.");
+    await page.getByTestId("saved-held-out-change").click();
+    await expect(page.getByTestId("conditions-editor")).toBeVisible();
+  });
+
+  test("a shelf whose every save is held out says so instead of claiming it is empty", async ({ page }) => {
+    await bootSaved(page);
+    await serveSaved(page, [], { heldOutByRules: 3 });
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-all-held-out")).toContainText("All 3 of your saves are hidden by your conditions.");
+    await expect(page.getByTestId("saved-empty")).toHaveCount(0);
   });
 });

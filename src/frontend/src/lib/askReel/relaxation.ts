@@ -16,9 +16,13 @@ import type { AskKnockout } from "../askReelStream";
 export function ruleTarget(knockout: Pick<AskKnockout, "kind" | "value">): string {
   const value = knockout.value.trim().toLowerCase();
   switch (knockout.kind) {
+    // The chip's own toggle for the rule — the exclude mark for an exclusion, the require mark for
+    // a requirement — so one press from where focus lands turns it off. (Not the chip: it is a
+    // `role="group"` that cannot take focus, so landing on it left focus on the dialog's close.)
     case "ExcludeGenre":
+      return value ? `[data-testid="genre-${cssEscape(value)}-exclude"]` : EDITOR;
     case "IncludeGenre":
-      return value ? `[data-testid="genre-${cssEscape(value)}"]` : EDITOR;
+      return value ? `[data-testid="genre-${cssEscape(value)}-include"]` : EDITOR;
     case "MinPredictedRating":
       return '[data-testid="min-rating-slider"]';
     case "MinCrowdRating":

@@ -563,7 +563,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
     /// <summary>
     /// IREV2-SYS-02 wired through the turn (WS-1 CR-1): a degraded reading replies with the copy for
-    /// ITS cause — a spent allowance names the midnight-UTC reset, a 402 names the empty account, a 401
+    /// ITS cause — a spent allowance names the reset at the account's midnight, a 402 names the empty account, a 401
     /// the rejected key — never "try again in a moment", and the cause rides as its own
     /// <c>plan-cause:</c> token beside <c>plan</c>, so history still reads the turn as plan-failed.
     /// </summary>
@@ -714,13 +714,15 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     // ── Round 1 (R1-01, R1-02, R1-04, R1-09, R1-10) ─────────────────────────────────────────────
 
     /// <summary>
-    /// R1-01: a card nobody judged is never presented as a match the bar held back. Under a bar no
-    /// card clears, the judged matches go to the floor tray and are named under the bar; the cards
-    /// the judge skipped — a skipped entry in an answered batch and a whole failed batch alike — go
-    /// to the unchecked tray, are counted as unchecked, and raise the missing-verdict flag.
+    /// R1-01 and XM-06: a card nobody judged is never presented as a MATCH the bar held back, and the
+    /// bar binds it all the same. Under a bar no card clears, the judged matches go to the floor tray
+    /// and are named under the bar; the cards the judge skipped — a skipped entry in an answered batch
+    /// and a whole failed batch alike — go to the floor tray too, with no verdict, are counted in the
+    /// reply as unchecked (never named), and raise the missing-verdict flag. The unchecked tray holds
+    /// only unchecked cards that clear the bar, so none of it is under the bar.
     /// </summary>
     [Fact]
-    public async Task An_unjudged_card_under_the_bar_is_unchecked_never_held_back_as_a_match()
+    public async Task An_unjudged_card_under_the_bar_is_held_back_by_it_but_never_named_as_a_match()
     {
         if (!Fixture.Available)
         {
@@ -742,14 +744,15 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         var done = Assert.Single(events, e => e.Event == "done").Data;
         Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
         var held = Names(done.GetProperty("belowFloor"));
-        var notChecked = Names(done.GetProperty("unchecked"));
-        Assert.Equal(2, held.Count);
-        Assert.All(held, n => Assert.StartsWith("Gate Yes", n, StringComparison.Ordinal));
-        Assert.All(done.GetProperty("belowFloor").EnumerateArray(), c => Assert.Equal("yes", c.GetProperty("satisfies").GetString()));
-        Assert.Equal(3, notChecked.Count);
-        Assert.All(notChecked, n => Assert.StartsWith("Gate Fail", n, StringComparison.Ordinal));
+        Assert.Empty(done.GetProperty("unchecked").EnumerateArray());
+        Assert.Equal(5, held.Count);
+        Assert.All(held.Take(2), n => Assert.StartsWith("Gate Yes", n, StringComparison.Ordinal));
+        Assert.All(held.Skip(2), n => Assert.StartsWith("Gate Fail", n, StringComparison.Ordinal));
         Assert.Equal(
-            "3 not checked against what you asked — shown below · 2 held back by your 9.9 bar — shown below",
+            ["yes", "yes", null, null, null],
+            done.GetProperty("belowFloor").EnumerateArray().Select(c => c.GetProperty("satisfies").GetString()));
+        Assert.Equal(
+            "5 held back by your 9.9 bar, 3 of them not checked against what you asked — shown below",
             done.GetProperty("reason").GetString());
         // Which batch the skipped titles fall in follows the similarity order; the missing count does not.
         Assert.Contains("judge-missing:3/5", done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
@@ -758,11 +761,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Contains("3 titles I couldn't check against your request are below", outcome.AssistantText, StringComparison.Ordinal);
         Assert.DoesNotContain("Gate Fail", outcome.AssistantText, StringComparison.Ordinal);
         Assert.Equal(2, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor && c.Satisfies == "yes"));
-        Assert.Equal(3, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.Unchecked && c.Satisfies is null));
-        // Stored in the order the screen renders the trays: the floor tray, then the unchecked tray.
-        Assert.Equal(
-            [SearchTurnCardTier.BelowFloor, SearchTurnCardTier.BelowFloor, SearchTurnCardTier.Unchecked, SearchTurnCardTier.Unchecked, SearchTurnCardTier.Unchecked],
-            outcome.Cards.OrderBy(c => c.Rank).Select(c => c.Tier));
+        Assert.Equal(3, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor && c.Satisfies is null));
+        Assert.DoesNotContain(outcome.Cards, c => c.Tier == SearchTurnCardTier.Unchecked);
     }
 
     /// <summary>
@@ -944,6 +944,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     /// the media the message names and the account's conditions, with the bar visible and counted,
     /// honest copy, the no-model flag and its stage timings. The old path streamed American Ninja
     /// Warrior (a reality series) into the grid for "ninja movies", with no reply, flag or timings.
+    /// XM-06: the matches the bar holds back are in the floor tray, not the unchecked one.
     /// </summary>
     [Theory]
     [InlineData("{0} movies", "9.9", 2, 2)]
@@ -980,7 +981,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
         Assert.Empty(done.GetProperty("results").EnumerateArray());
         Assert.DoesNotContain(events, e => e.Event == "candidate");
-        Assert.Equal(shown, done.GetProperty("unchecked").GetArrayLength());
+        Assert.Equal(shown - underBar, done.GetProperty("unchecked").GetArrayLength());
+        Assert.Equal(underBar, done.GetProperty("belowFloor").GetArrayLength());
         Assert.Equal(["no-model"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
         Assert.True(Assert.Single(events, e => e.Event == "assistant-message").Data.GetProperty("degraded").GetBoolean());
         Assert.StartsWith("Ask Reel has no language model connected right now", outcome.AssistantText, StringComparison.Ordinal);
@@ -997,7 +999,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
         Assert.Equal(SearchTurnDegraded.NoModel, outcome.DegradedFlags);
         Assert.Null(outcome.ReasoningEffort);
-        Assert.All(outcome.Cards, c => Assert.Equal(SearchTurnCardTier.Unchecked, c.Tier));
+        Assert.Equal(shown - underBar, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.Unchecked));
+        Assert.Equal(underBar, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor));
         using var timings = JsonDocument.Parse(outcome.StageTimingsJson!);
         Assert.True(timings.RootElement.TryGetProperty(AskStageTimings.Discover, out _));
         Assert.True(timings.RootElement.TryGetProperty(AskStageTimings.Score, out _));
@@ -1492,7 +1495,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            new LexicalSearchService(eligibility),
+            Application.Search.Retrieval.KeylessTextSearch.Offline(db, eligibility),
             new CatalogWorkCoordinator(),
             cache ?? new MemoryCache(new MemoryCacheOptions()),
             NullLogger<LiveSearchExpansionService>.Instance,

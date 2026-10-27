@@ -39,7 +39,7 @@ public static class PlanSanitizer
         var negations = delta.Negations.Where(n => Said(n) && !Standing(n)).ToList();
         var named = delta.People.Select(p => p.Name).Concat(delta.ReferenceNames).ToList();
         var concepts = delta.Concepts
-            .Where(c => !AskReelIntentSanitizer.RejectedKeyword(c, message))
+            .Where(c => !Rejected(c, message))
             .Where(c => !named.Any(n => string.Equals(n, c, StringComparison.OrdinalIgnoreCase)))
             // A concept the same message also negates is resolved by where it stands in the message:
             // the latest mention decides (the keyless reading's rule, applied to the model's output).
@@ -47,14 +47,43 @@ public static class PlanSanitizer
             .ToList();
         negations = negations.Where(n => !concepts.Any(c => NegationTerms.EqualsAnyForm(c, n))).ToList();
 
+        // The user's own media word is never lost to a plan that left media unset: "how many ninja
+        // movies are left?" was counted over movies AND shows. Only a message naming exactly one.
+        var mediaNamed = Retrieval.MediaScopes.From(AskReelCarry.MediaNamed(message));
+        var media = delta.Media ?? (mediaNamed == Retrieval.MediaScope.Any ? null : mediaNamed);
+
         var clarify = state.ClarifiedOnce ? null : plan.ClarifyQuestion;
         return plan with
         {
             References = references,
-            Delta = delta with { Concepts = concepts, Negations = negations },
+            Delta = delta with { Concepts = concepts, Negations = negations, Media = media },
             ClarifyQuestion = clarify,
             ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
         };
+    }
+
+    /// <summary>The words a message of at most this many is allowed to be its own topic in.</summary>
+    internal const int ShortTopicWords = 4;
+
+    /// <summary>
+    /// A concept is rejected by the v1 keyword rule (a negation cue, filler, a pointer, the whole
+    /// message echoed) — except that a SHORT message which is exactly its topic keeps it: "survival at
+    /// sea" is the request, not an echo of one. The echo rule was written for a sentence searched as a
+    /// keyword ("something brooding and futuristic for tonight"); applied to a three-word topic it
+    /// emptied the request, and an empty request judged sixteen random titles to a none-found.
+    /// </summary>
+    private static bool Rejected(string concept, string message)
+    {
+        if (!AskReelIntentSanitizer.RejectedKeyword(concept, message))
+        {
+            return false;
+        }
+
+        var words = AskReelIntentSanitizer.Words(concept);
+        var whole = AskReelIntentSanitizer.Words(message);
+        var isItsOwnTopic = whole.Count <= ShortTopicWords && words.SequenceEqual(whole, StringComparer.Ordinal);
+        // Every other reason still applies: judged as if no message were there to echo.
+        return !isItsOwnTopic || AskReelIntentSanitizer.RejectedKeyword(concept, string.Empty);
     }
 
     /// <summary>True when the keyless reading of <paramref name="message"/> ends with <paramref name="concept"/> asked FOR.</summary>

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AskCard, DoneData } from "../askReelStream";
-import { chatReducer, gridRowOf, initialChatState, type ChatAction } from "./reducer";
-import { refineChips } from "./copy";
+import { AskStreamError } from "../askReelStream";
+import { chatReducer, failureFor, gridRowOf, initialChatState, type ChatAction } from "./reducer";
+import { failureCopy, refineChips, waitPhrase } from "./copy";
 import { transcriptOf, type ConversationPayload } from "./transcript";
 
 /**
@@ -262,5 +263,54 @@ describe("refineChips — built from the reading and the account's conditions", 
       .toEqual([]);
     expect(refineChips({ concepts: [], hasCards: false, excludedGenres: ["Comedy"], minYear: null, maxYear: null }))
       .toEqual(["More intense"]);
+  });
+});
+
+describe("a refused or failed turn says why (WS-8 CR-5)", () => {
+  it("maps each ask_rate window to a rate failure carrying the wait", () => {
+    expect(failureFor(new AskStreamError(429, "ask_rate_minute", undefined, 41))).toEqual({
+      type: "error", reason: "rate", rateLimit: { window: "minute", retryAfterSeconds: 41 },
+    });
+    expect(failureFor(new AskStreamError(429, "ask_rate_day", undefined, 7200))).toMatchObject({ rateLimit: { window: "day" } });
+    // A 429 with no ask_rate code is still a limit, just not one the page can name.
+    expect(failureFor(new AskStreamError(429, null, undefined, null))).toEqual({
+      type: "error", reason: "rate", rateLimit: { window: null, retryAfterSeconds: null },
+    });
+    // …and the 409 family is untouched: the limiter's in-flight refusal is still "in progress".
+    expect(failureFor(new AskStreamError(409, "turn_in_progress", undefined, 2))).toEqual({ type: "turnInProgress" });
+  });
+
+  it("names the limit and the wait instead of a crash, and keeps the retry", () => {
+    const state = chatReducer(initialChatState, failureFor(new AskStreamError(429, "ask_rate_minute", undefined, 41)) as ChatAction);
+    expect(state.status).toBe("error");
+    expect(state.errorReason).toBe("rate");
+    const copy = failureCopy(state.errorReason, state.rateLimit);
+    expect(copy.title).toBe("That’s the most questions Reel answers in a minute");
+    expect(copy.detail).toBe("You can ask again in 41 seconds. Nothing was lost — your conversation is as you left it.");
+    expect(copy.inline).toBe("That’s the most questions Reel answers in a minute — you can ask again in 41 seconds.");
+    expect(copy.retryable).toBe(true);
+    expect(failureCopy("rate", { window: "hour", retryAfterSeconds: 1500 }).title).toBe("That’s the most questions Reel answers in an hour");
+    expect(failureCopy("rate", { window: null, retryAfterSeconds: null }).inline).toBe("Reel is answering too many of your questions at once — give it a moment.");
+  });
+
+  it("never offers a retry that cannot work, and never blames the engine for it", () => {
+    expect(failureCopy("session").retryable).toBe(false);
+    expect(failureCopy("request").retryable).toBe(false);
+    expect(failureCopy("timeout").retryable).toBe(true);
+    for (const reason of ["rate", "session", "timeout", "request"] as const) {
+      expect(failureCopy(reason).detail).not.toMatch(/search engine/);
+    }
+    expect(failureCopy(null).title).toBe("Search hit a snag");
+  });
+
+  it("says the wait in the reader's units", () => {
+    expect(waitPhrase(null)).toBeNull();
+    expect(waitPhrase(0)).toBeNull();
+    expect(waitPhrase(1)).toBe("in 1 second");
+    expect(waitPhrase(59)).toBe("in 59 seconds");
+    expect(waitPhrase(60)).toBe("in about a minute");
+    expect(waitPhrase(61)).toBe("in about 2 minutes");
+    expect(waitPhrase(3600)).toBe("in about an hour");
+    expect(waitPhrase(5 * 3600 + 1)).toBe("in about 6 hours");
   });
 });

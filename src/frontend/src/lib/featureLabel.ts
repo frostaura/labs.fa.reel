@@ -63,6 +63,10 @@ export function featureLabel(feature: string): string {
     hasAttributesEra: "setting data",
     // synthetic serving-time entries (not model features)
     dislikedSimilarity: "similar to titles you passed on",
+    // the title page's walk (WS-5's PredictionWaterfall): the steps after the model's own features
+    otherFeatures: "everything else",
+    recentRatingsCorrection: "your recent ratings",
+    calibrationToYourScale: "fitted to how you rate",
     // Ranking-time entries: these explain where the title SAT, not what the model predicted.
     tastePriorNoHistoryGenre: "a genre you don't watch",
     tastePriorGenreAffinity: "how you rate this genre",

@@ -544,3 +544,16 @@ test.describe("billing visibility (KILL-10)", () => {
     await expect(page.getByTestId("checkout-failure")).toHaveText("Billing isn't switched on yet. Nothing was charged.");
   });
 });
+
+test("/settings#region — where-to-watch's edit link — lands on the region card, focused", async ({ page }) => {
+  await boot(page);
+  await routeFilters(page, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FILTERS) }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings#region");
+
+  const card = page.locator("#region");
+  await expect(card).toBeFocused();
+  await expect(card).toBeInViewport();
+  // Focus is on the card, not the combobox: focusing the picker would pop its list open unasked.
+  await expect(page.getByTestId("region-options")).toHaveCount(0);
+});

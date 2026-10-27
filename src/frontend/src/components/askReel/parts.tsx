@@ -3,6 +3,7 @@ import { AlertTriangle, RotateCcw } from "lucide-react";
 import PosterImage from "../rec/PosterImage";
 import ScoreBadges from "../rec/ScoreBadges";
 import CardQuickActions from "../rec/CardQuickActions";
+import PillButton from "./PillButton";
 import { listPhrase } from "../../lib/askReel/copy";
 import type { AskCard } from "../../lib/askReelStream";
 
@@ -112,15 +113,9 @@ export function CardSkeleton() {
  */
 export function RetryButton({ onRetry, disabled, label = "Try again" }: { onRetry: () => void; disabled: boolean; label?: string }) {
   return (
-    <button
-      type="button"
-      onClick={onRetry}
-      disabled={disabled}
-      data-testid="askreel-retry"
-      className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
-    >
-      <RotateCcw className="h-3.5 w-3.5" /> {label}
-    </button>
+    <PillButton tone="strong" onClick={onRetry} disabled={disabled} data-testid="askreel-retry">
+      <RotateCcw className="h-3.5 w-3.5" aria-hidden /> {label}
+    </PillButton>
   );
 }
 

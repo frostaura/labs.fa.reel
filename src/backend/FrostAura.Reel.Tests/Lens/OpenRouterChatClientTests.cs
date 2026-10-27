@@ -635,25 +635,37 @@ public class OpenRouterChatClientTests
 
         var judge = Assert.Single(metrics.Snapshot(), h => h.Purpose == ApiUsagePurpose.AskJudge);
         Assert.Equal(3, judge.Calls);
+        Assert.Equal(2, judge.Answered);
         Assert.Equal(2, judge.LengthCalls);
+        Assert.Equal(1, judge.Truncated);
         Assert.Equal(1, judge.Fallbacks);
         Assert.Equal(2, judge.Retries);
+        Assert.Equal(0, judge.Stops);
+        Assert.Equal(
+            new Dictionary<string, long> { [LlmCallOutcome.Answered] = 2, [LlmCallOutcome.Truncated] = 1 },
+            judge.Outcomes);
         Assert.Equal(3, judge.WindowCalls);
         // Under 50 calls the alarm cannot judge a rate.
         Assert.False(judge.Alarming);
     }
 
     [Fact]
-    public async Task A_call_refused_before_sending_is_not_a_call()
+    public async Task A_call_refused_before_sending_is_a_stop_not_a_call()
     {
-        // A spent allowance is a stop, not a model failure: counting it would raise the fallback
-        // alarm every evening the budget runs out.
+        // A spent allowance is a stop, not a model failure: counting it as a call would raise the
+        // fallback alarm every evening the budget runs out. It is still in the one tally (CR-1),
+        // under its outcome code, so the metrics report can show how often a purpose was refused.
         var metrics = new LlmCallMetrics();
 
         await Client(new Script(Ok("{}")), gate: new RefusingGate(), metrics: metrics)
             .CompleteAsync(Request(ApiUsagePurpose.AskPlan, Schema), default);
 
-        Assert.DoesNotContain(metrics.Snapshot(), h => h.Purpose == ApiUsagePurpose.AskPlan);
+        var plan = Assert.Single(metrics.Snapshot(), h => h.Purpose == ApiUsagePurpose.AskPlan);
+        Assert.Equal(0, plan.Calls);
+        Assert.Equal(0, plan.Fallbacks);
+        Assert.Equal(0, plan.WindowCalls);
+        Assert.Equal(1, plan.Stops);
+        Assert.Equal(new Dictionary<string, long> { [LlmCallOutcome.BudgetSpent] = 1 }, plan.Outcomes);
     }
 
     [Theory]
@@ -666,7 +678,7 @@ public class OpenRouterChatClientTests
         var metrics = new LlmCallMetrics();
         for (var i = 0; i < calls; i++)
         {
-            metrics.Record(ApiUsagePurpose.RerankFeed, lengthFinishes: 0, attempts: 1, fallback: i < failuresFirst);
+            metrics.Record(ApiUsagePurpose.RerankFeed, i < failuresFirst ? LlmCallOutcome.TimedOut : LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
         }
 
         var feed = Assert.Single(metrics.Snapshot());
@@ -680,7 +692,7 @@ public class OpenRouterChatClientTests
         var metrics = new LlmCallMetrics();
         for (var i = 0; i < LlmCallMetrics.Window; i++)
         {
-            metrics.Record(ApiUsagePurpose.Lens, lengthFinishes: i < 2 ? 1 : 0, attempts: i < 2 ? 2 : 1, fallback: false);
+            metrics.Record(ApiUsagePurpose.Lens, LlmCallOutcome.Answered, lengthFinishes: i < 2 ? 1 : 0, attempts: i < 2 ? 2 : 1);
         }
 
         var lens = Assert.Single(metrics.Snapshot());

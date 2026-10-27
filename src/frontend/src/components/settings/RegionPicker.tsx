@@ -1,6 +1,7 @@
 import { useId, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { filterRegions, regionOptions } from "./regions";
+import { COARSE_TAP } from "../../lib/tapTarget";
 
 /** How many matches the list draws at once; typing narrows it, so the cap is never a wall. */
 const MAX_SHOWN = 60;
@@ -88,7 +89,7 @@ export default function RegionPicker({
             setOpen(true);
           }}
           onKeyDown={onKeyDown}
-          className="fa-input w-full pr-9"
+          className={`fa-input w-full pr-9 ${COARSE_TAP}`}
           data-testid="region-select"
         />
         <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fa-frost-dim" aria-hidden />

@@ -49,7 +49,12 @@
   "httpErrors": 0,
   "surfacesWithoutData": [],
   "complete": true,
+  "uncitableWhyLines": null,
+  "citableChecked": null,
+  "citableUnscored": null,
   "copyClaimsChecked": null,
+  "falseCopyClaims": null,
+  "unregisteredCopyClaims": null,
   "randomCosineP90": 0.383448415008099,
   "exposuresWritten": 279,
   "costUsd": 0,
@@ -82,7 +87,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "feed-row": {
    "blocks": 4,
@@ -107,7 +115,10 @@
    "anchored": 30,
    "evidencePass": 10,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "more": {
    "blocks": 6,
@@ -131,7 +142,10 @@
    "anchored": 36,
    "evidencePass": 7,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "genre-rail": {
    "blocks": 8,
@@ -176,7 +190,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "similar": {
    "blocks": 5,
@@ -200,7 +217,10 @@
    "anchored": 60,
    "evidencePass": 59,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "digest": {
    "blocks": 1,
@@ -225,7 +245,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "saved": {
    "blocks": 1,
@@ -268,7 +291,10 @@
     "A Good Woman Is Hard to Find (saved)",
     "Pinocchio: Unstrung (saved)",
     "Hidden (saved)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "watch-tonight": {
    "blocks": 1,
@@ -292,7 +318,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "person": {
    "blocks": 5,
@@ -335,7 +364,10 @@
     "Submergence (person:2b06c463-9cc2-4011-9b7d-9b03f54a3601)",
     "Starter for 10 (person:2b06c463-9cc2-4011-9b7d-9b03f54a3601)",
     "Harry Potter and the Philosopher's Stone (person:7a9caca4-42a1-433b-aef3-ec373d884b21)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "typeahead": {
    "blocks": 10,
@@ -373,7 +405,10 @@
     "Severance (typeahead:severance)",
     "Dune (typeahead:dune)",
     "Dune: Part Two (typeahead:dune)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   }
  },
  "hedges": [
@@ -381,6 +416,7 @@
   "because-you-loved:The Family Man · Where the Wild Things Are [lensClause]: Since you lean toward brisk action and adventure, this is a more inward detour: Max imagines running away from his mom by sailing to a far-off land, where Ira…",
   "because-you-loved:The Great Wall · The Dark [lensClause]: Since you favor brisk action and adventure, this is a darker, slower detour: a flesh-eating undead girl haunts the remote woods where she was murdered, then…"
  ],
+ "uncitable": [],
  "repeats": [],
  "ledger": [
   {

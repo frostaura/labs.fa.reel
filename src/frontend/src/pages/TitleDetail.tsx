@@ -38,14 +38,15 @@ import {
 } from "../components/ui/dropdown-menu";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Dialog, DialogClose, DialogOverlay, DialogPortal, DialogTitle } from "../components/ui/dialog";
+import { Button } from "../components/ui/button";
 
 /** A labelled row of person chips (Director / Writers / Cast) — each a clickable, rateable avatar. */
 function CreditRow({ label, people }: { label: string; people: CreditPerson[] }) {
   if (people.length === 0) return null;
   return (
     <div className="space-y-2">
-      <p className="fa-overline text-fa-frost-dim">{label}</p>
-      <FadeScrollRow className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
+      <p className="fa-overline text-3">{label}</p>
+      <FadeScrollRow bleed className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
         {people.map((p) => (
           <CastMemberCard key={p.personId} member={p} />
         ))}
@@ -196,26 +197,25 @@ export default function TitleDetail() {
                       failure may be a 500, a 403 or no answer at all, and how long it lasts is not
                       something this screen knows — so it says nothing it cannot back. */}
                   {failure === "not-found" && (
-                    <p className="fa-caption text-fa-frost-dim">
+                    <p className="fa-caption text-3">
                       The link may be mistyped, or the title has left TMDB&apos;s catalogue.
                     </p>
                   )}
                   <div className="flex items-center justify-center gap-2">
                     {failure === "error" && (
-                      <button
-                        type="button"
+                      <Button
                         onClick={() => void refetch()}
                         disabled={isFetching}
-                        className="fa-button min-h-11"
+                        className="min-h-11"
                         data-testid="title-retry"
                       >
-                        <RotateCw className="h-4 w-4" />
+                        <RotateCw className="h-4 w-4" aria-hidden />
                         {isFetching ? "Retrying…" : "Retry"}
-                      </button>
+                      </Button>
                     )}
-                    <button type="button" onClick={close} className="fa-button-ghost min-h-11" data-testid="title-failure-close">
+                    <Button variant="ghost" onClick={close} className="min-h-11" data-testid="title-failure-close">
                       Close
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </>
@@ -271,6 +271,7 @@ export default function TitleDetail() {
                                   predictedRating={title.prediction.predictedRating}
                                   crowdRating={title.crowdRating ?? null}
                                   crowdVotes={title.crowdVotes ?? null}
+                                  band={title.prediction.expectedAbsoluteError}
                                   size="lg"
                                 />
                               )
@@ -281,7 +282,7 @@ export default function TitleDetail() {
                               Reel predicted {title.prediction.predictedRating.toFixed(1)} for you
                             </p>
                           )}
-                          <p className="fa-caption text-fa-frost-dim">
+                          <p className="fa-caption text-3">
                             {[
                               title.year,
                               formatRuntime(title.runtimeMinutes),
@@ -298,41 +299,46 @@ export default function TitleDetail() {
                   )}
                 </div>
 
-                <div className="p-5 sm:p-6 space-y-6">
+                {/* The shell's gutter, not a padding of its own, so the rows below bleed to the sheet's
+                    edge exactly as Home's rails bleed to the page's (WS-9, O-9). */}
+                <div className="px-gutter py-5 sm:py-6 space-y-6">
                   {/* Reactions */}
                   <div className="flex items-center gap-2 flex-wrap" data-testid="reaction-bar">
                     {/* The trailer is an action like the rest, here with them — not a disc over the
                         art, where on a phone it sat on the title it was meant to sell (O-13). */}
                     {trailerKey && !trailerOpen && (
-                      <button
-                        type="button"
+                      <Button
                         onClick={() => setTrailerOpen(true)}
-                        className="fa-button min-h-11"
+                        className="min-h-11"
                         data-testid="play-trailer"
                       >
-                        <Play className="h-4 w-4" />
+                        <Play className="h-4 w-4" aria-hidden />
                         Trailer
-                      </button>
+                      </Button>
                     )}
                     <Popover open={ratePickerOpen} onOpenChange={setRatePickerOpen}>
                       <PopoverTrigger asChild>
-                        <button className={`${title.userState.userRating ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}>
-                          <Eye className="h-4 w-4" />
+                        <Button
+                          variant={title.userState.userRating ? "primary" : "default"}
+                          className="min-h-11 [@media(pointer:fine)]:min-h-0"
+                        >
+                          <Eye className="h-4 w-4" aria-hidden />
                           {title.userState.userRating ? `Seen it — you rated ${title.userState.userRating}` : "Seen it + rate"}
-                        </button>
+                        </Button>
                       </PopoverTrigger>
                       <PopoverContent align="start" className="w-auto">
-                        <p className="fa-overline text-fa-frost-dim mb-2">one tap — seen &amp; rated</p>
+                        <p className="fa-overline text-3 mb-2">one tap — seen &amp; rated</p>
                         {/* Two rows of five: ten 44 px targets in one row are wider than a phone. */}
                         <div className="grid grid-cols-5 gap-1">
                           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
-                            <button
+                            <Button
                               key={value}
                               onClick={() => {
                                 rate({ ...args, titleId: title.titleId, rating: value });
                                 setRatePickerOpen(false);
                               }}
-                              className={`h-11 w-11 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9 rounded-md border text-sm tabular-nums transition ${
+                              aria-pressed={title.userState.userRating === value}
+                              className={`h-11 w-11 p-0 font-normal [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9 rounded-md tabular-nums ${
                                 title.userState.userRating === value
                                   ? "border-fa-frost bg-fa-frost/25 text-fa-frost-bright"
                                   : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/50 hover:bg-fa-frost/15"
@@ -340,22 +346,23 @@ export default function TitleDetail() {
                               data-testid={`rate-${value}`}
                             >
                               {value}
-                            </button>
+                            </Button>
                           ))}
                           {title.userState.userRating != null && (
-                            <button
+                            <Button
+                              variant="ghost"
                               onClick={() => {
                                 unrate(args);
                                 setRatePickerOpen(false);
                               }}
-                              className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-fa-frost-dim"
+                              className="min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-3"
                               data-testid="clear-rating"
                             >
                               Clear rating
-                            </button>
+                            </Button>
                           )}
                         </div>
-                        <p className="fa-caption text-fa-frost-dim/70 mt-2">
+                        <p className="fa-caption text-3 mt-2">
                           {title.mediaType === "Movie"
                             ? "Also logs a play on your Trakt history — cleared if you remove the rating."
                             : "Ratings sync to Trakt — your episode history is never touched."}
@@ -363,29 +370,30 @@ export default function TitleDetail() {
                       </PopoverContent>
                     </Popover>
 
-                    <button
+                    <Button
+                      variant={title.userState.savedForLater ? "primary" : "default"}
                       onClick={() =>
                         title.userState.savedForLater
                           ? unsave({ ...args, titleId: title.titleId })
                           : save({ ...args, titleId: title.titleId })
                       }
-                      className={`${title.userState.savedForLater ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}
+                      className="min-h-11 [@media(pointer:fine)]:min-h-0"
                       data-testid="save-button"
                     >
-                      {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" aria-hidden /> : <Bookmark className="h-4 w-4" aria-hidden />}
                       {title.userState.savedForLater ? "Saved — on your Up Next" : "Save for later"}
-                    </button>
+                    </Button>
 
                     {title.userState.notInterested ? (
-                      <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-danger/40 text-fa-danger">
-                        <Undo2 className="h-4 w-4" /> Not interested — undo
-                      </button>
+                      <Button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-danger/40 text-fa-danger">
+                        <Undo2 className="h-4 w-4" aria-hidden /> Not interested — undo
+                      </Button>
                     ) : (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <button className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="not-interested">
-                            <EyeOff className="h-4 w-4" /> Not interested
-                          </button>
+                          <Button variant="ghost" className="min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="not-interested">
+                            <EyeOff className="h-4 w-4" aria-hidden /> Not interested
+                          </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
                           {DISLIKE_REASONS.map((reason) => (
@@ -403,13 +411,13 @@ export default function TitleDetail() {
                     {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
                     {title.mediaType === "Show" && (
                       title.userState.dropped ? (
-                        <button onClick={() => undrop({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-frost/40 text-fa-frost" data-testid="undrop">
-                          <Undo2 className="h-4 w-4" /> Dropped — undo
-                        </button>
+                        <Button onClick={() => undrop({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-frost/40 text-fa-frost" data-testid="undrop">
+                          <Undo2 className="h-4 w-4" aria-hidden /> Dropped — undo
+                        </Button>
                       ) : (
-                        <button onClick={() => markDropped({ ...args, titleId: title.titleId })} className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="drop-show">
-                          <X className="h-4 w-4" /> Drop show
-                        </button>
+                        <Button variant="ghost" onClick={() => markDropped({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="drop-show">
+                          <X className="h-4 w-4" aria-hidden /> Drop show
+                        </Button>
                       )
                     )}
                   </div>
@@ -439,10 +447,10 @@ export default function TitleDetail() {
                       (F-25), then the bars that pushed it. */}
                   {title.prediction && (waterfall || bars.length > 0) && (
                     <section className="space-y-2">
-                      <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
+                      <h2 className="fa-overline text-3">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
                       {waterfall && (
                         <ol
-                          className="fa-caption flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-fa-frost-dim max-w-2xl"
+                          className="fa-caption flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-3 max-w-2xl"
                           aria-label={`From ${waterfall.start.label} ${waterfall.start.value.toFixed(1)} to ${waterfall.end.toFixed(1)} for you`}
                           data-testid="prediction-waterfall"
                         >
@@ -477,34 +485,37 @@ export default function TitleDetail() {
                                   style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
                                 />
                               </div>
-                              <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">
-                                {contribution.value >= 0 ? "+" : ""}
-                                {contribution.value.toFixed(1)}
-                              </span>
+                              {/* No number: a bar is its push scaled to the largest one, not rating
+                                  points, and a signed decimal here read as points and contradicted
+                                  the walk above it. Length and colour carry it; the walk carries the
+                                  points. */}
+                              <span className="sr-only">{positive ? "pushed it up" : "pushed it down"}</span>
                             </>
                           );
                           // A bar with nothing verified behind it stays a plain row — no chevron
                           // that opens onto an empty panel.
                           if (!detail) {
                             return (
-                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]">
+                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]" data-testid="contribution-bar">
                                 {bar}
                               </div>
                             );
                           }
                           return (
                             <div key={contribution.feature}>
-                              <button
-                                type="button"
+                              <Button
+                                variant="ghost"
+                                data-testid="contribution-bar"
                                 onClick={() => setExpandedFeature(expanded ? null : contribution.feature)}
                                 aria-expanded={expanded}
-                                className="flex w-full items-center gap-3 rounded-md -mx-1 px-1 hover:bg-fa-frost/5 transition-colors"
+                                className="h-auto w-full justify-start gap-3 whitespace-normal rounded-md -mx-1 px-1 py-0 font-normal text-fa-frost hover:bg-fa-frost/5 hover:text-fa-frost"
                               >
                                 {bar}
                                 <ChevronDown
-                                  className={`h-3.5 w-3.5 shrink-0 text-fa-frost-dim transition-transform ${expanded ? "rotate-180" : ""}`}
+                                  className={`h-3.5 w-3.5 shrink-0 text-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+                                  aria-hidden
                                 />
-                              </button>
+                              </Button>
                               {expanded && (
                                 <div data-testid="contribution-details" className="ml-1 mt-1.5 mb-1 space-y-1.5">
                                   {detail.people?.length ? (
@@ -519,14 +530,14 @@ export default function TitleDetail() {
                                             {initials(p.name)}
                                           </span>
                                           <span className="fa-caption text-fa-frost-bright">{p.name}</span>
-                                          <span className="fa-caption text-fa-frost-dim tabular-nums">
+                                          <span className="fa-caption text-3 tabular-nums">
                                             you rate them {p.yourAverage.toFixed(1)}
                                           </span>
                                         </Link>
                                       ))}
                                     </div>
                                   ) : (
-                                    detail.note && <p className="fa-caption text-fa-frost-dim">{detail.note}</p>
+                                    detail.note && <p className="fa-caption text-3">{detail.note}</p>
                                   )}
                                 </div>
                               )}

@@ -39,7 +39,12 @@
    "digest: no cards"
   ],
   "complete": false,
+  "uncitableWhyLines": null,
+  "citableChecked": null,
+  "citableUnscored": null,
   "copyClaimsChecked": null,
+  "falseCopyClaims": null,
+  "unregisteredCopyClaims": null,
   "randomCosineP90": 0.3861180543899536,
   "exposuresWritten": 282,
   "costUsd": 0.0262145,
@@ -71,7 +76,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "feed-row": {
    "blocks": 4,
@@ -95,7 +103,10 @@
    "anchored": 30,
    "evidencePass": 16,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "more": {
    "blocks": 6,
@@ -119,7 +130,10 @@
    "anchored": 36,
    "evidencePass": 15,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "genre-rail": {
    "blocks": 8,
@@ -164,7 +178,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "similar": {
    "blocks": 5,
@@ -188,7 +205,10 @@
    "anchored": 60,
    "evidencePass": 53,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "digest": {
    "blocks": 1,
@@ -210,7 +230,10 @@
    "anchored": 0,
    "evidencePass": 0,
    "footprint": 0,
-   "footprintNames": []
+   "footprintNames": [],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "saved": {
    "blocks": 1,
@@ -253,7 +276,10 @@
     "A Good Woman Is Hard to Find (saved)",
     "Pinocchio: Unstrung (saved)",
     "Hidden (saved)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   },
   "typeahead": {
    "blocks": 10,
@@ -291,7 +317,10 @@
     "Severance (typeahead:severance)",
     "Dune: Part Two (typeahead:dune)",
     "Dune (typeahead:dune)"
-   ]
+   ],
+   "citableChecked": 0,
+   "uncitable": 0,
+   "citableUnscored": 0
   }
  },
  "hedges": [
@@ -325,6 +354,7 @@
   "genre:mystery · The Dead Girl [whyThis]: The intersecting lives around a young woman’s death create a layered mystery, but its drama-heavy tone may not land as strongly for you.",
   "genre:mystery · White Collar [whyThis]: Neal Caffrey’s cons and FBI cases bring crime-solving intrigue, though this recurring series is less suited to your film-first habits."
  ],
+ "uncitable": [],
  "repeats": [],
  "ledger": [
   {

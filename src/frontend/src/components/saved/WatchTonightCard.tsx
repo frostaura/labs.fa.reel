@@ -7,6 +7,7 @@ import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 import WhereToWatch from "../title/WhereToWatch";
 import { formatRuntime } from "../../lib/format";
 import { predictionWithBand } from "../../lib/savedQueue";
+import { Button } from "../ui/button";
 
 interface Props {
   item: SavedQueueItem;
@@ -39,16 +40,16 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
       <div className="flex items-center justify-between gap-3 mb-3">
         <h2 className="fa-overline text-fa-frost">watch tonight</h2>
         {hasNext && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={onNotTonight}
-            className="fa-button-ghost fa-overline min-h-11 [@media(pointer:fine)]:min-h-0"
+            className="h-auto min-h-11 gap-1.5 px-3 py-2 font-normal [@media(pointer:fine)]:min-h-0"
             title="Show the next candidate instead. This lasts for the session only — nothing is recorded against the title."
             data-testid="not-tonight"
           >
-            <SkipForward className="h-3.5 w-3.5" />
-            Not tonight
-          </button>
+            <SkipForward className="h-3.5 w-3.5" aria-hidden />
+            <span className="fa-overline">Not tonight</span>
+          </Button>
         )}
       </div>
 
@@ -56,9 +57,10 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
         <Link
           to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
           state={{ backgroundLocation: location }}
-          className="block w-32 shrink-0 focus:outline-none"
-          aria-label={`Open ${item.name}`}
+          className="block w-32 shrink-0 rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60"
         >
+          {/* Named by the poster (its alt, or the fallback's role="img" label): an aria-label here
+              would hide the visible initials from the name (axe label-content-name-mismatch). */}
           <PosterImage path={item.posterPath} alt={item.name} size="w342" />
         </Link>
 
@@ -70,7 +72,7 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
               </h3>
               {item.predictedRating != null && <PredictedRatingBadge rating={item.predictedRating} />}
             </div>
-            <p className="fa-caption text-fa-frost-dim">
+            <p className="fa-caption text-3">
               {[item.year, runtime].filter(Boolean).join(" · ")}
               {band != null && (
                 <>
@@ -98,11 +100,11 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
           )}
 
           <div className="flex flex-wrap items-center gap-2 pt-1">
-            <button
-              type="button"
+            <Button
+              variant={started ? "default" : "primary"}
               onClick={() => setStarted(true)}
               disabled={started}
-              className={`${started ? "fa-button" : "fa-button-primary"} min-h-11 [@media(pointer:fine)]:min-h-0`}
+              className="min-h-11 [@media(pointer:fine)]:min-h-0"
               title={
                 started
                   ? "Noted on this device for this session. Reel logs the watch when Trakt reports it — that is the record of truth."
@@ -110,11 +112,11 @@ export default function WatchTonightCard({ item, expectedAbsoluteError, hasNext,
               }
               data-testid="started-watching"
             >
-              {started ? <Check className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              {started ? <Check className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
               {started ? "Started" : "Started watching"}
-            </button>
+            </Button>
             {started && (
-              <span className="fa-caption text-fa-frost-dim">
+              <span className="fa-caption text-3">
                 Noted here only — it leaves the queue by itself once Trakt reports the watch.
               </span>
             )}

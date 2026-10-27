@@ -40,7 +40,7 @@ public sealed class TitleLanguageBackfillService(
             var filled = 0;
             while (!stoppingToken.IsCancellationRequested)
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 var tmdb = scope.ServiceProvider.GetRequiredService<ITmdbClient>();
 

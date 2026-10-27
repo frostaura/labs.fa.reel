@@ -33,7 +33,8 @@ namespace FrostAura.Reel.Tests.Harness;
 /// also neither local nor flaky. It asserted the reverse (filter-contains-keyword) exclusion arm
 /// that was deliberately deleted in 2767cf9 for over-excluding ("warehouse" swallowed "ware").
 /// The test now asserts the surviving forward contract, and a new sibling test pins the
-/// counterexample so the retired arm cannot return unnoticed.
+/// counterexample so the retired arm cannot return unnoticed. (That class was deleted with
+/// <c>LexicalSearchService</c> in trust-v1 wave B; <c>KeylessTextSearchIntegrationTests</c> covers it.)
 /// </description></item>
 /// </list>
 /// <para>

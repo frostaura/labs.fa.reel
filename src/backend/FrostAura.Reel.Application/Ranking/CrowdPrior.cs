@@ -52,8 +52,51 @@ public static class CrowdPrior
             _ => null,
         };
 
-    /// <summary>The ranking multiplier for <paramref name="title"/>: 1.0 with no crowd score.</summary>
-    public static double FactorFor(Title title) => FactorForScore(ShrunkScoreOf(title));
+    /// <summary>The most the crowd's VOLUME may move a title's ranking key, either way.</summary>
+    public const double VolumeSwing = 0.10d;
+
+    /// <summary>The vote count at which the volume term is neutral: the snapshot median the program targets (task 9).</summary>
+    public const double VolumePivotVotes = 1_500d;
+
+    /// <summary>How many decades of votes from the pivot reach the full volume swing.</summary>
+    public const double VolumeFullSwingDecades = 1d;
+
+    /// <summary>
+    /// The ranking multiplier for <paramref name="title"/>: the crowd's score term times its volume
+    /// term (<see cref="VolumeFactorFor"/>).
+    /// </summary>
+    public static double FactorFor(Title title) => FactorForScore(ShrunkScoreOf(title)) * VolumeFactorFor(VotesOf(title));
+
+    /// <summary>
+    /// How many people stand behind a title (WS-5 task 9, D-4): log-linear around
+    /// <see cref="VolumePivotVotes"/>, reaching ±<see cref="VolumeSwing"/> a decade either side (150
+    /// votes ×0.90, 15,000 ×1.10). No votes on record is the least evidence there is, so it takes
+    /// the floor, ×0.90 — unlike the score term, where an unknown score is no evidence either way.
+    ///
+    /// <para><b>Why it is a term of its own.</b> The shrinkage folds volume into the score only
+    /// weakly: 7.0 on 400 votes and 7.0 on 40,000 shrink to nearly the same number. On the founder's
+    /// copy (<c>reel_ws5</c>, 2026-10-26) the TMDB vote count of a film he rated rank-correlates
+    /// with his rating at Spearman +0.44 over 1,942 films — his mean rating is 5.4 under 300 votes,
+    /// 6.2 at 300–1,500, 7.1 at 1,500–10,000 and 7.8 above 10,000 — while the served prediction
+    /// correlates at −0.06. The snapshot's films sat at a median of 292 votes. Selection caveat as
+    /// for the score term: these are films he chose to watch.</para>
+    ///
+    /// <para>Bounded like the score term, and an ordering term only: the number on the card is the
+    /// prediction, untouched.</para>
+    /// </summary>
+    public static double VolumeFactorFor(int votes)
+    {
+        if (votes <= 0)
+        {
+            return 1d - VolumeSwing;
+        }
+
+        var decades = (Math.Log10(votes) - Math.Log10(VolumePivotVotes)) / VolumeFullSwingDecades;
+        return 1d + (VolumeSwing * Math.Clamp(decades, -1d, 1d));
+    }
+
+    /// <summary>The vote count the volume term reads: TMDB's where it has any, else Trakt's.</summary>
+    public static int VotesOf(Title title) => title.TmdbVoteCount > 0 ? title.TmdbVoteCount : title.TraktVotes;
 
     /// <summary>The ranking multiplier for a shrunk crowd score; 1.0 for null.</summary>
     public static double FactorForScore(decimal? shrunk)

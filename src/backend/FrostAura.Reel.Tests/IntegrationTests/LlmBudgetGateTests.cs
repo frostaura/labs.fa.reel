@@ -461,19 +461,100 @@ public class LlmBudgetGateTests(PostgresFixture fixture)
         Assert.Same(LlmAdmission.Unmetered, await gate.TryReserveAsync(Guid.NewGuid(), ApiUsagePurpose.Probe(ApiUsagePurpose.AskPlan), 1, CancellationToken.None));
     }
 
-    private LlmCallGate Gate(Dictionary<string, string?>? settings = null, IPendingApiUsage? pending = null)
+    [Fact]
+    public async Task The_gate_admits_under_fail_closed_tenancy_and_counts_only_the_callers_spend()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-1 task 10 (J-11). The gate is a singleton and reads through a fresh DI scope whose
+        // account context is unpinned. That is safe only because everything it reads — the ledger
+        // and the accounts table — is deliberately not account-scoped; this pins it, so the day the
+        // ledger gains a tenancy filter the gate's unpinned read fails here, not on every metered
+        // call in production once Tenancy__UnscopedReads flips to Throw.
+        var accountId = await SeedAccountAsync();
+        var other = await SeedAccountAsync();
+        await RecordAsync(other, ApiUsagePurpose.AskPlan, calls: 5, tokens: 10);
+        var (callsSetting, _) = AskBudget.Settings("ASK_PLAN");
+        var gate = Gate(new() { [callsSetting] = "5" }, failClosed: true);
+
+        foreach (var purpose in new[] { ApiUsagePurpose.AskPlan, ApiUsagePurpose.RerankFeed, ApiUsagePurpose.CrossReference })
+        {
+            using var admission = await gate.TryReserveAsync(accountId, purpose, 1_000, CancellationToken.None);
+            Assert.True(admission.Admitted, $"{purpose}: {admission.Refusal}");
+        }
+    }
+
+    [Fact]
+    public async Task Every_per_account_ceiling_counts_the_accounts_own_day()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Task 12 (ADD-22). 22:30 UTC on the 26th is 00:30 on the 27th in Johannesburg: the
+        // evening's spend before local midnight is yesterday's, and the ledger row stamped the 27th
+        // (by the same calendar, in the recorder) is today's for every per-account ceiling.
+        var accountId = await SeedAccountAsync();
+        var the26th = new DateTime(2026, 10, 26, 0, 0, 0, DateTimeKind.Utc);
+        var the27th = the26th.AddDays(1);
+        foreach (var purpose in new[] { ApiUsagePurpose.RerankFeed, ApiUsagePurpose.CrossReference, ApiUsagePurpose.Lens, ApiUsagePurpose.AskPlan })
+        {
+            await RecordOnAsync(accountId, purpose, the26th, calls: 7, tokens: 700);
+            await RecordOnAsync(accountId, purpose, the27th, calls: 2, tokens: 200);
+        }
+
+        var calendar = new BudgetCalendar(
+            new FixedZone("Africa/Johannesburg"), new FixedTime(new DateTimeOffset(2026, 10, 26, 22, 30, 0, TimeSpan.Zero)));
+        await using var db = fixture.CreateContext(new AccountContext());
+
+        Assert.Equal(2, (await new RerankBudget(db, Config(), calendar: calendar).AllowanceAsync(accountId, default)).CallsUsed);
+        Assert.Equal(2, (await new CrossReferenceBudget(db, Config(), calendar: calendar).AllowanceAsync(accountId, default)).CallsUsed);
+        Assert.Equal(2, (await new Application.Lens.LensBudget(db, Config(), calendar: calendar).AllowanceAsync(accountId, default)).CallsUsed);
+
+        // The gate's Ask ceiling reads the same day: two spent of three, so one more is admitted.
+        var (callsSetting, _) = AskBudget.Settings("ASK_PLAN");
+        var gate = Gate(new() { [callsSetting] = "3" }, calendar: calendar);
+        using (var third = await gate.TryReserveAsync(accountId, ApiUsagePurpose.AskPlan, 1, default))
+        {
+            Assert.True(third.Admitted, third.Refusal);
+            using var fourth = await gate.TryReserveAsync(accountId, ApiUsagePurpose.AskPlan, 1, default);
+            Assert.False(fourth.Admitted);
+        }
+    }
+
+    private LlmCallGate Gate(Dictionary<string, string?>? settings = null, IPendingApiUsage? pending = null, bool failClosed = false, IBudgetCalendar? calendar = null)
     {
         var config = Config(settings);
         var services = new ServiceCollection();
         services.AddSingleton(config);
-        services.AddScoped<IReelDbContext>(_ => fixture.CreateContext(new AccountContext()));
+        if (failClosed)
+        {
+            // What the API registers: a scoped context under the configured policy, here Throw.
+            var policy = new UnscopedReadPolicy(UnscopedReadMode.Throw);
+            services.AddScoped<IAccountContext>(_ => new AccountContext(policy));
+            services.AddScoped<IReelDbContext>(sp => fixture.CreateContext(sp.GetRequiredService<IAccountContext>()));
+        }
+        else
+        {
+            services.AddScoped<IReelDbContext>(_ => fixture.CreateContext(new AccountContext()));
+        }
+
         if (pending is not null)
         {
             services.AddSingleton(pending);
         }
 
-        services.AddScoped(sp => new RerankBudget(sp.GetRequiredService<IReelDbContext>(), config, sp.GetService<IPendingApiUsage>()));
-        services.AddScoped(sp => new CrossReferenceBudget(sp.GetRequiredService<IReelDbContext>(), config, sp.GetService<IPendingApiUsage>()));
+        if (calendar is not null)
+        {
+            services.AddSingleton(calendar);
+        }
+
+        services.AddScoped(sp => new RerankBudget(sp.GetRequiredService<IReelDbContext>(), config, sp.GetService<IPendingApiUsage>(), sp.GetService<IBudgetCalendar>()));
+        services.AddScoped(sp => new CrossReferenceBudget(sp.GetRequiredService<IReelDbContext>(), config, sp.GetService<IPendingApiUsage>(), sp.GetService<IBudgetCalendar>()));
         var provider = services.BuildServiceProvider();
         return new LlmCallGate(provider.GetRequiredService<IServiceScopeFactory>(), config, NullLogger<LlmCallGate>.Instance);
     }
@@ -516,6 +597,35 @@ public class LlmBudgetGateTests(PostgresFixture fixture)
             TokensUsed = tokens,
         });
         await db.SaveChangesAsync();
+    }
+
+    private async Task RecordOnAsync(Guid accountId, string purpose, DateTime day, long calls, long tokens)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ExternalApiUsages.Add(new ExternalApiUsage
+        {
+            Id = Guid.NewGuid(),
+            Provider = ApiProvider.OpenRouter,
+            Day = day,
+            AccountId = accountId,
+            Model = $"test/{Guid.NewGuid():N}",
+            Purpose = purpose,
+            CallCount = calls,
+            TokensUsed = tokens,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private sealed class FixedZone(string zone) : IAccountZoneSource
+    {
+        public Task<string?> ZoneIdAsync(Guid accountId, CancellationToken ct) => Task.FromResult<string?>(zone);
+
+        public string? ZoneId(Guid accountId) => zone;
+    }
+
+    private sealed class FixedTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private sealed class CountingPending : IPendingApiUsage

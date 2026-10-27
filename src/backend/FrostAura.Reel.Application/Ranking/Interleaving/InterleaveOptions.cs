@@ -34,6 +34,12 @@ public sealed class InterleaveOptions
     /// <summary>The always-valid type-I ceiling. Default 0.05.</summary>
     public const string AlphaKey = "INTERLEAVE_ALPHA";
 
+    /// <summary>
+    /// When the experiment started, as an ISO-8601 UTC instant (<c>2026-11-02T00:00:00Z</c>). Unset:
+    /// every interleaved slate ever served counts, and the challenger refits with each evaluation.
+    /// </summary>
+    public const string SinceKey = "INTERLEAVE_SINCE";
+
     /// <summary>Whether a Fresh build drafts its slates between two policies.</summary>
     public bool Enabled { get; init; }
 
@@ -53,6 +59,15 @@ public sealed class InterleaveOptions
     /// <summary>The always-valid type-I ceiling. Peeking at any time is safe at this level.</summary>
     public double Alpha { get; init; } = 0.05d;
 
+    /// <summary>
+    /// The experiment's start (D-14: interleaving starts once the ranker and the pool are frozen).
+    /// Set, it freezes the comparison twice over: only slates served from this instant count, and a
+    /// fitted challenger keeps the weights its pre-registered fit had at this instant instead of
+    /// refitting with every evaluation — an arm that moves during the experiment is two experiments
+    /// in one p-value. Moving it restarts the comparison, as reconfiguring the arms already does.
+    /// </summary>
+    public DateTime? Since { get; init; }
+
     /// <summary>The posture every test and every unconfigured host gets.</summary>
     public static InterleaveOptions Disabled { get; } = new();
 
@@ -64,7 +79,19 @@ public sealed class InterleaveOptions
         PolicyB = RankingPolicyCatalog.Normalise(configuration?[PolicyBKey], PopularityBaselinePolicy.Id),
         Tau = ReadPositive(configuration, TauKey, 0.15d),
         Alpha = ReadUnitInterval(configuration, AlphaKey, 0.05d),
+        Since = ReadInstant(configuration, SinceKey),
     };
+
+    /// <summary>An ISO-8601 instant read invariant and normalised to UTC; anything unreadable is unset.</summary>
+    private static DateTime? ReadInstant(IConfiguration? configuration, string key) =>
+        configuration?[key] is { Length: > 0 } raw
+        && DateTime.TryParse(
+            raw,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
+            : null;
 
     private static double ReadPositive(IConfiguration? configuration, string key, double fallback) =>
         configuration?[key] is { } raw

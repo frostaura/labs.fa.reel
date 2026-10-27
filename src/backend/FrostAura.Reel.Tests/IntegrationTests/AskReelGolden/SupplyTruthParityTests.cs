@@ -187,6 +187,34 @@ public class SupplyTruthParityTests(PostgresFixture fixture)
             truth);
     }
 
+    [Fact]
+    public async Task Supply_truth_equals_the_reporter_when_the_anime_composite_is_the_knockout()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-3 CR-3 (H-7): "no anime" removes animation whose original language is Japanese, on both media.
+        // Every language is opted in, so the composite is the only rule that can hold a Japanese title out.
+        var topic = $"goldensupply{Guid.NewGuid():N}";
+        var account = await SeedAccountAsync(null, (FilterKind.ExcludeGenre, "anime"), (FilterKind.Language, "*"));
+
+        await SeedTitleAsync(topic, t => (t.Genres, t.Language) = (["animation", "action"], "ja"));
+        await SeedTitleAsync(topic, t => (t.MediaType, t.Genres, t.Language) = (MediaType.Show, ["animation"], "JA"));
+        // Eligible: animation in another language, and a Japanese title that is not animation.
+        await SeedTitleAsync(topic, t => (t.Genres, t.Language) = (["animation"], "en"));
+        await SeedTitleAsync(topic, t => (t.Genres, t.Language) = (["drama"], "ja"));
+
+        var (report, truth) = await BothAsync(account, topic);
+
+        Assert.Equal(Shape(report), truth);
+        Assert.Equal(
+            "matching=4|lowVoteMatches=0|alreadySeen=0|savedOrDismissed=0|excludedByConditions=2|eligible=2"
+            + "|unscored=2|belowFloor=0|clearingFloor=0|ExcludeGenre/anime=2",
+            truth);
+    }
+
     /// <summary>The reporter's counts and the eval's SQL truth for one topic, each as a comparable line.</summary>
     private async Task<(SupplyReport Report, string Truth)> BothAsync(Guid accountId, string topic, MediaScope media = MediaScope.Any)
     {

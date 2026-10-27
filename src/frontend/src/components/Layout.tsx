@@ -94,7 +94,7 @@ export default function Layout() {
       <RealtimeSync />
       <header className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
         <div className="mx-auto max-w-shell px-gutter h-14 flex items-center gap-4">
-          <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition">
+          <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition coarse:min-h-11">
             <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
             <span className="text-lg font-light tracking-wide text-fa-frost-bright">Reel</span>
           </Link>
@@ -113,7 +113,11 @@ export default function Layout() {
             </div>
             <SyncStatusPill />
             <DropdownMenu>
-              <DropdownMenuTrigger className="flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-2 py-1 hover:border-fa-frost/40 transition">
+              <DropdownMenuTrigger
+                // The name is visible only from `sm` up; a phone shows just the avatar, which needs a name too.
+                aria-label={session?.displayName ? `Account menu, ${session.displayName}` : "Account menu"}
+                className="flex items-center justify-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-2 py-1 hover:border-fa-frost/40 transition coarse:min-h-11 coarse:min-w-11"
+              >
                 {session?.avatarUrl ? (
                   <img src={session.avatarUrl} alt="" className="h-6 w-6 rounded-full object-cover" />
                 ) : (

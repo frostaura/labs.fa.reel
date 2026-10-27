@@ -124,21 +124,12 @@ public class BuildFeedJobHandler(
     private const double PreferenceTagWeight = 0.10;
 
     /// <summary>
-    /// How many shortlist titles must clear the account's own <c>MinPredictedRating</c> before the
-    /// floor is taken at face value. Four times the hero: a floor that leaves fewer candidates than
-    /// four heroes' worth is not selecting the page, it IS the page, and the whole feed below the
-    /// hero then assembles out of whatever handful survived. On 2026-09-10 this was fourteen reality
-    /// shows on a 220-title shortlist.
+    /// How many shortlist titles must clear the account's own <c>MinPredictedRating</c> for the page
+    /// not to be short. Four times the hero: a bar that leaves fewer is not selecting the page, it IS
+    /// the page, and the page says so (<see cref="ForYouBar.ShortReason"/>). It no longer relaxes the
+    /// bar: FD-4's default is that a card under it never reaches a main grid (XM-07).
     /// </summary>
-    private const int FloorRelaxMinimum = 4 * HeroSize;
-
-    /// <summary>
-    /// The quantile the floor relaxes TO. Not zero — relaxing to nothing throws away the user's
-    /// setting entirely and lets the bottom of the shortlist onto rails. The 80th percentile keeps
-    /// the top fifth of what was actually scored, which is a weaker claim than the user asked for
-    /// and an honest one, and it is stated on the page rather than applied in silence.
-    /// </summary>
-    private const double FloorRelaxQuantile = 0.80d;
+    private const int ShortPageBelow = 4 * HeroSize;
 
     /// <summary>
     /// How many shortlist candidates the pre-assembly fit pass judges on a Fresh build. Forty is
@@ -190,6 +181,14 @@ public class BuildFeedJobHandler(
 
     public JobKind Kind => JobKind.BuildFeed;
 
+    private string? _feedFitSalt;
+
+    /// <summary>
+    /// The salt every feed fit this build caches or reads is keyed with (<see cref="FeedPaginator.FitKey"/>):
+    /// the agent's <c>RerankFeed</c> salt, computed once per build because it fingerprints the prompt.
+    /// </summary>
+    private string FeedFitSalt => _feedFitSalt ??= agent.CacheSalt(ApiUsagePurpose.RerankFeed);
+
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildFeed requires an account.");
@@ -214,6 +213,20 @@ public class BuildFeedJobHandler(
             return;
         }
 
+        // ── Short-circuit: nothing this build reads has changed (task 13, F+1) ───────────────
+        // A Preserve build over unchanged inputs used to refresh the pool (TMDB), score the field
+        // and assemble the page only to find it item-for-item the Active one. The fingerprint of
+        // everything it reads that the account or its model can change decides that before any of
+        // it runs: when it matches the fingerprint that produced the Active snapshot, the page cannot
+        // differ, and the build records its no-op and stops. Remembered in process; a restart costs
+        // one ordinary build. Never for a user-forced or trust-purge build, which are Fresh anyway.
+        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, DateOnly.FromDateTime(now), ct);
+        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, ct) is { } activeId)
+        {
+            await RecordUnchangedAsync(job, accountId, artifact.Id, activeId, now, stopwatch, ct);
+            return;
+        }
+
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         // The online residual head for this Active artifact, loaded once and folded into every score
         // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
@@ -233,7 +246,7 @@ public class BuildFeedJobHandler(
             ? Math.Clamp(floor, 0m, 10m) : 0m;
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
-        ReportProgress(job, accountId, 10, "Scouting fresh candidates");
+        await ReportProgressAsync(job, accountId, 10, "Scouting fresh candidates", ct);
         // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
         // the same replayability contract the row anchors hold.
         var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
@@ -243,7 +256,7 @@ public class BuildFeedJobHandler(
         // slice over the user's taste centroids — so a well-matched but unpopular title actually
         // enters scoring — then the FastTree model re-ranks the union exactly as before. The
         // retriever applies the same eligibility rule, the poster/tmdbId lane, and the maturity gate.
-        ReportProgress(job, accountId, 30, "Scoring the field");
+        await ReportProgressAsync(job, accountId, 30, "Scoring the field", ct);
 
         var retrieval = await candidateRetriever.RetrieveWithArmsAsync(
             accountId,
@@ -287,13 +300,13 @@ public class BuildFeedJobHandler(
         var needsHydration = shortlist.Where(t => t.LastMetadataRefreshAt == null).ToList();
         if (needsHydration.Count > 0)
         {
-            ReportProgress(job, accountId, 50, $"Enriching {needsHydration.Count} contenders");
+            await ReportProgressAsync(job, accountId, 50, $"Enriching {needsHydration.Count} contenders", ct);
             await hydrator.HydrateBatchAsync(needsHydration, ct);
             await db.SaveChangesAsync(ct);
         }
 
         // ── Phase 4: final score with contributions ─────────────────────────────────────
-        ReportProgress(job, accountId, 70, "Final ranking");
+        await ReportProgressAsync(job, accountId, 70, "Final ranking", ct);
 
         // The dislike demotion is subtracted on the shortlist scores, BEFORE hero and row
         // selection — so a title similar to what the user declined cannot ride a high base score
@@ -355,7 +368,8 @@ public class BuildFeedJobHandler(
         var profileHash = await ProfileHashOrNullAsync(accountId, taste, now, ct);
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
-        ReportProgress(job, accountId, 85, "Assembling tonight's picks");
+        await ReportProgressAsync(job, accountId, 85, "Assembling tonight's picks", ct);
+        capture.Progress = (pct, message) => ReportProgressAsync(job, accountId, pct, message, ct);
         var snapshot = await AssembleAsync(
             account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, profileHash, capture,
             ScoreFinalAsync, ct);
@@ -461,6 +475,7 @@ public class BuildFeedJobHandler(
             logger.LogInformation(
                 "Feed unchanged for {AccountId} — snapshot suppressed ({Recalibrated} score(s) updated in place).",
                 accountId, scoreUpdates.Count);
+            await RememberInputsAsync(accountId, inputHash, ct);
             return;
         }
 
@@ -499,6 +514,7 @@ public class BuildFeedJobHandler(
 
         // See the no-op path above: the availability and enrichment enqueues both race the index.
         await db.SaveAbsorbingRebuildRaceAsync(ct);
+        RememberInputs(accountId, snapshot.Id, inputHash);
 
         events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?> { ["stage"] = "FeedReady" });
         events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?>
@@ -523,6 +539,91 @@ public class BuildFeedJobHandler(
                 + "{Dropped} rail(s) dropped).",
             snapshot.Id, accountId, candidates.Count, capture.AveragePriorMagnitude, capture.JudgedBeforeAssembly,
             capture.AnchorsPassedOver, capture.RailsDropped);
+    }
+
+    /// <summary>The fingerprint the Active snapshot was dealt (or kept) under, remembered per account in process.</summary>
+    private sealed record BuiltFrom(Guid SnapshotId, string InputHash);
+
+    private static string InputsKey(Guid accountId) => $"feedinputs:{accountId:N}";
+
+    /// <summary>How long a remembered fingerprint is trusted: past a day the stable-tonight key has moved anyway.</summary>
+    private static readonly TimeSpan InputsMemory = TimeSpan.FromHours(26);
+
+    private void RememberInputs(Guid accountId, Guid snapshotId, string inputHash) =>
+        cache.Set(InputsKey(accountId), new BuiltFrom(snapshotId, inputHash), InputsMemory);
+
+    /// <summary>The no-op exit's half: the Active snapshot it kept is the one these inputs produced.</summary>
+    private async Task RememberInputsAsync(Guid accountId, string inputHash, CancellationToken ct)
+    {
+        var activeId = await db.FeedSnapshots
+            .Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active)
+            .OrderByDescending(s => s.GeneratedAt)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(ct);
+        if (activeId is { } id)
+        {
+            RememberInputs(accountId, id, inputHash);
+        }
+    }
+
+    /// <summary>
+    /// The Active snapshot's id when this build would be a Preserve build over exactly the inputs that
+    /// produced it; null when anything differs, nothing is remembered, or the build would be Fresh.
+    /// </summary>
+    private async Task<Guid?> UnchangedSinceActiveAsync(
+        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, CancellationToken ct)
+    {
+        if (!cache.TryGetValue<BuiltFrom>(InputsKey(accountId), out var built) || built is null || built.InputHash != inputHash)
+        {
+            return null;
+        }
+
+        var active = await db.FeedSnapshots
+            .Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active)
+            .OrderByDescending(s => s.GeneratedAt)
+            .Select(s => new { s.Id, s.GeneratedAt, s.ModelArtifactId })
+            .FirstOrDefaultAsync(ct);
+        return active is not null
+            && active.Id == built.SnapshotId
+            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now) == FeedBuildMode.Preserve
+                ? active.Id
+                : null;
+    }
+
+    /// <summary>
+    /// The short-circuit's record: a NoOp build row (the instrument shows every run, as the skipped
+    /// exit's does, with the counts it did not compute written as zero), the job's message, and the
+    /// same completed frame a no-op build publishes.
+    /// </summary>
+    private async Task RecordUnchangedAsync(
+        SyncJob job, Guid accountId, Guid artifactId, Guid activeId, DateTime now,
+        System.Diagnostics.Stopwatch stopwatch, CancellationToken ct)
+    {
+        job.ProgressMessage = "feed unchanged — kept tonight's picks";
+        db.FeedBuildStats.Add(new FeedBuildStat
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = activeId,
+            ModelArtifactId = artifactId,
+            BuiltAt = now,
+            Mode = FeedBuildOutcome.NoOp,
+            ClustersUsed = 0,
+            AnnPerClusterJson = "[]",
+            SeedPoolSize = 0,
+            SeedsUsed = 0,
+            NewlyEligiblePerArmJson = "[]",
+            DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        });
+        await db.SaveAbsorbingRebuildRaceAsync(ct);
+        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+        {
+            ["kind"] = "feed",
+            ["picksChanged"] = 0,
+        });
+        logger.LogInformation(
+            "Feed build for {AccountId} short-circuited: nothing it reads has changed since snapshot {SnapshotId}.",
+            accountId, activeId);
     }
 
     /// <summary>
@@ -762,6 +863,9 @@ public class BuildFeedJobHandler(
     {
         public FeedBuildMode Mode { get; set; }
 
+        /// <summary>Reports a step of assembly to the job row and the pill; null in tests that assemble directly.</summary>
+        public Func<decimal, string, Task>? Progress { get; set; }
+
         public int HeroEligibleCount { get; set; }
 
         public int RailsDropped { get; set; }
@@ -877,9 +981,13 @@ public class BuildFeedJobHandler(
             return null;
         }
 
+        // Frozen at the experiment's start when one is set (INTERLEAVE_SINCE): the newest fit at or
+        // before it, so the arm does not move under the comparison. None by then ⇒ the policy's
+        // default weights, which are fixed too.
+        var since = _interleave.Since ?? DateTime.MaxValue;
         var ledger = await db.EvaluationResults
             .AsNoTracking()
-            .Where(r => r.AccountId == accountId && r.BaselinesJson != null)
+            .Where(r => r.AccountId == accountId && r.BaselinesJson != null && r.ComputedAt <= since)
             .OrderByDescending(r => r.ComputedAt)
             .Select(r => r.BaselinesJson)
             .FirstOrDefaultAsync(ct);
@@ -931,48 +1039,20 @@ public class BuildFeedJobHandler(
         string? profileHash, BuildCapture capture,
         Func<IReadOnlyList<Title>, CancellationToken, Task<IReadOnlyList<Candidate>>> scoreFinal, CancellationToken ct)
     {
-        // ── The floor is soft; the content rules are not ────────────────────────────────────
-        // Content filters are the user's statement about CONTENT — they bind absolutely and are
-        // already applied in retrieval. MinPredictedRating is a statement about the MODEL's opinion,
-        // and the model's output scale is not something the user can see or calibrate against. When
-        // almost nothing clears it, honouring it strictly renders a blank — or worse, a page built
-        // entirely out of the handful of titles that happened to squeak over; relaxing it and SAYING
-        // SO shows honest, lower-confidence rankings instead. Same call Ask Reel already makes
-        // (LiveSearchExpansionService's MinFloorRelaxedCount arm) — the feed build was the one
-        // suggestion surface still treating "empty" as a verdict rather than a failure to look harder.
-        //
-        // TWO things changed here on 2026-09-10, both from the same live build.
-        //
-        // The TRIGGER is no longer "nothing clears it". A floor that admits fourteen titles out of a
-        // 220-title shortlist is not selecting a page, it is BEING the page — hero, deep cuts and
-        // every rail assemble out of those fourteen, and on the founder's account all fourteen were
-        // reality shows. The bar is now FloorRelaxMinimum: four heroes' worth of supply, or the floor
-        // is treated as the failure it is.
-        //
-        // The DESTINATION is no longer zero. Relaxing to nothing discards the user's setting whole
-        // and lets the bottom of the shortlist onto rails; relaxing to the shortlist's 80th
-        // percentile keeps the top fifth of what the model actually scored. Guarded with Math.Min so
-        // a "relaxation" can never RAISE the floor above what the user asked for.
+        // ── The bar holds; a short page says so ─────────────────────────────────────────────
+        // Content filters are the user's statement about CONTENT and are already applied in
+        // retrieval. MinPredictedRating is the user's "for you" bar, and FD-4's default is that a
+        // card below it never reaches a main grid (XM-07). Until 2026-10-26 the build relaxed it to
+        // the shortlist's 80th percentile whenever fewer than four heroes' worth cleared it, and said
+        // so; that put cards under the user's own bar into tonight's picks. The bar now holds, and
+        // when it leaves the page short the reason names the bar and the count, so a sparse or empty
+        // page is never a silent one. The model-saturation failure the relaxation was built for
+        // (2026-09-10) is the calibration work's to prevent, not the bar's to absorb.
         var effectiveFloor = minPredicted;
-        string? degradedReason = null;
-        var clearingFloor = candidates.Count(c => c.Predicted >= minPredicted);
-        if (minPredicted > 0m && clearingFloor < FloorRelaxMinimum)
-        {
-            effectiveFloor = Math.Min(minPredicted, Percentile(candidates, FloorRelaxQuantile) ?? 0m);
-
-            // Invariant culture, deliberately: these numbers are ratings on the same 0–10 scale the
-            // settings screen shows and ContentFilterRules stores, and a server whose locale renders
-            // "9,9" would quote the user a threshold they never typed.
-            degradedReason = candidates.Count > 0
-                ? string.Format(
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    "Your ≥{0:0.0} “for you” floor left only {1} title{2} tonight; relaxed to {3:0.0} for this build.",
-                    minPredicted,
-                    clearingFloor,
-                    clearingFloor == 1 ? string.Empty : "s",
-                    effectiveFloor)
-                : null;
-        }
+        var clearingFloor = candidates.Count(c => ForYouBar.Clears(c.Predicted, minPredicted));
+        var degradedReason = candidates.Count > 0
+            ? ForYouBar.ShortReason(minPredicted, clearingFloor, ShortPageBelow)
+            : null;
 
         // An empty candidate pool is a different failure with a different answer: retrieval, not
         // ranking, came back with nothing, so the feed must name the content condition responsible.
@@ -1269,6 +1349,11 @@ public class BuildFeedJobHandler(
         // only produce an order it is not allowed to use — and would spend for the privilege.
         // Every verdict lands in the shared 6h fit cache, so the why pass below reads them back for
         // free and the pass costs the build ~5 calls in total rather than two passes' worth.
+        if (mode == FeedBuildMode.Fresh && capture.Progress is { } judging)
+        {
+            await judging(88, "Judging fit for tonight's picks");
+        }
+
         var preAssemblyFits = mode == FeedBuildMode.Fresh
             ? await JudgeFitBeforeAssemblyAsync(account.Id, taste, candidates, effectiveFloor, RankKey, ct)
             : new Dictionary<Guid, double>();
@@ -1413,7 +1498,9 @@ public class BuildFeedJobHandler(
             hero.AddRange(previousItems
                 .Where(i => i.Row == FeedRowKind.Hero)
                 .OrderBy(i => i.Rank)
-                .Where(i => candidatesById.ContainsKey(i.TitleId))
+                // A kept seat still has to clear the bar: a bar raised since the last build applies
+                // now, not tomorrow (XM-07).
+                .Where(i => candidatesById.TryGetValue(i.TitleId, out var kept) && ForYouBar.Clears(kept.Predicted, effectiveFloor))
                 .Select(i => candidatesById[i.TitleId])
                 .Take(HeroSize));
         }
@@ -1898,6 +1985,11 @@ public class BuildFeedJobHandler(
         // AFTER the no-op decision, so a suppressed rebuild never spends a call: kept cards reuse
         // their persisted whys (Preserve), the rest go through the agent within a time-boxed budget
         // into the same 6h fit cache the paginator uses, and every rail ends repeat-free.
+        if (capture.Progress is { } writing)
+        {
+            await writing(94, "Writing why-lines");
+        }
+
         await ApplyCuratedWhysAsync(
             account.Id, taste, planned, previousItems, mode,
             anchors.ToDictionary(a => a.Id, a => a.Name),
@@ -2179,7 +2271,7 @@ public class BuildFeedJobHandler(
             // Only a MODEL fit is ever cached (see below), but the source is read rather than assumed:
             // a cached stub fit is the predicted rating divided by ten, and ranking on it would
             // count the prediction twice under a label that says the model judged the title.
-            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, candidate.Title.Id, rowKey), out var hit)
+            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(FeedFitSalt, accountId, candidate.Title.Id, rowKey), out var hit)
                 && hit is { FitSource: ResultSource.Llm })
             {
                 fits[candidate.Title.Id] = hit.Fit;
@@ -2238,7 +2330,7 @@ public class BuildFeedJobHandler(
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
                     fits[result.TitleId] = result.Fit;
                 }
             });
@@ -2323,7 +2415,7 @@ public class BuildFeedJobHandler(
         {
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
             var cachedHit = cache.TryGetValue<RerankResult>(
-                FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
+                FeedPaginator.FitKey(FeedFitSalt, accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
             var cachedFit = cachedHit && hit!.FitSource == ResultSource.Llm;
             if (cachedFit && item.Row == FeedRowKind.Hero)
             {
@@ -2572,7 +2664,7 @@ public class BuildFeedJobHandler(
             item.Replace(replacement, heroContext(replacement));
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
-                cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
+                cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
                 item.LlmFit = (decimal)verdict.Fit;
                 if (ModelWhy(verdict) is { } why)
                 {
@@ -2661,7 +2753,7 @@ public class BuildFeedJobHandler(
                         : raw;
                     debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
-                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    cache.Set(FeedPaginator.FitKey(FeedFitSalt, accountId, result.TitleId, rowKey), result, FitTtl);
                     if (isHeroRail)
                     {
                         heroFits[result.TitleId] = result.Fit;
@@ -2890,10 +2982,21 @@ public class BuildFeedJobHandler(
         return union == 0 ? 0d : (double)intersection / union;
     }
 
-    private void ReportProgress(SyncJob job, Guid accountId, decimal pct, string message)
+    /// <summary>
+    /// One step of the build, persisted before it is published — the order every other handler
+    /// uses, because the pill has two sources (this frame and a five-second poll of the job row) and
+    /// a poll mid-build read "Scouting fresh candidates" for the whole run (WS-6). The row is written
+    /// with a fenced UPDATE of its two progress columns only, outside the build's unit of work, so a
+    /// progress write never commits half a build; a reclaimed attempt's fence matches no row.
+    /// </summary>
+    private async Task ReportProgressAsync(SyncJob job, Guid accountId, decimal pct, string message, CancellationToken ct)
     {
         job.ProgressPct = pct;
         job.ProgressMessage = message;
+        var (id, attempt) = (job.Id, job.AttemptCount);
+        await db.SyncJobs
+            .Where(j => j.Id == id && j.AttemptCount == attempt && j.Status == JobStatus.Running)
+            .ExecuteUpdateAsync(set => set.SetProperty(j => j.ProgressPct, pct).SetProperty(j => j.ProgressMessage, message), ct);
         events.Publish(accountId, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
         {
             ["kind"] = "feed",

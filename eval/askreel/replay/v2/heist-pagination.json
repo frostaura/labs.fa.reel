@@ -1,0 +1,373 @@
+{
+  "id": "heist-pagination",
+  "scenario": "cerebral-heist-ordinals",
+  "provenance": "authored from the open-set scenario's pagination turn: 'more of those' never repeats a card already shown. The world holds more titles than one turn retrieves (AskReelEngine.RetrievalWant = 40), so the second turn has fresh supply; with fewer, an honest none-found is the right answer (the first replay of this fixture, with 14 titles, showed all 14 on turn 1 and said none-found on turn 2).",
+  "account": {
+    "filters": []
+  },
+  "titles": [
+    {
+      "name": "Heist 01",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4990
+    },
+    {
+      "name": "Heist 02",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4980
+    },
+    {
+      "name": "Heist 03",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4970
+    },
+    {
+      "name": "Heist 04",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4960
+    },
+    {
+      "name": "Heist 05",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4950
+    },
+    {
+      "name": "Heist 06",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4940
+    },
+    {
+      "name": "Heist 07",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4930
+    },
+    {
+      "name": "Heist 08",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4920
+    },
+    {
+      "name": "Heist 09",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4910
+    },
+    {
+      "name": "Heist 10",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4900
+    },
+    {
+      "name": "Heist 11",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4890
+    },
+    {
+      "name": "Heist 12",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4880
+    },
+    {
+      "name": "Heist 13",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4870
+    },
+    {
+      "name": "Heist 14",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4860
+    },
+    {
+      "name": "Heist 15",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4850
+    },
+    {
+      "name": "Heist 16",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4840
+    },
+    {
+      "name": "Heist 17",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4830
+    },
+    {
+      "name": "Heist 18",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4820
+    },
+    {
+      "name": "Heist 19",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4810
+    },
+    {
+      "name": "Heist 20",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4800
+    },
+    {
+      "name": "Heist 21",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4790
+    },
+    {
+      "name": "Heist 22",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4780
+    },
+    {
+      "name": "Heist 23",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4770
+    },
+    {
+      "name": "Heist 24",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4760
+    },
+    {
+      "name": "Heist 25",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4750
+    },
+    {
+      "name": "Heist 26",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4740
+    },
+    {
+      "name": "Heist 27",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4730
+    },
+    {
+      "name": "Heist 28",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4720
+    },
+    {
+      "name": "Heist 29",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4710
+    },
+    {
+      "name": "Heist 30",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4700
+    },
+    {
+      "name": "Heist 31",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4690
+    },
+    {
+      "name": "Heist 32",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4680
+    },
+    {
+      "name": "Heist 33",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4670
+    },
+    {
+      "name": "Heist 34",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4660
+    },
+    {
+      "name": "Heist 35",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4650
+    },
+    {
+      "name": "Heist 36",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4640
+    },
+    {
+      "name": "Heist 37",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4630
+    },
+    {
+      "name": "Heist 38",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4620
+    },
+    {
+      "name": "Heist 39",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4610
+    },
+    {
+      "name": "Heist 40",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4600
+    },
+    {
+      "name": "Heist 41",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4590
+    },
+    {
+      "name": "Heist 42",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4580
+    },
+    {
+      "name": "Heist 43",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4570
+    },
+    {
+      "name": "Heist 44",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4560
+    },
+    {
+      "name": "Heist 45",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4550
+    },
+    {
+      "name": "Heist 46",
+      "keywords": [
+        "heist"
+      ],
+      "votes": 4540
+    }
+  ],
+  "turns": [
+    {
+      "message": "a cerebral heist movie with a twist ending",
+      "plan": {
+        "act": "NewRequest",
+        "concepts": [
+          "heist"
+        ],
+        "media": "Movies",
+        "tools": [
+          "SearchCatalog"
+        ]
+      },
+      "verdicts": {
+        "*": "Yes"
+      },
+      "expect": {
+        "mode": "Picks",
+        "minPicks": 1
+      }
+    },
+    {
+      "message": "more of those please",
+      "plan": {
+        "act": "Refine",
+        "tools": [
+          "SearchCatalog"
+        ]
+      },
+      "verdicts": {
+        "*": "Yes"
+      },
+      "expect": {
+        "mode": "Picks",
+        "minPicks": 1,
+        "noRepeatTurns": [
+          1
+        ]
+      }
+    }
+  ]
+}

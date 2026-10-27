@@ -7,6 +7,7 @@ import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import { titleFailure } from "../components/title/titleRouting";
 import { filmographyRoleLine } from "../lib/personRoles";
+import { Button } from "../components/ui/button";
 
 /** Initials for the avatar fallback — first letters of the first two words of a name. */
 function initials(name: string): string {
@@ -33,7 +34,7 @@ function PersonAvatar({ name, profilePath }: { name: string; profilePath: string
           className="h-full w-full object-cover"
         />
       ) : (
-        <div className="h-full w-full flex items-center justify-center bg-gradient-to-br from-fa-ink-2 to-fa-ink-3 text-fa-frost-dim select-none">
+        <div className="h-full w-full flex items-center justify-center bg-gradient-to-br from-fa-ink-2 to-fa-ink-3 text-3 select-none">
           {initials(name)}
         </div>
       )}
@@ -55,15 +56,16 @@ export default function Person() {
     const failure = personId ? titleFailure(error) : "not-found";
     return (
       <div className="fa-card p-8 text-center space-y-4" role="alert" data-testid={`person-${failure}`}>
-        <p className="fa-body text-fa-frost-bright">
+        {/* The page's one heading, so a failed page is still a titled page (axe page-has-heading-one). */}
+        <h1 className="fa-body text-fa-frost-bright">
           {failure === "not-found" ? "Reel has no person at this address." : "Couldn't load this person — try again."}
-        </p>
+        </h1>
         <div className="flex items-center justify-center gap-2">
           {failure === "error" && (
-            <button type="button" onClick={() => void refetch()} disabled={isFetching} className="fa-button min-h-11" data-testid="person-retry">
-              <RotateCw className="h-4 w-4" />
+            <Button onClick={() => void refetch()} disabled={isFetching} className="min-h-11" data-testid="person-retry">
+              <RotateCw className="h-4 w-4" aria-hidden />
               {isFetching ? "Retrying…" : "Retry"}
-            </button>
+            </Button>
           )}
           <Link to="/home" className="fa-button-ghost min-h-11">
             Back to Home
@@ -74,7 +76,7 @@ export default function Person() {
   }
 
   if (isLoading || !person) {
-    return <div className="fa-body text-fa-frost-dim py-10 text-center">Loading…</div>;
+    return <div className="fa-body text-3 py-10 text-center">Loading…</div>;
   }
 
   return (
@@ -83,9 +85,9 @@ export default function Person() {
         <PersonAvatar name={person.name} profilePath={person.profilePath} />
         <div className="space-y-2">
           <h1 className="text-2xl font-light text-fa-frost-bright">{person.name}</h1>
-          {person.department && <p className="fa-caption text-fa-frost-dim">{person.department}</p>}
+          {person.department && <p className="fa-caption text-3">{person.department}</p>}
           {person.derivedAffinity != null && (
-            <p className="fa-caption text-fa-frost-dim">
+            <p className="fa-caption text-3">
               You rate their work <span className="text-fa-frost">{person.derivedAffinity.toFixed(1)}</span> on average
               {" "}across {person.ratedTitleCount} {person.ratedTitleCount === 1 ? "title" : "titles"}.
             </p>
@@ -95,15 +97,16 @@ export default function Person() {
 
       {/* Explicit rating control */}
       <section className="fa-card p-4 space-y-2">
-        <p className="fa-overline text-fa-frost-dim flex items-center gap-1.5">
-          <Star className="h-3.5 w-3.5" /> your rating
+        <p className="fa-overline text-3 flex items-center gap-1.5">
+          <Star className="h-3.5 w-3.5" aria-hidden /> your rating
         </p>
         <div className="flex gap-1 flex-wrap">
           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
-            <button
+            <Button
               key={value}
               onClick={() => ratePerson({ personId, rating: value })}
-              className={`h-11 w-11 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-8 rounded-md border text-sm tabular-nums transition ${
+              aria-pressed={person.userRating === value}
+              className={`h-11 w-11 p-0 font-normal [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-8 rounded-md tabular-nums ${
                 person.userRating === value
                   ? "border-fa-frost bg-fa-frost/20 text-fa-frost-bright"
                   : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
@@ -111,15 +114,15 @@ export default function Person() {
               data-testid="person-rate-value"
             >
               {value}
-            </button>
+            </Button>
           ))}
           {person.userRating != null && (
-            <button onClick={() => unratePerson({ personId })} className="fa-button-ghost min-h-11 text-fa-frost-dim ml-2 [@media(pointer:fine)]:min-h-0">
+            <Button variant="ghost" onClick={() => unratePerson({ personId })} className="min-h-11 text-3 ml-2 [@media(pointer:fine)]:min-h-0">
               Clear
-            </button>
+            </Button>
           )}
         </div>
-        <p className="fa-caption text-fa-frost-dim/70">Rating someone you love nudges their titles up across your feed.</p>
+        <p className="fa-caption text-3">Rating someone you love nudges their titles up across your feed.</p>
       </section>
 
       {/* Filmography */}
@@ -134,7 +137,7 @@ export default function Person() {
                 key={t.titleId}
                 to={`/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`}
                 state={{ backgroundLocation: location }}
-                className="group block focus:outline-none"
+                className="group block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60"
               >
                 <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
                   {/* The shared poster component, not hand-rolled markup: it carries the shimmer,
@@ -145,7 +148,7 @@ export default function Person() {
                   <ScoreBadges userRating={t.userRating} predictedRating={t.predictedRating} />
                 </div>
                 <p className="mt-2 fa-caption text-fa-frost-bright truncate" title={t.name}>{t.name}</p>
-                <p className="fa-caption text-fa-frost-dim">{t.year ?? ""}</p>
+                <p className="fa-caption text-3">{t.year ?? ""}</p>
                 {/* What they did on it (F-24) — present only when the API says. */}
                 {role && (
                   <p className="fa-caption text-fa-frost/80 truncate" title={role} data-testid="filmography-role">

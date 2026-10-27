@@ -137,18 +137,28 @@ public class AskReelCacheKeyTests
     }
 
     [Fact]
-    public void The_rerank_fit_key_carries_the_prompt_generation_and_the_model()
+    public void The_rerank_fit_key_carries_the_salt_the_prompt_generation_and_the_batch()
     {
         var accountId = Guid.NewGuid();
         var titleId = Guid.NewGuid();
-        var key = LiveSearchExpansionService.FitKey(accountId, titleId, "a tense thriller", "openai/gpt-5.4-mini");
+        var other = Guid.NewGuid();
+        const string Salt = "rr2:openai/gpt-5.4-mini|none:p00000000";
+        Guid[] batch = [titleId, other];
+        var key = LiveSearchExpansionService.FitKey(Salt, accountId, titleId, "a tense thriller", batch);
 
+        // WS-1 CR-4: the shared re-rank key shape, so a model, effort or prompt change misses.
+        Assert.StartsWith("askfit:" + Salt + ":", key, StringComparison.Ordinal);
         Assert.Contains(AskReelPromptVersion.Current, key, StringComparison.Ordinal);
-        Assert.Contains("openai/gpt-5.4-mini", key, StringComparison.Ordinal);
-        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(accountId, titleId, "a tense thriller", "some/other-model"));
-        // Still account- and title-scoped: a verdict is one person's, about one title.
-        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(Guid.NewGuid(), titleId, "a tense thriller", "openai/gpt-5.4-mini"));
-        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(accountId, Guid.NewGuid(), "a tense thriller", "openai/gpt-5.4-mini"));
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey("rr2:openai/gpt-5.4-mini|low:p00000000", accountId, titleId, "a tense thriller", batch));
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey("rr2:some/other-model|none:p00000000", accountId, titleId, "a tense thriller", batch));
+        // Still account- and title-scoped: a verdict is one person's, about one title…
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(Salt, Guid.NewGuid(), titleId, "a tense thriller", batch));
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(Salt, accountId, Guid.NewGuid(), "a tense thriller", batch));
+        // …about one request, among one set of companions (the prompt spreads fits across the batch),
+        // in any order.
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(Salt, accountId, titleId, "a quiet drama", batch));
+        Assert.NotEqual(key, LiveSearchExpansionService.FitKey(Salt, accountId, titleId, "a tense thriller", [titleId]));
+        Assert.Equal(key, LiveSearchExpansionService.FitKey(Salt, accountId, titleId, "a tense thriller", [other, titleId]));
     }
 
     // ── The interpret key ───────────────────────────────────────────────────────────────────

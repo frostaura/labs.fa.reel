@@ -20,11 +20,18 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// exact vocabulary labels, whole-word name matches and genre tags (with TV stand-ins), best
 /// vote-shrunk crowd score first.</item>
 /// <item><b>Full text</b> — <see cref="FullTextArm"/> over the name, keywords, themes and overview.</item>
+/// <item><b>Mood</b> — <see cref="MoodArm"/>: each mood ("cosy", "tense") read as the extracted tone,
+/// keyword labels and genres that carry it, one ranked list per mood. Soft: it finds and orders, never
+/// filters.</item>
 /// <item><b>Semantic</b> — kNN on the positive concept text (moods included, rejected words never),
 /// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/>; an uncached
-/// text that misses it is fused without, and the arm is reported in
+/// text that misses it falls back to the mean of the precomputed embeddings of the labels the
+/// concepts and moods reached, and only with none of those is the arm fused without and reported in
 /// <see cref="RetrievalResult.SkippedArms"/>. <c>hnsw.iterative_scan</c> is on for every connection
 /// (<c>HnswFilteredSearchInterceptor</c>), so a filtered search returns the full k.</item>
+/// <item><b>Steer</b> — <see cref="AttributeSteer"/>: the request's attribute steers ("funnier", "less
+/// dark") and its moods' implied lean, relative to the reference titles' centroid when there are any.
+/// It re-ranks what the other arms found, and reads the whole pool only when nothing else spoke.</item>
 /// <item><b>TMDB</b> — <see cref="TmdbDiscoveryArm"/>, the standing conditions sent with the fetch,
 /// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>), run on its own database
 /// context so it overlaps the catalogue arms. Titles
@@ -36,7 +43,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// re-rank titles the catalogue evidence already admits. TMDB keyword tags are noisy (Batman Begins
 /// carries "ninja"), and a vector arm always fills — the two reasons a ninja request used to show 24
 /// non-ninja cards. Without a concept (a mood, a reference, a person, a decade) every arm draws from
-/// the eligible titles that satisfy the remaining hard constraints.</para>
+/// the eligible titles that satisfy the remaining hard constraints, and the bare best-regarded list
+/// runs only when no mood, reference or steer list found anything.</para>
 ///
 /// <para><b>Supply</b> is <see cref="ISupplyReporter"/>'s over the RESOLVED constraints, so the
 /// counts a reply quotes are counted with the same labels the cards were found with.</para>
@@ -51,6 +59,8 @@ public sealed class HybridRetriever(
     IServiceScopeFactory scopes,
     ILogger<HybridRetriever> logger) : IAskReelRetriever
 {
+    private readonly MoodArm moodArm = new(db, resolver);
+
     /// <summary>Reciprocal-rank fusion constant shared by every arm.</summary>
     public const int RrfK = FacetRetriever.RrfK;
 
@@ -117,14 +127,9 @@ public sealed class HybridRetriever(
         var evidence = new Dictionary<Guid, List<string>>();
         var similarity = new Dictionary<Guid, double>();
 
-        if (q.Arms.HasFlag(RetrievalArms.Facet))
+        if (q.Arms.HasFlag(RetrievalArms.Facet) && hard.HasConcepts)
         {
-            clock.Restart();
-            // Best vote-shrunk crowd score first (task 4, D-12): a 10.0 on 2 votes ranks below a 7.0
-            // on 5,000, so the facet arm's head - what the judge sees first - is the concept's
-            // best-regarded titles, not merely its most-voted or its luckiest few-vote outliers.
-            lists["facet"] = await CrowdVotes.BestShrunkFirst(conceptPool).Select(t => t.Id).Take(ArmDepth).ToListAsync(ct);
-            timings["facet"] = clock.ElapsedMilliseconds;
+            await FacetAsync(conceptPool, lists, timings, clock, ct);
         }
 
         if (q.Arms.HasFlag(RetrievalArms.FullText) && hard.HasConcepts)
@@ -153,10 +158,42 @@ public sealed class HybridRetriever(
             ? [.. lists.GetValueOrDefault("facet", []), .. lists.GetValueOrDefault("fulltext", [])]
             : null;
 
+        // Moods (soft): one ranked list per mood the catalogue can read — its tone, labels and genres.
+        // With a concept they only re-rank what the concept admits (fusion ignores anything else).
+        var moodResult = MoodArmResult.Empty;
+        if (q.Soft.Moods.Count > 0)
+        {
+            clock.Restart();
+            moodResult = await moodArm.FindAsync(hard.HasConcepts ? conceptPool : basePool, q.Soft.Moods, ArmDepth, ct);
+            foreach (var (mood, hits) in moodResult.Lists)
+            {
+                lists[$"mood:{mood}"] = [.. hits.Select(h => h.TitleId)];
+                foreach (var hit in hits)
+                {
+                    Add(evidence, hit.TitleId, hit.Evidence);
+                }
+            }
+
+            timings["mood"] = clock.ElapsedMilliseconds;
+        }
+
         if (q.Arms.HasFlag(RetrievalArms.Semantic))
         {
             var vector = await embedding;
             timings["semantic-embed"] = semanticClock.ElapsedMilliseconds;
+            if (vector is null && semanticText.Length > 0)
+            {
+                // The text missed its budget (or there is no provider): stand on the precomputed
+                // embeddings of the labels the concepts and moods reached instead of dropping the arm.
+                var labels = hard.Concepts.SelectMany(c => c.ExactLabels ?? []).Concat(moodResult.Labels).Distinct(StringComparer.Ordinal).ToList();
+                var (centroid, used) = await LabelCentroidAsync(labels, ct);
+                if (centroid is not null)
+                {
+                    vector = centroid;
+                    timings["semantic-labels"] = used;
+                }
+            }
+
             var anchor = await AnchorAsync(vector, q.Soft.ReferenceTitleIds, ct);
             if (anchor is null)
             {
@@ -177,6 +214,36 @@ public sealed class HybridRetriever(
 
                 timings["semantic"] = clock.ElapsedMilliseconds;
             }
+        }
+
+        // Attribute steers ("funnier", "less dark", a mood's lean): the population leaning the asked
+        // way, most first. It re-ranks what the other arms found; only when nothing else spoke does it
+        // read the whole pool.
+        var steers = AttributeSteer.Merge(q.Soft.Directions, moodResult.Implied);
+        if (steers.Count > 0)
+        {
+            clock.Restart();
+            IReadOnlyCollection<Guid>? population = admitted
+                ?? (lists.Values.Any(l => l.Count > 0) ? [.. lists.Values.SelectMany(l => l).Distinct()] : null);
+            var steered = await SteerAsync(steers, q.Soft.ReferenceTitleIds, population, basePool, ct);
+            if (steered.Count > 0)
+            {
+                lists["steer"] = [.. steered.Select(s => s.TitleId)];
+                foreach (var (id, lean) in steered)
+                {
+                    Add(evidence, id, lean);
+                }
+            }
+
+            timings["steer"] = clock.ElapsedMilliseconds;
+        }
+
+        // No concept and no soft list to stand on (a person, a decade, a bare media switch): the
+        // pool's best-regarded titles. Never beside a mood or reference list, where it was noise —
+        // a "cosy" request used to be answered by the catalogue's best-rated titles of any kind.
+        if (q.Arms.HasFlag(RetrievalArms.Facet) && !hard.HasConcepts && !lists.Values.Any(l => l.Count > 0))
+        {
+            await FacetAsync(basePool, lists, timings, clock, ct);
         }
 
         var provisional = new List<ProvisionalTitle>();
@@ -302,6 +369,131 @@ public sealed class HybridRetriever(
         var rows = await db.ContentFilters.IgnoreQueryFilters().Where(f => f.AccountId == q.AccountId).ToListAsync(ct);
         var rules = FilterRuleSet.FromRows(rows).WithExclusions(q.ExcludeGenres, q.ExcludeKeywords);
         return eligibility.EligibleTitles(q.AccountId, rules);
+    }
+
+    /// <summary>
+    /// The facet list: best vote-shrunk crowd score first (task 4, D-12) — a 10.0 on 2 votes ranks
+    /// below a 7.0 on 5,000, so the head the judge sees first is the pool's best-regarded titles, not
+    /// merely its most-voted or its luckiest few-vote outliers.
+    /// </summary>
+    private static async Task FacetAsync(
+        IQueryable<Title> pool, Dictionary<string, List<Guid>> lists, Dictionary<string, long> timings, Stopwatch clock, CancellationToken ct)
+    {
+        clock.Restart();
+        lists["facet"] = await CrowdVotes.BestShrunkFirst(pool).Select(t => t.Id).Take(ArmDepth).ToListAsync(ct);
+        timings["facet"] = clock.ElapsedMilliseconds;
+    }
+
+    /// <summary>
+    /// The titles leaning the way <paramref name="steers"/> ask, most first, each with the
+    /// <c>steer:</c> evidence it satisfies. Pivots are the reference titles' centroid when there are
+    /// references, else the midpoint (<see cref="AttributeSteer"/>). Within
+    /// <paramref name="population"/> when given; otherwise over the pool's titles with at least
+    /// <see cref="CrowdVotes.MinRelaxVotes"/> votes, by lean in steps of 0.2 and then the crowd, so the
+    /// head is well regarded rather than merely extreme. Trusted (Done) attributes only.
+    /// </summary>
+    private async Task<List<(Guid TitleId, IReadOnlyList<string> Evidence)>> SteerAsync(
+        IReadOnlyList<(string Attribute, AttributeTrend Trend, bool Explicit)> steers,
+        IReadOnlyList<Guid> references,
+        IReadOnlyCollection<Guid>? population,
+        IQueryable<Title> pool,
+        CancellationToken ct)
+    {
+        var pivots = new Dictionary<string, decimal>(StringComparer.Ordinal);
+        if (references.Count > 0)
+        {
+            var refIds = references.ToList();
+            var refRows = await Scalars(db.TitleAttributes.Where(a => refIds.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)).ToListAsync(ct);
+            if (refRows.Count > 0)
+            {
+                foreach (var (attribute, _, _) in steers)
+                {
+                    pivots[attribute] = refRows.Average(r => AttributeSteer.Value(r, attribute));
+                }
+            }
+        }
+
+        List<TitleAttributes> rows;
+        if (population is not null)
+        {
+            var ids = population.ToList();
+            rows = [.. (await Scalars(db.TitleAttributes.Where(a => ids.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)).ToListAsync(ct))
+                .Where(r => AttributeSteer.Leans(r, steers, pivots) && AttributeSteer.Fit(r, steers, pivots) > 0m)
+                .OrderByDescending(r => AttributeSteer.Fit(r, steers, pivots))
+                .ThenBy(r => r.TitleId)
+                .Take(ArmDepth)];
+        }
+        else
+        {
+            var poolIds = CrowdVotes.AtLeast(pool, CrowdVotes.MinRelaxVotes).Select(t => t.Id);
+            var leaning = await Scalars(db.TitleAttributes
+                    .Where(a => a.Status == AttributeExtractionStatus.Done && poolIds.Contains(a.TitleId))
+                    .Where(AttributeSteer.LeansExpression(steers, pivots))
+                    .OrderByDescending(AttributeSteer.FitExpression(steers, pivots))
+                    .ThenBy(a => a.TitleId))
+                .Take(ArmDepth * 3)
+                .ToListAsync(ct);
+            var leaningIds = leaning.Select(r => r.TitleId).ToList();
+            var crowdRank = (await CrowdVotes.BestShrunkFirst(pool.Where(t => leaningIds.Contains(t.Id))).Select(t => t.Id).ToListAsync(ct))
+                .Select((id, rank) => (id, rank))
+                .ToDictionary(x => x.id, x => x.rank);
+            rows = [.. leaning
+                .Where(r => AttributeSteer.Fit(r, steers, pivots) > 0m && crowdRank.ContainsKey(r.TitleId))
+                .OrderByDescending(r => Math.Round(AttributeSteer.Fit(r, steers, pivots) * 5m, MidpointRounding.AwayFromZero))
+                .ThenBy(r => crowdRank[r.TitleId])
+                .Take(ArmDepth)];
+        }
+
+        return [.. rows.Select(r => (r.TitleId, (IReadOnlyList<string>)[.. steers
+            .Where(s => (s.Trend == AttributeTrend.More ? 1m : -1m) * (AttributeSteer.Value(r, s.Attribute) - (pivots.TryGetValue(s.Attribute, out var p) ? p : AttributeSteer.Midpoint)) > 0m)
+            .Select(s => AttributeSteer.Evidence(s.Attribute, s.Trend))]))];
+    }
+
+    /// <summary>The six steerable scalars only — never the raw extraction JSON.</summary>
+    private static IQueryable<TitleAttributes> Scalars(IQueryable<TitleAttributes> rows) =>
+        rows.Select(a => new TitleAttributes
+        {
+            TitleId = a.TitleId,
+            Darkness = a.Darkness,
+            Pacing = a.Pacing,
+            Complexity = a.Complexity,
+            EmotionalIntensity = a.EmotionalIntensity,
+            Humor = a.Humor,
+            Optimism = a.Optimism,
+        });
+
+    /// <summary>
+    /// The mean of the precomputed embeddings of <paramref name="labels"/> (the most-carried 24 that
+    /// have one, from the current embedding model), and how many were used; null when none has one.
+    /// </summary>
+    private async Task<(float[]? Centroid, int Used)> LabelCentroidAsync(IReadOnlyList<string> labels, CancellationToken ct)
+    {
+        if (labels.Count == 0)
+        {
+            return (null, 0);
+        }
+
+        var wanted = labels.ToList();
+        var vectors = await db.KeywordLabels
+            .Where(l => wanted.Contains(l.Label) && l.Embedding != null && l.EmbeddingModel == Ml.EmbeddingText.Model)
+            .OrderByDescending(l => l.TitleCount)
+            .ThenBy(l => l.Label)
+            .Select(l => l.Embedding!)
+            .Take(24)
+            .ToListAsync(ct);
+        if (vectors.Count == 0)
+        {
+            return (null, 0);
+        }
+
+        var dims = vectors[0].ToArray().Length;
+        var centroid = new float[dims];
+        foreach (var v in vectors.Select(v => v.ToArray()).Where(v => v.Length == dims))
+        {
+            Accumulate(centroid, v, 1f / vectors.Count);
+        }
+
+        return (centroid, vectors.Count);
     }
 
     /// <summary>

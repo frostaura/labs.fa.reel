@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Configuration;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
@@ -123,7 +124,8 @@ public sealed record RerankAllowance(
 /// enters through the same door. A page that ships uncurated is a slightly worse order, not a
 /// wrong one.</para>
 /// </summary>
-public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null)
+public sealed class RerankBudget(
+    IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null, IBudgetCalendar? calendar = null)
 {
     /// <summary>Calls per account per day across the whole family. See the type note for the derivation.</summary>
     public const int DefaultDailyCalls = 240;
@@ -165,7 +167,8 @@ public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration
     /// <summary>Today's family spend against today's ceiling, for one account.</summary>
     public async Task<RerankAllowance> AllowanceAsync(Guid accountId, CancellationToken ct)
     {
-        var today = DateTime.UtcNow.Date;
+        // The account's own day (task 12, ADD-22): the recorder stamps these rows with the same calendar.
+        var today = await (calendar ?? BudgetCalendar.Utc).TodayAsync(accountId, ct);
         var family = ApiUsagePurpose.RerankFamily;
 
         long calls = 0, tokens = 0, askCalls = 0, askTokens = 0;

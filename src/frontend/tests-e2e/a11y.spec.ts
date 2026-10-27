@@ -252,8 +252,8 @@ test.describe("keyboard paths", () => {
     await page.goto("/home");
     await expect(page.getByTestId("hero-card")).toHaveCount(5);
 
-    await tabTo(page, key, '[data-testid="hero-card"]');
-    const card = page.getByTestId("hero-card").first();
+    await tabTo(page, key, '[data-testid="hero-card-link"]');
+    const card = page.getByTestId("hero-card-link").first();
     await expect(card).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/title\/movie\/9101$/);

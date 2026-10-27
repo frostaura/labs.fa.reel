@@ -81,13 +81,13 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         // 2 length finishes in a full 50-call window is 4%, above WS-1's 2% line.
         for (var i = 0; i < 48; i++)
         {
-            calls.Record("rerank", lengthFinishes: 0, attempts: 1, fallback: false);
+            calls.Record("rerank", LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
         }
 
-        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
-        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
+        calls.Record("rerank", LlmCallOutcome.Answered, lengthFinishes: 1, attempts: 2);
+        calls.Record("rerank", LlmCallOutcome.Answered, lengthFinishes: 1, attempts: 2);
         // A healthy purpose beside it raises nothing.
-        calls.Record("lens", lengthFinishes: 0, attempts: 1, fallback: false);
+        calls.Record("lens", LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
         await monitor.EvaluateAsync(now, CancellationToken.None);
 
         var (raised, kind) = Assert.Single(sink.Deliveries);
@@ -103,7 +103,7 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
 
         for (var i = 0; i < 50; i++)
         {
-            calls.Record("rerank", lengthFinishes: 0, attempts: 1, fallback: false);
+            calls.Record("rerank", LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
         }
 
         await monitor.EvaluateAsync(now.AddMinutes(2), CancellationToken.None);
@@ -225,7 +225,7 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
         var founder = await SeedAccountAsync(db, AccountTier.Founder);
         var free = await SeedAccountAsync(db, AccountTier.Free);
         using var calls = new FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics();
-        calls.Record("rerank", lengthFinishes: 1, attempts: 2, fallback: false);
+        calls.Record("rerank", LlmCallOutcome.Answered, lengthFinishes: 1, attempts: 2);
         var query = new SyncStatusQuery(db, new UnmonitoredProviderHealthReader(), reader, calls);
 
         var founderStatus = await query.GetAsync(founder, 10, DateTime.UtcNow, CancellationToken.None);

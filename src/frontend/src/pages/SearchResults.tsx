@@ -3,8 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useDispatch, useSelector } from "react-redux";
 import { useLocation, useNavigate } from "react-router";
-import { Plus, Sparkles, Square } from "lucide-react";
-import BrowseFilters from "../components/rec/BrowseFilters";
+import { Plus, Sparkles } from "lucide-react";
 import {
   api, useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
 } from "../store/api";
@@ -15,11 +14,13 @@ import UndoToast from "../components/search/UndoToast";
 import AnswerStrip from "../components/askReel/AnswerStrip";
 import Composer from "../components/askReel/Composer";
 import Transcript from "../components/askReel/Transcript";
-import { CARD_GRID, CardSkeleton, ConflictNotice, RetryButton } from "../components/askReel/parts";
+import LiveSlot from "../components/askReel/LiveSlot";
+import PillButton from "../components/askReel/PillButton";
+import { MoodPresets, RefineBar } from "../components/askReel/Starters";
 import { deriveAskView } from "../components/askReel/view";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { narrate, refineChips, showMoodPresets } from "../lib/askReel/copy";
+import { refineChips, showMoodPresets } from "../lib/askReel/copy";
 import { scrollTargetFor, turnSettled } from "../lib/askReel/reducer";
 import {
   claimHandoff, FRESH_CONVERSATION, mediaFilterFor, nextBootstrap, NO_RESUME, PENDING_TURN_BUDGET_MS,
@@ -37,14 +38,6 @@ import type { ConversationPayload } from "../lib/askReel/transcript";
  * the reply that produced it (chat UI v2); the page orchestrates the hook, the transcript, the
  * answer strip and the composer (WS-2 task 5's split).
  */
-
-/** Cold-start mood presets — one tap seeds a whole first turn on an otherwise empty page. */
-const MOOD_PRESETS = [
-  "Under 90 minutes, feel-good",
-  "Something dark and gripping",
-  "Family movie night",
-  "True-story tension",
-];
 
 /** Maps the browse toggle to the wire values the server understands ([] = no constraint). */
 function mediaTypesFor(filter: BrowseFilter): string[] {
@@ -86,8 +79,8 @@ function AskReel() {
   const [draft, setDraft] = useState("");
   const chat = useAskReelChat();
   const {
-    turns, status, send, resume, startNew, reask, retryTurn, stop, setMediaTypes, canRetry,
-    resumedTail, conversationId, hasLocalTurn, phase, plan,
+    turns, status, send, resume, startNew, reask, setMediaTypes,
+    resumedTail, conversationId, hasLocalTurn, plan,
   } = chat;
   const storeDispatch = useDispatch();
   // The bar itself is not on the wire and should not be: it is the account's own standing
@@ -341,100 +334,7 @@ function AskReel() {
     maxYear: accountFilters?.maxYear ?? null,
   });
 
-  /**
-   * The live turn's block, under the newest row: where the page scrolls to when a turn starts, the
-   * 409 card, the turn-status slot (banner while it runs, provenance line once it settles — one box
-   * so the grid under it never moves, F6-04), the collision fallbacks, the stopped card, and — while
-   * the previous answer is held under its own reply — the cells this turn's cards will fill.
-   */
-  const liveSlot = (
-    <div className="space-y-5" aria-live="off" data-testid="askreel-live">
-      {/* 409 — the same question is already being answered. Nothing failed and nothing is cleared;
-          "Check again" re-sends the SAME turn id. */}
-      {status === "blocked" && (
-        <div className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center" data-testid="askreel-in-progress">
-          <p className="fa-caption text-fa-frost-dim">That question is already being answered — give it a moment.</p>
-          <RetryButton onRetry={retryTurn} disabled={streaming} label="Check again" />
-        </div>
-      )}
-
-      {(streaming || (view.showsProvenance && view.footnoteInSlot)) && (
-        <div className="flex min-h-[4.875rem] flex-col justify-center" data-testid="askreel-turn-status">
-          {streaming ? (
-            <div data-testid="askreel-banner" className="fa-card relative overflow-hidden p-4 flex items-center gap-4">
-              <span className="relative flex h-8 w-8 items-center justify-center shrink-0">
-                <span className="absolute inline-flex h-full w-full rounded-full bg-fa-frost/20 animate-ping" />
-                <Sparkles className="h-4 w-4 text-fa-frost" />
-              </span>
-              <div className="flex-1 min-w-0">
-                {/* The narration line, driven by `phase` frames — the engine's own label where the
-                    v2 engine sends one. Live, because it is the only feedback a screen-reader user
-                    gets while Reel is working. */}
-                <p data-testid="askreel-narration" aria-live="polite" aria-atomic="true" className="fa-caption text-fa-frost-bright truncate">
-                  {narrate(phase)}
-                </p>
-                {/* The sweep only moves inside a positioning context (`fa-progress-slide` animates
-                    `left`). */}
-                <div className="relative mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
-                  <div className="absolute inset-y-0 rounded bg-fa-frost/60 fa-progress-slide" />
-                </div>
-              </div>
-              {phase && phase.found > 0 && (
-                <span className="fa-caption text-fa-frost-dim shrink-0 tabular-nums">
-                  {phase.scored > 0 ? `${phase.scored} scored` : `${phase.found} found`}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={stop}
-                data-testid="askreel-stop"
-                aria-label="Stop searching"
-                className="fa-caption inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
-              >
-                <Square className="h-3 w-3" /> Stop
-              </button>
-            </div>
-          ) : (
-            /* The provenance line, in the box the banner just vacated — at body size (14 px), not
-               caption: it is the account of where the answer came from, and it was the smallest
-               type on the page (WS-2 task 3). `footnote` reconciles a paged answer (R1-03). */
-            <p className="fa-body text-fa-frost-dim text-center" data-testid="askreel-footnote">{view.footnoteText}</p>
-          )}
-        </div>
-      )}
-
-      {/* The collision notice's FALLBACK position — when there is no reply to attach it to. */}
-      {view.conflictMessage && view.answerIndex < 0 && (
-        <ConflictNotice message={view.conflictMessage} terms={chat.conflictTerms} />
-      )}
-      {view.showsTurnConflict && view.turnConflictMessage && view.liveReplyIndex < 0 && !(view.conflictMessage && view.answerIndex < 0) && (
-        <ConflictNotice message={view.turnConflictMessage} terms={chat.turnConflictTerms} />
-      )}
-
-      {/* A stopped turn is a state, not an absence: the way back, above whatever did arrive. */}
-      {status === "stopped" && (
-        <div ref={settledRef} className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center scroll-mt-20" data-testid="askreel-stopped">
-          <p className="fa-caption text-fa-frost-dim">{view.stoppedText}</p>
-          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
-          {/* The abandoned turn's own collision, with the row it belongs to and nowhere else (R5-01). */}
-          {view.turnConflictMessage && (
-            <div className="w-full">
-              <ConflictNotice message={view.turnConflictMessage} terms={chat.turnConflictTerms} />
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* The new turn's cells, reserved while the previous answer is held under its own reply. */}
-      {view.reserveSlots > 0 && (
-        <div className={CARD_GRID} data-testid="askreel-reserve">
-          {Array.from({ length: view.reserveSlots }, (_, i) => (
-            <CardSkeleton key={`reserve-${i}`} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  const liveSlot = <LiveSlot chat={chat} view={view} settledRef={settledRef} />;
 
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it.
@@ -446,15 +346,9 @@ function AskReel() {
           </h1>
           {/* `+ New` is the way OUT of a conversation; the switcher is the way back to another. */}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              data-testid="askreel-new"
-              onClick={beginFreshThread}
-              disabled={streaming}
-              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5" /> New
-            </button>
+            <PillButton tone="quiet" data-testid="askreel-new" onClick={beginFreshThread} disabled={streaming}>
+              <Plus className="h-3.5 w-3.5" aria-hidden /> New
+            </PillButton>
             <ConversationSwitcher
               currentId={conversationId}
               // F6-01: walking away from a running turn bound the in-flight answer to the thread
@@ -491,49 +385,19 @@ function AskReel() {
 
       {/* Cold-start mood presets — gone the moment a conversation exists. */}
       {showMoodPresets(turns.length, chat.cards.length + chat.outsideCards.length, streaming) && (
-        <div className="fa-card p-6 max-w-xl mx-auto space-y-4 text-center">
-          <div className="space-y-1">
-            <p className="fa-body text-fa-frost-bright">What are you in the mood for?</p>
-            <p className="fa-caption text-fa-frost-dim">Tap one to start, or ask in your own words below.</p>
-          </div>
-          <div className="flex flex-wrap justify-center gap-2">
-            {MOOD_PRESETS.map((preset) => (
-              <button
-                key={preset}
-                type="button"
-                data-testid="askreel-preset"
-                onClick={() => send(preset)}
-                className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/25 px-4 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
-              >
-                {preset}
-              </button>
-            ))}
-          </div>
-        </div>
+        <MoodPresets onPick={(preset) => send(preset)} />
       )}
 
       {/* Refine chips + media filter. Gated on the TRANSCRIPT, not on cards: a resumed thread with
           no cards still has a conversation to act on. */}
       {turns.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2" data-testid="askreel-refine">
-          {chips.map((chip) => (
-            <button
-              key={chip}
-              type="button"
-              data-testid="askreel-chip"
-              onClick={() => send(chip, false)}
-              disabled={streaming}
-              title={streaming ? "Wait for the current results to finish" : undefined}
-              aria-disabled={streaming}
-              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
-            >
-              {chip}
-            </button>
-          ))}
-          <div className="ml-auto">
-            <BrowseFilters value={filter} onChange={changeFilter} showAvailability={false} />
-          </div>
-        </div>
+        <RefineBar
+          chips={chips}
+          streaming={streaming}
+          onChip={(chip) => send(chip, false)}
+          filter={filter}
+          onFilterChange={changeFilter}
+        />
       )}
 
       {speech.error && (

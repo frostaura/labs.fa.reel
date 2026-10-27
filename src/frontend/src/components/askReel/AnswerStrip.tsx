@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { AlertTriangle, Sparkles } from "lucide-react";
 import PickConditionsButton from "../rec/PickConditionsButton";
+import { Button } from "../ui/button";
 import CardTray from "./CardTray";
+import PillButton from "./PillButton";
 import RelaxationChip from "./RelaxationChip";
 import { CARD_GRID, CardSkeleton, ResultCard, RetryButton } from "./parts";
-import { nearMissHeading, plural, removedNote } from "../../lib/askReel/copy";
+import { failureCopy, nearMissHeading, plural, removedNote } from "../../lib/askReel/copy";
 import { relTime } from "../../lib/format";
 import type { AskReelChat } from "../../lib/askReel/useAskReelChat";
 import type { AskCard } from "../../lib/askReelStream";
@@ -35,6 +37,9 @@ export default function AnswerStrip({
   // The held previous answer is labelled and kept readable — never under 0.9 (WS-2 task 3). It used
   // to drop to 40 %, which read as "disabled" for an answer the reader was still entitled to use.
   const held = holdingPrevious ? "opacity-90" : "";
+  // What a failure says depends on its cause — a turn limit is waited out, a lapsed session is not
+  // retried (see `failureCopy`).
+  const failure = failureCopy(chat.errorReason, chat.rateLimit);
 
   const floorTray = view.heldBack > 0 && (
     // The floor, shown rather than assumed. Collapsed: these picks are not being recommended, they
@@ -104,9 +109,9 @@ export default function AnswerStrip({
           wipe the reel — a quiet inline retry instead of the full-bleed card. Not for a 404: that
           has its own card, and both firing put two "Ask again" buttons under two explanations. */}
       {status === "error" && chat.errorReason !== "conversation" && chat.cards.length > 0 && (
-        <div className="flex flex-col items-center gap-2" data-testid="askreel-page-error">
-          <p className="fa-caption text-fa-warning">That last request hit a snag.</p>
-          {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
+        <div className="flex flex-col items-center gap-2" data-testid="askreel-page-error" data-reason={chat.errorReason ?? "unknown"}>
+          <p className="fa-caption text-fa-warning text-center">{failure.inline}</p>
+          {canRetry && failure.retryable && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
       )}
     </div>
@@ -127,11 +132,11 @@ export default function AnswerStrip({
     }
     if (status === "error" && chat.cards.length === 0) {
       return (
-        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="semantic-error">
-          <AlertTriangle className="h-6 w-6 text-fa-warning mx-auto" />
-          <p className="fa-body text-fa-frost-bright">Search hit a snag</p>
-          <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
-          {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
+        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="semantic-error" data-reason={chat.errorReason ?? "unknown"}>
+          <AlertTriangle className="h-6 w-6 text-fa-warning mx-auto" aria-hidden />
+          <p className="fa-body text-fa-frost-bright">{failure.title}</p>
+          <p className="fa-caption text-fa-frost-dim">{failure.detail}</p>
+          {canRetry && failure.retryable && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
       );
     }
@@ -240,7 +245,7 @@ export default function AnswerStrip({
           <div className={`space-y-3 border-t border-fa-frost/10 pt-5 ${held}`} data-testid="askreel-outside">
             <div>
               <p className="fa-body text-fa-frost-dim">Outside your request — closest we could get</p>
-              <p className="fa-caption text-fa-frost-dim/70">These match the vibe but hit something you excluded.</p>
+              <p className="fa-caption text-3">These match the vibe but hit something you excluded.</p>
             </div>
             <div className={CARD_GRID}>
               {outsideVisible.map((card) => (
@@ -269,7 +274,7 @@ function ResumeSeam({ chat }: { chat: AskReelChat }) {
       <p className="fa-caption text-fa-frost-dim">Picked up where you left off · {relTime(stamp)}</p>
       {chat.resumedTail && chat.answeredQuery && <SeamQuestion question={chat.answeredQuery} />}
       {chat.removed > 0 && (
-        <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
+        <p className="fa-caption text-3" data-testid="askreel-removed">
           {/* R1-11: "since" only of cards acted on after the answer — see removedNote. */}
           {removedNote(chat.removed, chat.removedEarlier)}
         </p>
@@ -285,16 +290,16 @@ function ResumeSeam({ chat }: { chat: AskReelChat }) {
 function SeamQuestion({ question }: { question: string }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <button
-      type="button"
+    <Button
+      variant="link"
       data-testid="askreel-seam-answers"
       title={question}
       aria-expanded={expanded}
       onClick={() => setExpanded((v) => !v)}
-      className={`fa-caption max-w-full text-left text-fa-frost-dim/70 hover:text-fa-frost-dim transition-colors ${expanded ? "" : "truncate"}`}
+      className={`fa-caption block h-auto max-w-full p-0 text-left text-xs font-normal text-3 hover:text-fa-frost-dim ${expanded ? "whitespace-normal" : "truncate"}`}
     >
       These answer “{question}”.
-    </button>
+    </Button>
   );
 }
 
@@ -309,15 +314,9 @@ function Paging({ chat, view }: { chat: AskReelChat; view: AskView }) {
   return (
     <div className="flex flex-col items-center gap-2">
       {(pageable || appending) && (
-        <button
-          type="button"
-          data-testid="askreel-more"
-          onClick={loadMore}
-          disabled={view.streaming || appending}
-          className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
-        >
+        <PillButton tone="strong" data-testid="askreel-more" onClick={loadMore} disabled={view.streaming || appending}>
           {appending ? "Finding more like these…" : "Show me more"}
-        </button>
+        </PillButton>
       )}
       {exhausted && !appending && (
         <p className="fa-caption text-fa-frost-dim text-center">

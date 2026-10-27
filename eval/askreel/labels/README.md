@@ -28,8 +28,12 @@ the label.
 from the top eight of 100 different turns of the 99c0761 open baseline, drawn in a seeded order.
 Regenerating with the same seed gives the same items.
 
-**Still owed:** WS-3's 20 in-catalogue ninja films (WS-3 P1 task 11) are appended as yes/no confirm rows
-with `--confirm <file of title ids>` once that list exists, so you confirm them in the same sitting.
+**The 20 confirm rows** (`confirm#1`–`confirm#20`, "Is this a ninja film?", yes/no) are WS-3's in-catalogue
+ninja films (WS-3 P1 task 11, `src/backend/FrostAura.Reel.Tests/Filters/ninja-recall-list.json`), appended
+with `--confirm <file of their title ids>` so you confirm them in the same sitting. The ids are the
+films' `Titles.Id` in the reel-2026-10-23 snapshot, resolved by TMDB id (they equal the ids WS-3 records
+on its branch). Regenerating with the same seed and the same file gives the same 120 rows; κ reads only
+the 100 `satisfies` rows.
 
 ## After labelling
 

@@ -5,6 +5,8 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Auth;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
@@ -27,9 +29,11 @@ public record SessionTokens(Guid SessionId, string AccessToken, string? RefreshT
 /// rest). Trakt OAuth is the identity; these tokens are merely the app's session transport
 /// (HttpOnly cookies at the API edge).
 /// </summary>
-public class SessionService(IReelDbContext db, IOptions<SessionOptions> options)
+public class SessionService(IReelDbContext db, IOptions<SessionOptions> options, ILogger<SessionService>? logger = null)
 {
     private static readonly JsonWebTokenHandler TokenHandler = new();
+
+    private readonly ILogger log = (ILogger?)logger ?? NullLogger.Instance;
 
     private SessionOptions Settings => options.Value;
     private string Issuer => Settings.Issuer;
@@ -85,8 +89,9 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options)
     ///
     /// <para>The loser of the race is answered from the successor inside <see cref="RefreshGrace"/>:
     /// an access token for the same account, tagged with the successor's id, and no refresh token
-    /// (it keeps the cookie the winner set). After the window, or for a token that was revoked by
-    /// logout rather than rotated, the answer is null — sign in again.</para>
+    /// (it keeps the cookie the winner set). A token revoked by logout answers null. A ROTATED token
+    /// presented after the window is reuse: the answer is null and its whole family is revoked
+    /// (<see cref="RevokeFamilyAfterReuseAsync"/>).</para>
     /// </summary>
     public async Task<SessionTokens?> RefreshAsync(string refreshToken, string? userAgent, CancellationToken ct = default)
     {
@@ -104,6 +109,12 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options)
 
         if (session.RevokedAt is not null)
         {
+            if (session.ReplacedBySessionId is not null && now - session.RevokedAt.Value > RefreshGrace)
+            {
+                await RevokeFamilyAfterReuseAsync(session, now, ct);
+                return null;
+            }
+
             return await GraceAnswerAsync(session, now, ct);
         }
 
@@ -170,6 +181,50 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options)
             ? null
             : new SessionTokens(successor.Id, MintAccessToken(account, now), null, now.AddMinutes(AccessMinutes), successor.ExpiresAt);
     }
+
+    /// <summary>
+    /// Reuse of a rotated refresh token (J*4): a token that was replaced more than
+    /// <see cref="RefreshGrace"/> ago is presented again. Only two parties can hold it — the browser
+    /// it was issued to, which threw it away at rotation, and someone who copied it — so its
+    /// presentation means the family is compromised, and every live session descended from it is
+    /// revoked: the thief's and the owner's alike. The owner signs in again; the thief, who cannot,
+    /// is out.
+    ///
+    /// <para>The family is the successor chain from the reused session forward
+    /// (<see cref="RefreshSession.ReplacedBySessionId"/>), walked in ONE recursive statement so a
+    /// month of rotations is one round trip and no schema change. Sessions the account holds on
+    /// other devices are separate families and are untouched. A token revoked by logout names no
+    /// successor and never reaches here. The chain is never broken by retention: it deletes only
+    /// EXPIRED sessions, and every descendant of an unexpired session was created after it and
+    /// expires after it.</para>
+    /// </summary>
+    private async Task RevokeFamilyAfterReuseAsync(RefreshSession reused, DateTime now, CancellationToken ct)
+    {
+        var revoked = await db.Database.ExecuteSqlAsync(
+            $"""
+             WITH RECURSIVE family AS (
+                 SELECT s."Id", s."ReplacedBySessionId", 0 AS depth
+                 FROM "RefreshSessions" s WHERE s."Id" = {reused.Id}
+                 UNION ALL
+                 SELECT r."Id", r."ReplacedBySessionId", f.depth + 1
+                 FROM "RefreshSessions" r JOIN family f ON r."Id" = f."ReplacedBySessionId"
+                 WHERE f.depth < {MaxFamilyDepth})
+             UPDATE "RefreshSessions" SET "RevokedAt" = {now}
+             WHERE "Id" IN (SELECT "Id" FROM family) AND "RevokedAt" IS NULL
+             """,
+            ct);
+
+        log.LogWarning(
+            "Refresh token reuse for account {AccountId}: session {SessionId}, rotated {Age} ago, was presented again; "
+            + "revoked {Revoked} live session(s) in its family. The owner must sign in again.",
+            reused.AccountId, reused.Id, now - reused.RevokedAt!.Value, revoked);
+    }
+
+    /// <summary>
+    /// A ceiling on the successor walk, far above any real chain (a 365-day refresh lifetime at one
+    /// rotation per 1-minute access token is about 525k links; at the default 15 minutes, 35k).
+    /// </summary>
+    private const int MaxFamilyDepth = 1_000_000;
 
     private (RefreshSession Session, string RefreshToken) NewSession(Guid accountId, Guid id, string? userAgent, DateTime now)
     {

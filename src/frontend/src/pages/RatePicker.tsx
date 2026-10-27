@@ -11,6 +11,7 @@ import LoadFailed from "../components/ui/load-failed";
 import { refusedOutright } from "../components/ui/save-outcome";
 import { Button } from "../components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+import { COARSE_TAP } from "../lib/tapTarget";
 
 /**
  * The label engine.
@@ -112,7 +113,10 @@ export default function RatePicker() {
       {items.map((t) => (
         <Popover key={t.titleId}>
           <PopoverTrigger asChild>
-            <button className="group block text-left focus:outline-none reel-rise" data-testid="rate-card">
+            <button
+              className="group block text-left rounded-lg reel-rise focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60 focus-visible:ring-offset-2 focus-visible:ring-offset-fa-ink"
+              data-testid="rate-card"
+            >
               <div className="relative overflow-hidden rounded-lg group-hover:ring-2 group-hover:ring-fa-frost/50 transition">
                 <PosterImage path={t.posterPath} alt={t.name} size="w185" />
               </div>
@@ -121,16 +125,19 @@ export default function RatePicker() {
           </PopoverTrigger>
           <PopoverContent align="center" className="w-auto">
             <p className="fa-overline text-fa-frost-dim mb-2">rate {t.name}</p>
-            <div className="flex gap-1">
+            {/* Two rows of five on a coarse pointer, where each value is a 44 px target and ten in a row
+                would not fit a phone; one row of ten under a mouse. */}
+            <div className="grid grid-cols-5 gap-1 [@media(pointer:fine)]:flex">
               {Array.from({ length: 10 }, (_, i) => i + 1).map((v) => (
-                <button
+                <Button
                   key={v}
+                  size="sm"
                   onClick={() => rate(t, v)}
-                  className="h-9 w-7 rounded-md border border-fa-edge bg-fa-glass text-sm tabular-nums text-fa-frost hover:border-fa-frost/40 transition"
+                  className={`h-9 w-7 px-0 tabular-nums ${COARSE_TAP}`}
                   data-testid="rate-value"
                 >
                   {v}
-                </button>
+                </Button>
               ))}
             </div>
           </PopoverContent>
