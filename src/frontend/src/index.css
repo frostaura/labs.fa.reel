@@ -107,6 +107,15 @@ html, body, #root {
   height: 100%;
 }
 
+/* Below md the fixed bottom tab bar (MobileTabBar: 3.5rem plus the home-indicator inset) covers the
+ * bottom of the viewport. Focus scrolling only brings an element to the viewport's edge, so without
+ * this a Tab onto a control near the bottom parked it — and its focus ring — under the bar (PH2-03:
+ * the Settings rating slider at 390 × 844). Clear the bar plus 1rem, room for a ring drawn outside
+ * the control's box. md is where the bar goes away (`md:hidden`), so 767.98px is its last width. */
+@media (max-width: 767.98px) {
+  html { scroll-padding-bottom: calc(3.5rem + env(safe-area-inset-bottom) + 1rem); }
+}
+
 body {
   background: rgb(var(--c-ink));
   background-image:
