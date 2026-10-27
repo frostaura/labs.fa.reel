@@ -24,7 +24,7 @@ export default function UpdatePrompt() {
           variant="ghost"
           size="sm"
           onClick={dismissPwaUpdate}
-          className="rounded-full fa-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
+          className="rounded-full text-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
         >
           Later
         </Button>
@@ -33,7 +33,7 @@ export default function UpdatePrompt() {
           variant="primary"
           size="sm"
           onClick={acceptPwaUpdate}
-          className="rounded-full fa-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
+          className="rounded-full text-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
         >
           Reload
         </Button>

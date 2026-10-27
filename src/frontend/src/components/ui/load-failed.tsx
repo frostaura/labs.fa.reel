@@ -21,8 +21,8 @@ interface Props {
  * lies: an empty list rendered as "nothing here yet", or a shimmer that never stopped. A failed read
  * is a third state, not a variant of loading or of empty, and it always offers the way back.
  *
- * Lives under `settings/` only because that is where lane 10B may add files; it is meant to move to
- * `components/ui/` with WS-9's primitives (requested in the WS-10B report).
+ * Retry is `size="sm"` for its compact look under a mouse; like every Button it is a 44 × 44 target
+ * under a coarse pointer (R1-38, measured in shell-targets.spec.ts).
  */
 export default function LoadFailed({ what, onRetry, retrying = false, variant = "page", testId = "load-failed" }: Props) {
   const shell =

@@ -100,84 +100,6 @@
   "askreel-negation.spec.ts \u203a Ask Reel \u2014 the collision notice stays with its answer \u203a the stopped turn's own collision is shown with the stopped turn": [
     "GET /api/settings/filters"
   ],
-  "askreel-render.spec.ts \u203a standing conditions on /search \u203a every condition is named, and the editor is one tap away": [
-    "GET /api/search/filter-chips"
-  ],
-  "askreel-trust.spec.ts \u203a Ask Reel \u2014 WS-2 review round 1 \u203a a none-found answer renders even when one relaxation offer is malformed": [
-    "GET /api/settings/filters"
-  ],
-  "askreel-trust.spec.ts \u203a Ask Reel \u2014 WS-2 review round 1 \u203a a stream that closes without its done frame is a failure, never a spinner": [
-    "GET /api/settings/filters"
-  ],
-  "card-quick-actions.spec.ts \u203a card quick actions \u203a hover reveals Not for me + Save; Not for me fires the reaction and removes only that card, in place": [
-    "GET /api/accuracy",
-    "GET /api/digest/current",
-    "GET /api/feed/genres",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "card-quick-actions.spec.ts \u203a card quick actions \u203a press-and-hold opens the picker instead of dismissing, and the hold's own click never fires the default": [
-    "GET /api/accuracy",
-    "GET /api/digest/current",
-    "GET /api/feed/genres",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "card-quick-actions.spec.ts \u203a card quick actions \u203a right-click opens the four-way picker and posts the reason that was chosen": [
-    "GET /api/accuracy",
-    "GET /api/digest/current",
-    "GET /api/feed/genres",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "card-quick-actions.spec.ts \u203a card quick actions \u203a the rating popover posts the score in place and retires the card": [
-    "GET /api/accuracy",
-    "GET /api/digest/current",
-    "GET /api/feed/genres",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a a Trakt poll cannot steal the pill from a run in progress": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the pill names the pass from the status poll and hands back on completion": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "digest-blend.spec.ts \u203a weekly digest rail \u203a hides itself entirely while the week's digest is empty": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "digest-blend.spec.ts \u203a weekly digest rail \u203a renders 'New & high for you this week' from the digest payload": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "filter-cost-meter.spec.ts \u203a filter cost meter \u203a a suggestion chip applies its rule to the draft and saves nothing on its own": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "filter-cost-meter.spec.ts \u203a filter cost meter \u203a shows what the current rules leave, badges each excluded genre, and notes the other rules": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "filter-cost-meter.spec.ts \u203a filter cost meter \u203a the counts follow the draft as chips move, before anything is saved": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
   "gating.spec.ts \u203a entitlement gating \u203a founder tier renders rows without the upsell": [
     "GET /api/accuracy",
     "GET /api/digest/current",
@@ -230,72 +152,6 @@
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
   ],
-  "hero-layout.spec.ts \u203a hero at 1024\u00d7768 \u203a every title and badge sits inside its card, and the actions never cover text": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 1024\u00d7768 \u203a the lens clause is off the card and the hook is held to two lines": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 1440\u00d7900 \u203a every title and badge sits inside its card, and the actions never cover text": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 1440\u00d7900 \u203a the lens clause is off the card and the hook is held to two lines": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 390\u00d7844 \u203a every title and badge sits inside its card, and the actions never cover text": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 390\u00d7844 \u203a the lens clause is off the card and the hook is held to two lines": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 834\u00d71194 \u203a every title and badge sits inside its card, and the actions never cover text": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a hero at 834\u00d71194 \u203a the lens clause is off the card and the hook is held to two lines": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a narrow screens \u203a the card stacks: art above, text below it, actions in a visible row at the bottom": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a title contrast at 1440 \u203a every one of 20 hero titles is at least 4.5:1 over near-white art": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a title contrast at 390 \u203a every one of 20 hero titles is at least 4.5:1 over near-white art": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a Not for me acts instead of navigating, and takes only that hero slide": [
     "GET /api/accuracy",
     "GET /api/feed/learned",
@@ -321,84 +177,6 @@
     "GET /api/settings/filters"
   ],
   "hero-quick-actions.spec.ts \u203a hero quick actions \u203a the hero carries all three actions, revealed on hover like the rail cards": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a a failing /feed/more \u203a Retry is one more request for that rail only": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a a failing /feed/more \u203a backs off, stops at four requests per rail, and ends in a Retry tile with no shimmer": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a a cold Home at 1440\u00d7900 asks for at most 2 pages and no genre rail": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a a cold Home at 390\u00d7844 asks for at most 2 pages and no genre rail": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a a genre rail fills once the user scrolls to it": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a with no personalised rows at 1440\u00d7900, exactly the genre rails near the fold fetch": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a with no personalised rows at 390\u00d7844, exactly the genre rails near the fold fetch": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a with one personalised row at 1440\u00d7900, exactly the genre rails near the fold fetch": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a lazy rails \u203a with one personalised row at 390\u00d7844, exactly the genre rails near the fold fetch": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a leaving a rail while its request is out \u203a navigating away mid-request schedules nothing more": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a leaving a rail while its request is out \u203a switching the medium mid-request retires the old hero; only the new one pages": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a page-wide exclusions \u203a every rail sends what the rest of the page shows, under one page token": [
-    "GET /api/accuracy",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "hero-rails-paging.spec.ts \u203a page-wide exclusions \u203a the hero's first top-up already excludes the rows below it": [
     "GET /api/accuracy",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
@@ -443,30 +221,6 @@
     "GET /api/accuracy",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a a null caution simply has no disclosure": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a a stale note says it is stale rather than passing itself off as current": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a mood and occasion render as the closed-vocabulary labels": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a no lens means the page renders exactly as it did before the feature existed": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a renders the lens above the synopsis, and never instead of it": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a reporting a spoiler withdraws the note at once and leaves the synopsis standing": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a the anchors name titles from your own library with what links them": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "lens-copy.spec.ts \u203a through your lens \u203a the caution is behind a tap, and it really does argue against the pick": [
-    "GET /api/titles/movie/:id/providers"
   ],
   "onboarding.spec.ts \u203a onboarding build-up \u203a an accepted 'Try again' on an unchanged stop shows the stop again with what happened, then follows the run": [
     "GET /api/feed"
@@ -529,27 +283,6 @@
     "GET /api/settings/filters"
   ],
   "taste-dna-dislikes.spec.ts \u203a taste DNA data states \u203a a failed DNA read is an error with a Retry, and the retry recovers": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a a failed Older page says so \u2014 page 1's rows never stand in for it \u2014 and Newer recovers": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a a failed undo says so and the row stays": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a an account that has said no to nothing gets no panel at all": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a counts the dislikes, names what is being demoted, and never conflates the two numbers": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a each row says the reason it was given, and admits when none was": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a paging asks for the next page and the panel disappears entirely when there is nothing to show": [
-    "GET /api/taste/narrative"
-  ],
-  "taste-dna-dislikes.spec.ts \u203a taste DNA dislikes \u203a undo goes to the existing revoke endpoint, with the right verb per reaction kind": [
     "GET /api/taste/narrative"
   ],
   "title-actions.spec.ts \u203a person page states \u203a a 404 says not found instead of Loading\u2026 forever": [
@@ -669,33 +402,5 @@
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters",
     "POST /api/feed/more"
-  ],
-  "typeahead-global.spec.ts \u203a global typeahead \u2014 beyond your catalogue \u203a sparse local results grow the flagged TMDB group, reachable by keyboard": [
-    "GET /api/accuracy",
-    "GET /api/digest/current",
-    "GET /api/feed/genres",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a a feed-scores-updated frame changes the numbers without remounting a single row": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a a stale or malformed frame leaves the page alone": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a a sync that found nothing says so, rather than reverting to a timestamp": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a the sync pill says what the sync did, then what it did to the page": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
   ]
 }

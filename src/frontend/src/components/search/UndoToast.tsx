@@ -70,7 +70,7 @@ export default function UndoToast({
           variant="chip"
           onClick={onUndo}
           data-testid={`${testId}-undo`}
-          className="fa-caption min-h-11 gap-1.5 border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10"
+          className="min-h-11 gap-1.5 border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10"
         >
           <Undo2 className="h-3.5 w-3.5" /> {undoLabel}
         </Button>

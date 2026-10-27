@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attribute, judge, parseHits, routeShape } from "./unmockedApi";
+import { attribute, judge, parseHits, routeShape, shardHarvestFile } from "./unmockedApi";
 
 describe("routeShape", () => {
   it("collapses numeric and uuid segments so one mock shape covers every fixture id", () => {
@@ -92,5 +92,14 @@ describe("parseHits", () => {
       { at: 1, method: "GET", path: "/api/a" },
       { at: 2, method: "PUT", path: "/sse/x" },
     ]);
+  });
+});
+
+describe("shardHarvestFile", () => {
+  it("gives every WebKit shard its own harvest file beside the one asked for", () => {
+    const files = [1, 2, 12].map((n) => shardHarvestFile("/tmp/found.json", n));
+    expect(files).toEqual(["/tmp/found.json.webkit-1.json", "/tmp/found.json.webkit-2.json", "/tmp/found.json.webkit-12.json"]);
+    expect(new Set(files).size).toBe(3);
+    expect(files).not.toContain("/tmp/found.json");
   });
 });

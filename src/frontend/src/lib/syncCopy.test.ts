@@ -46,6 +46,39 @@ describe("syncExplainer", () => {
   it("no longer promises that only a model beating popularity ships", () => {
     // 0 of 101 evaluations beat popularity and every model shipped anyway.
     expect(syncExplainer("evaluate").lines.join(" ")).not.toMatch(/only a model that beats/i);
+    // R1-46: the hydrate caption made the same promise ("the baseline your model must beat").
+    for (const kind of BACKEND_SSE_KINDS) {
+      expect(syncExplainer(kind).lines.join(" "), kind).not.toMatch(/must beat|only .* ships/i);
+    }
+  });
+
+  /**
+   * R1-46 (claims family pipeline-stage-descriptions): each caption sits on the stage whose handler
+   * does that work, so the header never describes one job while another runs. The work itself is
+   * pinned by the backend tests the claims register names: TitleHydrator writes poster, backdrop,
+   * trailer and TMDB popularity for the library's titles; EnrichCatalog writes plot embeddings;
+   * Train fits the artifact on the ratings; BuildFeed scores the eligible pool and orders it by
+   * the calibrated prediction × freshness with genre-diversity shaping; CrossReference judges the
+   * whole eligible pool beside the viewer's nearest rated titles; EvalHarness's primary baseline is
+   * popularity.
+   */
+  it.each([
+    ["hydrate", /artwork and trailers for the titles in your library/i],
+    ["hydrate", /popularity — the baseline your model is measured against/i],
+    ["enrich", /plot embeddings/i],
+    ["train", /fitting a fresh model on your ratings/i],
+    ["feed", /scoring eligible titles with your model/i],
+    ["feed", /ranking by predicted rating, freshness and variety/i],
+    ["xref", /every eligible title against the ones you've actually rated/i],
+  ])("the %s stage, and only it, says %s", (kind, caption) => {
+    expect(syncExplainer(kind).lines.some((line) => caption.test(line))).toBe(true);
+    for (const other of BACKEND_SSE_KINDS.filter((k) => k !== kind)) {
+      expect(syncExplainer(other).lines.some((line) => caption.test(line)), other).toBe(false);
+    }
+  });
+
+  it("claims the whole catalogue for no library stage", () => {
+    expect(syncExplainer("hydrate").lines.join(" ")).not.toMatch(/every title/i);
   });
 });
 

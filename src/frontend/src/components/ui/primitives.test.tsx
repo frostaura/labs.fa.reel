@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Button } from "./button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "./card";
 import { Chip } from "./chip";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./dialog";
+import LoadFailed from "./load-failed";
 import { Input } from "./input";
 import { PageHeader } from "./page-header";
 import { SegmentedControl } from "./segmented-control";
@@ -173,5 +175,76 @@ describe("PageHeader and Card", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Sub" })).toBeTruthy();
     expect(screen.getByText("Tonight first.").tagName).toBe("P");
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
+  });
+});
+
+/**
+ * R1-38: the 44 px touch floor lives in the primitives, not in a lane's helper string. jsdom cannot
+ * evaluate `(pointer: coarse)`, so this pins the class on every primitive and every size; the pixels
+ * are measured in a browser by tests-e2e/shell-targets.spec.ts.
+ */
+describe("the 44 px touch floor", () => {
+  const FLOOR = ["coarse:min-h-11", "coarse:min-w-11"];
+  const hasFloor = (el: Element, classes = FLOOR) => classes.every((c) => el.className.split(" ").includes(c));
+
+  it("is on every Button variant and size except the inline link", () => {
+    for (const variant of ["default", "primary", "destructive", "outline", "ghost", "chip"] as const) {
+      for (const size of ["default", "sm", "lg", "chip", "icon", "icon-sm"] as const) {
+        const { unmount } = render(<Button variant={variant} size={size}>{`${variant}-${size}`}</Button>);
+        expect(hasFloor(screen.getByRole("button", { name: `${variant}-${size}` })), `${variant}/${size}`).toBe(true);
+        unmount();
+      }
+    }
+    render(<Button variant="link">inline</Button>);
+    expect(screen.getByRole("button", { name: "inline" }).className).toContain("coarse:min-h-0");
+  });
+
+  it("survives a caller's compact size: min-height and min-width outrank h-7 w-7", () => {
+    render(
+      <Button size="icon-sm" className="h-7 w-7 min-h-0" aria-label="dense">
+        x
+      </Button>
+    );
+    const button = screen.getByRole("button", { name: "dense" });
+    expect(hasFloor(button)).toBe(true);
+    expect(button.className).toContain("h-7");
+  });
+
+  it("is on the Chip, the Input, the Select trigger and a Tab", () => {
+    render(
+      <>
+        <Chip selected={false}>Drama</Chip>
+        <Input label="Email" />
+        <Select label="Region" value="ZA" onValueChange={vi.fn()} options={[{ value: "ZA", label: "South Africa" }]} />
+        <Tabs defaultValue="a">
+          <TabsList aria-label="Sections">
+            <TabsTrigger value="a">First</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </>
+    );
+    expect(hasFloor(screen.getByRole("button", { name: "Drama" }))).toBe(true);
+    expect(hasFloor(screen.getByLabelText("Email"), ["coarse:min-h-11"])).toBe(true);
+    expect(hasFloor(screen.getByLabelText("Region"), ["coarse:min-h-11"])).toBe(true);
+    expect(hasFloor(screen.getByRole("tab", { name: "First" }), ["coarse:min-h-11"])).toBe(true);
+  });
+
+  it("is on the dialog's close button, which also shows a focus ring", () => {
+    render(
+      <Dialog open>
+        <DialogContent>
+          <DialogTitle>Remove PIN</DialogTitle>
+          <DialogDescription>Conditions unlock for everyone on this account.</DialogDescription>
+        </DialogContent>
+      </Dialog>
+    );
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(hasFloor(close)).toBe(true);
+    expect(close.className).toContain("focus-visible:ring-2");
+  });
+
+  it("is on a failed read's Retry, compact size and all", () => {
+    render(<LoadFailed what="your taste DNA" onRetry={vi.fn()} />);
+    expect(hasFloor(screen.getByTestId("load-failed-retry"))).toBe(true);
   });
 });

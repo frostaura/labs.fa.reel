@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { shardHarvestFile } from "./unmockedApi.ts";
 
 /**
  * Runs the WebKit project in shards, each its own Playwright process and so its own browser
@@ -20,6 +21,11 @@ import { spawnSync } from "node:child_process";
  *
  * Usage: `node scripts/e2e/webkitShards.ts [playwright args…]` — the args (spec files, `-g`, …)
  * pass through to every shard. Exits non-zero when any shard fails.
+ *
+ * A harvest (`UNMOCKED_API_FOUND=<file>`, see unmockedApiReporter.ts) gets one file per shard,
+ * `<file>.webkit-<n>.json`: every shard is its own Playwright run with its own reporter, so a single
+ * path would keep only the last shard's findings — which is how a harvest silently loses most of
+ * WebKit.
  */
 const TESTS_PER_SHARD = 40;
 
@@ -44,8 +50,10 @@ console.log(`webkit: ${tests} tests in ${shards} shard(s) of at most ${TESTS_PER
 
 const failed: number[] = [];
 for (let shard = 1; shard <= shards; shard++) {
+  const found = process.env.UNMOCKED_API_FOUND;
   const run = spawnSync(npx, ["playwright", "test", "--project=webkit", `--shard=${shard}/${shards}`, ...passThrough], {
     stdio: "inherit",
+    env: found ? { ...process.env, UNMOCKED_API_FOUND: shardHarvestFile(found, shard) } : process.env,
   });
   if (run.status !== 0) failed.push(shard);
 }
