@@ -74,3 +74,39 @@ test("a mouse keeps the compact header controls", async ({ page }) => {
   // `h-7 w-7`: 28 px under a fine pointer.
   expect(Math.round((await details.boundingBox())?.height ?? 0)).toBe(28);
 });
+
+/**
+ * R1-38: a failed read's Retry is `size="sm"` (30 px tall under a mouse, as WS-10B measured it) and
+ * still a 44 × 44 target on a phone, because the floor lives in Button itself. Two pages, so a
+ * page-specific wrapper cannot be what makes it pass.
+ */
+for (const { route, testId } of [
+  { route: "/dna", testId: "dna-error-retry" },
+  { route: "/track-record", testId: "track-record-error-retry" },
+]) {
+  test(`a failed read's Retry on ${route} is 44 px on a touch phone and compact under a mouse`, async ({ browser }) => {
+    for (const touch of [true, false]) {
+      const context = await browser.newContext(touch ? PHONE : { viewport: { width: 1440, height: 900 } });
+      const page = await context.newPage();
+      await stubEventSource(page);
+      // Every read fails, except the two the shell needs to render at all.
+      await page.route(
+        (u) => u.pathname.startsWith("/api/"),
+        (r) => r.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+      );
+      await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+      await mockJson(page, "**/api/sync/status", syncStatus());
+      await page.goto(route);
+      const retry = page.getByTestId(testId);
+      await expect(retry).toBeVisible();
+      const box = await retry.boundingBox();
+      if (touch) {
+        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+      } else {
+        expect(box?.height ?? 99).toBeLessThan(44);
+      }
+      await context.close();
+    }
+  });
+}

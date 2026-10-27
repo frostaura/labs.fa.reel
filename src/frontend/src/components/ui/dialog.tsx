@@ -45,7 +45,15 @@ const DialogContent = React.forwardRef<
       {...props}
     >
       {children}
-      <DialogClose className="absolute right-4 top-4 rounded-sm opacity-70 text-fa-frost-dim hover:opacity-100 hover:text-fa-frost-bright transition disabled:pointer-events-none">
+      {/* 32 px under a mouse, 44 × 44 under touch (R1-38); the icon stays where it always sat. */}
+      <DialogClose
+        data-testid="dialog-close"
+        className={cn(
+          "absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-control opacity-70 text-fa-frost-dim",
+          "hover:opacity-100 hover:text-fa-frost-bright transition disabled:pointer-events-none coarse:min-h-11 coarse:min-w-11",
+          "focus-visible:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-fa-frost/60"
+        )}
+      >
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </DialogClose>

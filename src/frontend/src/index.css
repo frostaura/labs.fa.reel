@@ -129,17 +129,19 @@ body {
   .fa-card {
     @apply bg-fa-glass border border-fa-edge rounded-xl shadow-fa-glass backdrop-blur-sm;
   }
+  /* The legacy control classes carry the same 44 px touch floor as the ui/ primitives (R1-38), so a
+     raw field or button not yet migrated to a primitive is not a 36 px target on a phone. */
   .fa-input {
-    @apply bg-fa-glass border border-fa-edge rounded-md px-3 py-2 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:border-fa-frost/40 transition;
+    @apply bg-fa-glass border border-fa-edge rounded-md px-3 py-2 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:border-fa-frost/40 transition coarse:min-h-11;
   }
   .fa-button {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition border border-fa-edge bg-fa-glass-strong hover:bg-fa-glass hover:border-fa-frost/40 disabled:opacity-50 disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition border border-fa-edge bg-fa-glass-strong hover:bg-fa-glass hover:border-fa-frost/40 disabled:opacity-50 disabled:pointer-events-none coarse:min-h-11 coarse:min-w-11;
   }
   .fa-button-primary {
     @apply fa-button bg-fa-frost/15 border-fa-frost/40 text-fa-frost-bright hover:bg-fa-frost/25;
   }
   .fa-button-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition text-fa-frost/80 hover:text-fa-frost-bright hover:bg-fa-glass;
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition text-fa-frost/80 hover:text-fa-frost-bright hover:bg-fa-glass coarse:min-h-11 coarse:min-w-11;
   }
   .fa-link {
     @apply text-fa-frost-bright hover:underline underline-offset-4;
