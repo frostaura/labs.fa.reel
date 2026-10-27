@@ -336,13 +336,22 @@ the product's "for you" vocabulary). `eval/claims/claims.json` is the register:
 `claims.test.mjs` (in the replay suite) runs the check on the tree, so new claim-shaped copy is audited
 before it merges. `IT/ClaimsAudit/ClaimsAuditTests` pins the claims no owner's test covered (the push
 port's only consumer is the weekly digest; nothing can send an email; the scoring model never reads the
-taste narrative; the retrain threshold the status reports is the one the nightly gate applies). The first
+taste narrative; the retrain threshold the status reports is the one the nightly gate applies), and pins two
+false ones until their owners fix them (the top-bar lookup's global leg shows a title over the maturity
+ceiling that the local leg hides and counts; Ask's "no standing conditions" answer is given while the
+English-only default holds titles out). The first
 audit (build/trust-v1 @ 20429ff): 268 claim-shaped strings; 194 claims in 36 families — 123 true, 15 false
 (9 families), 56 unverified (6 families); 78 not claims. One false claim was found by the harness rather
 than by reading: `askreel.mjs check --db --api` showed WS-3's cost meter counting 199 unrated titles as
 clearing the crowd floor, so "These rules leave N of M titles" overstates N
 (`EligibilityTruthParityTests.The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect`
 ledgers it until WS-3's fix).
+
+The hardening re-audit (build/trust-v1 @ 4394aad, 2026-10-27): 280 claim-shaped strings; 202 claims in 39
+families — 133 true, 13 false (10 families), 56 unverified; 81 not claims. `exclusions-are-airtight` is now
+true (the matrix holds on all 485 cells with `MatrixLedger` empty); three new false families came from
+wave-B copy: `top-bar-search-hides-and-counts` (WS-3), `ask-reel-no-conditions-means-everything` (WS-2), and
+Ask's "They leave N unseen titles" joining `cost-meter-counts` (WS-3).
 
 ## The exclusion matrix (WS-7 task 7)
 
@@ -365,8 +374,10 @@ ordinary integration pass (the `postgres` collection) in about two minutes.
   person pages) hold out every content rule but may show what you have seen; Saved holds out content rules
   and consumed saves and must show what you saved; the pin is never a ruled-out or consumed title, and
   under the bar its reason says so. The bar is held at badge precision.
-- **Leaks are ratcheted** in `MatrixLedger` with their defect and owner (XM-01…07). A ledgered cell that
-  stops leaking fails, so the ledger can only shrink as owners land fixes.
+- **Leaks are ratcheted** in `MatrixLedger` with their defect and owner. A ledgered cell that stops
+  leaking fails, so the ledger can only shrink as owners land fixes. XM-01…07 are all closed (wave B), so
+  the ledger is empty and every cell must hold. The matrix reads the typeahead's local leg only; the
+  global TMDB leg is covered by `TypeaheadSearchTests` and the claims audit.
 
 **The timestamp-aware audit.** `node scripts/eval/footprint-audit.mjs --db <eval db> [--since <ISO>]`
 lists every exposure in the append-only log served after its title entered the footprint or a standing
@@ -375,6 +386,56 @@ conversations (`eval/surfaces/footprint-audit.sql`; `FootprintAuditSqlTests` pin
 with `--since <a harness run's start>` it gates that run's own exposures. Rules are judged as they are
 defined today (stand-ins included), and the maturity ceiling and deleted rules are not audited, because
 nothing records when they started.
+
+## The synthetic week (R1-36)
+
+WS-4, WS-5 and WS-6 each carry "over 7 days" acceptance rows that §5.2 says run "on the eval stack under
+a replayed synthetic week". The week runs in about half an hour, with zero paid calls and zero network:
+
+1. `scripts/eval/snapshot.sh clone reel_eval_template reel_ws7_week` — a clone is spent by one run.
+2. `REEL_SYNTHETIC_WEEK_DB=reel_ws7_week dotnet test --filter FullyQualifiedName~SyntheticWeekRun` (with
+   the usual `REEL_TEST_CONNECTION_STRING`, inside `build-slot` and `caffeinate -i`, nothing else
+   building: the queue waits are wall-clock measurements). `REEL_SYNTHETIC_WEEK_TICKS=3` is a smoke run.
+3. `node scripts/eval/week.mjs --db reel_ws7_week --run .tmp/eval/week/<run>` — the acceptance SQL,
+   bounded to the week by the run's `since`; exits 1 on a failed gate. The same queries, with
+   `since = now() − 7 days`, are the post-deploy monitoring set.
+
+**How a week passes.** 28 six-hour ticks. Each tick the founder account does what that part of a day
+holds (a morning refresh, Home and Saved loads; a save and a not-interested; a Trakt watch-and-rate of a saved movie, an
+in-app rating and a Trakt watchlist add; two quiet days with no ratings at all), the delta poll's own
+scheduling pass runs, and the real job runner and outbox dispatcher work the queue on wall time until it
+is idle. Then `DatabaseClock` ages the whole database six hours: every stored timestamp of every base
+table moves back by the same interval, so code that reads `DateTime.UtcNow` sees six hours gone. A unique
+index over a timestamp (`ExposureEvents`' minute bucket) is shifted in two steps, because a one-step shift
+moves a row onto a bucket another row has not left yet (`DatabaseClockTests` fails one-step). Generated
+columns and views move with their sources; `TitleEmbeddings.CreatedAt` and timestamps inside JSON stay put.
+The Friday tick runs the weekly digest's scheduling pass; boot repairs run once at the start, as a deploy
+runs them.
+
+**The fakes.** Every model adapter runs in stub mode (`ReelApiFactory`). `WeekTraktClient` serves the
+week's own items behind a `last_activities` whose stamps move; every ingest a delta runs is an upsert, so
+older history stays as the snapshot left it, and a show snapshot (whose ingest reconciles progress away)
+is refused loudly. Reel's own writes bump the stamps they would bump on Trakt. A catalogue title with no
+Trakt id gets `9,000,000,000 + tmdbId`. `WeekTmdbClient` answers catalogue reads empty and a
+watch-provider lookup with the offers the clone already holds — empty would make `AvailabilitySnapshot`
+delete every refreshed title's offers.
+
+**Not in the week.** The nightly reconcile: its pass is inline in `NightlyReconcileService.ExecuteAsync`
+behind a wall-clock wait for 03:00 UTC, with no seam to call, so no nightly retrain, forced delta or
+enrichment sweep runs, and the rows that need them report "no data" rather than passing. That seam is
+owed to WS-5.
+
+**First full run (2026-10-27, ws/ws7 after build/trust-v1 @ 4394aad, snapshot reel-2026-10-23).** 28 ticks
+in 11.5 minutes, 0 paid calls, every Trakt call in-process; 24 BuildFeed, 27 DeltaSync, 24
+RefreshAvailability, 17 PersonaliseTitles, 7 CrossReference, 6 BuildTasteNarrative and 1 BuildDigest, none
+failed. All WS-6 rows pass (DeltaSync wait p95 1.9 s, BuildFeed run p95 18.7 s, longest cross-reference
+attempt 46 s, no attempt over 3, no orphaned Failed, no `@p` in an error). WS-4 passes every row but
+availability freshness: 30 of 37 saves (0.81) have offers fetched this week and none are stale — the other
+7 have no offer row at all, which `AvailabilitySnapshot` cannot tell from never looked at. WS-5: no Unknown
+why-source, no zero base score, no banned or decade why-lines, shortlist p50 moves at most 0.02 between
+builds with no rating between them; but it fell 7.18 → 5.22 across two rating days whose ratings were all
+at or above the model's prediction, and from day 4 every build said nothing cleared the founder's 6.0 bar
+(hero-eligible 9–10 → 0), so the anchor share has no sample. Retrains: no data (no nightly).
 
 ## Spend
 

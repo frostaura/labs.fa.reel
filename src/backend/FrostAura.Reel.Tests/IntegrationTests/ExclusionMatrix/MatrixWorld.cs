@@ -44,8 +44,8 @@ namespace FrostAura.Reel.Tests.IntegrationTests.ExclusionMatrix;
 /// <para><b>Three kinds of pair.</b> Broad pairs (one per exclusion family: rules, footprint, the
 /// For-you bar) fetch every surface over the whole catalogue. Surfaces that show only their top few —
 /// tonight's picks (5), the digest (10) — cannot show every violator at once, so each exclusion kind
-/// also gets a focus pair whose account has watched everything except that kind's violators and two
-/// clean titles: what is left is short enough for the capped surfaces to show all of it. The
+/// also gets a focus pair whose account has watched everything except that kind's violators and one
+/// clean title per medium: what is left fits the capped surfaces, so they can show all of it. The
 /// Watch-tonight pin shows ONE title, so each (kind, medium) gets a pin pair whose queue holds only
 /// that kind's violator.</para>
 ///
@@ -479,11 +479,17 @@ public sealed class MatrixWorld
         var label = Focus(kind, guarded, late, rows);
         var accountId = await SeedAccountAsync(label, savedRuleViolators: false);
 
-        // Narrow the pool to this kind's violators and two clean titles per medium: watch the rest. A
-        // focus-row account also keeps the decoys, which outrank everything and take tonight's picks.
+        // Narrow the pool to this kind's violators and clean titles: watch the rest. A focus account's
+        // pool must FIT tonight's picks (5), or the hero chooses among the violators and one of them can
+        // fall out for a reason that is not the exclusion — an unexercised cell. So it keeps one clean
+        // title per medium: 2 violators + 2 clean = 4. (With two per medium it was 6 for 5 seats, and the
+        // hero, which seats crowd-backed titles first, left out the sub-floor crowd series on the
+        // control: crowd|Show|feed-hero went unexercised once WS-5's bar-to-the-badge build merged.) A
+        // focus-row account keeps two clean titles per medium for its rows, and the decoys, which
+        // outrank everything and take tonight's picks.
         var keep = Media.SelectMany(m => (kind == "bar"
                 ? _catalogue.Where(t => t.MediaType == m && t.Name.StartsWith("Xm clean", StringComparison.Ordinal)).Select(t => t.Id)
-                : _catalogue.Where(t => t.MediaType == m && t.Name.StartsWith("Xm clean", StringComparison.Ordinal)).Take(2).Select(t => t.Id)
+                : _catalogue.Where(t => t.MediaType == m && t.Name.StartsWith("Xm clean", StringComparison.Ordinal)).Take(rows ? 2 : 1).Select(t => t.Id)
                     .Append(Violators[(kind, m)].Id))
                 .Concat(rows ? _catalogue.Where(t => t.MediaType == m && t.Name.StartsWith("Xm decoy", StringComparison.Ordinal)).Select(t => t.Id) : []))
             .ToHashSet();

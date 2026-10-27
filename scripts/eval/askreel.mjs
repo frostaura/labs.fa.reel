@@ -222,7 +222,8 @@ const cardOf = (c, rank) => ({
 export function degradedOf(frames, done) {
   const flags = [];
   for (const x of frames) {
-    if (x.ev === "degraded") flags.push(x.data?.what ?? x.data);
+    // v2 sends `what` as an array of flags (docs/ask-reel-turns.md); an older shape sent one string.
+    if (x.ev === "degraded") flags.push(...[x.data?.what ?? x.data].flat());
     if (x.ev === "assistant-message" && x.data?.degraded === true) flags.push("reply");
   }
   if (Array.isArray(done?.degraded)) flags.push(...done.degraded);
@@ -252,6 +253,10 @@ export function compactTurn(raw) {
   const v2Picks = f("picks").flatMap((x) => x.data?.cards ?? []);
   const trays = f("tray");
   const answer = f("answer").at(-1)?.data?.text ?? null;
+  // v2's `clarify` frame is the turn's reply ({ question, options }); no `assistant-message` follows
+  // an answer or a clarify, so reading the reply from that frame alone scored every v2 clarify as
+  // reply-less — invisible to the echo, grounding and stub-reply checks (R1-34).
+  const clarify = f("clarify").at(-1)?.data?.question ?? null;
   const assistant = f("assistant-message").at(-1)?.data ?? null;
   const cards = (v2Picks.length > 0 ? v2Picks : done?.results ?? []).map((c, i) => cardOf(c, i + 1));
   // Every tray the user sees, from v1's `done` (belowFloor, nearMiss, unchecked) and v2's `tray` frames.
@@ -273,7 +278,7 @@ export function compactTurn(raw) {
   if (typeof done?.mode === "string" && MODES.includes(done.mode) && done.mode !== "Any") observedMode = done.mode;
   else if (f("none-found").length) observedMode = "NoneFound";
   else if (f("clarify").length) observedMode = "Clarify";
-  else if (answer) observedMode = "Answer";
+  else if (answer !== null) observedMode = "Answer";
   else if (raw.status === 200 && ended) observedMode = cards.length > 0 ? "Picks" : "NoneFound";
   return {
     status: raw.status, error: raw.error ?? null,
@@ -282,7 +287,7 @@ export function compactTurn(raw) {
     firstByteMs: raw.firstByteMs, firstCardMs: raw.firstCardMs, totalMs: raw.totalMs,
     engine: plan ? "v2" : "v1",
     act: plan?.act ?? null, references: plan?.references ?? null,
-    reply: answer ?? assistant?.text ?? null,
+    reply: answer ?? clarify ?? assistant?.text ?? null,
     conflict: Boolean(assistant?.conflict) || conflictFrame,
     failed: Boolean(done?.failed) || raw.status !== 200 || !ended || Boolean(raw.error),
     reason: done?.reason ?? null,

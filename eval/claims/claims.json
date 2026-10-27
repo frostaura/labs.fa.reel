@@ -31,10 +31,11 @@
       "id": "saved-syncs-to-managed-list",
       "owner": "WS-4",
       "verdict": "true",
-      "assertion": "Saving a title queues it onto the managed Trakt list ('Reel — Up Next'); what Trakt-connected apps then show is theirs.",
-      "evidence": "The save endpoint queues ListAdd and AddToWatchlist (SaveConsumption remarks); the list-sync state is pending exactly while a ListAdd waits. Plex / Kodi / Infuse visibility is third-party behaviour and is not checkable here.",
+      "assertion": "Saving a title queues it onto the managed Trakt list ('Reel — Up Next'), and the user's Trakt watchlist is imported as saves; what Trakt-connected apps then show is theirs.",
+      "evidence": "The save endpoint queues ListAdd and AddToWatchlist (SaveConsumption remarks); the list-sync state is pending exactly while a ListAdd waits. Plex / Kodi / Infuse visibility is third-party behaviour and is not checkable here. The watchlist intake turns Trakt watchlist rows into saves, except Reel's own echoes and titles already consumed or declined (TraktP1IngestTests).",
       "tests": [
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::List_sync_is_pending_only_while_a_list_add_is_actually_waiting"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/SavedQueueEndpointTests.cs::List_sync_is_pending_only_while_a_list_add_is_actually_waiting",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TraktP1IngestTests.cs::The_watchlist_becomes_saves_except_reels_own_echoes_consumed_and_declined_titles"
       ],
       "claims": [
         {
@@ -43,11 +44,11 @@
         },
         {
           "file": "src/frontend/src/pages/Saved.tsx",
-          "text": "Everything here syncs to the managed"
+          "text": "What you save here syncs to the managed"
         },
         {
           "file": "src/frontend/src/pages/Saved.tsx",
-          "text": "list — visible in Plex, Kodi, Infuse and every Trakt-connected app."
+          "text": "list — visible in Plex, Kodi, Infuse and every Trakt-connected app — and your Trakt watchlist lands here too."
         }
       ]
     },
@@ -299,10 +300,9 @@
     {
       "id": "exclusions-are-airtight",
       "owner": "WS-5",
-      "verdict": "false",
+      "verdict": "true",
       "assertion": "A crossed-out genre, a language outside the list, the crowd floor, the For-you bar and 'not interested' hide those titles from what Reel recommends.",
-      "evidence": "The exclusion matrix holds every rule on most surfaces but ledgers open leaks: XM-01 person pages (WS-5), XM-02 Saved and the pin (WS-4), XM-03 late rules on the materialised feed (WS-5), XM-04 the stored digest (WS-4), XM-05 the digest ignores the For-you bar (WS-4), XM-06 Ask v1 unchecked cards under the bar (WS-2), XM-07 the relaxed feed bar (WS-5). Each copy line is false exactly on its ledgered cells.",
-      "defect": "False until MatrixLedger is empty for the rule a line names; the leaks are owned per XM id (WS-5 owns the family as the owner of most cells).",
+      "evidence": "ExclusionMatrixTests holds on every one of its 485 cells — genre, genre stand-in, keyword, language, crowd floor, the For-you bar and the footprint (not-interested among it), for movies and TV, on every surface, standing and saved after the build — with MatrixLedger empty: XM-01, XM-03 and XM-07 closed by WS-5, XM-02, XM-04 and XM-05 by WS-4, XM-06 by WS-2 (re-run 486/486 on ws/ws7 after merging build/trust-v1 @ 4394aad, 2026-10-27). Scope: the matrix reads the lookup's local leg; the global TMDB leg is judged by StandingDiscoverPlan.Admits on genre, language, crowd, years and keywords (TypeaheadSearchTests), and its maturity gap is the separate top-bar-search-hides-and-counts family — none of these five lines names maturity.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::Truth_and_builder_agree_on_every_rule_with_explicit_conditions"
@@ -334,17 +334,13 @@
       "id": "conditions-scope",
       "owner": "WS-10A",
       "verdict": "true",
-      "assertion": "The conditions shape the hero, every row and Ask Reel; the top-bar lookup applies the content rules but not the For-you bar, so it can show a title the conditions exclude.",
-      "evidence": "MatrixCells: lookups hold every rule exclusion and are not gated by the bar (NotGated cells).",
+      "assertion": "With no condition set every title is fair game (the summary shows a language chip unless every language is allowed, so 'Nothing set' never hides the English-only default); a none-found reply names an include-genre allow-list as 'only these genres'.",
+      "evidence": "ConditionSummary renders 'Nothing set' only when summaryChips is empty, and summaryChips emits a language chip unless the allow-list holds '*', a chip for the For-you bar and one for the maturity ceiling; SupplyReporter.LabelFor names IncludeGenre rows. The exclusion matrix holds every rule on every suggestion surface.",
       "tests": [
-        "src/frontend/src/lib/conditionsCopy.test.ts::says the top-bar lookup can show titles the conditions exclude",
+        "src/frontend/src/lib/pickConditions.test.ts",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
       ],
       "claims": [
-        {
-          "file": "src/frontend/src/lib/conditionsCopy.ts",
-          "text": "These shape the hero, every row and Ask Reel."
-        },
         {
           "file": "src/frontend/src/components/settings/ConditionSummary.tsx",
           "text": "Nothing set — everything is fair game."
@@ -356,11 +352,73 @@
       ]
     },
     {
+      "id": "top-bar-search-hides-and-counts",
+      "owner": "WS-3",
+      "verdict": "false",
+      "assertion": "The conditions shape top-bar search too: it still finds titles you have seen and ignores the 'for you' minimum, and anything else the conditions rule out is hidden and counted, not shown.",
+      "evidence": "Both legs hide and count what the content rules exclude (TypeaheadSearchTests: tiers and counted exclusions locally, the global leg judged by the conditions); the local leg shows watched titles badged and is not gated by the bar (MatrixCells NotGated lookup cells). But the maturity ceiling — a condition the editor sets — binds only the local leg: GlobalAsync judges a catalogue row by ContentFilteredTitles and any other row by StandingDiscoverPlan.Admits, and neither reads the ceiling, so an over-ceiling title the local leg hides and counts comes straight back as a global row (fired when the local strong matches are sparse), and an uncertified TMDB row reaches a kids' profile.",
+      "defect": "Hold the global leg to the account's maturity ceiling: drop (and count) a catalogue row that fails EligibilityQueryBuilder.PassesMaturity, and a beyond-catalogue row unless the ceiling allows adult content (PassesMaturity's own rule for an unknown certification). Then flip the ClaimsAuditTests pin.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::The_top_bar_lookups_global_leg_shows_a_title_over_the_maturity_ceiling_that_the_local_leg_hides",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TypeaheadSearchTests.cs::The_global_leg_judges_tmdb_rows_by_the_conditions_and_counts_what_it_hid",
+        "src/frontend/src/lib/conditionsCopy.test.ts::names top-bar search as governed, and says hidden matches are counted rather than shown"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/conditionsCopy.ts",
+          "text": "These shape the hero, every row, Ask Reel and top-bar search. Search still finds titles you've seen and ignores the “for you” minimum; anything else your conditions rule out is counted, not shown."
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-no-conditions-means-everything",
+      "owner": "WS-2",
+      "verdict": "false",
+      "assertion": "When Ask Reel says 'You have no standing conditions set', every unseen title in the catalogue is open to the user.",
+      "evidence": "ConditionsAnswer says it whenever AskReelStandingFilters.Describe returns null. Describe names only the FilterRuleSet rules and leaves out a language rule unless the account chose one, so the sentence is also said (a) with no rows at all, when FilterRuleSet's DefaultLanguage holds every non-English title out, and (b) for an account whose only conditions are a maturity ceiling or a 'for you' bar, neither of which FilterRuleSet carries. The answer is word for word the same for an account that allows every language, the one case it is true of.",
+      "defect": "Describe the defaults the answer stands on: say 'English only (the default)' unless every language is allowed, and name a maturity ceiling and a 'for you' bar the account has set; say 'no conditions' only when none of them binds.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ClaimsAudit/ClaimsAuditTests.cs::Asks_no_conditions_answer_is_given_while_the_default_language_rule_holds_titles_out"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "You have no standing conditions set, so every unseen title in the catalogue is open to you."
+        }
+      ]
+    },
+    {
+      "id": "operator-alerts-are-app-wide",
+      "owner": "WS-6",
+      "verdict": "true",
+      "assertion": "The founder's operator alerts are about Reel as a whole: a refusing provider is off for every account until the key or account is fixed, and the job-failure count is the last hour across every account.",
+      "evidence": "OperatorAlertMonitor reads failed SyncJobs inside the IAccountContext system scope (every account) over a one-hour window, plus the runner's remembered retried attempts; provider_refused comes from a provider-wide breaker (Purpose null) in the singleton ProviderHealthService, which refuses every purpose and admits one probe call per cool-off, closing only when a probe is answered — i.e. once the key or account works again.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/OperatorAlertMonitorTests.cs::Failed_attempts_over_the_hourly_threshold_raise_one_alert_counting_retried_attempts_and_terminal_failures",
+        "src/backend/FrostAura.Reel.Tests/Lens/OpenRouterChatClientTests.cs::A_refusal_is_one_billed_call_zero_retries_and_opens_the_breaker_for_every_purpose",
+        "src/backend/FrostAura.Reel.Tests/Lens/OpenRouterChatClientTests.cs::After_the_cool_off_exactly_one_probe_goes_out_and_an_answer_closes_the_breaker"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "for every account, until the key or the account is fixed."
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "failed in the last hour, across every account"
+        },
+        {
+          "file": "src/frontend/src/lib/syncPill.ts",
+          "text": "Job attempts are failing across every account"
+        }
+      ]
+    },
+    {
       "id": "cost-meter-counts",
       "owner": "WS-3",
       "verdict": "false",
-      "assertion": "The conditions editor's 'These rules leave N of M titles' is the number of titles the rules leave.",
-      "evidence": "FilterCostMeter (7b59843) counts a title with no crowd rating as passing the crowd floor: in its bitmask projection NOT(NULL >= floor) is NULL, so the breach bit stays clear, while EligibilityQueryBuilder, the serving path and the SQL truth hold it out (FD-7 default). On the eval snapshot with the founder's rules: meter 3,706 eligible vs truth 3,507 — the 199 unrated titles that break only the floor; the crowd marginal is 3,396 vs 3,595 and every other marginal is inflated by the unrated titles it shares (askreel.mjs check --db reel_ws7 --api).",
+      "assertion": "The conditions editor's 'These rules leave N of M titles', and Ask Reel's 'They leave N unseen titles open to you', are the number of titles the rules leave.",
+      "evidence": "FilterCostMeter (7b59843) counts a title with no crowd rating as passing the crowd floor: in its bitmask projection NOT(NULL >= floor) is NULL, so the breach bit stays clear, while EligibilityQueryBuilder, the serving path and the SQL truth hold it out (FD-7 default). On the eval snapshot with the founder's rules: meter 3,706 eligible vs truth 3,507 — the 199 unrated titles that break only the floor; the crowd marginal is 3,396 vs 3,595 and every other marginal is inflated by the unrated titles it shares (askreel.mjs check --db reel_ws7 --api). Ask Reel's conditions answer (ConditionsAnswer) prints the same meter's Eligible, so it carries the same gap.",
       "defect": "Make the meter's crowd bit treat a missing rating as a breach (coalesce the comparison to true, as the builder's predicate does), then delete the allowance in the parity test.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelGolden/EligibilityTruthParityTests.cs::The_cost_meter_counts_what_the_truth_counts_but_for_its_ledgered_unrated_title_defect"
@@ -369,6 +427,10 @@
         {
           "file": "src/frontend/src/lib/filterCost.ts",
           "text": "These rules leave … of … titles"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+          "text": "They leave … unseen"
         }
       ]
     },
@@ -1093,10 +1155,13 @@
       "id": "tonights-picks-and-the-bar",
       "owner": "WS-5",
       "verdict": "true",
-      "assertion": "When nothing clears the bar, the hero says it is reaching and the build records why; deep cuts and new-for-you rows are what they are named.",
-      "evidence": "BuildFeedJobHandler relaxes the floor and records degradedReason ('relaxed to … for this build'); heroConfidence states the shortfall only for a measured card. The feed bar relaxation itself is XM-07 (exclusions-are-airtight).",
+      "assertion": "The For-you bar holds on the feed at build and at read: a short page says how many titles cleared it and that nothing under it is shown, and a bar raised after the build says how many of tonight's picks it now holds back; the hero says it is reaching only for a measured card; deep cuts and new-for-you rows are what they are named.",
+      "evidence": "ForYouBar.Clears is the one comparison the build and the read path use; the build no longer relaxes the bar (XM-07 closed by WS-5), ShortReason states the shortfall, and HeldBackOnRead covers a bar saved after the build. The bar is the 'for you' minimum in the Settings conditions editor. heroConfidence states a shortfall only for a measured card.",
       "tests": [
-        "src/frontend/src/lib/heroConfidence.test.ts::is true only for a pick the server measured and found short"
+        "src/frontend/src/lib/heroConfidence.test.ts::is true only for a pick the server measured and found short",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeedLateRulesTests.cs::A_short_page_names_the_bar_instead_of_relaxing_it",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeedLateRulesTests.cs::A_rule_and_a_bar_saved_after_the_build_hold_on_the_next_read",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/ExclusionMatrix/ExclusionMatrixTests.cs::Every_exclusion_holds_on_every_surface_for_movies_and_tv"
       ],
       "claims": [
         {
@@ -1110,10 +1175,6 @@
         {
           "file": "src/frontend/src/lib/heroConfidence.ts",
           "text": "Nothing cleared your usual… bar tonight"
-        },
-        {
-          "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
-          "text": "floor left only"
         },
         {
           "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
@@ -1138,6 +1199,22 @@
         {
           "file": "src/frontend/src/pages/Blend.tsx",
           "text": "eligible for you both"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
+          "text": "Nothing cleared your ≥… “for you” bar tonight, and nothing under it is shown. Lower it in Settings to see more."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
+          "text": "Only … title"
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
+          "text": "cleared your ≥… “for you” bar tonight; nothing under it is shown. Lower it in Settings to see more."
+        },
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
+          "text": "Your ≥… “for you” bar holds back … of tonight's picks; nothing under it is shown. Lower it in Settings to see more."
         }
       ]
     },
@@ -1626,6 +1703,21 @@
       "file": "src/frontend/src/components/rec/RefreshPicksButton.tsx",
       "text": "Pull the latest from Trakt, then regenerate tonight's picks",
       "reason": "button tooltip naming its action"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Jobs/BuildFeedJobHandler.cs",
+      "text": "Judging fit for tonight's picks",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+      "text": "Counting what your conditions leave",
+      "reason": "job progress label"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Ranking/ForYouBar.cs",
+      "text": "“for you” floor left only",
+      "reason": "matcher for a retired build reason (IsRetiredRelaxation); the read path replaces any reason it matches, so it is never shown"
     }
   ]
 }

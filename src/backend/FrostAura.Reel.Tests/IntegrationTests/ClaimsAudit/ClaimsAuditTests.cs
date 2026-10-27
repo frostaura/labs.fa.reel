@@ -3,7 +3,15 @@ using System.Reflection;
 using System.Text.Json;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.AskReel.Engine;
+using FrostAura.Reel.Application.Search.Typeahead;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Tmdb;
+using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests.ClaimsAudit;
@@ -103,6 +111,101 @@ public class ClaimsAuditTests(PostgresFixture fixture, ReelApiFactory api) : ICl
         var gate = scope.ServiceProvider.GetRequiredService<RetrainGate>();
         Assert.Equal(gate.Threshold, reported);
         Assert.Equal(RetrainPolicy.DefaultMinNewRatings, reported);
+    }
+
+    /// <summary>
+    /// The conditions scope sentence (conditionsCopy.ts): "…top-bar search. … anything else your conditions
+    /// rule out is counted, not shown." The audit found it FALSE for the maturity ceiling, a condition the
+    /// editor sets: the lookup's local leg drops an over-ceiling title and counts it, but the global leg
+    /// judges a TMDB row by the content rules alone (<c>ContentFilteredTitles</c> for a catalogue title,
+    /// <c>StandingDiscoverPlan.Admits</c> beyond it), neither of which reads the ceiling — so the same title
+    /// comes straight back as a global row. This pins the leak; when WS-3 holds the global leg to the
+    /// ceiling it fails here, and the register's verdict goes back for review.
+    /// </summary>
+    [Fact]
+    public async Task The_top_bar_lookups_global_leg_shows_a_title_over_the_maturity_ceiling_that_the_local_leg_hides()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var token = "zq" + Guid.NewGuid().ToString("N")[..8];
+        var tmdbId = Random.Shared.NextInt64(1, long.MaxValue);
+        Guid accountId;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var account = new Account
+            {
+                Id = Guid.NewGuid(),
+                TraktUserSlug = $"claims-maturity-{Guid.NewGuid():N}",
+                Tier = AccountTier.Paid,
+                CreatedAt = DateTime.UtcNow,
+                LastSeenAt = DateTime.UtcNow,
+                PipelineStageChangedAt = DateTime.UtcNow,
+            };
+            account.Settings.MaturityCeiling = "PG-13";
+            db.Add(account);
+            db.Add(new Title
+            {
+                Id = Guid.NewGuid(),
+                MediaType = MediaType.Movie,
+                TmdbId = tmdbId,
+                TraktSlug = string.Empty,
+                Name = $"{token} After Dark",
+                Language = "en",
+                Genres = ["drama"],
+                Year = 2010,
+                Certification = "R",
+                TmdbVoteAverage = 7m,
+                TmdbVoteCount = 500,
+                TmdbPopularity = 0m,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+            accountId = account.Id;
+        }
+
+        await using var read = fixture.CreateContext(new AccountContext());
+        var search = new TypeaheadSearch(read, new EligibilityQueryBuilder(read));
+        var local = await search.LocalAsync(accountId, token, default);
+        Assert.Empty(local.Titles);
+        Assert.Equal(1, local.HiddenByConditions);
+
+        // Vary one field: the same title, the same term, asked of the global leg.
+        var tmdb = new SearchOnlyTmdbClient
+        {
+            MovieResults =
+            [
+                new TmdbListItem(tmdbId, true, $"{token} After Dark", "/p.jpg", null, "An overview.", 50m, 7m, 500,
+                    new DateTime(2010, 5, 14, 0, 0, 0, DateTimeKind.Utc), [18], "en"),
+            ],
+        };
+        var global = await search.GlobalAsync(accountId, tmdb, token, default);
+        Assert.Equal([tmdbId], global.Rows.Select(r => r.TmdbId));
+    }
+
+    /// <summary>
+    /// Ask Reel's conditions answer: "You have no standing conditions set, so every unseen title in the
+    /// catalogue is open to you." The audit found it FALSE: it is said whenever the content rules describe
+    /// to nothing, which is also the default English-only language rule (FilterRuleSet's DefaultLanguage —
+    /// every non-English title is held out) and an account whose only conditions are a maturity ceiling or
+    /// a "for you" bar (neither is in FilterRuleSet, so neither is described). This pins the sentence for
+    /// the account with no rows at all; when WS-2 states the defaults, it fails here for review.
+    /// </summary>
+    [Fact]
+    public void Asks_no_conditions_answer_is_given_while_the_default_language_rule_holds_titles_out()
+    {
+        var none = FilterRuleSet.FromRows([]);
+        Assert.False(none.AllLanguagesAllowed);
+        Assert.Equal([FilterRuleSet.DefaultLanguage], none.EffectiveLanguages);
+        Assert.StartsWith("You have no standing conditions set", AskReelEngine.ConditionsAnswer(none, null), StringComparison.Ordinal);
+
+        // Vary one field: with every language allowed the sentence is true — and the answer is word for
+        // word the same, so it cannot tell the account it is true of from the one it is false for.
+        var all = FilterRuleSet.Create(null, null, null, [FilterRuleSet.AllLanguages], null, null, null);
+        Assert.True(all.AllLanguagesAllowed);
+        Assert.Equal(AskReelEngine.ConditionsAnswer(all, null), AskReelEngine.ConditionsAnswer(none, null));
     }
 
     private static string RepoRoot()

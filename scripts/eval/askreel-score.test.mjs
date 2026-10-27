@@ -349,6 +349,44 @@ test("runner: degraded comes from done.degraded and a degraded reply, never from
   assert.equal(compactTurn(v1Frames({ mode: "Clarify" })).mode, "Clarify");
 });
 
+// A v2 answer or clarify turn as the engine streams it (docs/ask-reel-turns.md, frame order): the
+// `answer` / `clarify` frame IS the reply, and no `assistant-message` follows it (R1-34).
+const v2ReplyFrames = (terminal, { done = true, degraded = null } = {}) => ({
+  status: 200, totalMs: 700, firstByteMs: 4, firstCardMs: null,
+  frames: [
+    ["conversation", { id: "conv-2", turnId: "turn-2", sequence: 3, engine: "v2" }],
+    ["phase", { stage: "planning", label: "Reading your request" }],
+    ["plan", { act: terminal[0] === "clarify" ? "NewRequest" : "ItemQuestion", references: [] }],
+    ...(degraded ? [["degraded", { what: degraded }]] : []),
+    terminal,
+    ...(done ? [["done", {
+      engine: "v2", results: [], belowFloor: [], nearMiss: [], unchecked: [], degraded: [], reason: null,
+      mode: terminal[0] === "clarify" ? "Clarify" : "Answer",
+      answer: terminal[0] === "answer" ? terminal[1].text : null,
+      clarify: terminal[0] === "clarify" ? terminal[1] : null,
+    }]] : []),
+  ].map(([ev, data], i) => ({ at: i, ev, data })),
+});
+
+test("runner: a v2 clarify or answer turn's reply is read from its own frame, since no assistant-message follows (R1-34)", () => {
+  const question = "Do you mean films set in Japan, or Japanese-language films?";
+  const clarify = compactTurn(v2ReplyFrames(["clarify", { question, options: ["Set in Japan", "In Japanese"] }]));
+  assert.equal(clarify.mode, "Clarify");
+  assert.equal(clarify.reply, question);
+  assert.equal(clarify.failed, false);
+  // Vary one field: the same clarify ending on its terminal frame, with no `done`.
+  const bare = compactTurn(v2ReplyFrames(["clarify", { question, options: [] }], { done: false }));
+  assert.equal(bare.reply, question);
+  assert.equal(bare.mode, "Clarify");
+  // An answer turn reads answer.text.
+  const text = "Heat runs 170 minutes.";
+  assert.equal(compactTurn(v2ReplyFrames(["answer", { text, handle: "T1.2", titleId: A }])).reply, text);
+  // The echo check now sees the clarify text: one that quotes the user's message back is an echo.
+  assert.equal(isEcho("films set in tokyo after dark", compactTurn(v2ReplyFrames(["clarify", { question: "“films set in tokyo after dark”?", options: [] }])).reply), true);
+  // A v2 `degraded` frame carries `what` as an array of flags; each one counts.
+  assert.deepEqual(compactTurn(v2ReplyFrames(["answer", { text, handle: null, titleId: null }], { done: false, degraded: ["answer", "plan"] })).degraded, ["answer", "plan"]);
+});
+
 test("replay: a recording whose done frames say degraded fails the fallback gate", () => {
   const sc = [{ id: "keyless", categories: ["facet"], turns: [{ query: "heist movies", expect: {} }, { query: "more", expect: {} }] }];
   const rec = (degraded) => ({ label: "k", concurrency: 4, ledger: [], facts: facts(), scenarios: [{ id: "keyless", categories: ["facet"], turns: [
