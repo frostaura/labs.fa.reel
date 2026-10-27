@@ -31,6 +31,21 @@ public class FullIngestJobHandler(
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
+        try
+        {
+            await RunAsync(job, ct);
+        }
+        catch (TraktTokenUnreadableException ex)
+        {
+            // A token no key ring here can decrypt fails identically on every attempt; the token
+            // store has already marked the connection Revoked, so the poll stops re-enqueuing it and
+            // the user is asked to re-link. Fail once (R1-27).
+            throw new NonRetryableJobException(ex.Message, ex);
+        }
+    }
+
+    private async Task RunAsync(SyncJob job, CancellationToken ct)
+    {
         var accountId = job.AccountId ?? throw new InvalidOperationException("FullIngest requires an account.");
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var connection = await db.TraktConnections.FirstAsync(c => c.AccountId == accountId, ct);
