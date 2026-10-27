@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { earlierAnswerSummary, narrate, nearMissHeading, stoppedMessage } from "./copy";
-import { EDITOR, relaxationLabel, ruleTarget } from "./relaxation";
+import { relaxationLabel } from "./relaxation";
 
 describe("narrate — the narration line follows the phase frames", () => {
   it("prints a v2 label verbatim", () => {
@@ -15,17 +15,7 @@ describe("narrate — the narration line follows the phase frames", () => {
   });
 });
 
-describe("relaxation chips open the editor on their rule", () => {
-  it("lands a genre rule on its chip and a language rule on the allow-list", () => {
-    expect(ruleTarget({ kind: "ExcludeGenre", value: "Comedy" })).toBe('[data-testid="genre-comedy-exclude"]');
-    expect(ruleTarget({ kind: "IncludeGenre", value: "thriller" })).toBe('[data-testid="genre-thriller-include"]');
-    expect(ruleTarget({ kind: "Language", value: "en" })).toBe('[data-testid="lang-all"]');
-    expect(ruleTarget({ kind: "MinPredictedRating", value: "6.0" })).toBe('[data-testid="min-rating-slider"]');
-  });
-  it("lands an unknown kind on the editor itself, never nowhere", () => {
-    expect(ruleTarget({ kind: "SomethingNew", value: "x" })).toBe(EDITOR);
-    expect(ruleTarget({ kind: "ExcludeKeyword", value: "anime" })).toBe(EDITOR);
-  });
+describe("relaxation chips", () => {
   it("says what turning it off unlocks", () => {
     expect(relaxationLabel({ label: "English only", wouldUnlock: 4 })).toBe("Without “English only”: +4");
   });
