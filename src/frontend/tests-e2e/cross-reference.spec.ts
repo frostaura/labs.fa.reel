@@ -213,6 +213,50 @@ const ACCURACY_WITH_XREF = {
   },
 };
 
+/** A model-metrics read with no runs (the same shape interleave-panel.spec.ts serves), so /lab renders its sections. */
+const LAB_MODEL_METRICS = {
+  gate: {
+    threshold: 0.2,
+    passed: false,
+    latestLift: -0.8,
+    ndcgModel: 0.21,
+    ndcgBaseline: 0.34,
+    ndcgLiftCiLow: -0.31,
+    ndcgLiftCiHigh: 0.04,
+    ciExcludesZero: false,
+    legacyThreshold: 0.2,
+    legacyPassed: false,
+    iterationsUsed: 12,
+    killCriterionAt: 3,
+    criterionExceeded: true,
+  },
+  efficiency: {
+    computedAt: "2026-09-10T06:00:00Z",
+    conversions: {
+      count: 0,
+      ratedCount: 0,
+      scoredCount: 0,
+      accuracy: {
+        count: 0, meanPredicted: null, meanActual: null, meanAbsoluteError: null,
+        bias: null, withinOnePointRate: null, pearsonCorrelation: null,
+      },
+      ratingDistribution: [],
+      worstMisses: [],
+    },
+    predictedVsActual: {
+      pairs: 0,
+      accuracy: {
+        count: 0, meanPredicted: null, meanActual: null, meanAbsoluteError: null,
+        bias: null, withinOnePointRate: null, pearsonCorrelation: null,
+      },
+      worstMisses: [],
+    },
+    counterfactual: [],
+  },
+  activeArtifact: null,
+  runs: [],
+};
+
 test.describe("cross-reference pass", () => {
   test("the pill names the pass from the status poll and hands back on completion", async ({ page }) => {
     // Seeded from the status poll — a reload mid-pass must show the pill. Since pill v2 (WS-9,
@@ -293,7 +337,7 @@ test.describe("cross-reference pass", () => {
   };
 
   /** Everything else on the page answers 404 (its own inline error), so nothing reaches the tripwire. */
-  async function bootPage(page: Page, path: string) {
+  async function bootPage(page: Page, path: string, extra?: (page: Page) => Promise<void>) {
     await stubEventSource(page);
     await page.route(
       (u) => u.pathname.startsWith("/api/"),
@@ -306,7 +350,27 @@ test.describe("cross-reference pass", () => {
       (u) => u.pathname === "/api/metrics/cross-reference",
       (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(XREF_STATS) })
     );
+    // Registered last, so it wins over the catch-all above.
+    await extra?.(page);
     await page.goto(path);
+  }
+
+  // R1-41: the band lives on Track record (FD-15), so its "— see the track record" clause and its
+  // "Track record" link pointed at the page the reader was on. Every gating branch that carries
+  // the pointer elsewhere is checked here, on the page itself.
+  for (const gating of ["demote-only", "gating"]) {
+    test(`the band on Track record never points back at Track record (${gating})`, async ({ page }) => {
+      await bootPage(page, "/track-record", (p) =>
+        p.route(
+          (u) => u.pathname === "/api/feed/cross-reference",
+          (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...BAND_LANDED, gating }) })
+        )
+      );
+      const band = page.getByTestId("cross-reference-band");
+      await expect(page.getByTestId("cross-reference-sentence")).toContainText("Cross-referenced 2,242 titles against your history");
+      await expect(band).not.toContainText(/track record/i);
+      await expect(band.getByRole("link")).toHaveCount(0);
+    });
   }
 
   test("the track record says, in plain words, what the running pass was measured to do", async ({ page }) => {
@@ -334,7 +398,9 @@ test.describe("cross-reference pass", () => {
   });
 
   test("the lab carries the interval and names the version running now", async ({ page }) => {
-    await bootPage(page, "/lab");
+    // The lab holds every section behind the model metrics read (WS-10B, G-14), so the catch-all
+    // 404 left only its "Couldn't load the model metrics" alert; it gets a real read here.
+    await bootPage(page, "/lab", (p) => mockJson(p, "**/api/metrics/model", LAB_MODEL_METRICS));
 
     const backtest = page.getByTestId("lab-xref-backtest").first();
     await expect(backtest).toContainText("95% confidence 12.3–21.0%");

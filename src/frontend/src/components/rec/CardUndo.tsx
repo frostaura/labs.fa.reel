@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch } from "react-redux";
 import UndoToast from "../search/UndoToast";
-import type { AppDispatch, RootState } from "../../store";
+import type { AppDispatch } from "../../store";
 import { useUndoNotInterestedMutation, useUnrateTitleMutation, useUnsaveForLaterMutation } from "../../store/api";
 import { titleRestored } from "../../store/removedTitlesSlice";
 import { verdictDismissed } from "../../store/verdictSlice";
@@ -25,13 +25,13 @@ interface Shown {
  * after-rating verdict (the number it compared against is gone), and puts the card back on the
  * rails. A failed undo says so and offers to try again rather than vanishing.
  *
- * Reuses the app's one undo toast so the look is learned once. The after-rating verdict sits in the
- * same spot, so while one is on screen this toast is lifted above it: the wrapper is `fixed` and
- * transformed, which makes it the containing block for the toast's own `fixed` box.
+ * Reuses the app's one undo toast so the look is learned once. It portals into the shared toast
+ * column (ui/toast-stack), which stacks it with the after-rating verdict, so this provider no longer
+ * lifts it over the verdict itself (R1-42 removed that `-translate-y-28` wrapper, dead since the
+ * stack landed).
  */
 export function CardUndoProvider({ children }: { children: ReactNode }) {
   const dispatch = useDispatch<AppDispatch>();
-  const verdictShowing = useSelector((state: RootState) => state.verdict.current != null);
   const [shown, setShown] = useState<Shown | null>(null);
   const sequence = useRef(0);
   const [unsave] = useUnsaveForLaterMutation();
@@ -70,20 +70,14 @@ export function CardUndoProvider({ children }: { children: ReactNode }) {
     <CardUndoContext.Provider value={announce}>
       {children}
       {shown && copy && (
-        <div
-          className={`pointer-events-none fixed inset-x-0 bottom-0 z-[60] [&>*]:pointer-events-auto ${
-            verdictShowing ? "-translate-y-28" : "translate-y-0"
-          }`}
-        >
-          <UndoToast
-            id={shown.id}
-            message={copy.message}
-            undoLabel={copy.undoLabel}
-            onUndo={() => void undo()}
-            onExpire={() => setShown(null)}
-            testId="card-undo-toast"
-          />
-        </div>
+        <UndoToast
+          id={shown.id}
+          message={copy.message}
+          undoLabel={copy.undoLabel}
+          onUndo={() => void undo()}
+          onExpire={() => setShown(null)}
+          testId="card-undo-toast"
+        />
       )}
     </CardUndoContext.Provider>
   );

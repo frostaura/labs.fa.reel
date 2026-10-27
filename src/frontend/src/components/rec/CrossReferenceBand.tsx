@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 import { Layers } from "lucide-react";
 import { useGetCrossReferenceQuery } from "../../store/api";
 import { xrefBandCopy, xrefCoverageNote } from "../../lib/xrefCopy";
@@ -19,10 +19,16 @@ import { xrefBandCopy, xrefCoverageNote } from "../../lib/xrefCopy";
  *
  * Renders nothing at all when the server has nothing honest to say (204 → null), which is the
  * correct output for an account whose pass has never run.
+ *
+ * <p>On Track record — its home since FD-15 — it carries no link to Track record and no "see the
+ * track record" clause (R1-41). `linkToTrackRecord` decides; left unset it is read off the route,
+ * so the band cannot self-link wherever it is mounted.</p>
  */
-export default function CrossReferenceBand() {
+export default function CrossReferenceBand({ linkToTrackRecord }: { linkToTrackRecord?: boolean } = {}) {
+  const { pathname } = useLocation();
+  const onTrackRecord = !(linkToTrackRecord ?? !pathname.startsWith("/track-record"));
   const { data: status } = useGetCrossReferenceQuery();
-  const sentence = xrefBandCopy(status);
+  const sentence = xrefBandCopy(status, { onTrackRecord });
 
   if (!sentence) return null;
 
@@ -44,12 +50,15 @@ export default function CrossReferenceBand() {
           </p>
         )}
       </div>
-      <Link
-        to="/track-record"
-        className="fa-caption text-3 shrink-0 underline underline-offset-2 hover:text-fa-frost-bright"
-      >
-        Track record
-      </Link>
+      {!onTrackRecord && (
+        <Link
+          to="/track-record"
+          className="fa-caption text-3 shrink-0 underline underline-offset-2 hover:text-fa-frost-bright"
+          data-testid="cross-reference-track-record-link"
+        >
+          Track record
+        </Link>
+      )}
     </section>
   );
 }

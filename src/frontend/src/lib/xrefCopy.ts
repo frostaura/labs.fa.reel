@@ -40,19 +40,28 @@ export const GATING_UNMEASURED = "unmeasured";
  * having earned a demotion is still not the same thing as the ranking layer applying one, and the
  * band must describe the code rather than the permission.
  */
-export function ruleOutClause(gating: string): string {
+export function ruleOutClause(gating: string, { onTrackRecord = false }: XrefBandPlace = {}): string {
+  // On Track record the explanation is the section right under the band, so pointing at "the
+  // track record" would be a link to the page the reader is on (R1-41).
+  const pointer = onTrackRecord ? "" : " — see the track record";
+
   if (gating === GATING_GATING) {
     // The measurement cleared the bar; the ranking layer still does not act on it (round 2 and the
     // demotion are a later release). Saying "hidden" here would be the band promising a behaviour
     // the feed does not have.
-    return "rule-outs have earned their keep but still don't change your picks — see the track record";
+    return `rule-outs have earned their keep but still don't change your picks${pointer}`;
   }
 
   if (gating === GATING_UNMEASURED) {
     return "rule-outs change nothing — nothing has measured them against your history yet";
   }
 
-  return "rule-outs change nothing yet — see the track record";
+  return `rule-outs change nothing yet${pointer}`;
+}
+
+/** Where the band is rendered. On Track record it drops every pointer back to Track record. */
+export interface XrefBandPlace {
+  onTrackRecord?: boolean;
 }
 
 /**
@@ -65,7 +74,7 @@ export function ruleOutClause(gating: string): string {
  * posture exists to avoid. Zero rule-outs is likewise not an error and not a boast; the clause is
  * about what rule-outs DO, and it is as true at zero as at six hundred.
  */
-export function xrefBandCopy(status: CrossReferenceStatus | null | undefined): string | null {
+export function xrefBandCopy(status: CrossReferenceStatus | null | undefined, place: XrefBandPlace = {}): string | null {
   if (!status) return null;
 
   if (status.running) {
@@ -82,7 +91,7 @@ export function xrefBandCopy(status: CrossReferenceStatus | null | undefined): s
     parts.push(`${count(status.kept)} kept, nudged up a little`);
   }
 
-  parts.push(ruleOutClause(status.gating));
+  parts.push(ruleOutClause(status.gating, place));
 
   return parts.join(" · ");
 }

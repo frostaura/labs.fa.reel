@@ -102,8 +102,19 @@ test.describe("phone targets on WS-10A routes", () => {
       items: [item(1), item(2), item(3)], eveningBudgetMinutes: 150, expectedAbsoluteError: 1.2,
       unscoredRemaining: 0, managedListUrl: null, sort: "tonight",
     });
+    // The pinned pick's where-to-watch block (R1-42: left unmocked, it hit the tripwire and sat in the
+    // unmocked-API baseline). Served with a deep link and a search link, so the probe measures the
+    // provider chips the founder actually taps, not an empty block.
+    await mockJson(page, "**/api/titles/movie/2001/providers", {
+      region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/2001/watch",
+      providers: [
+        { provider: "Netflix", logoPath: null, kinds: ["Flatrate"], linkKind: "direct", url: "https://www.netflix.com/title/1", displayPriority: 1 },
+        { provider: "Max", logoPath: null, kinds: ["Flatrate"], linkKind: "search", url: "https://play.max.com/search?q=x", displayPriority: 2 },
+      ],
+    });
     await page.goto("/saved");
     await expect(page.getByTestId("saved-card").first()).toBeVisible();
+    await expect(page.getByTestId("provider-chip").first()).toBeVisible();
     expect(await smallTargets(page)).toEqual([]);
     await context.close();
   });

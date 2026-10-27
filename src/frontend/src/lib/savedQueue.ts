@@ -107,6 +107,24 @@ export function ratingDelta(predictedRating: number, actualRating: number): stri
   return `Reel said ${predictedRating.toFixed(1)} · you said ${actualRating} — noted`;
 }
 
+/**
+ * What Saved says about the managed "Reel — Up Next" list (R1-09). Only a save made in Reel is
+ * written to it (the save endpoint queues ListAdd); a title that came in from the Trakt watchlist is
+ * saved here and deliberately NOT pushed to Up Next (WatchlistIntake is read-only), which is why a
+ * card can say "not on Up Next". So neither line may say that everything on the shelf lands on the
+ * list. Plex, Kodi and Infuse showing the list is their behaviour, not something Reel checks.
+ */
+export const MANAGED_LIST_TOOLTIP =
+  "Reel keeps a Trakt list called “Reel — Up Next”. What you save in Reel lands on it, and shows up in Plex, Kodi, Infuse and every Trakt-connected app. Titles from your Trakt watchlist are saved here too but stay off that list.";
+
+/** The shelf's intro, split around the list's name, which the page sets in its own colour. */
+export const SAVED_INTRO = {
+  before: "Your queue, in the order worth watching it. What you save in Reel syncs to the managed",
+  listName: "Reel — Up Next",
+  after:
+    "list — visible in Plex, Kodi, Infuse and every Trakt-connected app. Your Trakt watchlist lands here too, and stays off that list. Watch something and it leaves by itself.",
+} as const;
+
 /** What a saved card says about the managed Trakt list, and the tooltip that explains it. */
 export interface ListSyncLabel {
   text: string;

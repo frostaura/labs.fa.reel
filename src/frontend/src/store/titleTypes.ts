@@ -24,6 +24,8 @@ export interface PersonPayload {
   userRating: number | null;
   derivedAffinity: number | null;
   ratedTitleCount: number;
+  /** Credits the conditions (content rules, maturity ceiling) hold out of `filmography`. Optional: an older server does not send it. */
+  hiddenByConditions?: number | null;
   filmography: {
     titleId: string;
     mediaType: "Movie" | "Show";

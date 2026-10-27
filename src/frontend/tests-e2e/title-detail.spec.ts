@@ -270,4 +270,47 @@ test.describe("person page", () => {
     const roles = page.getByTestId("filmography-role");
     await expect(roles).toHaveText(["Director · Writer", "as Himself"]);
   });
+
+  // R1-41: PersonEndpoints holds out credits the conditions exclude and counts them; the page used
+  // to drop the count, so a director's horror films simply vanished. The line names the count and
+  // opens the conditions editor right there; a person whose every credit is held out still says so.
+  async function bootPerson(page: Page, filmography: unknown[], hiddenByConditions: number) {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/settings/filters", { excludeGenres: ["horror"], languages: ["en"] });
+    await mockJson(page, "**/api/search/filter-chips", { minTitles: 50, chips: [] });
+    await mockJson(page, "**/api/people/00000000-0000-0000-0000-0000000000bb", {
+      id: "00000000-0000-0000-0000-0000000000bb", name: "John Carpenter", department: "Directing", profilePath: null,
+      userRating: null, derivedAffinity: null, ratedTitleCount: 0, hiddenByConditions, filmography,
+    });
+    await page.goto("/person/00000000-0000-0000-0000-0000000000bb");
+    await expect(page.getByRole("heading", { level: 1, name: "John Carpenter" })).toBeVisible();
+  }
+
+  const credit = (n: number) => ({
+    titleId: `00000000-0000-0000-0000-0000000008${n}0`, mediaType: "Movie", tmdbId: 5000 + n, name: `Credit ${n}`,
+    year: 2001 + n, posterPath: null, userRating: null, predictedRating: 6.8, roles: ["Director"],
+  });
+
+  test("counts the credits the conditions hide and opens the conditions from that line", async ({ page }) => {
+    await bootPerson(page, [credit(1), credit(2)], 3);
+    await expect(page.getByTestId("person-hidden")).toContainText("3 more of their titles are hidden by your conditions.");
+    await page.getByTestId("person-hidden-change").click();
+    await expect(page.getByTestId("conditions-editor")).toBeVisible();
+  });
+
+  test("a person whose every credit is held out says so instead of showing nothing", async ({ page }) => {
+    await bootPerson(page, [], 1);
+    await expect(page.getByTestId("person-hidden")).toContainText("Their 1 title in Reel is hidden by your conditions.");
+  });
+
+  test("no hidden line when the conditions hide nothing", async ({ page }) => {
+    await bootPerson(page, [credit(1)], 0);
+    await expect(page.getByText("Credit 1")).toBeVisible();
+    await expect(page.getByTestId("person-hidden")).toHaveCount(0);
+  });
 });

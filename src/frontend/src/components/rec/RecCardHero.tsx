@@ -167,6 +167,8 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
                 to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
                 state={{ backgroundLocation: location }}
                 className="absolute inset-0 z-[1] rounded-2xl focus:outline-none"
+                // Explicit, so plain Tab reaches the card in WebKit too, as it does its actions (R1-42).
+                tabIndex={0}
                 data-testid="hero-card-link"
               >
                 <span className="sr-only">{card.name}</span>

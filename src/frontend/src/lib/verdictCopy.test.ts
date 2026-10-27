@@ -48,12 +48,18 @@ describe("verdictHeadline", () => {
 
 describe("verdictFollowUp", () => {
   it("promises a retrain only when the rating actually disagreed", () => {
-    // A line saying "that goes into tonight's retrain" after a rating that confirmed the model is
+    // A line saying "that goes into your next retrain" after a rating that confirmed the model is
     // the first string a founder catches out.
     expect(verdictFollowUp("over")).toContain("retrain");
     expect(verdictFollowUp("under")).toContain("retrain");
     expect(verdictFollowUp("spot-on")).not.toContain("retrain");
     expect(verdictFollowUp("close")).not.toContain("retrain");
+    // R1-40: the nightly job retrains only when RetrainGate says one is owed (10 new ratings, a
+    // 14-day-old model or a calibration breach); one rating changes none of those. The rating is
+    // used at the next retrain, whenever that is — never promise "tonight".
+    for (const band of ["over", "under", "spot-on", "close"] as const) {
+      expect(verdictFollowUp(band)).not.toMatch(/tonight/i);
+    }
   });
 
   it("never apologises, exclaims or claims it will do better", () => {
@@ -98,7 +104,7 @@ describe("verdictSurface", () => {
 describe("verdictCopy", () => {
   it("reads as the founder's worst case, plainly", () => {
     expect(verdictCopy(verdict(), 5, NOW)).toBe(
-      "Reel said 8.4 · you said 5 — shown 12 days ago on tonight's picks — noted — that goes into tonight's retrain"
+      "Reel said 8.4 · you said 5 — shown 12 days ago on tonight's picks — noted — that goes into your next retrain"
     );
   });
 
@@ -110,13 +116,13 @@ describe("verdictCopy", () => {
 
   it("drops the where-and-when clause entirely on the retro fallback", () => {
     const copy = verdictCopy(verdict({ surface: null, shownAt: null }), 5, NOW);
-    expect(copy).toBe("Reel said 8.4 · you said 5 — noted — that goes into tonight's retrain");
+    expect(copy).toBe("Reel said 8.4 · you said 5 — noted — that goes into your next retrain");
     expect(copy).not.toMatch(/shown/);
   });
 
   it("drops only the surface when the shown-at is known but the surface is not", () => {
     expect(verdictCopy(verdict({ surface: "SomethingNew" }), 5, NOW)).toBe(
-      "Reel said 8.4 · you said 5 — shown 12 days ago — noted — that goes into tonight's retrain"
+      "Reel said 8.4 · you said 5 — shown 12 days ago — noted — that goes into your next retrain"
     );
   });
 });

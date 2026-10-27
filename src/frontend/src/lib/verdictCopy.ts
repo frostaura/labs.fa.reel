@@ -58,6 +58,9 @@ export function verdictHeadline(predicted: number, actual: number): string {
  * What happens next, in one clause. Deliberately different per band, and deliberately silent when
  * nothing happens: a line promising a retrain after a rating that changed nothing would be the
  * first thing the founder caught out.
+ *
+ * "Next", never "tonight" (R1-40): the nightly job retrains only when RetrainGate says one is owed
+ * (10 new ratings, a 14-day-old model or a calibration breach), and one rating moves none of those.
  */
 export function verdictFollowUp(band: VerdictBand): string {
   switch (band) {
@@ -66,9 +69,9 @@ export function verdictFollowUp(band: VerdictBand): string {
     case "close":
       return "close enough to count";
     case "over":
-      return "noted — that goes into tonight's retrain";
+      return "noted — that goes into your next retrain";
     case "under":
-      return "under-called it — that goes into tonight's retrain";
+      return "under-called it — that goes into your next retrain";
   }
 }
 

@@ -27,6 +27,16 @@ interface Props {
 /** How long a press must hold before it means "let me pick a reason" instead of "dismiss it". */
 const LONG_PRESS_MS = 450;
 
+
+/**
+ * Safari's default keyboard model leaves buttons and links out of the plain-Tab order (Option-Tab
+ * reaches them, or the "press Tab to highlight each item" setting), so Tab from a card's title link
+ * jumped straight past its actions in WebKit (R1-42). An EXPLICIT tabindex puts an element in WebKit's
+ * Tab order whatever that setting says, and changes nothing in Chromium or Firefox, where buttons
+ * are already tabbable. Zero keeps document order: title link, Not for me, Save, Rate.
+ */
+const KEYBOARD_REACHABLE = 0;
+
 /**
  * One-tap card actions — "Not for me" and "Save" — overlaid on a recommendation poster, so acting
  * on a pick no longer costs a navigation into the detail modal and back (the top usability finding
@@ -200,6 +210,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-expanded={reasonsOpen}
             title="Not for me — hold or right-click to say why"
             className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100 lg:opacity-100" : ""}`}
+            // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
+            tabIndex={KEYBOARD_REACHABLE}
             data-testid="quick-not-interested"
           >
             <span className={pillClass}>
@@ -242,6 +254,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
         aria-label={`Save for later — ${name}`}
         title="Save for later"
         className={`${buttonClass} hover:text-fa-frost-bright`}
+        // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
+        tabIndex={KEYBOARD_REACHABLE}
         data-testid="quick-save"
       >
         <span className={pillClass}>
@@ -261,6 +275,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-expanded={rateOpen}
             title="Rate it — you have seen this one"
             className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100 lg:opacity-100" : ""}`}
+            // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
+            tabIndex={KEYBOARD_REACHABLE}
             data-testid="quick-rate"
           >
             <span className={pillClass}>
