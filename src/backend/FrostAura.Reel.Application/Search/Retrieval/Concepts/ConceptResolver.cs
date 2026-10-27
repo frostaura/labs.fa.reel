@@ -31,7 +31,9 @@ public interface IConceptResolver
 /// <item>Normalise: lower-case, drop the media words ("movies", "shows", "series") and leading
 /// articles. "Ninja movies" and "a ninja film" are the same concept.</item>
 /// <item>Stems: the words, the planner's labels, and every <see cref="ConceptSynonyms"/> group either
-/// belongs to. Genre words ("horror", "sci-fi", "Sci-Fi &amp; Fantasy") add genre slugs.</item>
+/// belongs to. Genre words ("horror", "sci-fi", "Sci-Fi &amp; Fantasy") add genre slugs INSTEAD of
+/// stems: a genre is its tag (plus aliases and stand-ins where a taxonomy cannot tag it), never a
+/// keyword that merely contains the word ("teen comedy" is not the comedy genre).</item>
 /// <item>Expand through <see cref="KeywordVocabulary"/>. A stem that reaches nothing is retried
 /// singular ("heists" → "heist", "witches" → "witch"); a phrase that reaches nothing falls back to
 /// its words, each with its synonyms ("ai robot" → AI, robot, android), OR-ed.</item>
@@ -109,15 +111,25 @@ public sealed partial class ConceptResolver(
             .ToList();
 
         var genres = concept.Genres.Select(g => g.Trim().ToLowerInvariant()).Where(g => g.Length > 0).ToList();
+        var genreSeeds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var seed in seeds)
         {
             if (ConceptSynonyms.GenreWords.TryGetValue(seed, out var slugs))
             {
                 genres.AddRange(slugs);
+                genreSeeds.Add(seed);
             }
         }
 
-        var stems = seeds.SelectMany(ConceptSynonyms.GroupOf).Distinct(StringComparer.Ordinal).ToList();
+        // A seed that names a genre is matched as the genre — the tag, and the alias genres and
+        // stand-ins on the media that cannot tag it, exactly as an exclusion reads it — never as a
+        // keyword stem. As a stem "comedy" reached every label containing the word, so "teen comedy"
+        // made a family sci-fi film one of the founder's "unseen comedies" while eligibility (rightly)
+        // did not call it a comedy, and one reply counted with two definitions (HREV1-RET-06).
+        var stems = seeds.Where(s => !genreSeeds.Contains(s))
+            .SelectMany(ConceptSynonyms.GroupOf)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
         var labels = await vocabulary.LabelsAsync(ct);
         var exact = new HashSet<string>(StringComparer.Ordinal);
         var matchedStems = new List<string>(stems.Count);
@@ -167,9 +179,11 @@ public sealed partial class ConceptResolver(
         // A concept the catalogue has no label for and no genre for keeps its own words as the stem,
         // so the name and full-text arms can still try; its exact set is empty, not null, so the
         // keyword arm matches nothing rather than every label containing a stray stem.
+        // A pure genre concept has no stems at all: its words are the genre, which the genre arm
+        // matches, so they are not offered to the name or full-text arms as a phrase either.
         return new ConceptTerm(
             concept.UserWords,
-            finalStems.Count > 0 ? finalStems : [words],
+            finalStems.Count > 0 ? finalStems : genres.Count > 0 && genreSeeds.Count == seeds.Count ? [] : [words],
             [.. genres.Distinct(StringComparer.Ordinal)],
             exactLabels);
     }

@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
@@ -163,6 +164,97 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     [Fact]
+    public async Task A_genre_word_is_matched_as_the_genre_never_as_a_keyword_or_name_containing_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // HREV1-RET-06: "romantic comedies" resolved "comedy" to every label containing the word, so How
+        // to Build a Better Boy ({family, science-fiction}, keyword "teen comedy") was counted as the
+        // founder's one "unseen comedy" while eligibility did not call it a comedy at all. A unique topic
+        // concept scopes every count to this test's titles on the shared catalogue.
+        var topic = $"genreword{Guid.NewGuid():N}";
+        var tagged = await SeedTitleAsync(t => { t.Genres = ["comedy", "romance"]; t.Keywords = [topic]; });
+        var teenComedy = await SeedTitleAsync(t =>
+        {
+            t.Genres = ["family", "science-fiction"];
+            t.Keywords = [topic, "teen comedy", "teenage romance"];
+        });
+        var namedComedy = await SeedTitleAsync(t =>
+        {
+            t.Name = $"A Romantic Comedy of Errors {Guid.NewGuid():N}";
+            t.Genres = ["drama"];
+            t.Keywords = [topic];
+        });
+        // TV romance is judged as an exclusion reads it: the soap alias and the overview stand-in count;
+        // the same overview on a FILM does not (TMDB tags films with romance itself).
+        var soapShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["comedy", "soap"]; t.Keywords = [topic]; });
+        var overviewShow = await SeedTitleAsync(t =>
+        {
+            t.MediaType = MediaType.Show;
+            t.Genres = ["comedy", "drama"];
+            t.Keywords = [topic];
+            t.Overview = "Two exes rekindle an old romance.";
+        });
+        var overviewFilm = await SeedTitleAsync(t => { t.Genres = ["comedy", "drama"]; t.Keywords = [topic]; t.Overview = "Two exes rekindle an old romance."; });
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var resolver = new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new StubEmbeddingProvider(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+
+        // The genre concepts the reducer builds (one per genre), and the plural / adjective spellings.
+        foreach (var (words, genre) in new[] { ("comedy", "comedy"), ("comedies", "comedy"), ("romantic", "romance"), ("Romance movies", "romance") })
+        {
+            var resolved = await resolver.ResolveAsync(new ConceptTerm(words, [], words.Contains(' ') ? [] : [genre]), default);
+            Assert.Equal([genre], resolved.Genres);
+            Assert.Empty(resolved.ExactLabels!);
+            Assert.Empty(HardConstraintFilter.LabelsOf(resolved));
+        }
+
+        // A phrase that is a TMDB keyword stays a keyword concept: "teen comedy" is a label, not a genre.
+        var phrase = await resolver.ResolveAsync(new ConceptTerm("teen comedy", [], []), default);
+        Assert.Contains("teen comedy", phrase.ExactLabels!);
+        Assert.Empty(phrase.Genres);
+
+        var hard = await resolver.ResolveAsync(
+            HardConstraints.None with
+            {
+                Concepts = [new ConceptTerm(topic, [topic], []), new ConceptTerm("comedy", [], ["comedy"]), new ConceptTerm("romance", [], ["romance"])],
+            },
+            default);
+        var accountId = await SeedAccountAsync();
+        var eligibility = new EligibilityQueryBuilder(db);
+        var supply = await new SupplyReporter(db, eligibility).ReportAsync(accountId, hard, CancellationToken.None);
+        var matched = await HardConstraintFilter.Apply(db.Titles, db, hard).Select(t => t.Id).ToListAsync();
+        Assert.Equal(new HashSet<Guid> { tagged, soapShow, overviewShow }, matched.ToHashSet());
+        Assert.Equal(3, supply.MatchingInCatalogue);
+
+        // Evidence names the genre, never a keyword or name that merely contains the genre word.
+        var taggedTitle = await db.Titles.SingleAsync(t => t.Id == tagged);
+        Assert.Equal(["keyword:" + topic, "genre:comedy", "genre:romance"], HardConstraintFilter.EvidenceFor(taggedTitle, hard));
+
+        // The founder's conflict: comedy and romance are standing exclusions, so all three are held
+        // out by conditions and nothing is "an unseen comedy". Each knockout alone unlocks nothing —
+        // the other exclusion still binds — which is what lets the reply name the conflict instead.
+        db.ContentFilters.AddRange(
+            new ContentFilter { Id = Guid.NewGuid(), AccountId = accountId, Kind = FilterKind.ExcludeGenre, Value = "comedy", CreatedAt = DateTime.UtcNow },
+            new ContentFilter { Id = Guid.NewGuid(), AccountId = accountId, Kind = FilterKind.ExcludeGenre, Value = "romance", CreatedAt = DateTime.UtcNow.AddSeconds(1) });
+        await db.SaveChangesAsync();
+        var conflicted = await new SupplyReporter(db, eligibility).ReportAsync(accountId, hard, CancellationToken.None);
+        Assert.Equal(3, conflicted.MatchingInCatalogue);
+        Assert.Equal(3, conflicted.ExcludedByConditions);
+        Assert.Equal(0, conflicted.Eligible);
+        Assert.DoesNotContain(conflicted.Knockouts, k => k.Kind == FilterKind.ExcludeGenre);
+        _ = (teenComedy, namedComedy, overviewFilm);
+    }
+
+    [Fact]
     public async Task Keyword_neighbours_share_specific_evidence_and_say_which()
     {
         if (!Fixture.Available)
@@ -230,19 +322,19 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         var horror = await SeedTitleAsync(t => t.Genres = [genre, "horror"]);
         await using (var seed = Fixture.CreateContext(new AccountContext()))
         {
-            seed.ContentFilters.Add(new Domain.Filters.ContentFilter
+            seed.ContentFilters.Add(new ContentFilter
             {
                 Id = Guid.NewGuid(),
                 AccountId = accountId,
-                Kind = Domain.Filters.FilterKind.IncludeGenre,
+                Kind = FilterKind.IncludeGenre,
                 Value = "drama",
                 CreatedAt = DateTime.UtcNow,
             });
-            seed.ContentFilters.Add(new Domain.Filters.ContentFilter
+            seed.ContentFilters.Add(new ContentFilter
             {
                 Id = Guid.NewGuid(),
                 AccountId = accountId,
-                Kind = Domain.Filters.FilterKind.ExcludeGenre,
+                Kind = FilterKind.ExcludeGenre,
                 Value = "horror",
                 CreatedAt = DateTime.UtcNow.AddSeconds(1),
             });
@@ -259,9 +351,9 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal(2, rail.MatchingInCatalogue);
         Assert.Equal(1, rail.ExcludedByConditions);
         Assert.Equal(1, rail.Eligible);
-        Assert.DoesNotContain(rail.Knockouts, k => k.Kind == Domain.Filters.FilterKind.IncludeGenre);
+        Assert.DoesNotContain(rail.Knockouts, k => k.Kind == FilterKind.IncludeGenre);
         var exclude = Assert.Single(rail.Knockouts);
-        Assert.Equal(Domain.Filters.FilterKind.ExcludeGenre, exclude.Kind);
+        Assert.Equal(FilterKind.ExcludeGenre, exclude.Kind);
         Assert.Equal(horror, Assert.Single(exclude.Sample).TitleId);
         Assert.NotEqual(plain, horror);
     }

@@ -104,6 +104,52 @@ public static class ConceptSynonyms
             ["news"] = ["news"],
         };
 
+    /// <summary>
+    /// The genre slugs <paramref name="phrase"/> names when the WHOLE phrase is genre words — one
+    /// <see cref="GenreWords"/> key ("comedy", "sci-fi &amp; fantasy") or several joined by spaces and
+    /// "and"/"&amp;"/"or" ("romantic comedies", "comedy romance") — or null when any word is not a genre
+    /// word ("romantic comedy film noir" is not). Lower-case, normalised input.
+    /// </summary>
+    public static IReadOnlyList<string>? GenresNamedBy(string phrase)
+    {
+        if (string.IsNullOrWhiteSpace(phrase))
+        {
+            return null;
+        }
+
+        if (GenreWords.TryGetValue(phrase, out var whole))
+        {
+            return whole;
+        }
+
+        var tokens = phrase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var slugs = new List<string>();
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (tokens[i] is "and" or "&" or "or")
+            {
+                continue;
+            }
+
+            // Two-word genre names first ("science fiction", "talk show", "soap opera").
+            if (i + 1 < tokens.Length && GenreWords.TryGetValue($"{tokens[i]} {tokens[i + 1]}", out var pair))
+            {
+                slugs.AddRange(pair);
+                i++;
+                continue;
+            }
+
+            if (!GenreWords.TryGetValue(tokens[i], out var single))
+            {
+                return null;
+            }
+
+            slugs.AddRange(single);
+        }
+
+        return slugs.Count == 0 ? null : [.. slugs.Distinct(StringComparer.Ordinal)];
+    }
+
     /// <summary>The synonym group containing <paramref name="stem"/>, or just the stem.</summary>
     public static IEnumerable<string> GroupOf(string stem)
     {

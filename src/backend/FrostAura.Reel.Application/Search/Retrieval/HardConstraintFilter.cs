@@ -16,7 +16,9 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// <list type="bullet">
 /// <item>A concept matches by a TMDB keyword that CONTAINS the label from a word start
 /// (<c>\mninja</c>: "ninja", "female ninja", "ninja warrior"), by a label standing as a whole word in
-/// the title's NAME (plural allowed), or by genre slug. Keywords are stored lower-cased by ingest, so
+/// the title's NAME (plural allowed), or by genre slug. A genre slug is matched only as an exclusion of
+/// it reads (<see cref="FilterBreaches.ExcludedGenre"/>); a label that restates the concept's genres is
+/// dropped, so no keyword or name containing the genre word satisfies a genre. Keywords are stored lower-cased by ingest, so
 /// the labels are lower-cased here and the keyword column is not; the name is matched
 /// case-insensitively.</item>
 /// <item>The keyword match starts at a word boundary because bare containment counted mid-word hits:
@@ -38,12 +40,26 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// </summary>
 public static class HardConstraintFilter
 {
-    /// <summary>The concept labels actually matched for <paramref name="concept"/>: its catalogue labels, or its own words.</summary>
+    /// <summary>
+    /// The concept labels actually matched for <paramref name="concept"/>: its catalogue labels, or its
+    /// own words — minus any label that only restates the concept's genres ("comedy", "romantic
+    /// comedies" beside genres {comedy, romance}). A genre is satisfied by the genre predicate alone,
+    /// the one eligibility uses; a keyword or a name that merely CONTAINS the genre word never
+    /// satisfies it (HREV1-RET-06: "teen comedy" on a family sci-fi film).
+    /// </summary>
     public static IReadOnlyList<string> LabelsOf(ConceptTerm concept)
     {
         var labels = concept.CatalogueLabels.Count > 0 ? concept.CatalogueLabels : [concept.UserWords];
-        return Clean(labels);
+        var genres = GenresOf(concept);
+        return genres.Count == 0
+            ? Clean(labels)
+            : Clean(labels).Where(label => !RestatesGenres(label, genres)).ToList();
     }
+
+    /// <summary>True when every genre <paramref name="label"/> names is one of <paramref name="genres"/> and it names nothing else.</summary>
+    private static bool RestatesGenres(string label, IReadOnlyList<string> genres) =>
+        Concepts.ConceptSynonyms.GenresNamedBy(Concepts.ConceptResolver.Normalise(label)) is { } named
+        && named.All(g => genres.Contains(g, StringComparer.Ordinal));
 
     /// <summary>The genre slugs that satisfy <paramref name="concept"/>, cleaned.</summary>
     public static IReadOnlyList<string> GenresOf(ConceptTerm concept) => Clean(concept.Genres);
