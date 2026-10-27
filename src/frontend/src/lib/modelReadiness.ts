@@ -178,3 +178,45 @@ export function pipelineSentence(status: ReadinessInput | null | undefined): str
       return "Reel is working on your picks.";
   }
 }
+
+/** The status fields the Rate screen's payoff line reads: readiness plus the retrain gate's counts. */
+export interface RateProgressInput extends ReadinessInput {
+  retrain?: { hasActiveModel: boolean; minNewRatings: number; newRatingsSinceTrain: number } | null;
+}
+
+/**
+ * The Rate screen's payoff line: what the ratings saved here buy, or null when the status cannot
+ * say (not loaded, or an older payload with no `retrain` block) — no line beats a made-up one.
+ *
+ * `saved` is the ratings confirmed on this screen since the status was read. The status query is not
+ * invalidated by a rating, so they are counted on top of the server's numbers; each is a title the
+ * account had not rated, so it is one more row for the trainer's floor and one more new rating for
+ * the retrain gate.
+ *
+ * With a model, it is the retrain gate's countdown. Without one it used to promise "Reel trains your
+ * first model tonight" from the first rating — but the trainer refuses below its floor (R1-43), so
+ * while `notEnoughRatings` holds the line says how many more the first model needs, and "tonight"
+ * is promised only once the floor is met.
+ */
+export function rateProgress(status: RateProgressInput | null | undefined, saved: number): string | null {
+  const retrain = status?.retrain;
+  if (!status || !retrain) return null;
+
+  if (retrain.hasActiveModel) {
+    const sinceTrain = retrain.newRatingsSinceTrain + saved;
+    const toGo = Math.max(0, retrain.minNewRatings - sinceTrain);
+    if (toGo === 0) return `That's enough — Reel retrains tonight on ${sinceTrain} new ${sinceTrain === 1 ? "rating" : "ratings"}.`;
+    return `${toGo} more ${toGo === 1 ? "rating" : "ratings"} and Reel retrains tonight.`;
+  }
+
+  const readiness = modelReadiness(status);
+  if (!readiness || readiness.kind === "ready") return null;
+  if (readiness.kind !== "needsRatings") return noModelSentence(readiness);
+  if (!readiness.floor) {
+    return "Reel needs a few more of your ratings before it can build your first model — keep rating.";
+  }
+  const have = readiness.floor.usableRatings + saved;
+  const short = readiness.floor.required - have;
+  if (short <= 0) return `That's enough — ${FIRST_MODEL_TIMING}.`;
+  return `${have} of ${readiness.floor.required} ratings — rate ${short === 1 ? "one more" : `${short} more`} and Reel can build your first model.`;
+}

@@ -241,7 +241,7 @@ export default function Onboarding() {
             <div className="fa-card px-8 py-6 space-y-3 border-fa-frost/30">
               <Sparkles className="h-6 w-6 text-fa-frost mx-auto" />
               <p className="fa-caption text-3">
-                Model trained on your ratings — every pick comes with the reason and a predicted rating.
+                Model trained on your ratings — every pick comes with a predicted rating, and the reason when there&apos;s one worth naming.
               </p>
             </div>
             <Button variant="primary" size="lg" onClick={enterApp} className={`text-base py-3 ${COARSE_TAP}`} data-testid="enter-app">

@@ -167,8 +167,9 @@ export default function TasteNarrativePanel() {
             data-testid="narrative-editor"
             className="w-full rounded-lg border border-fa-edge bg-fa-ink-2 p-3 fa-body text-fa-frost leading-relaxed focus:outline-none focus:ring-2 focus:ring-fa-frost/40"
           />
-          <p className="fa-caption text-fa-frost-dim">
-            Reel reads this before every pick it makes for you. Correcting it here changes what it looks for.
+          <p className="fa-caption text-3" data-testid="narrative-editor-note">
+            Reel&apos;s written passes read this when they run — the curation of your picks, the cross-reference, the
+            lens and Ask Reel. Correcting it here changes what they look for; the predicted ratings never read it.
           </p>
           <div className="flex items-center gap-2">
             <Button

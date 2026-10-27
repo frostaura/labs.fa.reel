@@ -55,6 +55,16 @@ test.describe("landing on phones", () => {
     await expect(body).not.toContainText(/\b\d\.\d\b/);
   });
 
+  test("promises a reason for a pick only when there is one worth naming (R1-43)", async ({ page }) => {
+    // The explanation templater ships no line when nothing citable moved the prediction, so "why it
+    // was picked" on every pick is a promise the product does not keep.
+    await page.goto("/");
+    const picks = page.getByTestId("landing-step").nth(2);
+    await expect(picks).toContainText("Each with a predicted rating for you and where to watch it");
+    await expect(picks).toContainText("and why it was picked, when there's a reason worth naming.");
+    await expect(page.getByTestId("landing-steps")).not.toContainText("a predicted rating for you, why it was picked");
+  });
+
   test("carries the Reel mark and no studio artwork (O-19)", async ({ page }) => {
     await page.goto("/");
     const mark = page.getByTestId("landing-mark");

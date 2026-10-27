@@ -116,6 +116,12 @@ test.describe("taste narrative", () => {
 
     const edited = "You only ever watch heist films, and you know it.";
     await page.getByTestId("narrative-edit").click();
+    // R1-43: the scoring model never reads the narrative (ClaimsAuditTests), so the note names the
+    // written passes that do, and says the predicted ratings do not.
+    const note = page.getByTestId("narrative-editor-note");
+    await expect(note).toContainText("Reel's written passes read this when they run");
+    await expect(note).toContainText("the predicted ratings never read it");
+    await expect(note).not.toContainText("before every pick");
     await page.getByTestId("narrative-editor").fill(edited);
     await page.getByTestId("narrative-save").click();
 
