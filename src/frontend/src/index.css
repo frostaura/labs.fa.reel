@@ -324,6 +324,19 @@ body {
   background: var(--fa-frost-bright); border: 2px solid var(--fa-ink);
   box-shadow: 0 0 0 1px var(--fa-frost-bright), 0 0 12px rgba(212, 236, 255, 0.55);
 }
+/* Keyboard focus (PH2-03). `.fa-range` drops the native outline because it would box the whole
+ * 18 px strip, so the focused slider draws a ring around its thumb instead — an ink gap, then a
+ * frost ring — which is what the arrow keys move. Without this the slider looked identical focused
+ * and unfocused. Forced-colours mode ignores box-shadow, so it gets a system-colour outline back. */
+.fa-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--fa-ink), 0 0 0 5px rgb(var(--c-frost) / 0.75), 0 0 12px rgba(212, 236, 255, 0.55);
+}
+.fa-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 2px var(--fa-ink), 0 0 0 5px rgb(var(--c-frost) / 0.75), 0 0 12px rgba(212, 236, 255, 0.55);
+}
+@media (forced-colors: active) {
+  .fa-range:focus-visible { outline: 2px solid CanvasText; outline-offset: 2px; }
+}
 
 /* Motion, once, for the whole stylesheet.
  *

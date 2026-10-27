@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readBaseline, regressions, scan, scanTree } from "./designRatchet";
+import { readBaseline, regressions, scan, scannedFiles, scanTree } from "./designRatchet";
 
 describe("design ratchet — the scanner", () => {
   it("counts raw buttons outside ui/, and none inside it", () => {
@@ -30,6 +30,31 @@ describe("design ratchet — the scanner", () => {
     ).toBeUndefined();
   });
 
+  // PH2-03: the TSX literal check never saw CSS, and .fa-range set `outline: none` with no focus style.
+  it("counts a CSS outline:none only where no :focus or :focus-visible rule restyles the same selector", () => {
+    const bare = `.fa-range { appearance: none; outline: none; }`;
+    expect(scan("src/index.css", bare).outlineWithoutFocus).toBe(1);
+    expect(scan("src/index.css", `.a{outline:0}\n.b { outline: none }`).outlineWithoutFocus).toBe(2);
+    // A focus style for the same selector, on the element or on a part of it, answers it.
+    expect(
+      scan("src/index.css", `${bare}\n.fa-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px red; }`)
+        .outlineWithoutFocus,
+    ).toBeUndefined();
+    expect(scan("src/index.css", `${bare}\n.fa-range:focus { box-shadow: 0 0 0 3px red; }`).outlineWithoutFocus).toBeUndefined();
+    // A focus style for a DIFFERENT selector does not; nor does one that only removes the outline.
+    expect(scan("src/index.css", `${bare}\n.fa-ranger:focus-visible { box-shadow: 0 0 0 3px red; }`).outlineWithoutFocus).toBe(1);
+    expect(scan("src/index.css", `.x:focus { outline: none; }`).outlineWithoutFocus).toBe(1);
+    // Inside an at-rule, in an @apply, and never in a comment.
+    expect(scan("src/index.css", `@media (hover: hover) { .y { outline: none; } }`).outlineWithoutFocus).toBe(1);
+    expect(scan("src/index.css", `.z { @apply px-2 outline-none; }`).outlineWithoutFocus).toBe(1);
+    expect(scan("src/index.css", `.z { @apply outline-none focus:border-fa-frost/40; }`).outlineWithoutFocus).toBeUndefined();
+    expect(scan("src/index.css", `/* .c { outline: none } */ .c { color: red; }`).outlineWithoutFocus).toBeUndefined();
+  });
+
+  it("holds CSS to the outline rule only: its hex tokens and @apply opacity are the token layer's business", () => {
+    expect(scan("src/index.css", `/* #A4D4F4 */ .i { @apply text-fa-frost-dim/60; }`)).toEqual({});
+  });
+
   it("flags a rise above the baseline and a new file's first violation, never a fall", () => {
     const baseline = { "src/a.tsx": { rawButton: 2 } };
     expect(regressions({ "src/a.tsx": { rawButton: 1 } }, baseline)).toEqual([]);
@@ -41,6 +66,10 @@ describe("design ratchet — the scanner", () => {
 });
 
 describe("design ratchet — the tree", () => {
+  it("scans the stylesheets as well as the TS and TSX sources", () => {
+    expect(scannedFiles()).toEqual(expect.arrayContaining(["src/index.css", "src/App.tsx"]));
+  });
+
   // The gate itself. A failure names each file and rule; fix the code, never raise the baseline.
   it("no file has more raw buttons, selects, hex colours, faint text or bare outline-none than its baseline", () => {
     expect(regressions(scanTree(), readBaseline())).toEqual([]);
