@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -404,6 +405,40 @@ public class EdgeSecurityTests(PostgresFixture fixture, ReelApiFactory api) : IC
         var account = await db.Accounts.IgnoreQueryFilters().SingleAsync(a => a.Id == accountId);
         Assert.Equal("GB", account.Region);
         Assert.Equal("dean@frostaura.net", account.Settings.EmailForBilling);
+    }
+
+    /// <summary>
+    /// HREV1-PLAT-7: a redeploy needs no key-ring mount. The Data Protection keys live in the
+    /// <c>DataProtectionKeys</c> table, so a brand-new process on the same database — what a redeploy
+    /// is — reads every secret the old one sealed. The control proves the check can fail: a host whose
+    /// ring is NOT the database cannot read the same token, which is the R1-27 "Revoked" path a lost
+    /// ring (or, once <c>DATAPROTECTION_CERT_PATH</c> is set, a missing certificate) leads to.
+    /// </summary>
+    [Fact]
+    public async Task A_redeployed_process_reads_the_old_ones_secrets_from_the_database_alone()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var secret = $"trakt-token-{Guid.NewGuid():N}";
+        var sealedByOld = api.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>().Protect(secret);
+
+        await using (var redeployed = api.WithWebHostBuilder(_ => { }))
+        {
+            Assert.Equal(secret, redeployed.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>().Unprotect(sealedByOld));
+        }
+
+        await using (var elsewhere = api.WithWebHostBuilder(b => b.ConfigureServices(s =>
+            s.AddDataProtection().SetApplicationName("FrostAura.Reel").UseEphemeralDataProtectionProvider())))
+        {
+            var reader = elsewhere.Services.GetRequiredService<FrostAura.Reel.Domain.Ports.ISecretProtector>();
+            Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() => reader.Unprotect(sealedByOld));
+        }
+
+        await using var db = Db();
+        Assert.True(await db.DataProtectionKeys.AnyAsync(), "the key ring is expected in the DataProtectionKeys table");
     }
 
     [Fact]
