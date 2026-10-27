@@ -115,6 +115,72 @@ public class UnreadableTraktTokenTests(PostgresFixture fixture)
         Assert.Equal(ConnectionStatus.Active, (await read.TraktConnections.SingleAsync(c => c.AccountId == accountId)).Status);
     }
 
+    public static TheoryData<string, int> RelinkedUnderneath => new()
+    {
+        // Which stale secret fails to decrypt, and days until the stale access token expires. A far
+        // expiry reads the stale access token off the caller's entity; a near one re-reads the access
+        // token from the row (readable, re-linked) and then reads the stale refresh token.
+        { "access", 60 },
+        { "refresh", 1 },
+    };
+
+    /// <summary>
+    /// A job holds the old, unreadable token, the user re-links Trakt, and only then does the job
+    /// try to decrypt what it holds. The failure is about the token the job read, not the one the
+    /// row holds now, so the fresh link must stay Active and the poll must keep syncing it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RelinkedUnderneath))]
+    public async Task A_relink_after_the_job_read_the_old_token_is_not_revoked(string which, int expiresInDays)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAsync(now, expiresInDays, accessReadable: which != "access", refreshReadable: which != "refresh");
+
+        await using var db = Pinned(accountId);
+        var stale = await db.TraktConnections.SingleAsync(c => c.AccountId == accountId);
+
+        // The re-link (TraktOAuthService) writes a fresh pair this host can read. The re-linked
+        // access token is near expiry too, so the refresh variant still has to read a refresh token.
+        await using (var relink = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await relink.TraktConnections.SingleAsync(c => c.AccountId == accountId);
+            row.AccessTokenEncrypted = hostRing.Protect("relinked-access-" + Guid.NewGuid().ToString("N"));
+            row.RefreshTokenEncrypted = hostRing.Protect("relinked-refresh-" + Guid.NewGuid().ToString("N"));
+            row.ExpiresAt = now.AddDays(expiresInDays);
+            row.Status = ConnectionStatus.Active;
+            await relink.SaveChangesAsync();
+        }
+
+        string? token = null;
+        Exception? failure = null;
+        try
+        {
+            token = await TokenStore(db).GetValidAccessTokenAsync(stale, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        // Not the re-link failure: that would fail the job for good and tell the user, who has just
+        // re-linked, to re-link again. A stale read is an ordinary, retryable miss, or (when the
+        // re-linked access token is still valid) no miss at all.
+        Assert.False(failure is TraktTokenUnreadableException, failure?.Message);
+        Assert.True(failure is not null || token!.StartsWith("relinked-access-", StringComparison.Ordinal), token);
+
+        await using (var read = fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Equal(ConnectionStatus.Active, (await read.TraktConnections.SingleAsync(c => c.AccountId == accountId)).Status);
+        }
+
+        Assert.NotEqual(ConnectionStatus.Revoked, stale.Status);
+    }
+
     private async Task AssertRevokedAndNotPolledAsync(Guid accountId, DateTime now)
     {
         await using (var read = fixture.CreateContext(new AccountContext()))

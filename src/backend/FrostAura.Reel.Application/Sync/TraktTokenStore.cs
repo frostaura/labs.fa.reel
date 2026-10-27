@@ -176,6 +176,11 @@ public class TraktTokenStore(
     /// throws next never saves its tracked changes — and a <see cref="TraktTokenUnreadableException"/>
     /// is thrown for the caller to fail on once, not retry (R1-27). Before this, DeltaSync spent all
     /// three attempts every minute on a connection the poll kept re-enqueuing.
+    ///
+    /// <para>The revoke is conditional on the row still holding the ciphertext that failed. A job
+    /// that read the old token before the user re-linked must not revoke the fresh link it never
+    /// read: that read is stale, not unrecoverable, so it fails as an ordinary retryable miss and
+    /// the next attempt reads the re-linked token.</para>
     /// </summary>
     private async Task<string> RevealAsync(TraktConnection connection, string ciphertext, string which, CancellationToken ct)
     {
@@ -185,9 +190,20 @@ public class TraktTokenStore(
         }
         catch (CryptographicException ex)
         {
-            await db.TraktConnections
-                .Where(c => c.Id == connection.Id)
+            var stillStored = which == "refresh"
+                ? db.TraktConnections.Where(c => c.Id == connection.Id && c.RefreshTokenEncrypted == ciphertext)
+                : db.TraktConnections.Where(c => c.Id == connection.Id && c.AccessTokenEncrypted == ciphertext);
+            var revoked = await stillStored
                 .ExecuteUpdateAsync(s => s.SetProperty(c => c.Status, ConnectionStatus.Revoked), CancellationToken.None);
+            if (revoked == 0)
+            {
+                logger.LogInformation(
+                    "The Trakt {Which} token read for account {AccountId} cannot be decrypted, but the link was replaced since it was read; retrying with the stored one.",
+                    which, connection.AccountId);
+                throw new InvalidOperationException(
+                    $"The Trakt {which} token read for account {connection.AccountId} was replaced before it could be used; retry.");
+            }
+
             connection.Status = ConnectionStatus.Revoked;
             logger.LogWarning(
                 "The stored Trakt {Which} token for account {AccountId} cannot be decrypted; the connection is marked Revoked until the user re-links.",
