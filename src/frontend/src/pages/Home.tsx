@@ -42,7 +42,13 @@ import { Button } from "../components/ui/button";
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
   const { data: session } = useGetSessionQuery();
-  const { data: feed, isLoading } = useGetFeedQuery();
+  const {
+    data: feed,
+    isLoading,
+    isError: feedFailed,
+    isFetching: feedFetching,
+    refetch: refetchFeed,
+  } = useGetFeedQuery();
   const { data: continueWatching } = useGetContinueWatchingQuery();
   const [filter, setFilter] = useBrowseFilter("home");
   const dispatch = useDispatch();
@@ -118,7 +124,9 @@ export default function Home() {
   // never change it — see heroReachingNote.
   const removedSet = new Set(removed);
   const reachingNote = heroReachingNote(
-    (feed?.hero ?? []).filter((c) => matchesBrowseFilter(c, filter) && !removedSet.has(c.titleId))
+    (feed?.hero ?? []).filter((c) => matchesBrowseFilter(c, filter) && !removedSet.has(c.titleId)),
+    // Whose bar it is: "your" only when the bar is the account's own saved minimum (HREV1-D01).
+    filters?.minPredictedRating
   );
 
   // Everything the snapshot puts on the page, registered before any rail's first request so the
@@ -137,8 +145,12 @@ export default function Home() {
     // Card actions (save, not for me, rate) raise their undo toast through this provider (F-19).
     <CardUndoProvider>
       <div className="space-y-5 md:space-y-6">
-        <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
-          <div className="min-w-0">
+        <div className="flex flex-wrap items-end justify-between gap-2 md:gap-x-3">
+          {/* A fixed basis from `md`, so whether the controls wrap under the title is decided by the
+              viewport and not by the "ranked for you" stamp, which arrives with the feed after the
+              header has painted (it re-wrapped the header at 834 and moved everything below, HREV1-D04).
+              The stamp wraps under the heading inside this basis instead. */}
+          <div className="min-w-0 md:grow md:basis-72">
             {/* The stamp sits beside the heading where it fits (a phone included) and wraps under it
                 where it does not: a line of chrome saved is a line of the first pick above the fold. */}
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -149,21 +161,6 @@ export default function Home() {
                 </p>
               )}
             </div>
-            {/* Everything actually in force, under the title: the saved conditions AND the browse
-                toggles. Without this the feed silently obeys settings made on another screen — a
-                standing "no documentary" is invisible exactly where its effect is — and the browse
-                toggles were doubly invisible, since the summary used to omit them entirely while they
-                were halving the feed. Every chip opens the editor (H-9); "+N more" expands. On a
-                phone the chips move into the control line below instead (see there). */}
-            {isMdUp && (
-              <HomeConditionChips
-                className="mt-2"
-                browse={filter}
-                onBrowseChange={setFilter}
-                onOpenEditor={() => setConditionsOpen(true)}
-                limit={6}
-              />
-            )}
           </div>
           {/* One scrolling line on a phone, wrapping from `md`. Wrapped on a phone the controls took
               two lines (the browse segments alone are 44px tall there) and put the first pick below
@@ -220,6 +217,27 @@ export default function Home() {
               <BrowseFilters value={filter} onChange={setFilter} />
             </div>
           </div>
+          {/* Everything actually in force, on its own full-width line under the title and the
+              controls: the saved conditions AND the browse toggles. Without this the feed silently
+              obeys settings made on another screen — a standing "no documentary" is invisible
+              exactly where its effect is — and the browse toggles were doubly invisible, since the
+              summary used to omit them entirely while they were halving the feed. Every chip opens
+              the editor (H-9); "+N more" expands. On a phone the chips move into the control line
+              above instead (see there).
+
+              Its own line, one line tall from the first frame (HREV1-D04): the conditions arrive
+              after the picks have painted, and as a wrapping block inside the title column the chips
+              changed how the header wrapped and shoved the hero down 73 px at 834. Here neither its
+              width nor its height depends on what arrives. */}
+          {isMdUp && (
+            <HomeConditionChips
+              className="w-full"
+              browse={filter}
+              onBrowseChange={setFilter}
+              onOpenEditor={() => setConditionsOpen(true)}
+              limit={6}
+            />
+          )}
         </div>
 
         <PostWatchStrip />
@@ -255,6 +273,24 @@ export default function Home() {
                 line; on a phone the status line takes its own, under the chips. The product's own
                 error rate lives in that line now, not in a banner of its own (FD-15). */}
             <div className="space-y-3">
+              {/* The stored picks failed to load (HREV1-D12). The hero still pages live picks from
+                  the ranker rather than open blank, but it says that is what they are: without this
+                  line a different set of picks sat under "Tonight's picks" with no stamp, no
+                  why-lines and no word that anything had failed. */}
+              {feedFailed && !feed && (
+                <p className="fa-caption flex flex-wrap items-center gap-x-1 text-fa-warning" role="alert" data-testid="feed-load-failed">
+                  Couldn&apos;t load tonight&apos;s picks — showing live picks instead ·
+                  <Button
+                    variant="link"
+                    onClick={() => void refetchFeed()}
+                    disabled={feedFetching}
+                    className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11"
+                    data-testid="feed-load-failed-retry"
+                  >
+                    {feedFetching ? "retrying…" : "Retry"}
+                  </Button>
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
                 <TonightMoodChips className="w-full lg:w-auto" value={mood} onChange={setMood} />
                 <HomeStatusLine reachingNote={reachingNote} className="lg:ml-auto" />
@@ -280,6 +316,7 @@ export default function Home() {
                 seed={row.items}
                 filter={filter}
                 mood={mood}
+                onSeeWhy={() => setConditionsOpen(true)}
               />
             ))}
 
@@ -294,7 +331,13 @@ export default function Home() {
             )}
 
             {(genres ?? []).map((g) => (
-              <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
+              <GenreRow
+                key={`${g.slug}:${filter.media}:${resetKey}`}
+                slug={g.slug}
+                label={g.label}
+                filter={filter}
+                onSeeWhy={() => setConditionsOpen(true)}
+              />
             ))}
             </RailPageProvider>
 

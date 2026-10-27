@@ -3,6 +3,7 @@ import { ExternalLink, Play, Search } from "lucide-react";
 import { useGetProvidersQuery } from "../../store/api";
 import { logoUrl } from "../../lib/tmdbImages";
 import { LINK_DESCRIPTION, LINK_LABEL, providerLadder, type ProviderLink } from "../../lib/whereToWatch";
+import { Button } from "../ui/button";
 
 /**
  * Spec §8 requires the link type to be *visible*, not merely hoverable: a link to the title, a
@@ -34,9 +35,30 @@ function LinkKindPill({ link }: { link: ProviderLink }) {
  * shown verbatim. No scraping, no per-title JustWatch deep links (the M5 gate).
  */
 export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string; tmdbId: number }) {
-  const { data, isFetching, isError } = useGetProvidersQuery({ mediaType, tmdbId });
+  const { data, isFetching, isError, refetch } = useGetProvidersQuery({ mediaType, tmdbId });
 
-  if (isError) return null; // availability is best-effort; never block the page on it
+  // Availability is best-effort and never blocks the page — but a failed read is said, not hidden:
+  // a section that silently vanished read as "not streaming anywhere" when the truth was "couldn't
+  // check" (HREV1-D11). One line in the section's own place, with a retry.
+  if (isError && !data) {
+    return (
+      <section className="space-y-2" data-testid="where-to-watch-failed">
+        <h2 className="fa-overline text-3">where to watch</h2>
+        <p className="fa-caption flex flex-wrap items-center gap-x-1 text-3" role="status">
+          Couldn&apos;t load where to watch —
+          <Button
+            variant="link"
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11"
+            data-testid="where-to-watch-retry"
+          >
+            {isFetching ? "retrying…" : "Retry"}
+          </Button>
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="space-y-2" data-testid="where-to-watch">

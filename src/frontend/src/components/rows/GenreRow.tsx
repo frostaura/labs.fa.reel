@@ -8,6 +8,8 @@ interface Props {
   slug: string;
   label: string;
   filter: BrowseFilter;
+  /** Opens the page's conditions editor from the rail's "See why" (RET-07). */
+  onSeeWhy?: () => void;
 }
 
 /**
@@ -19,13 +21,13 @@ interface Props {
  * sit at the same point and all come into range at once. The parent re-keys it (slug + feed
  * generatedAt), so a genre swap or rebuild remounts it cleanly.
  */
-export default function GenreRow({ slug, label, filter }: Props) {
+export default function GenreRow({ slug, label, filter, onSeeWhy }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const near = useNearViewport(ref);
   // Thread the browse-filter medium so the rail pages the selected medium; the parent re-keys the
   // rail on filter.media, so a switch remounts it cleanly with the correct-medium first page.
   const mediaType = filter.media === "all" ? undefined : filter.media;
-  const { items, loadMore, retry, loading, failed, idle, exhausted } = useInfiniteRow(
+  const { items, loadMore, retry, loading, failed, idle, exhausted, supply } = useInfiniteRow(
     { row: "genre", genre: slug, mediaType },
     [],
     { active: near }
@@ -58,6 +60,9 @@ export default function GenreRow({ slug, label, filter }: Props) {
         failed={failed}
         onRetry={retry}
         exhausted={exhausted}
+        supply={supply}
+        hiddenByView={items.length - visible.length}
+        onSeeWhy={onSeeWhy}
       />
     </div>
   );

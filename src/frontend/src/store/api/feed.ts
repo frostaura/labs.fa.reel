@@ -6,6 +6,7 @@ import type {
   GenreRail,
   MoreFeedRequest,
   MoreFeedResponse,
+  RailSupply,
 } from "../feedTypes";
 import { api } from "./base";
 
@@ -92,7 +93,13 @@ export const feedApi = api.injectEndpoints({
     // (never on a transient error). A missing flag defaults to exhausted for safety.
     loadMoreFeed: b.mutation<MoreFeedResponse, MoreFeedRequest>({
       query: (body) => ({ url: "feed/more", method: "POST", body }),
-      transformResponse: (r: { items: FeedCard[]; exhausted?: boolean }) => ({ items: r.items, exhausted: r.exhausted ?? true }),
+      // `supply` rides along: it is what lets a short rail say why it is short (RET-07). Dropping it
+      // here was why no rail ever could.
+      transformResponse: (r: { items: FeedCard[]; exhausted?: boolean; supply?: RailSupply | null }) => ({
+        items: r.items,
+        exhausted: r.exhausted ?? true,
+        supply: r.supply ?? null,
+      }),
     }),
     // Weekly digest — read-only snapshot of this week's "new & high for you" picks.
     getDigest: b.query<DigestPayload, void>({

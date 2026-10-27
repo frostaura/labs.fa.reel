@@ -20,10 +20,12 @@ export default function CastMemberCard({ member }: { member: CreditPerson }) {
       data-testid="person-chip"
     >
       <div className="relative h-20 w-20 rounded-full overflow-hidden bg-fa-ink-3 mx-auto ring-0 group-hover:ring-2 group-hover:ring-fa-frost/50 transition">
+        {/* Decorative: the name under the photo already names the person, so an alt (or the
+            initials) repeating it made a screen reader say every name twice (PH-08). */}
         {profileUrl(member.profilePath) ? (
-          <img src={profileUrl(member.profilePath)!} alt={member.name} loading="lazy" className="h-full w-full object-cover" />
+          <img src={profileUrl(member.profilePath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
         ) : (
-          <div className="h-full w-full flex items-center justify-center fa-caption text-3">
+          <div aria-hidden="true" className="h-full w-full flex items-center justify-center fa-caption text-3">
             {member.name.split(" ").map((w) => w[0]).slice(0, 2).join("")}
           </div>
         )}

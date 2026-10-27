@@ -87,7 +87,9 @@ test.describe("phone targets on WS-10A routes", () => {
     await context.close();
   });
 
-  test("Saved has no interactive element under 44 px", async ({ browser }) => {
+  // Twice: the plain shelf, and one with saves held out by the conditions — the held-out line's
+  // "Change conditions" link-button measured 101×16 on touch, and the plain fixture never drew it (PH-07).
+  for (const heldOutByRules of [undefined, 4]) test(`Saved has no interactive element under 44 px${heldOutByRules ? " — with saves held out" : ""}`, async ({ browser }) => {
     const context = await browser.newContext(PHONE);
     const page = await context.newPage();
     await boot(page);
@@ -100,7 +102,7 @@ test.describe("phone targets on WS-10A routes", () => {
     });
     await mockJson(page, "**/api/saved", {
       items: [item(1), item(2), item(3)], eveningBudgetMinutes: 150, expectedAbsoluteError: 1.2,
-      unscoredRemaining: 0, managedListUrl: null, sort: "tonight",
+      unscoredRemaining: 0, managedListUrl: null, sort: "tonight", heldOutByRules,
     });
     // The pinned pick's where-to-watch block (R1-42: left unmocked, it hit the tripwire and sat in the
     // unmocked-API baseline). Served with a deep link and a search link, so the probe measures the
@@ -115,6 +117,7 @@ test.describe("phone targets on WS-10A routes", () => {
     await page.goto("/saved");
     await expect(page.getByTestId("saved-card").first()).toBeVisible();
     await expect(page.getByTestId("provider-chip").first()).toBeVisible();
+    if (heldOutByRules) await expect(page.getByTestId("saved-held-out-change")).toBeVisible();
     expect(await smallTargets(page)).toEqual([]);
     await context.close();
   });

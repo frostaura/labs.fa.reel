@@ -11,6 +11,7 @@ import {
   SAVED_INTRO,
   savedAgo,
   tonightCandidates,
+  advancedPinLine,
 } from "./savedQueue";
 import type { SavedQueueItem } from "../store/savedTypes";
 
@@ -226,5 +227,50 @@ describe("what Saved says about the managed list (R1-09)", () => {
     // The offList card line is the fact; the header must leave room for it, not contradict it.
     expect(listSyncLabel({ listSync: "offList" })!.title).toMatch(/^Saved here; not on your Reel — Up Next/);
     expect(MANAGED_LIST_TOOLTIP).toMatch(/^Reel keeps a Trakt list called “Reel — Up Next”/);
+  });
+});
+
+// HREV1-D05: after one "Not tonight", Saved pinned Seized at 5.0 — under the founder's For-you bar
+// of 6.0 — under "WATCH TONIGHT" with no line at all, because only the server's own pin carries a
+// reason. The server's rule (SavedQueue.WatchTonightReason, R1-18): an under-bar pick says so in its
+// first words. The pin the client advanced to now carries a line of its own under the same rule.
+describe("advancedPinLine — the line on a pin 'Not tonight' advanced to", () => {
+  const seized = item({ titleId: "seized", predictedRating: 5.0, runtimeMinutes: 110 });
+
+  it("leads with the shortfall when the pick is under the bar", () => {
+    const line = advancedPinLine(seized, { bar: 6.0, expectedAbsoluteError: 1.2, eveningBudgetMinutes: 150 });
+    expect(line).toBe(
+      "Under 6.0 for you — the next thing in your queue that's streaming now and fits tonight: 5.0 for you (±1.2), 1h 50m against your 2h 30m."
+    );
+    expect(line!.startsWith("Under 6.0")).toBe(true);
+  });
+
+  it("is under the bar at the precision the badge shows — 5.96 shows as 6.0 and clears a 6.0 bar", () => {
+    const line = advancedPinLine(item({ titleId: "edge", predictedRating: 5.96, runtimeMinutes: 90 }), {
+      bar: 6.0, expectedAbsoluteError: null, eveningBudgetMinutes: 150,
+    });
+    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.0 for you, 1h 30m against your 2h 30m.");
+  });
+
+  it("makes no quality claim at all when it cannot tell — never 'highest' or 'good', only 'next'", () => {
+    const line = advancedPinLine(item({ titleId: "x", predictedRating: 6.4, runtimeMinutes: 95 }), {
+      bar: null, expectedAbsoluteError: 0.9, eveningBudgetMinutes: 120,
+    });
+    expect(line).toBe("Next-highest-predicted thing in your queue that's streaming now and fits tonight — 6.4 for you (±0.9), 1h 35m against your 2h.");
+  });
+
+  it("varies with the fixture: every under-bar rating leads with 'Under'", () => {
+    for (const rating of [1.0, 4.04, 5.94, 7.44]) {
+      for (const bar of [6.0, 7.5]) {
+        const line = advancedPinLine(item({ titleId: "v", predictedRating: rating }), { bar, expectedAbsoluteError: null, eveningBudgetMinutes: 150 })!;
+        const under = Number(rating.toFixed(1)) < bar;
+        expect(line.startsWith("Under "), `${rating} vs ${bar}`).toBe(under);
+      }
+    }
+  });
+
+  it("says nothing for a card that could not have been pinned", () => {
+    expect(advancedPinLine(item({ titleId: "u", predictedRating: null }), { bar: 6, expectedAbsoluteError: null, eveningBudgetMinutes: 150 })).toBeNull();
+    expect(advancedPinLine(item({ titleId: "r", runtimeMinutes: null }), { bar: 6, expectedAbsoluteError: null, eveningBudgetMinutes: 150 })).toBeNull();
   });
 });

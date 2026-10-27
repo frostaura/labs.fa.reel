@@ -1,8 +1,12 @@
-import type { ReactNode } from "react";
-import type { FeedCard } from "../../store/feedTypes";
+import { useState, type ReactNode } from "react";
+import type { FeedCard, RailSupply } from "../../store/feedTypes";
 import RecCard from "../rec/RecCard";
 import FadeScrollRow from "../FadeScrollRow";
 import RailRetryTile from "./RailRetryTile";
+import PickConditionsButton from "../rec/PickConditionsButton";
+import { Button } from "../ui/button";
+import { railSupplyLine } from "../../lib/railSupplyCopy";
+import { useGetSessionQuery } from "../../store/api";
 
 interface Props {
   title: ReactNode;
@@ -23,6 +27,15 @@ interface Props {
    * that shows one shimmer card reads as "one result coming"; a row's worth reads as the row it is.
    */
   skeletonCount?: number;
+  /** What the server counted behind a short last page (RET-07); see `railSupplyLine`. */
+  supply?: RailSupply | null;
+  /** Cards this rail loaded that the per-device browse toggles hide. */
+  hiddenByView?: number;
+  /**
+   * Opens the conditions editor from the rail's "See why". Home passes its own dialog, so a save
+   * re-seeds the page; without one the rail mounts the same dialog itself.
+   */
+  onSeeWhy?: () => void;
 }
 
 /** A skeleton poster card trailing the rail while the next page resolves. */
@@ -45,15 +58,32 @@ export default function RecRow({
   failed,
   onRetry,
   skeletonCount = 1,
+  exhausted = false,
+  supply,
+  hiddenByView = 0,
+  onSeeWhy,
 }: Props) {
-  // Nothing to show and nothing coming — render nothing. While a first page is in flight (genre
-  // rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
+  const [editorOpen, setEditorOpen] = useState(false);
+  const { data: session } = useGetSessionQuery();
+  const empty = items.length === 0;
+  // Free pages no rails: its /more is always empty and exhausted, and the tier is the only reason.
+  const supplyLine =
+    exhausted && !loading && !failed
+      ? railSupplyLine(supply, { empty, hiddenByView, tierCapped: session?.tier === "Free" })
+      : null;
+
+  // Nothing to show and nothing asked for yet — render nothing. While a first page is in flight
+  // (genre rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
   // failed says so rather than vanishing, because an empty rail and a broken one are different news.
-  if (items.length === 0 && !loading && !failed) {
+  // And a rail the server has said is dry says THAT, with what its conditions hide, instead of
+  // vanishing (RET-07): "nothing here" and "your conditions hide 5,386" are different news too. A
+  // dry rail with nothing true to say about why (a Free account's) still vanishes.
+  if (empty && !loading && !failed && (!exhausted || !supplyLine)) {
     return null;
   }
 
   const isGenre = variant === "genre";
+  const seeWhy = () => (onSeeWhy ? onSeeWhy() : setEditorOpen(true));
 
   return (
     <section
@@ -84,21 +114,41 @@ export default function RecRow({
 
       {/* Bleeds through the gutter to the edge of whatever it sits in (WS-9, O-9): the first card
           lines up with the heading, the row scrolls out to the edge, the fades sit in the gutter. */}
-      <FadeScrollRow
-        bleed
-        onNearEnd={loadMore}
-        className="flex gap-4 overflow-x-auto snap-x pb-2 [scrollbar-width:thin]"
-      >
-        {items.map((card) => (
-          <div key={card.titleId} className="snap-start">
-            <RecCard card={card} />
-          </div>
-        ))}
-        {loading &&
-          !failed &&
-          Array.from({ length: items.length === 0 ? skeletonCount : 1 }, (_, i) => <ShimmerCard key={`skeleton-${i}`} />)}
-        {failed && onRetry && <RailRetryTile onRetry={onRetry} />}
-      </FadeScrollRow>
+      {!(empty && supplyLine) && (
+        <FadeScrollRow
+          bleed
+          onNearEnd={loadMore}
+          className="flex gap-4 overflow-x-auto snap-x pb-2 [scrollbar-width:thin]"
+        >
+          {items.map((card) => (
+            <div key={card.titleId} className="snap-start">
+              <RecCard card={card} />
+            </div>
+          ))}
+          {loading &&
+            !failed &&
+            Array.from({ length: items.length === 0 ? skeletonCount : 1 }, (_, i) => <ShimmerCard key={`skeleton-${i}`} />)}
+          {failed && onRetry && <RailRetryTile onRetry={onRetry} />}
+        </FadeScrollRow>
+      )}
+
+      {supplyLine && (
+        <p className="fa-caption flex flex-wrap items-center gap-x-1.5 text-3" data-testid="rail-supply" data-empty={empty}>
+          <span>{supplyLine.text}</span>
+          {supplyLine.seeWhy && (
+            <Button
+              variant="link"
+              onClick={seeWhy}
+              className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11"
+              data-testid="rail-supply-see-why"
+            >
+              {supplyLine.seeWhy}
+            </Button>
+          )}
+        </p>
+      )}
+      {/* The rail's own conditions dialog, only when nothing above it owns one (the title page). */}
+      {editorOpen && !onSeeWhy && <PickConditionsButton trigger={false} open onOpenChange={setEditorOpen} />}
     </section>
   );
 }

@@ -122,6 +122,33 @@ test.describe("Home's condition chips (H-20, H-9, O-11)", () => {
     await expect(page.getByTestId("condition-chip")).toHaveCount(6);
   });
 
+  test("hold one line: as many chips as fit at 834, re-fitted when the window widens (HREV1-D04)", async ({ page }) => {
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await bootHome(page, MANY);
+    // Both browse toggles set, so the device's own group shares the line with the conditions.
+    await page.getByTestId("browse-show").click();
+    await page.getByTestId("browse-coming").click();
+    const summary = page.getByTestId("conditions-summary");
+    await expect(page.getByTestId("summary-group-browse")).toBeVisible();
+    await expect(page.getByTestId("conditions-more")).toBeVisible();
+    // One caption line under a mouse: the line's own fixed height, whatever the chips.
+    expect((await summary.boundingBox())!.height).toBeLessThanOrEqual(21);
+    const narrow = await page.getByTestId("condition-chip").count();
+    expect(narrow).toBeGreaterThanOrEqual(1);
+    expect(narrow).toBeLessThan(6);
+    // Every chip shown ends inside the line, and "+N more" counts the rest exactly.
+    const line = (await summary.boundingBox())!;
+    for (const chip of await page.getByTestId("condition-chip").all()) {
+      const box = (await chip.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(line.x + line.width + 0.5);
+    }
+    await expect(page.getByTestId("conditions-more")).toHaveText(`+${13 - narrow} more`);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByTestId("condition-chip")).toHaveCount(6);
+    await expect(page.getByTestId("conditions-more")).toHaveText("+7 more");
+  });
+
   test("the browse toggles render even when there are no picks to show", async ({ page }) => {
     await bootHome(page, MANY, []);
     await expect(page.getByTestId("browse-filters")).toBeVisible();

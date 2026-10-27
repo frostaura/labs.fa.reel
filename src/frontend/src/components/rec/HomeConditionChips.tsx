@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Minus, Plus, X } from "lucide-react";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
@@ -43,43 +43,96 @@ export default function HomeConditionChips({
 }) {
   const { data: filters } = useGetFiltersQuery();
   const [expanded, setExpanded] = useState(false);
+  const strip = variant === "strip";
+  // The row variant holds ONE line until "+N more" is tapped (HREV1-D04). The saved conditions land
+  // after the first paint, and a chip line that appeared — or wrapped — above the picks then shoved
+  // the whole hero down (73 px at 834, every cold load, CLS 0.133). So the line is drawn at its own
+  // height from the first frame, and filled with as many chips as fit on it; the rest sit behind
+  // "+N more". `fit` is that count, measured before paint; null means "measure on this render".
+  const holdsOneLine = !strip && !expanded;
+  const [fit, setFit] = useState<number | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  const chips = filters ? summaryChips(filters, strip ? null : browse) : [];
+  const conditions = chips.filter((c) => c.kind === "condition");
+  const views = chips.filter((c) => c.kind === "browse");
+  const chipsKey = chips.map((c) => c.key).join("|");
+
+  // A new set of chips is a new measurement. Adjusted during render (React's alternative to a
+  // syncing effect), like Home's seed key: it settles in one extra pass, before anything paints.
+  const [measuredFor, setMeasuredFor] = useState(chipsKey);
+  if (measuredFor !== chipsKey) {
+    setMeasuredFor(chipsKey);
+    setFit(null);
+  }
+
+  // Before paint: with every chip on the (non-wrapping, clipped) line, count the ones that end
+  // inside it, leaving room for "+N more" and the browse group. setState in a layout effect
+  // re-renders synchronously, so the over-full line is never painted.
+  useLayoutEffect(() => {
+    if (!holdsOneLine || fit !== null || !rowRef.current) return;
+    setFit(chipsThatFit(rowRef.current));
+  }, [holdsOneLine, fit, chipsKey]);
+
+  // A resize re-measures from scratch (all chips, then count).
+  useLayoutEffect(() => {
+    const row = rowRef.current;
+    if (!holdsOneLine || !row || typeof ResizeObserver === "undefined") return;
+    let width = row.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (row.clientWidth !== width) {
+        width = row.clientWidth;
+        setFit(null);
+      }
+    });
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [holdsOneLine]);
 
   // Waits for the real payload rather than rendering against the defaults: `normalizeFilters` fills
   // an absent payload out to `languages: ["en"]`, so an in-flight query would briefly assert an
-  // "English only" condition the account may not actually have.
-  if (!filters) return null;
+  // "English only" condition the account may not actually have. The strip has no line to hold (it
+  // sits inside the phone's control line); the row holds its line with an invisible chip.
+  if (!filters) {
+    if (strip) return null;
+    return (
+      // The same element the chips render into (same type, same place), so the resize observer
+      // attached to it on the first frame keeps watching once they arrive.
+      <div ref={rowRef} className={`${ONE_LINE} ${className}`} aria-hidden data-testid="conditions-summary-pending" />
+    );
+  }
+  if (strip && conditions.length === 0 && views.length === 0) return null;
 
-  const strip = variant === "strip";
-  const chips = summaryChips(filters, strip ? null : browse);
-  const conditions = chips.filter((c) => c.kind === "condition");
-  const views = chips.filter((c) => c.kind === "browse");
-  if (conditions.length === 0 && views.length === 0) return null;
-
-  const shown = expanded ? conditions : conditions.slice(0, limit);
+  const cap = holdsOneLine ? Math.min(limit, fit ?? conditions.length) : expanded ? conditions.length : limit;
+  const shown = conditions.slice(0, cap);
   const hidden = conditions.length - shown.length;
 
-  // A 44 px target on any coarse pointer, around a pill that stays caption-sized: the button is the
-  // hit area and the span inside it is what you see (the card quick actions' pattern). The Button
-  // primitive's own padding, fill and size are cleared, so only its focus ring is kept.
-  const bare = "h-auto gap-0 rounded-full p-0 font-normal hover:bg-transparent";
-  const target = strip
-    ? `${bare} min-h-11 shrink-0`
-    : `${bare} min-h-11 [@media(pointer:fine)]:min-h-0`;
-  const pill =
-    "inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption text-fa-frost transition group-hover:border-fa-frost/40 group-hover:text-fa-frost-bright";
+  const target = strip ? `${BARE} min-h-11 shrink-0` : `${ROW_TARGET} shrink-0`;
+  const pill = PILL;
 
   return (
     <div
+      ref={rowRef}
       className={
         strip
           ? `flex items-center gap-1.5 ${className}`
-          : `flex flex-wrap items-center gap-x-4 gap-y-0 ${className}`
+          : holdsOneLine
+            ? `${ONE_LINE} gap-x-4 ${className}`
+            : `flex flex-wrap items-center gap-x-4 gap-y-0 ${className}`
       }
       data-testid="conditions-summary"
     >
+      {/* Nothing saved and nothing toggled: the line still says so, rather than vanishing from a
+          height the page has already laid out around (HREV1-D04). */}
+      {!strip && conditions.length === 0 && views.length === 0 && (
+        <span className={`flex items-center gap-x-1.5 ${ROW_TARGET}`} data-testid="summary-none">
+          <span className="fa-overline text-3">Conditions</span>
+          <span className="fa-caption text-3">none saved</span>
+        </span>
+      )}
       {conditions.length > 0 && (
         <div
-          className={strip ? "flex items-center gap-1.5" : "flex flex-wrap items-center gap-x-1.5"}
+          className={strip || holdsOneLine ? "flex shrink-0 items-center gap-x-1.5 whitespace-nowrap" : "flex flex-wrap items-center gap-x-1.5"}
           role="group"
           aria-label="Conditions — saved to your account; tap one to change them"
           data-testid="summary-group-conditions"
@@ -113,7 +166,7 @@ export default function HomeConditionChips({
               </Button>
             );
           })}
-          {conditions.length > limit && (
+          {hidden > 0 || expanded ? (
             <Button
               variant="ghost"
               onClick={() => setExpanded((v) => !v)}
@@ -123,12 +176,15 @@ export default function HomeConditionChips({
             >
               <span className="fa-caption">{expanded ? "Show fewer" : `+${hidden} more`}</span>
             </Button>
-          )}
+          ) : null}
         </div>
       )}
 
       {views.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-1.5" data-testid="summary-group-browse">
+        <div
+          className={holdsOneLine ? "flex shrink-0 items-center gap-x-1.5 whitespace-nowrap" : "flex flex-wrap items-center gap-x-1.5"}
+          data-testid="summary-group-browse"
+        >
           <span
             className="fa-overline text-3"
             title="This browser only — set by the Movies/TV and availability toggles, and not saved to your account."
@@ -161,4 +217,47 @@ export default function HomeConditionChips({
       )}
     </div>
   );
+}
+
+/**
+ * The Button primitive's own padding, fill and size cleared, so only its focus ring is kept: the
+ * button is the hit area and the pill inside it is what you see (the card quick actions' pattern).
+ */
+const BARE = "h-auto gap-0 rounded-full p-0 font-normal hover:bg-transparent";
+/** A 44 px target on any coarse pointer, around a pill that stays caption-sized. */
+const ROW_TARGET = `${BARE} min-h-11 [@media(pointer:fine)]:min-h-0`;
+const PILL =
+  "inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption text-fa-frost transition group-hover:border-fa-frost/40 group-hover:text-fa-frost-bright";
+
+/**
+ * The row's one line: a FIXED height, the chips' own (a 44 px target on a coarse pointer, the
+ * caption pill under a mouse), so the line is the same height before the conditions arrive, with
+ * none saved, and with a dozen — nothing below it can move (HREV1-D04). Clipped sideways only, with
+ * a margin for the focus ring, so a measuring pass never widens the page.
+ */
+const ONE_LINE =
+  "flex flex-nowrap items-center h-11 [@media(pointer:fine)]:h-5 overflow-x-clip [overflow-clip-margin:4px]";
+
+/** Room kept at the line's end for "+N more" (it reads "+13 more" at its widest). */
+const MORE_RESERVE_PX = 72;
+
+/**
+ * How many condition chips end inside the row's one line, with room for "+N more" and the browse
+ * group after them. Read from the laid-out row (every chip rendered, no wrapping), so it is exact
+ * for the fonts and pointer in force. At least one chip always shows.
+ */
+function chipsThatFit(row: HTMLElement): number {
+  const chips = Array.from(row.querySelectorAll<HTMLElement>('[data-testid="condition-chip"]'));
+  if (chips.length === 0) return 0;
+  const rowBox = row.getBoundingClientRect();
+  const browse = row.querySelector<HTMLElement>('[data-testid="summary-group-browse"]');
+  const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+  const browseWidth = browse ? browse.getBoundingClientRect().width + gap : 0;
+  const ends = chips.map((chip) => chip.getBoundingClientRect().right - rowBox.left);
+  // Everything fits, and nothing beyond the chips on the line needs a "+N more".
+  const needsMore = row.querySelector('[data-testid="conditions-more"]') !== null;
+  if (!needsMore && ends[ends.length - 1] <= rowBox.width - browseWidth) return chips.length;
+  const room = rowBox.width - browseWidth - MORE_RESERVE_PX;
+  const fitting = ends.filter((end) => end <= room).length;
+  return Math.max(1, fitting);
 }

@@ -1,4 +1,5 @@
 import type { SavedQueueItem } from "../store/savedTypes";
+import { formatRuntime } from "./format";
 
 /** The four orders the shelf offers, in the order the control renders them. */
 export const SAVED_SORTS = ["tonight", "predicted", "added", "runtime"] as const;
@@ -65,6 +66,42 @@ export function pinnedPick(
   skipCount: number
 ): SavedQueueItem | undefined {
   return tonightCandidates(items, eveningBudgetMinutes)[skipCount];
+}
+
+/**
+ * The line on a pin the client advanced to with "Not tonight" (HREV1-D05).
+ *
+ * Only the server's own pin carries `watchTonightReason`, so the card "Not tonight" moved to had no
+ * line at all — and the founder saw Seized at 5.0, under his For-you bar of 6.0, under "WATCH
+ * TONIGHT" with nothing qualifying it. The server's rule (SavedQueue.WatchTonightReason, R1-18) is
+ * that a pick under the bar says so in its FIRST words; this holds the advanced pin to it:
+ *
+ * - **Under the bar** (compared at the badge's own 1dp, as the server compares): "Under 6.0 for you —
+ *   the next thing in your queue…". Never the server's "Nothing in your queue… reaches 6.0": the pick
+ *   the user just skipped may well have reached it.
+ * - **Otherwise** an ordinal, not a verdict: "Next-highest-predicted thing in your queue…". With the
+ *   bar unknown that is all the client can truthfully say, and it says no more.
+ *
+ * `bar` is the server's pin bar when it sends one (`SavedQueueResponse.pinBar`), else the account's
+ * For-you minimum, else null. It never claims a provider: "streaming now", as the server does when it
+ * has not established which provider the card shows.
+ */
+export function advancedPinLine(
+  item: SavedQueueItem,
+  context: { bar: number | null; expectedAbsoluteError: number | null; eveningBudgetMinutes: number }
+): string | null {
+  if (item.predictedRating == null || !Number.isFinite(item.predictedRating)) return null;
+  const runtime = formatRuntime(item.runtimeMinutes);
+  const budget = formatRuntime(context.eveningBudgetMinutes);
+  if (!runtime || !budget) return null;
+  const shown = Number(item.predictedRating.toFixed(1));
+  const error = context.expectedAbsoluteError;
+  const band = error != null && Number.isFinite(error) && error > 0 ? ` (±${Number(error.toFixed(1))})` : "";
+  const facts = `${shown.toFixed(1)} for you${band}, ${runtime} against your ${budget}.`;
+  if (context.bar != null && shown < context.bar) {
+    return `Under ${context.bar.toFixed(1)} for you — the next thing in your queue that's streaming now and fits tonight: ${facts}`;
+  }
+  return `Next-highest-predicted thing in your queue that's streaming now and fits tonight — ${facts}`;
 }
 
 /** The cards below the pin: everything except whatever is currently pinned. */

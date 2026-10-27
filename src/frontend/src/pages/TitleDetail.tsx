@@ -26,8 +26,7 @@ import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
-import { featureLabel } from "../lib/featureLabel";
-import { predictionWaterfall, significantContributions, signedStep } from "../lib/predictionWaterfall";
+import { breakdownBars, predictionWaterfall, signedStep } from "../lib/predictionWaterfall";
 import { canGoBack, titleFailure } from "../components/title/titleRouting";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { ratingPopoverNote } from "../lib/ratingNote";
@@ -54,28 +53,6 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
       </FadeScrollRow>
     </div>
   );
-}
-
-/**
- * The top-5 breakdown bars, plus every synthetic serving-time row the server sent — the dislike
- * demotion and the taste-prior factors. Those rows are the explanation for a card sitting lower
- * than its number suggests, so they must never be crowded out by the slice: the server appends them
- * after the model's own contributions, which is exactly where a top-5 cut would drop them.
- */
-const SYNTHETIC_FEATURES = [
-  "dislikedSimilarity",
-  "tastePriorNoHistoryGenre",
-  "tastePriorGenreAffinity",
-  "tastePriorMedia",
-];
-
-function visibleContributions(all: { feature: string; value: number }[]) {
-  // Bars under 0.05 are noise at one decimal and are not drawn at all (F-25) — a "+0.0" bar is a
-  // claim about nothing, and five of them crowded out the two that mattered.
-  const significant = significantContributions(all);
-  const top = significant.slice(0, 5);
-  const synthetic = significant.filter((c) => SYNTHETIC_FEATURES.includes(c.feature) && !top.includes(c));
-  return [...top, ...synthetic];
 }
 
 /**
@@ -141,10 +118,12 @@ export default function TitleDetail() {
   };
 
   const trailerKey = youTubeVideoId(title?.trailerUrl);
-  const bars = title?.prediction ? visibleContributions(title.prediction.contributions) : [];
   const waterfall = title?.prediction
     ? predictionWaterfall(title.prediction.predictedRating, title.prediction.waterfall)
     : null;
+  // One attribution source for the walk and the bars under it (HREV1-D02): with a walk, the bars are
+  // its steps; only without one are the model's own contributions drawn.
+  const bars = title?.prediction ? breakdownBars(waterfall, title.prediction.contributions) : [];
 
   return (
     /* This is spec §2's "Expanded (tap)" surface, so it is a real dialog, not a styled div: the
@@ -457,7 +436,7 @@ export default function TitleDetail() {
                             {waterfall.start.label} <span className="tabular-nums text-fa-frost">{waterfall.start.value.toFixed(1)}</span>
                           </li>
                           {waterfall.steps.map((step) => (
-                            <li key={step.label} data-testid="waterfall-step">
+                            <li key={step.label} data-testid="waterfall-step" data-feature={step.feature ?? "rest"}>
                               <span aria-hidden>→ </span>
                               <span className={`tabular-nums ${step.value >= 0 ? "text-fa-success" : "text-fa-danger"}`}>{signedStep(step.value)}</span>{" "}
                               {step.label}
@@ -471,17 +450,17 @@ export default function TitleDetail() {
                       )}
                       <div className="space-y-1.5 max-w-xl">
                         {bars.map((contribution) => {
-                          const max = Math.max(...bars.map((c) => Math.abs(c.value))) || 1;
                           const positive = contribution.value >= 0;
-                          const detail = detailFor(contribution.feature, title.contributionDetails);
-                          const expanded = expandedFeature === contribution.feature;
+                          const detail = contribution.feature ? detailFor(contribution.feature, title.contributionDetails) : undefined;
+                          const expanded = contribution.feature !== null && expandedFeature === contribution.feature;
                           const bar = (
                             <>
-                              <span className="fa-caption text-fa-frost w-44 truncate text-left">{featureLabel(contribution.feature)}</span>
+                              <span className="fa-caption text-fa-frost w-44 truncate text-left">{contribution.label}</span>
                               <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
                                 <div
                                   className={`h-full rounded-full ${positive ? "bg-fa-success/70" : "bg-fa-danger/60"}`}
-                                  style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
+                                  style={{ width: `${contribution.widthPct}%` }}
+                                  data-testid="contribution-bar-fill"
                                 />
                               </div>
                               {/* No number: a bar is its push scaled to the largest one, not rating
@@ -495,16 +474,18 @@ export default function TitleDetail() {
                           // that opens onto an empty panel.
                           if (!detail) {
                             return (
-                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]" data-testid="contribution-bar">
+                              <div key={contribution.label} className="flex items-center gap-3 pr-[1.375rem]" data-testid="contribution-bar" data-feature={contribution.feature ?? "rest"} data-sign={positive ? "up" : "down"}>
                                 {bar}
                               </div>
                             );
                           }
                           return (
-                            <div key={contribution.feature}>
+                            <div key={contribution.label}>
                               <Button
                                 variant="ghost"
                                 data-testid="contribution-bar"
+                                data-feature={contribution.feature ?? "rest"}
+                                data-sign={positive ? "up" : "down"}
                                 onClick={() => setExpandedFeature(expanded ? null : contribution.feature)}
                                 aria-expanded={expanded}
                                 className="h-auto w-full justify-start gap-3 whitespace-normal rounded-md -mx-1 px-1 py-0 font-normal text-fa-frost hover:bg-fa-frost/5 hover:text-fa-frost"
