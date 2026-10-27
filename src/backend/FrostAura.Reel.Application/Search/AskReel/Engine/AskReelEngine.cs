@@ -748,8 +748,7 @@ public sealed class AskReelEngine(
         }
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
-        var (candidates, scored) = await JudgeOrderAsync(
-            turn, () => scorer, Judgeable(retrieval, titles, exclude, next), turn.Timings, ct);
+        var candidates = await JudgeOrderAsync(turn, db, () => scorer, Judgeable(retrieval, titles, exclude, next), turn.Timings, ct);
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
@@ -766,13 +765,13 @@ public sealed class AskReelEngine(
         int? personSeen = null;
         if (personOnly)
         {
-            var predictions = scored ?? await ScoreAsync(turn, judgedSlice, ct);
+            var predictions = await ScoreAsync(turn, judgedSlice, ct);
             personSeen = await SeenCreditsAsync(accountId, hard.People, hard.Media, ct);
             await PlacePersonCreditsAsync(turn, plan, judgedSlice, titles, predictions, hard.People[0]);
         }
         else if (!judgeModel.IsAvailable)
         {
-            var predictions = scored ?? await ScoreAsync(turn, judgedSlice, ct);
+            var predictions = await ScoreAsync(turn, judgedSlice, ct);
             // No model to judge with: what was found is shown as found, unchecked, never as a pick.
             if (!turn.Degraded.Contains(SearchTurnDegraded.NoModel))
             {
@@ -789,7 +788,7 @@ public sealed class AskReelEngine(
         }
         else
         {
-            await JudgeAsync(turn, next, judgedSlice, titles, ct, scored);
+            await JudgeAsync(turn, next, judgedSlice, titles, ct);
             if (turn.Timings.Has(AskStageTimings.RetrieveSpeculative)
                 && turn.Speculative?.Judging is { IsCompletedSuccessfully: true, Result: { } early })
             {
@@ -1040,8 +1039,8 @@ public sealed class AskReelEngine(
             var titles = await scopedDb.Titles.AsNoTracking().Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
             // Ordered exactly as the turn will order it, or the early batch is spent on titles the turn
             // then judges after the bar-clearing ones — or never (HREV2-RET-01).
-            var (ordered, _) = await JudgeOrderAsync(
-                turn, services.GetRequiredService<OnDemandScorer>, Judgeable(result, titles, query.Exclude.ToHashSet(), next), null, ct);
+            var ordered = await JudgeOrderAsync(
+                turn, scopedDb, services.GetRequiredService<OnDemandScorer>, Judgeable(result, titles, query.Exclude.ToHashSet(), next), null, ct);
             var slice = ordered.Take(RequestJudge.MaxJudged).ToList();
             if (slice.Count == 0)
             {
@@ -1079,8 +1078,7 @@ public sealed class AskReelEngine(
     /// <summary>
     /// The order the judge takes the candidates in: retrieval's, except that when there are more of
     /// them than it rules on and the account has a bar, the ones the bar lets through go first —
-    /// stably, so equal footing keeps retrieval's order. Returns the predictions it scored, so the
-    /// turn places its verdicts on the same numbers; null when it scored nothing.
+    /// stably, so equal footing keeps retrieval's order.
     ///
     /// <para><b>Why (HREV2-RET-01, IREV2-SYS-01 carried to v2).</b> The judge rules on the first
     /// <see cref="RequestJudge.MaxJudged"/> titles. Retrieval's order says nothing about which of
@@ -1088,27 +1086,57 @@ public sealed class AskReelEngine(
     /// horror films" spent all sixteen judgements on titles under the bar and answered none-found
     /// while Dead Silence (7.5) and Lake Mungo (7.4) cleared it and were never judged; "heist movies"
     /// spent six of sixteen on Heist 88 (2.3) and The Order (1.3). Under the cap every candidate is
-    /// judged anyway, so nothing is scored early.</para>
+    /// judged anyway, so nothing is read or scored.</para>
+    ///
+    /// <para><b>Ordered on the stored predictions</b> — the account's active model's rows, the ones
+    /// the supply splits the bar by, so the titles judged first are the ones the reply counts as
+    /// clearing it — and only a candidate with no stored row is scored on demand. Scoring the whole
+    /// pool on demand put about a second between retrieval and the first judge batch; the slice the
+    /// judge takes is still placed on fresh predictions, scored beside the judge as before.</para>
     ///
     /// <para>Timed as <see cref="AskStageTimings.Score"/> on <paramref name="timings"/> — null from the
     /// speculation, which runs beside the turn and may not touch its (unsynchronised) timings. The
-    /// scorer is resolved only when it is needed.</para>
+    /// scorer is resolved only when a candidate needs it.</para>
     /// </summary>
-    private static async Task<(List<Candidate> Ordered, IReadOnlyDictionary<Guid, decimal>? Scored)> JudgeOrderAsync(
-        Turn turn, Func<OnDemandScorer> scoring, List<Candidate> candidates, AskStageTimings? timings, CancellationToken ct)
+    private static async Task<List<Candidate>> JudgeOrderAsync(
+        Turn turn, IReelDbContext store, Func<OnDemandScorer> scoring, List<Candidate> candidates, AskStageTimings? timings, CancellationToken ct)
     {
         if (turn.Floor <= 0m || candidates.Count <= RequestJudge.MaxJudged)
         {
-            return (candidates, null);
+            return candidates;
         }
 
-        IReadOnlyDictionary<Guid, decimal> predicted;
+        var ids = candidates.Select(c => c.TitleId).ToList();
+        var predicted = new Dictionary<Guid, decimal>();
         using (timings?.Stage(AskStageTimings.Score))
         {
-            predicted = await scoring().ScoreAsync(turn.AccountId, candidates.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
+            var activeId = await store.ModelArtifacts
+                .Where(a => a.AccountId == turn.AccountId && a.Status == ArtifactStatus.Active)
+                .OrderByDescending(a => a.Version)
+                .Select(a => (Guid?)a.Id)
+                .FirstOrDefaultAsync(ct);
+            if (activeId is { } artifact)
+            {
+                foreach (var row in await store.TitleScores
+                             .Where(s => s.AccountId == turn.AccountId && s.ModelArtifactId == artifact && ids.Contains(s.TitleId))
+                             .Select(s => new { s.TitleId, s.PredictedRating })
+                             .ToListAsync(ct))
+                {
+                    predicted.TryAdd(row.TitleId, row.PredictedRating);
+                }
+
+                var missing = ids.Where(id => !predicted.ContainsKey(id)).ToList();
+                if (missing.Count > 0)
+                {
+                    foreach (var (id, p) in await scoring().ScoreAsync(turn.AccountId, missing, DateTime.UtcNow, ct))
+                    {
+                        predicted[id] = p;
+                    }
+                }
+            }
         }
 
-        return (OrderForJudge(candidates, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, turn.Floor)), predicted);
+        return OrderForJudge(candidates, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, turn.Floor));
     }
 
     /// <summary>The candidates the bar lets through, then the rest — each in retrieval order.</summary>
@@ -1317,8 +1345,7 @@ public sealed class AskReelEngine(
         ConversationState next,
         IReadOnlyList<Candidate> slice,
         IReadOnlyDictionary<Guid, Title> titles,
-        CancellationToken ct,
-        IReadOnlyDictionary<Guid, decimal>? ordered = null)
+        CancellationToken ct)
     {
         if (slice.Count == 0)
         {
@@ -1349,12 +1376,6 @@ public sealed class AskReelEngine(
         var scoring = TimedScoreAsync();
         async Task<IReadOnlyDictionary<Guid, decimal>> TimedScoreAsync()
         {
-            // Already scored, over every candidate, to choose which ones are judged (HREV2-RET-01).
-            if (ordered is not null)
-            {
-                return ordered;
-            }
-
             var clock = Stopwatch.StartNew();
             var scored = await scorer.ScoreAsync(turn.AccountId, slice.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
             scoreMs = clock.Elapsed.TotalMilliseconds;

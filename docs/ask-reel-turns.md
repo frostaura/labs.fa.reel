@@ -563,10 +563,12 @@ uses it only to know which frames to expect.
    same way after **3 s**, recorded as `plan.hedge` (when the second call was sent). A healthy turn
    never hedges; both calls of a hedged one are on the usage ledger.
    **When more than 16 are retrieved and a bar is set, the ones the bar lets through go first**
-   (HREV2-RET-01): every candidate is scored, and the bar-clearing ones take the judge's slots in
-   retrieval order ahead of the rest — a title under the bar can only reach the floor tray, so judging
-   it ahead of one that clears spent a pick's slot on the tray. The speculation's early batch is
-   chosen in the same order. Under 16, nothing is scored early.
+   (HREV2-RET-01): the candidates are read against the account's stored predictions (the active
+   model's rows, the same ones the supply splits the bar by; a candidate with none is scored on
+   demand), and the bar-clearing ones take the judge's slots in retrieval order ahead of the rest — a
+   title under the bar can only reach the floor tray, so judging it ahead of one that clears spent a
+   pick's slot on the tray. The speculation's early batch is chosen in the same order. Under 16,
+   nothing is read early.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or

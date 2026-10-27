@@ -10,7 +10,8 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// message is dropped, and so is one that merely restates a standing condition (those are applied by
 /// eligibility and never stored in the state).</item>
 /// <item><b>Concepts</b> never a negation cue, never the whole message echoed back, never filler or a
-/// pointer ("the second one"), never a person or a title the plan names elsewhere.</item>
+/// pointer ("the second one"), never a person or a title the plan names elsewhere, and never words that
+/// only restate a genre the plan already requires ("romantic" beside the romance genre).</item>
 /// <item><b>A pointer resolves to the rank the user named</b> ("the second one", "#3", "the last
 /// one"): filled from the newest answer when the plan named no handle, moved to that rank when it named
 /// one at another whose title the message does not name (R1-30).</item>
@@ -49,6 +50,12 @@ public static class PlanSanitizer
             .Where(c => !negations.Any(n => NegationTerms.EqualsAnyForm(c, n)) || AskedLast(message, c))
             .ToList();
         negations = negations.Where(n => !concepts.Any(c => NegationTerms.EqualsAnyForm(c, n))).ToList();
+
+        // A concept whose words only name genres the plan already requires is that requirement again,
+        // and as a concept it also demanded the WORD as a tag: "romantic comedies" planned as romantic +
+        // comedy + romance counted 145 titles tagged "romantic", while the same question planned as
+        // comedy + romance counted every romantic comedy — two numbers for one question (HREV2-ASK-01).
+        concepts = concepts.Where(c => !RestatesGenres(c, delta.Genres)).ToList();
 
         var media = UserMedia(delta.Media, message);
 
@@ -104,6 +111,11 @@ public static class PlanSanitizer
             return media.Count == 0 ? null : Retrieval.MediaScopes.From(media);
         }
     }
+
+    /// <summary>True when <paramref name="concept"/>'s words name only genres that <paramref name="genres"/> already holds.</summary>
+    internal static bool RestatesGenres(string concept, IReadOnlyList<string> genres) =>
+        Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(concept)) is { Count: > 0 } named
+        && named.All(g => genres.Any(planned => string.Equals(planned.Trim(), g, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>Words that ask for a medium on top of what is already asked for: "shows too", "also series" (and "as well").</summary>
     private static readonly IReadOnlySet<string> AlsoCues = new HashSet<string>(StringComparer.Ordinal)

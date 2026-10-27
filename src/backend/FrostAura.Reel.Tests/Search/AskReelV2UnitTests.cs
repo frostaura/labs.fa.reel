@@ -315,6 +315,33 @@ public class AskReelV2UnitTests
         Assert.Equal(expected, PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([])).Delta.Media);
     }
 
+    /// <summary>
+    /// HREV2-ASK-01: "romantic comedies" was planned once as romantic + comedy + romance (145 titles,
+    /// because "romantic" as a concept also demanded the tag) and once as comedy + romance (every
+    /// romantic comedy). A concept whose words only restate a genre the plan requires is dropped, so
+    /// both plans search, count and name the same shelf. Varied: a concept naming a genre the plan does
+    /// not require, a concept naming no genre, and a phrase naming two required genres.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic", "comedy,romance", "")]
+    [InlineData("romantic comedies", "comedy,romance", "")]
+    [InlineData("romantic", "comedy", "romantic")]
+    [InlineData("ninja", "action", "ninja")]
+    [InlineData("heist,horror", "horror", "heist")]
+    public void A_concept_that_only_restates_a_planned_genre_is_dropped(string concepts, string genres, string kept)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+        {
+            Concepts = [.. concepts.Split(',')],
+            Genres = [.. genres.Split(',')],
+        });
+
+        var cleaned = PlanSanitizer.Clean(plan, $"{concepts.Replace(',', ' ')} {genres.Replace(',', ' ')}", ConversationState.Empty, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(kept, string.Join(',', cleaned.Delta.Concepts));
+        Assert.Equal(genres.Split(','), cleaned.Delta.Genres);
+    }
+
     [Fact]
     public void A_supply_answer_agrees_in_number()
     {

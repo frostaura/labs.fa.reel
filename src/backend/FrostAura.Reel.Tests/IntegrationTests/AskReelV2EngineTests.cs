@@ -725,13 +725,15 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     /// order — so "scary horror films" judged sixteen titles under the bar, answered none-found, and
     /// never judged the five that cleared it. Here the titles under the bar are retrieved first and
     /// the ones that clear it rank seventeenth and later; every one that clears it is still judged
-    /// and picked. Varied over how many sit under the bar and how many clear it.
+    /// and picked. Varied over how many sit under the bar and how many clear it, and over where the
+    /// predictions come from: the stored rows, or — with none stored — scored on demand.
     /// </summary>
     [Theory]
-    [InlineData(18, 4)]
-    [InlineData(16, 1)]
-    [InlineData(22, 3)]
-    public async Task Titles_that_clear_the_bar_are_judged_first_when_more_are_retrieved_than_the_judge_rules_on(int under, int clearing)
+    [InlineData(18, 4, true)]
+    [InlineData(16, 1, true)]
+    [InlineData(22, 3, true)]
+    [InlineData(18, 4, false)]
+    public async Task Titles_that_clear_the_bar_are_judged_first_when_more_are_retrieved_than_the_judge_rules_on(int under, int clearing, bool stored)
     {
         if (!Fixture.Available)
         {
@@ -744,12 +746,13 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         var seeded = await SeedTopicalAsync(topic, ("V2 Yes held", under), ("V2 Yes clears", clearing));
         var held = seeded.Take(under).ToList();
         var clears = seeded.Skip(under).ToList();
-        await SeedPredictionsAsync(accountId, held, 2.0m);
-        await SeedPredictionsAsync(accountId, clears, 8.4m);
+        await SeedPredictionsAsync(accountId, held, 2.0m, stored);
+        await SeedPredictionsAsync(accountId, clears, 8.4m, stored);
         await SeedBarAsync(accountId, 6.0m);
         var judge = new CountingJudge();
         var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
-        var (engine, events, emit) = Build(accountId, planner, judge, model: new RuntimeModelEngine());
+        var model = new RuntimeModelEngine();
+        var (engine, events, emit) = Build(accountId, planner, judge, model: model);
 
         var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
 
@@ -759,6 +762,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(clears.Order(), picks.Order());
         Assert.All(clears, id => Assert.Equal(1, judge.SendsOf(id)));
         Assert.Equal(RequestJudge.MaxJudged, held.Concat(clears).Count(id => judge.SendsOf(id) > 0));
+        Assert.Equal(stored ? 0 : 1, model.PoolScorings);
     }
 
     /// <summary>
@@ -793,7 +797,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
     /// <summary>
     /// HREV2-RET-01 with the plan's speculation: the early first batch is chosen in the same order the
-    /// turn judges in, so it is spent on titles that clear the bar — and none is sent twice.
+    /// turn judges in, so it is spent on titles that clear the bar — and none is sent twice. Both
+    /// order on the stored predictions, so neither scores the pool on demand.
     /// </summary>
     [Fact]
     public async Task The_early_first_batch_takes_the_titles_that_clear_the_bar()
@@ -821,7 +826,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         services.AddScoped<IAskReelRetriever>(sp => new OwnedRetriever(Fixture.CreateContext(sp.GetRequiredService<AccountContext>()), _ => { }));
         services.AddScoped(sp => new TitleFacts(sp.GetRequiredService<Application.Persistence.IReelDbContext>()));
         services.AddScoped<IRequestJudge>(_ => new RequestJudge(judge, cache, NullLogger<RequestJudge>.Instance));
-        services.AddScoped(sp => Scorer(sp.GetRequiredService<Infrastructure.Persistence.ReelDbContext>(), new RuntimeModelEngine(), cache));
+        var model = new RuntimeModelEngine();
+        services.AddScoped(sp => Scorer(sp.GetRequiredService<Infrastructure.Persistence.ReelDbContext>(), model, cache));
         await using var provider = services.BuildServiceProvider();
         var planner = new AwaitingPlanner(async _ =>
         {
@@ -829,7 +835,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             return Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic], Media = MediaScope.Movies });
         });
         var (engine, events, emit) = Build(
-            accountId, planner, judge, scopes: provider.GetRequiredService<IServiceScopeFactory>(), cache: cache, model: new RuntimeModelEngine());
+            accountId, planner, judge, scopes: provider.GetRequiredService<IServiceScopeFactory>(), cache: cache, model: model);
 
         var outcome = await engine.StreamAsync(Input($"{topic} films"), accountId, emit, CancellationToken.None);
 
@@ -838,6 +844,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(clears.Order(), picks.Order());
         Assert.All(held.Concat(clears), id => Assert.True(judge.SendsOf(id) <= 1));
         Assert.Contains(AskStageTimings.JudgeSpeculative, outcome.StageTimingsJson, StringComparison.Ordinal);
+
+        // Ordered on the stored predictions: no candidate pool was scored on demand, by either path.
+        Assert.Equal(0, model.PoolScorings);
     }
 
     /// <summary>
@@ -1633,11 +1642,13 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
     /// <summary>
     /// The account's model predicts <paramref name="predicted"/> for each title: a stored score (what
-    /// the supply splits by) and a runtime <see cref="RuntimeModelEngine"/> reads the same number from.
+    /// the supply splits by; skipped when <paramref name="stored"/> is false) and a runtime
+    /// <see cref="RuntimeModelEngine"/> reads the same number from.
     /// </summary>
-    private async Task SeedPredictionsAsync(Guid accountId, IReadOnlyList<Guid> titleIds, decimal predicted)
+    private async Task SeedPredictionsAsync(Guid accountId, IReadOnlyList<Guid> titleIds, decimal predicted, bool stored = true)
     {
-        await SeedScoresAsync(accountId, titleIds, predicted);
+        // With nothing stored, only the account's active model exists: every prediction is made on demand.
+        await SeedScoresAsync(accountId, stored ? titleIds : [], predicted);
         await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var title in await db.Titles.Where(t => titleIds.Contains(t.Id)).ToListAsync())
         {
@@ -2023,13 +2034,25 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     private sealed class RuntimeModelEngine : IModelEngine
     {
         private static readonly int Runtime = Array.IndexOf(FeatureSchema.AllNames(), "runtimeMinutes");
+        private int _poolScorings;
 
         public static int RuntimeFor(decimal predicted) => 100 + (int)(predicted * 10m);
+
+        /// <summary>How many calls scored more titles than the judge rules on — a whole candidate pool.</summary>
+        public int PoolScorings => Volatile.Read(ref _poolScorings);
 
         public TrainedModel Train(TrainingMatrix matrix, string hyperparamsJson) =>
             throw new NotSupportedException("This fixture scores; it never trains.");
 
-        public float[] Score(byte[] artifactBytes, float[][] features) => [.. features.Select(f => (f[Runtime] - 100f) / 10f)];
+        public float[] Score(byte[] artifactBytes, float[][] features)
+        {
+            if (features.Length > RequestJudge.MaxJudged)
+            {
+                Interlocked.Increment(ref _poolScorings);
+            }
+
+            return [.. features.Select(f => (f[Runtime] - 100f) / 10f)];
+        }
 
         public float[] ScoreCached(Guid modelKey, byte[] artifactBytes, float[][] features) => Score(artifactBytes, features);
 
