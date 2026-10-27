@@ -1,4 +1,6 @@
 import type { Page } from "@playwright/test";
+import type { ConversationPayload } from "../src/lib/askReel/transcript";
+import type { AskCard } from "../src/lib/askReelStream";
 import type { RateSuggestion } from "../src/store/api/onboarding";
 import type { TasteDnaPayload, DislikesPayload } from "../src/store/api/taste";
 import type {
@@ -334,6 +336,11 @@ export const ACCURACY: AccuracyPayload = {
 };
 
 export async function mockTrackRecord(page: Page): Promise<void> {
+  // The account's cross-reference standing; 204 is the server's "no pass has run" answer.
+  await page.route(
+    (url) => url.pathname === "/api/feed/cross-reference",
+    (route) => route.fulfill({ status: 204, body: "" })
+  );
   await mockJson(page, "**/api/accuracy", ACCURACY);
   await mockJson(page, "**/api/metrics/cross-reference", CROSS_REFERENCE);
 }
@@ -411,12 +418,38 @@ export const LENS: LensPayload = {
   generatedAt: "2026-10-25T06:00:00Z",
 };
 
+/**
+ * Where-to-watch and the lens for ANY title: Saved's tonight card, Ask Reel's answer cards and the
+ * title page all read them for whichever title they show. Registered before a page's own mocks.
+ */
+export async function mockTitleSideReads(page: Page): Promise<void> {
+  await page.route(/\/api\/titles\/(movie|show)\/\d+\/providers$/, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PROVIDERS) })
+  );
+  await page.route(/\/api\/titles\/(movie|show)\/\d+\/lens$/, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(LENS) })
+  );
+}
+
 export async function mockTitle(page: Page, title: TitleDetailPayload = TITLE): Promise<void> {
   const base = `**/api/titles/${title.mediaType.toLowerCase()}/${title.tmdbId}`;
   await mockJson(page, base, title);
   await mockJson(page, `${base}/providers`, PROVIDERS);
   await mockJson(page, `${base}/lens`, LENS);
-  await mockJson(page, "**/api/feed/more", { items: [2, 3, 4].map((n) => feedCard(40 + n)), exhausted: true });
+  // "More like this" — only for THIS title's anchor, so a title opened over Home leaves Home's own
+  // rails to Home's mocks.
+  await page.route(
+    (url) => url.pathname === "/api/feed/more",
+    (route) => {
+      const body = route.request().postDataJSON() as { anchorTitleId?: string | null } | null;
+      if (body?.anchorTitleId !== title.titleId) return route.fallback();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: [2, 3, 4].map((n) => feedCard(40 + n)), exhausted: true }),
+      });
+    }
+  );
 }
 
 export const PERSON: PersonPayload = {
@@ -480,6 +513,7 @@ export const SAVED: SavedQueueResponse = {
 };
 
 export async function mockSaved(page: Page): Promise<void> {
+  await mockTitleSideReads(page);
   await mockJson(page, "**/api/saved", SAVED);
   await mockJson(page, "**/api/saved/recently-watched", {
     expectedAbsoluteError: 1.9,
@@ -506,4 +540,52 @@ export const RATE_SUGGESTIONS: RateSuggestion[] = [1, 2, 3, 4, 5, 6, 7, 8].map((
 
 export async function mockRate(page: Page): Promise<void> {
   await mockJson(page, "**/api/titles/rate-suggestions", RATE_SUGGESTIONS);
+}
+
+// ── Search (Ask Reel, resumed) ───────────────────────────────────────────────────────────────────
+
+export const CONVERSATION_ID = "7f3a1b2c-0000-4000-8000-0000000000a1";
+
+const askCard = (n: number): AskCard => ({
+  titleId: id("k", n),
+  mediaType: n === 2 ? "Show" : "Movie",
+  tmdbId: 8100 + n,
+  name: `Answer ${n}`,
+  year: 2010 + n,
+  posterPath: n === 3 ? null : `/answer${n}.jpg`,
+  genres: ["crime", "thriller"],
+  similarity: 0.6,
+  predictedRating: 7.4,
+  crowdRating: 7.2,
+  crowdVotes: 30000,
+  fit: 0.8,
+  why: `A tense crew film like the heists you rate highest (${n}).`,
+  blend: 0.5,
+  seen: false,
+});
+
+export const CONVERSATION: ConversationPayload = {
+  id: CONVERSATION_ID,
+  title: "a tense heist",
+  lastCardsAt: "2026-10-26T18:00:00Z",
+  lastTurnAt: "2026-10-26T18:00:00Z",
+  turns: [
+    { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ],
+  cards: [1, 2, 3].map(askCard),
+  reason: "3 picks ranked for you, from 40 pulled.",
+  removed: 0,
+  lastQuery: "a tense heist",
+  mediaTypes: [],
+  shown: [8101, 8102, 8103],
+};
+
+export async function mockSearch(page: Page): Promise<void> {
+  await mockTitleSideReads(page);
+  await mockJson(page, "**/api/search/conversations", [
+    { id: CONVERSATION_ID, title: "a tense heist", turnCount: 2, lastTurnAt: CONVERSATION.lastTurnAt, lastCardsAt: CONVERSATION.lastCardsAt },
+  ]);
+  await mockJson(page, "**/api/search/conversations/latest", CONVERSATION);
+  await mockJson(page, `**/api/search/conversations/${CONVERSATION_ID}`, CONVERSATION);
 }
