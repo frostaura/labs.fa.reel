@@ -562,13 +562,19 @@ uses it only to know which frames to expect.
    **12 s** deadline, after which a batch still out is a failed batch. The plan call is hedged the
    same way after **3 s**, recorded as `plan.hedge` (when the second call was sent). A healthy turn
    never hedges; both calls of a hedged one are on the usage ledger.
-   **When more than 16 are retrieved and a bar is set, the ones the bar lets through go first**
-   (HREV2-RET-01): the candidates are read against the account's stored predictions (the active
-   model's rows, the same ones the supply splits the bar by; a candidate with none is scored on
-   demand), and the bar-clearing ones take the judge's slots in retrieval order ahead of the rest — a
-   title under the bar can only reach the floor tray, so judging it ahead of one that clears spent a
-   pick's slot on the tray. The speculation's early batch is chosen in the same order. Under 16,
-   nothing is read early.
+   **With a bar set, the judge's slots go to what can become a pick** (HREV2-RET-01): the
+   retrieved titles whose stored prediction (the active model's rows, the ones the supply splits the
+   bar by) clears the bar, in retrieval order; then, when those are fewer than 16 and the request
+   names a topic or a person, a **top-up from the supply itself** — titles that clear the bar on a
+   stored prediction, pass the request's hard constraints, the account's eligibility, the supply's
+   vote floor and maturity ceiling, and every exclusion a retrieved title passes, but were never
+   retrieved — best prediction first; then the retrieved titles with no stored prediction; then those
+   under the bar. A title under the bar can only reach the floor tray, and retrieval's depth is not the
+   supply's: "Show me more" on horror retrieved forty titles of which six cleared the bar while the
+   supply held 43 more. The retrieved pool is **scored on demand only** when the titles known to clear
+   cannot fill the slice and a retrieved title would otherwise go unjudged (HREV2-ASK-04: scoring it
+   every time put 0.4–3 s before the first card). The speculation's early batch is chosen in the same
+   order. With no bar, retrieval's first 16 are judged and nothing is read early.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
@@ -649,8 +655,12 @@ Negations come only from the user's words; standing conditions are never written
 account has not seen; the reply counts the seen ones and never names them. A person's credits are
 their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to
 the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`. The v1 engine holds to the
-same default (HREV2-ASK-03): its person path reads the account's full eligibility, and its reply is
-the composer's counted sentence, not the model's, which was written before any credit was looked up.
+same default (HREV2-ASK-03): its person path reads the account's full eligibility, takes the
+person's catalogued credits as well as TMDB's newest-first credit page, and its reply is the
+composer's counted sentence, not the model's, which was written before any credit was looked up.
+"You've seen N" is the same number in both engines: every seen title the person predicate credits to
+them in the request's media (plus, in v1, a page title not yet credited), whatever the account's
+conditions hold out — v1 once counted the credit page alone and said 11 where v2 said 39.
 
 ### Pre-v2 conversations
 

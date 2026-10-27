@@ -491,9 +491,18 @@ public sealed partial class LiveSearchExpansionService(
                                 relaxation == 0 ? conceptVector : null, ct);
                     }
 
+                    // A person's credits the catalogue already holds, past TMDB's newest-first page:
+                    // "Liam Neeson movies" read the forty newest credits, found two unseen ones under
+                    // the bar, and never saw Kinsey or Seraphim Falls, unseen and clearing it
+                    // (HREV2-ASK-03). Read through the account's eligibility, so nothing seen arrives.
+                    var credited = relaxation == 0 && isPersonQuery && hard.People.Count > 0
+                        ? await CataloguedCreditIdsAsync(baseQuery, hard, ct)
+                        : [];
+
                     discovered = discovered
                         .Concat(facet?.Candidates.Select(c => c.TitleId) ?? [])
                         .Concat(candidateIds)
+                        .Concat(credited)
                         .Concat(semanticIds)
                         .Distinct()
                         .ToList();
@@ -588,8 +597,7 @@ public sealed partial class LiveSearchExpansionService(
             {
                 // The reply counts what it holds back and names none of it (FD-3): the model's sentence
                 // was written before any credit was looked up and can name a seen title.
-                var seenCredits = await SeenCreditCountAsync(
-                    accountId, discovered, Relax(intent, 0), account.Settings.MaturityCeiling, ct);
+                var seenCredits = await SeenCreditCountAsync(accountId, hard, discovered, intent.MediaTypes, ct);
                 var shown = Math.Min(eligible.Count, PersonReturnCount);
                 var personReply = agentReply.Degraded
                     ? modelSentence

@@ -88,29 +88,47 @@ public sealed partial class LiveSearchExpansionService
     }
 
     /// <summary>
-    /// How many of a person's discovered credits the account has seen (watched or rated), counted over
-    /// the credits the request could otherwise show — inside the account's content rules, its maturity
-    /// ceiling and the request's media and years — so the reply's "you've seen N" is about the same
-    /// shelf as the titles under it.
+    /// How many of a person's credits the account has seen (watched or rated): every catalogued title
+    /// the supply's person predicate credits to them in the request's media — the count v2 and the
+    /// none-found supply give — plus any title on TMDB's credit page the catalogue holds no credit row
+    /// for yet. Not narrowed by the account's conditions: "you've seen N" is a fact about the person's
+    /// work and the account's history, and the conditions only decide what may be offered.
+    ///
+    /// <para><b>Why (HREV2-ASK-03).</b> It was counted over the discovered titles alone — TMDB's forty
+    /// newest credits — inside the conditions, so "Liam Neeson movies" said "You've seen 11" to an
+    /// account that had seen 39 of his catalogued films, and v2 said 39 for the same question.</para>
     /// </summary>
     private async Task<int> SeenCreditCountAsync(
-        Guid accountId, IReadOnlyList<Guid> discovered, SearchIntent pass, string? maturityCeiling, CancellationToken ct)
+        Guid accountId, Retrieval.HardConstraints hard, IReadOnlyList<Guid> discovered, IReadOnlyList<MediaType> media, CancellationToken ct)
     {
-        if (discovered.Count == 0)
-        {
-            return 0;
-        }
-
-        var credited = (await eligibility.ContentFilteredTitles(accountId)
-                .Where(t => discovered.Contains(t.Id))
-                .ToListAsync(ct))
-            .Where(t => EligibilityQueryBuilder.PassesMaturity(t, maturityCeiling))
-            .Where(t => MatchesMedia(t, pass.MediaTypes))
-            .Where(t => MatchesYear(t, pass))
-            .Select(t => t.Id)
-            .ToList();
-        return (await SeenTitleIdsAsync(accountId, credited, ct)).Count;
+        var seen = db.Titles.Where(t =>
+            db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
+            || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id));
+        var person = new Retrieval.HardConstraints([], hard.People, null, null, hard.Media);
+        var credited = hard.People.Count > 0
+            ? await Retrieval.HardConstraintFilter.Apply(seen, db, person).Select(t => t.Id).ToListAsync(ct)
+            : [];
+        var onPage = discovered.Count == 0
+            ? []
+            : (await seen.Where(t => discovered.Contains(t.Id)).ToListAsync(ct))
+                .Where(t => MatchesMedia(t, media))
+                .Select(t => t.Id);
+        return credited.Union(onPage).Count();
     }
+
+    /// <summary>
+    /// The person's catalogued credits the account may be offered (<paramref name="eligible"/> is its
+    /// eligibility) inside the request's hard constraints, dated newest first and capped — the ones
+    /// past TMDB's page included.
+    /// </summary>
+    private async Task<List<Guid>> CataloguedCreditIdsAsync(IQueryable<Title> eligible, Retrieval.HardConstraints hard, CancellationToken ct) =>
+        await Retrieval.HardConstraintFilter.Apply(eligible, db, hard)
+            .OrderBy(t => t.ReleasedAt == null && t.FirstAiredAt == null)
+            .ThenByDescending(t => t.ReleasedAt ?? t.FirstAiredAt)
+            .ThenBy(t => t.Id)
+            .Take(PersonReturnCount * 2)
+            .Select(t => t.Id)
+            .ToListAsync(ct);
 
     /// <summary>
     /// The person reply, counts only (FD-3): "You've seen 9 movies directed by Christopher Nolan; here
