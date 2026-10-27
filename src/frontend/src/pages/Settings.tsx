@@ -12,6 +12,7 @@ import { modelReadiness, pipelineSentence } from "../lib/modelReadiness";
 import { relTime } from "../lib/format";
 import { rememberOauthState } from "../lib/traktOauth";
 import RegionPicker from "../components/settings/RegionPicker";
+import TimeZoneCard from "../components/settings/TimeZoneCard";
 import {
   emailSaveMessage,
   saveFailureMessage,
@@ -296,6 +297,8 @@ export default function Settings() {
           testId="region-save-status"
         />
       </section>
+
+      <TimeZoneCard />
 
       {/* Router Link, not <a href> — a full document reload just to reach /rate threw away the
           store (and the settings the user may not have noticed were still saving). */}

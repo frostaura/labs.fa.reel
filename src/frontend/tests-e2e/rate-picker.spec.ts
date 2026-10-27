@@ -26,7 +26,7 @@ const suggestion = (n: number, source: "watched" | "popular") => ({
   source,
 });
 
-const SYNC = (retrain: Record<string, unknown> | null) => ({
+const SYNC = (retrain: Record<string, unknown> | null, status: Record<string, unknown> = {}) => ({
   pipelineStage: "FeedReady",
   connectionStatus: "Active",
   lastDeltaSyncAt: null,
@@ -38,6 +38,7 @@ const SYNC = (retrain: Record<string, unknown> | null) => ({
   lastListSyncAt: null,
   outboxLastError: null,
   ...(retrain ? { retrain } : {}),
+  ...status,
 });
 
 async function bootRate(
@@ -49,11 +50,12 @@ async function bootRate(
     newRatingsSinceTrain: 3,
     hasActiveModel: true,
     lastTrainedAt: "2026-09-08T00:00:00Z",
-  }
+  },
+  status: Record<string, unknown> = {}
 ) {
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
-  await mockJson(page, "**/api/sync/status", SYNC(retrain));
+  await mockJson(page, "**/api/sync/status", SYNC(retrain, status));
   await mockJson(page, "**/api/titles/rate-suggestions", suggestions);
   await page.goto("/rate");
 }
@@ -117,16 +119,48 @@ test.describe("rate picker", () => {
     );
   });
 
-  test("before the first model exists it promises a first training, not a retrain", async ({ page }) => {
-    await bootRate(page, [suggestion(3, "popular")], {
-      minNewRatings: 10,
-      newRatingsSinceTrain: 0,
-      hasActiveModel: false,
-      lastTrainedAt: null,
-    });
+  // R1-43: the first model is built only once the trainer's floor is met, so below it the line
+  // counts what is still needed and promises no night; "tonight" arrives with the floor.
+  const NO_MODEL = { minNewRatings: 10, newRatingsSinceTrain: 0, hasActiveModel: false, lastTrainedAt: null };
+  const BELOW_FLOOR = (usableRatings: number) => ({
+    pipelineStage: "NotEnoughRatings",
+    notEnoughRatings: { usableRatings, required: 10 },
+  });
+
+  test("below the training floor it counts the ratings the first model needs, and promises no night", async ({ page }) => {
+    await bootRate(page, [suggestion(1, "watched"), suggestion(2, "watched")], NO_MODEL, BELOW_FLOOR(4));
+
+    const line = page.getByTestId("retrain-progress");
+    await expect(line).toHaveText("4 of 10 ratings — rate 6 more and Reel can build your first model.");
+    await expect(line).not.toContainText("tonight");
+
+    await page.route(/\/api\/titles\/[Mm]ovie\/2001\/rating$/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userRating: 8 }) })
+    );
+    await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
+    await page.getByTestId("rate-value").nth(7).click();
+    await expect(line).toHaveText("5 of 10 ratings — rate 5 more and Reel can build your first model.");
+  });
+
+  test("the rating that meets the floor is the one that promises tonight's refresh", async ({ page }) => {
+    await bootRate(page, [suggestion(1, "watched"), suggestion(2, "watched")], NO_MODEL, BELOW_FLOOR(9));
+
+    const line = page.getByTestId("retrain-progress");
+    await expect(line).toHaveText("9 of 10 ratings — rate one more and Reel can build your first model.");
+
+    await page.route(/\/api\/titles\/[Mm]ovie\/2001\/rating$/, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userRating: 8 }) })
+    );
+    await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
+    await page.getByTestId("rate-value").nth(7).click();
+    await expect(line).toHaveText("That's enough — Reel builds your first model in tonight's refresh at the latest.");
+  });
+
+  test("with the floor already met and no model yet, it promises a first build, not a retrain", async ({ page }) => {
+    await bootRate(page, [suggestion(3, "popular")], NO_MODEL, { pipelineStage: "Degraded", degradedReason: "PipelineFailed", notEnoughRatings: null, lastFailures: [] });
 
     await expect(page.getByTestId("retrain-progress")).toHaveText(
-      "0 ratings in — Reel trains your first model tonight."
+      "You've rated enough — Reel builds your first model in tonight's refresh at the latest."
     );
   });
 

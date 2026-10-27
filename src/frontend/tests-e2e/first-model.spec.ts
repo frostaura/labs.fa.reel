@@ -110,7 +110,8 @@ test.describe("track record with no model yet", () => {
 
       await expect(page.getByTestId("track-record-no-model")).toHaveText(WAIT_SENTENCE);
       await expect(page.getByTestId("source-note")).toHaveText(
-        "Reel puts a number on titles once it has a model; every one it scores that you then rate lands here."
+        // R1-47: not "every one it scores … lands here" — once the exposure log holds rows, only shown cards count.
+        "Reel puts a number on titles once it has a model; rate titles after it has scored them and this page fills in."
       );
       await expect(page.getByText("it has already put a number on")).toHaveCount(0);
       await expect(page.getByTestId("track-record-empty-rate")).toHaveAttribute("href", "/rate");

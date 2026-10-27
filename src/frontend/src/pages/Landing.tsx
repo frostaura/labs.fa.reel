@@ -28,7 +28,7 @@ const STEPS: { title: string; body: string }[] = [
   },
   {
     title: "Picks you haven't seen",
-    body: "Each with a predicted rating for you, why it was picked, and where to watch it.",
+    body: "Each with a predicted rating for you and where to watch it — and why it was picked, when there's a reason worth naming.",
   },
 ];
 

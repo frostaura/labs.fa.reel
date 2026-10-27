@@ -13,11 +13,16 @@ test.describe("landing on phones", () => {
       await page.goto("/");
       await expect(page.getByRole("button", { name: /sign in with trakt/i })).toBeVisible();
 
-      const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+      // Against the layout width, not innerWidth: WebKit draws a classic vertical scrollbar, so its
+      // content box is narrower than the window (310 of 320) and scrollWidth matches that, while
+      // Chromium's overlay scrollbar leaves the two equal. Overflow is scrollWidth past clientWidth.
+      const { scrollWidth, clientWidth, innerWidth } = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
         innerWidth: window.innerWidth,
       }));
-      expect(scrollWidth).toBe(innerWidth);
+      expect(scrollWidth).toBe(clientWidth);
+      expect(clientWidth).toBeLessThanOrEqual(innerWidth);
 
       // The pitch paragraph sits fully inside the viewport, left edge included.
       const pitch = page.getByText(/Link your Trakt profile; get live, explainable picks/);
@@ -53,6 +58,16 @@ test.describe("landing on phones", () => {
     await expect(page.getByTestId("landing-illustration")).toHaveCount(0);
     // No score badge of any kind on a page with no real title to score.
     await expect(body).not.toContainText(/\b\d\.\d\b/);
+  });
+
+  test("promises a reason for a pick only when there is one worth naming (R1-43)", async ({ page }) => {
+    // The explanation templater ships no line when nothing citable moved the prediction, so "why it
+    // was picked" on every pick is a promise the product does not keep.
+    await page.goto("/");
+    const picks = page.getByTestId("landing-step").nth(2);
+    await expect(picks).toContainText("Each with a predicted rating for you and where to watch it");
+    await expect(picks).toContainText("and why it was picked, when there's a reason worth naming.");
+    await expect(page.getByTestId("landing-steps")).not.toContainText("a predicted rating for you, why it was picked");
   });
 
   test("carries the Reel mark and no studio artwork (O-19)", async ({ page }) => {

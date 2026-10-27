@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAwaitingModel, modelReadiness, noModelSentence, pipelineSentence, type ReadinessInput } from "./modelReadiness";
+import { isAwaitingModel, modelReadiness, noModelSentence, pipelineSentence, rateProgress, type RateProgressInput, type ReadinessInput } from "./modelReadiness";
 
 /**
  * Fixtures are payloads the status API sends (SyncStatusContractTests), varied one field at a time:
@@ -129,5 +129,65 @@ describe("pipelineSentence", () => {
       expect(pipelineSentence({ pipelineStage: stage })).not.toMatch(/[a-z][A-Z]|^[A-Z][a-z]+[A-Z]/);
     }
     expect(pipelineSentence({ pipelineStage: "SomeNewStage" })).toBe("Reel is working on your picks.");
+  });
+});
+
+describe("rateProgress (R1-43)", () => {
+  // A modelless account below the trainer's floor, as the status API sends it: the cold-start park
+  // with the floor's counts. Varied one field at a time below.
+  const GATE = { minNewRatings: 10, newRatingsSinceTrain: 0, hasActiveModel: false };
+  const BELOW: RateProgressInput = {
+    pipelineStage: "NotEnoughRatings",
+    degradedReason: null,
+    notEnoughRatings: { usableRatings: 4, required: 10 },
+    lastFailures: [],
+    retrain: GATE,
+  };
+
+  it("below the floor it counts what the first model still needs, and promises no night", () => {
+    const line = rateProgress(BELOW, 0);
+    expect(line).toBe("4 of 10 ratings — rate 6 more and Reel can build your first model.");
+    expect(line).not.toMatch(/tonight/);
+  });
+
+  it("counts the ratings saved on this screen toward the floor", () => {
+    expect(rateProgress(BELOW, 5)).toBe("9 of 10 ratings — rate one more and Reel can build your first model.");
+    expect(rateProgress({ ...BELOW, notEnoughRatings: { usableRatings: 0, required: 10 } }, 1)).toBe(
+      "1 of 10 ratings — rate 9 more and Reel can build your first model."
+    );
+  });
+
+  it("promises tonight's refresh only once the floor is met — by the server's count or this screen's", () => {
+    expect(rateProgress(BELOW, 6)).toBe("That's enough — Reel builds your first model in tonight's refresh at the latest.");
+    expect(rateProgress(BELOW, 9)).toBe("That's enough — Reel builds your first model in tonight's refresh at the latest.");
+    // Floor met before the screen opened: the trainer's Degraded park with no floor, no failed Train.
+    expect(rateProgress({ ...BELOW, pipelineStage: "Degraded", degradedReason: "PipelineFailed", notEnoughRatings: null }, 0)).toBe(
+      "You've rated enough — Reel builds your first model in tonight's refresh at the latest."
+    );
+  });
+
+  it("a below-floor stage without the counts asks for more ratings and names no number it does not have", () => {
+    expect(rateProgress({ ...BELOW, notEnoughRatings: null }, 3)).toBe(
+      "Reel needs a few more of your ratings before it can build your first model — keep rating."
+    );
+  });
+
+  it("a stopped or unlinked account is told so, not promised a model", () => {
+    const failed = { ...BELOW, pipelineStage: "Degraded", degradedReason: "PipelineFailed", notEnoughRatings: null, lastFailures: [{ kind: "Train" }] };
+    expect(rateProgress(failed, 0)).toBe("Building your model stopped on Reel's side. Nothing you've rated is lost.");
+    expect(rateProgress({ ...BELOW, degradedReason: "TraktRevoked" }, 0)).toMatch(/^Reel has lost access to your Trakt account/);
+    expect(rateProgress({ ...BELOW, pipelineStage: "Ingesting", notEnoughRatings: null }, 0)).toBe("Reel is building your first model right now.");
+  });
+
+  it("with a model it is the retrain gate's countdown, moved by this screen's ratings", () => {
+    const withModel = { ...BELOW, pipelineStage: "FeedReady", notEnoughRatings: null, retrain: { minNewRatings: 10, newRatingsSinceTrain: 3, hasActiveModel: true } };
+    expect(rateProgress(withModel, 0)).toBe("7 more ratings and Reel retrains tonight.");
+    expect(rateProgress(withModel, 6)).toBe("1 more rating and Reel retrains tonight.");
+    expect(rateProgress(withModel, 7)).toBe("That's enough — Reel retrains tonight on 10 new ratings.");
+  });
+
+  it("says nothing without the status or its retrain block", () => {
+    expect(rateProgress(undefined, 2)).toBeNull();
+    expect(rateProgress({ ...BELOW, retrain: null }, 2)).toBeNull();
   });
 });

@@ -12,6 +12,7 @@ import { refusedOutright } from "../components/ui/save-outcome";
 import { Button } from "../components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { COARSE_TAP } from "../lib/tapTarget";
+import { rateProgress } from "../lib/modelReadiness";
 
 /**
  * The label engine.
@@ -68,23 +69,10 @@ export default function RatePicker() {
     }
   };
 
-  // The ratings saved in this session are counted locally on top of the server's number: they are
-  // in the database the moment the mutation resolves, and the status query is not invalidated by a
-  // rating, so without this the counter would sit still while the user works.
-  const retrain = sync?.retrain;
-  const sinceTrain = (retrain?.newRatingsSinceTrain ?? 0) + count;
-  const toGo = retrain ? Math.max(0, retrain.minNewRatings - sinceTrain) : null;
-
-  const progress = (() => {
-    if (!retrain) return null;
-    if (!retrain.hasActiveModel) {
-      return `${sinceTrain} ${sinceTrain === 1 ? "rating" : "ratings"} in — Reel trains your first model tonight.`;
-    }
-    if (toGo === 0) {
-      return `That's enough — Reel retrains tonight on ${sinceTrain} new ${sinceTrain === 1 ? "rating" : "ratings"}.`;
-    }
-    return `${toGo} more ${toGo === 1 ? "rating" : "ratings"} and Reel retrains tonight.`;
-  })();
+  // The ratings saved in this session are counted on top of the server's numbers (rateProgress says
+  // why): they are in the database the moment the mutation resolves, and the status query is not
+  // invalidated by a rating, so without this the counter would sit still while the user works.
+  const progress = rateProgress(sync, count);
 
   // Three states before the grid. `data = []` as a default used to make a failed read and a truly
   // empty pool the same blank page.

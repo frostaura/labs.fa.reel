@@ -41,6 +41,11 @@ test.describe("onboarding build-up", () => {
 
     await emit(page, "feed-ready", {});
     await expect(page.getByTestId("reveal")).toBeVisible();
+    // R1-43: a pick carries a reason only when something citable moved its prediction.
+    await expect(page.getByTestId("reveal")).toContainText(
+      "every pick comes with a predicted rating, and the reason when there's one worth naming."
+    );
+    await expect(page.getByTestId("reveal")).not.toContainText("every pick comes with the reason");
     await expect(page.getByTestId("enter-app")).toBeVisible();
   });
 

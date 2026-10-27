@@ -6,10 +6,12 @@ import {
   biasNote,
   headlineSentence,
   learnedSentence,
+  NO_MODEL_SOURCE_NOTE,
   num,
   pct,
   signed,
   sourceNote,
+  PROVENANCE_NOTE,
 } from "./trackRecordCopy";
 import type { AccuracyPayload } from "../store/api";
 
@@ -66,7 +68,7 @@ describe("formatting", () => {
 
 describe("headlineSentence", () => {
   it("states the founder's real number without softening it", () => {
-    expect(headlineSentence(payload())).toBe("Within one point on 26% of what you rate");
+    expect(headlineSentence(payload())).toBe("Within one point on 26% of the predictions you've rated");
   });
 
   it("says there is nothing to score rather than claiming a perfect or a zero record", () => {
@@ -171,5 +173,30 @@ describe("offeredWindows / singleWindowNote (G-9)", () => {
     ];
     expect(offeredWindows(windows)).toEqual(["90d"]);
     expect(singleWindowNote(windows)).toBeNull();
+  });
+});
+
+describe("what the page claims about its numbers (R1-47)", () => {
+  // The family track-record-is-the-internal-measure: promotion reads NDCG@10, which this page does
+  // not show, and the retrain check reads the active model's own calibration pairs. The page may
+  // claim only what its numbers are — predictions against the ratings that followed them.
+  it("the provenance line says what the numbers are, and claims no internal judgement", () => {
+    expect(PROVENANCE_NOTE).toMatch(/^Every number here is Reel's prediction against the rating you then gave/);
+    expect(PROVENANCE_NOTE).not.toMatch(/judged|internal|same numbers/i);
+  });
+
+  it("the headline names its population on either evidence base, never every rating", () => {
+    for (const source of ["exposures", "retro"] as const) {
+      for (const n of [1, 116]) {
+        const p = payload({ source, headline: { ...payload().headline, n } });
+        expect(headlineSentence(p)).toMatch(/of the predictions you've rated$/);
+        expect(headlineSentence(p)).not.toMatch(/of what you rate/);
+      }
+    }
+  });
+
+  it("the no-model note promises the page fills in, not that every scored title lands here", () => {
+    expect(NO_MODEL_SOURCE_NOTE).not.toMatch(/\bevery\b/);
+    expect(NO_MODEL_SOURCE_NOTE).toMatch(/rate titles after it has scored them/);
   });
 });
