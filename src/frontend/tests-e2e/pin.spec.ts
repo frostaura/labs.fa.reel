@@ -21,6 +21,12 @@ test.describe("settings PIN", () => {
     });
     await mockJson(page, "**/api/settings/filters", FILTERS);
     await mockFilterChips(page);
+    // Everything else /settings reads on load (WS-9 CR-7): left unmocked, these reached the dev
+    // server on some runs and turned the unmocked-API gate red.
+    await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150, timeZone: null, effectiveTimeZone: "UTC" });
+    await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
+    await mockJson(page, "**/api/preferences/tags", []);
+    await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
     await page.goto("/settings");
   }
 

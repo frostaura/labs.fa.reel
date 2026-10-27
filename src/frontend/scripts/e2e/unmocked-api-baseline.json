@@ -234,21 +234,6 @@
   "onboarding.spec.ts \u203a onboarding build-up \u203a the trainer's Degraded frame for too few ratings becomes the counts once the poll lands": [
     "GET /api/feed"
   ],
-  "phone-targets.spec.ts \u203a phone targets on WS-10A routes \u203a Saved has no interactive element under 44 px": [
-    "GET /api/titles/movie/:id/providers"
-  ],
-  "pin.spec.ts \u203a settings PIN \u203a a PIN-configured account is locked until the correct PIN unlocks it": [
-    "GET /api/billing/status",
-    "GET /api/preferences/tags",
-    "GET /api/settings",
-    "POST /api/settings/filters/cost"
-  ],
-  "pin.spec.ts \u203a settings PIN \u203a removing the PIN demands a fresh PIN entry in a confirm dialog": [
-    "GET /api/billing/status",
-    "GET /api/preferences/tags",
-    "GET /api/settings",
-    "POST /api/settings/filters/cost"
-  ],
   "settings-errors.spec.ts \u203a billing visibility (KILL-10) \u203a a refused checkout gives the server's reason, never 'coming soon'": [
     "GET /api/settings/filters"
   ],
@@ -291,33 +276,6 @@
   "title-actions.spec.ts \u203a person page states \u203a a server error offers a retry": [
     "GET /api/sync/status"
   ],
-  "title-actions.spec.ts \u203a the after-rating verdict \u203a a near hit says so and promises no retrain it is not going to do": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a the after-rating verdict \u203a an over-promise names both numbers, when it was shown, and what happens next": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a the after-rating verdict \u203a no toast at all when Reel never committed to a number": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a the after-rating verdict \u203a the toast can be dismissed by hand": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail actions \u203a no why-line renders nothing rather than boilerplate": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail actions \u203a rating flips the button to 'Seen it \u2014 you rated N' and Clear rating reverts it": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail actions \u203a the Not interested menu sends the chosen reason on the wire": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail actions \u203a the modal carries the why-line, above the synopsis": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail states \u203a Escape on a deep link also lands on Home": [
-    "GET /api/titles/movie/:id/lens"
-  ],
   "title-actions.spec.ts \u203a title detail states \u203a a 404 renders within one second of the navigation that asked for it": [
     "GET /api/accuracy",
     "GET /api/feed/learned",
@@ -331,17 +289,7 @@
     "GET /api/feed/genres",
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
-    "GET /api/settings/filters",
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail states \u203a a rated title's header leads with your rating and keeps the prediction as a note": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail states \u203a a server error offers a retry that recovers": [
-    "GET /api/titles/movie/:id/lens"
-  ],
-  "title-actions.spec.ts \u203a title detail states \u203a an unrated title keeps the prediction badge and no note": [
-    "GET /api/titles/movie/:id/lens"
+    "GET /api/settings/filters"
   ],
   "tonight-mood.spec.ts \u203a lens copy on the cards \u203a a hero with no copy keeps the templated why-line it always had": [
     "GET /api/accuracy",
