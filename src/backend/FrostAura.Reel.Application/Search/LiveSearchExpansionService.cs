@@ -430,12 +430,10 @@ public sealed partial class LiveSearchExpansionService(
             // resolved topic: the keywords the supply counts and the words the reply names them by
             // are the same list (R1-02). The facet arm runs only when the request names a concrete
             // concept (a keyword): a genre-only mood request would put the most-voted titles of that
-            // genre ahead of the semantic matches. Only an anchored label is the user's own words; an
-            // unanchored one is the keywords joined, so it goes in as null and the concept reads as a
-            // stand-in that never names a curated synonym (HREV3-RET-A, WS-3 CR-3).
+            // genre ahead of the semantic matches.
             var topic = AskReelTopic.Resolve(intent.Keywords, trimmed, input.History);
             var hard = Retrieval.IntentConstraints.FromIntent(
-                intent with { Keywords = [.. topic.Keywords] }, input.MediaFilter, topic.Anchored ? topic.Label : null);
+                intent with { Keywords = [.. topic.Keywords] }, input.MediaFilter, topic.Label);
             Retrieval.RetrievalResult? facet = null;
             var evidence = new Dictionary<Guid, IReadOnlyList<string>>();
 
