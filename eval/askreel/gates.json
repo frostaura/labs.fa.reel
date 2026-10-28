@@ -304,6 +304,13 @@
       "dataSeen": "reports/hardening/h2/h2-smoke-v1-mislabelled-v2 (header engine v2, all 15 turns answered by v1) and h2-smoke-v2 (5 turns, all v2); no metric values",
       "change": "a recording's engine is the engine its answered turns name (the stream's conversation.engine / done.engine), not the --engine flag; a recording whose answered turns name another engine than requested, name none, or mix engines with none requested is INVALID: every gate reads INVALID, replay exits 1 and compare refuses it. The runner now asks for the engine (?engine=) and stops at the first mismatched turn",
       "reason": "HREV2-ASK-05 / HREV2-PLAT-3: the h2 smoke labelled 15 v1 turns as v2, so a G1 report could show v2 gates computed on v1 output. Validity only, no scoring rule moved: the 99c0761 baselines (v1 header, v1 turns) re-score to identical metrics"
+    },
+    {
+      "when": "2026-10-28",
+      "commit": "ws7-hardening-r4",
+      "dataSeen": "reports/hardening/h3/h3-smoke-v2-combined (no-conflict-control T1: reply 174 matching / 51 seen / 16 eligible / 4 clearing at 50 votes; ninja-critique T3 Clarify after two honest empties) and the 99c0761 open baseline's no-conflict-control and refine-recent rows",
+      "change": "a turn's expect may carry `years` ({last: N} through the run's UTC year, or {from, to}); its concept truth, supply truth and missed-supply count are materialised inside that window under the key <concept>@<from>-<to>, undated titles passing. A turn whose windowed truth a recording never froze is reported truthMissing and scores no concept check. A reference with no referent (the earlier turn never showed that card) holds the turn to mode Clarify instead of its scripted act. no-conflict-control T1 gains years {last: 10}, refine-recent T2 years {last: 5}",
+      "reason": "HREV3-EVAL-A / HREV3-RET-05: the all-years heist truth (487 / 124 / 33 / 11, MinYear 2000 unlocking 36) made a reply that equals the 2016–2026 truth on every bucket and knockout read as six count mismatches, a missing MinYear relaxation a 2016+ request cannot use, and 13 titles of missed supply. Re-materialised on reel_int_h3 (every frozen truth recomputed identically): supply counts pass on that turn, missed supply is 6 inside the window, not 13, and ninja-critique T3 passes as Clarify. The 99c0761 baselines cannot be re-materialised (their database and truth files have moved on: rematerialise refuses on 7 drifted truths), so their two windowed turns are truthMissing: open constraintPrecisionAt8 0.4673 (n 103) -> 0.4704 (n 101); every other metric is unchanged"
     }
   ],
   "judge": {

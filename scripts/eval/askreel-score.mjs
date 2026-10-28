@@ -80,6 +80,30 @@ function mediaScope(media) {
   return tv ? "Show" : "Movie";
 }
 
+// The year window a turn's own words set (`expect.years`), as inclusive `{ from, to }` years (either may
+// be null: unbounded). `{ last: N }` is the last N years counted back from the run's own UTC year, through
+// that year — "from the last ten years" asked in 2026 is 2016–2026 — so the truth moves with the clock
+// the API reads the request by; `{ from, to }` is absolute. null when the words set no window.
+export function yearWindow(years, startedAt) {
+  if (!years) return null;
+  if (Number.isInteger(years.last)) {
+    const now = new Date(startedAt ?? Date.now()).getUTCFullYear();
+    return { from: now - years.last, to: now };
+  }
+  return { from: years.from ?? null, to: years.to ?? null };
+}
+
+// The truth key a turn's concept is materialised and scored under: the concept itself, or — when the
+// turn's words set a year window — the concept inside that window ("heist@2016-2026"), so a request for
+// the last ten years is never held to every year's heists (HREV3-EVAL-A, HREV3-RET-05). The supply truth
+// is then counted over the windowed population, so a standing rule the window already subsumes
+// ("released 2000 or later" under 2016+) knocks out nothing and is never expected as a relaxation.
+export function conceptKey(expect, startedAt) {
+  if (!expect?.concept) return null;
+  const w = yearWindow(expect.years, startedAt);
+  return w ? `${expect.concept}@${w.from ?? ""}-${w.to ?? ""}` : expect.concept;
+}
+
 function costOf(ledger, prices) {
   let total = 0;
   const rows = [];
@@ -180,8 +204,13 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
   const mustNotMembers = new Set((e.mustNot ?? []).flatMap((k) => facts.truth?.[k]?.members ?? []));
   r.mustNotViolations = shown.filter((c) => mustNotMembers.has(c.titleId)).map((c) => c.name);
 
-  if (e.concept) {
-    const tr = facts.truth?.[e.concept];
+  const truthKey = conceptKey(e, opts.startedAt);
+  if (e.concept && !facts.truth?.[truthKey]) {
+    // A turn whose concept truth the recording never materialised (a window added after it ran) is
+    // unverified, never scored against an empty set: that would read as off-topic picks or missed supply.
+    r.truthMissing = truthKey;
+  } else if (e.concept) {
+    const tr = facts.truth[truthKey];
     const members = new Set(tr?.members ?? []);
     const supply = tr?.supply?.[scope] ?? tr?.supply?.Any ?? null;
     const first8 = picks.slice(0, 8);
@@ -214,16 +243,21 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
     r.precision = first8.length ? first8.filter((c) => !mustNotMembers.has(c.titleId)).length / first8.length : 0;
   }
 
-  const expectedMode = e.mode ?? (r.checks.honestEmpty !== undefined ? "NoneFound" : null);
+  // A reference to a card the earlier turn never showed ("the second one" after an honest empty) has no
+  // referent: the scripted act and mode assumed one. The only correct answer is to ask which title the
+  // user means, so the turn is held to Clarify instead (HREV3-RET-05, ninja-critique T3).
+  const expectedRefs = (e.references ?? []).map((ref) => scenarioTurns[ref.turn - 1]?.cards?.[ref.rank - 1] ?? null);
+  const voidReference = expectedRefs.some((x) => x === null) && !t.notRun && !t.failed;
+  const expectedMode = voidReference ? "Clarify" : e.mode ?? (r.checks.honestEmpty !== undefined ? "NoneFound" : null);
   if (expectedMode && expectedMode !== "Any") r.checks.mode = t.mode === expectedMode;
-  if (e.act && (t.act || opts.actObservable)) r.checks.act = !t.failed && t.act === e.act;
+  if (e.act && !voidReference && (t.act || opts.actObservable)) r.checks.act = !t.failed && t.act === e.act;
   if (typeof e.conflict === "boolean") r.checks.conflict = !t.failed && Boolean(t.conflict) === e.conflict;
 
   if (e.references?.length) {
-    const expected = e.references.map((ref) => scenarioTurns[ref.turn - 1]?.cards?.[ref.rank - 1] ?? null);
+    const expected = expectedRefs;
     if (t.notRun || t.failed) {
       r.checks.reference = false;
-    } else if (expected.some((x) => x === null)) {
+    } else if (voidReference) {
       r.referenceUnresolvable = true; // the earlier turn never showed that card; the premise is void
     } else {
       const v2 = referencedTitles(t, scenarioTurns.slice(0, index));
@@ -457,7 +491,7 @@ export function score(recording, scenarios, prices, gates) {
   for (const s of recording.scenarios) {
     const def = defs.get(s.id);
     const planned = plannedTurns(s, def);
-    const evals = planned.map((t, i) => evaluateTurn(def?.turns?.[i], t, i, planned, facts, { actObservable, turnCapMs }));
+    const evals = planned.map((t, i) => evaluateTurn(def?.turns?.[i], t, i, planned, facts, { actObservable, turnCapMs, startedAt: recording.startedAt }));
     const missingTurns = planned.length - s.turns.length;
     const fingerprint = scenarioFingerprint(s.id, planned.map((t) => t.query));
     // A recording scored against definitions that were edited after it ran measures a different question.
@@ -541,6 +575,8 @@ export function score(recording, scenarios, prices, gates) {
       artifact: facts.artifact ?? null, concurrency: recording.concurrency, scenarios: perScenario.length, turns: attempted,
       fingerprint: sha(perScenario.map((p) => [p.id, p.fingerprint]).sort((a, b) => (a[0] < b[0] ? -1 : 1))),
       staleScenarios: perScenario.filter((p) => p.stale).map((p) => p.id),
+      // Turns whose concept truth the recording never materialised: scored on no concept check at all.
+      truthMissing: perScenario.flatMap((p) => p.turns.filter((t) => t.truthMissing).map((t) => `${p.id}#${t.turn}: ${t.truthMissing}`)),
       modelKey: recording.modelKey ?? "unrecorded", buildSlotsHeld: recording.buildSlotsHeld === true,
       wallSeconds: recording.wallSeconds, costUsd: cost.total, latencyGated: latencyValid,
       gatesPassed: results.filter((r) => r.status === "pass").length, gatesFailed: results.filter((r) => r.status === "FAIL").length,
@@ -561,6 +597,7 @@ export function renderReport(recording, metrics) {
   L.push(`- Latency gates ${s.latencyGated ? "APPLY (concurrency ≤ 2, every build slot held)" : `do NOT apply (${s.concurrency > 2 ? "concurrency > 2" : "build slots not held during the run"}) — latency below is reported, not gated`}`);
   L.push(`- Model key: ${s.modelKey} · scenario fingerprint \`${s.fingerprint}\``);
   if (s.staleScenarios.length) L.push(`- **${s.staleScenarios.length} scenario(s) were edited after this recording ran** (${s.staleScenarios.join(", ")}): their rows score the old queries against new expectations; compare refuses this recording`);
+  if (s.truthMissing?.length) L.push(`- **${s.truthMissing.length} turn(s) have no materialised concept truth** (${s.truthMissing.slice(0, 5).join("; ")}): no concept check scored them; re-materialise with \`askreel.mjs rematerialise <recording.json> --db <eval db>\``);
   L.push(`- Started ${recording.startedAt}, finished ${recording.finishedAt}`, "");
   L.push("## Gates", "", "| Metric | Value | n | Gate | Status |", "|---|---|---|---|---|");
   for (const g of metrics.gates) L.push(`| ${g.label} | ${fmt(g.value)} | ${g.n} | ${g.op} ${g.target} | ${g.status} |`);
@@ -575,7 +612,7 @@ export function renderReport(recording, metrics) {
   for (const r of metrics.cost) L.push(`| ${r.provider} | ${r.model || "—"} | ${r.purpose || "—"} | ${r.calls} | ${r.promptTokens} | ${r.completionTokens} | ${fmt(r.usd, 4)} |`);
   L.push("", "## Per-scenario diffs (turns with a failed check, a leak, a fallback or a grounding violation)", "");
   for (const sc of metrics.scenarios) {
-    const bad = sc.turns.filter((t) => Object.values(t.checks).some((v) => !v) || t.leaks.length || t.mediaViolations.length || t.fallback || t.groundingViolations || t.echo || t.mustNotViolations.length || t.nonLatinWhys.length || t.missedSupply || t.supplyUnverified);
+    const bad = sc.turns.filter((t) => Object.values(t.checks).some((v) => !v) || t.leaks.length || t.mediaViolations.length || t.fallback || t.groundingViolations || t.echo || t.mustNotViolations.length || t.nonLatinWhys.length || t.missedSupply || t.supplyUnverified || t.truthMissing);
     if (!bad.length && !sc.missingTurns) continue;
     L.push(`### ${sc.id} (${sc.categories.join(", ")})`);
     if (sc.missingTurns) L.push(`- ${sc.missingTurns} turn(s) never ran (an earlier turn was refused); scored as failed turns`);
@@ -589,6 +626,7 @@ export function renderReport(recording, metrics) {
       if (t.missedSupply) L.push(`  - missed supply: no pick, while ${t.supply?.clearing ?? t.supply?.aboveBar ?? "?"} eligible title(s) clear the bar`);
       if (t.supplyMismatches?.length) L.push(`  - supply counts differ from the SQL truth: ${t.supplyMismatches.join("; ")}`);
       if (t.supplyUnverified) L.push(`  - supply counts unverified: ${t.supplyUnverified}`);
+      if (t.truthMissing) L.push(`  - concept truth \`${t.truthMissing}\` was never materialised for this recording: no concept check scored`);
       if (t.offTopic?.length) L.push(`  - off-topic in first 8: ${t.offTopic.join("; ")}`);
       if (t.repeatsRejected?.length) L.push(`  - re-showed rejected: ${t.repeatsRejected.join("; ")}`);
       if (t.repeats?.length) L.push(`  - repeated earlier cards: ${t.repeats.join("; ")}`);

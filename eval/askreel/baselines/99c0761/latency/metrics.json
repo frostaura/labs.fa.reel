@@ -2,6 +2,13 @@
  "summary": {
   "label": "baseline-99c0761-latency",
   "engine": "v1",
+  "engineRequested": "v1",
+  "engineCounts": {
+   "v1": 60
+  },
+  "engineValid": true,
+  "engineMismatches": [],
+  "engineMismatchCount": 0,
   "build": "99c0761",
   "buildInfo": null,
   "gitSha": "ba27944",
@@ -15,6 +22,7 @@
   "turns": 60,
   "fingerprint": "e84f9e89e829c196",
   "staleScenarios": [],
+  "truthMissing": [],
   "modelKey": "unrecorded",
   "buildSlotsHeld": false,
   "wallSeconds": 1235,

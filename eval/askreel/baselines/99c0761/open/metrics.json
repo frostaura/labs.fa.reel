@@ -2,6 +2,13 @@
  "summary": {
   "label": "baseline-99c0761-open",
   "engine": "v1",
+  "engineRequested": "v1",
+  "engineCounts": {
+   "v1": 167
+  },
+  "engineValid": true,
+  "engineMismatches": [],
+  "engineMismatchCount": 0,
   "build": "99c0761",
   "buildInfo": null,
   "gitSha": "8251f15",
@@ -15,6 +22,10 @@
   "turns": 167,
   "fingerprint": "cab2a605e71bc860",
   "staleScenarios": [],
+  "truthMissing": [
+   "no-conflict-control#1: heist@2016-2026",
+   "refine-recent#2: kidnapping@2021-2026"
+  ],
   "modelKey": "unrecorded",
   "buildSlotsHeld": false,
   "wallSeconds": 1632,
@@ -25,8 +36,8 @@
  },
  "metrics": {
   "constraintPrecisionAt8": {
-   "value": 0.4672907998150716,
-   "n": 103
+   "value": 0.47035596416784525,
+   "n": 101
   },
   "negationPrecisionAt8": {
    "value": 0.9416666666666667,
@@ -156,8 +167,8 @@
    "label": "Constraint precision@8 (facet scenarios)",
    "op": ">=",
    "target": 0.9,
-   "value": 0.4672907998150716,
-   "n": 103,
+   "value": 0.47035596416784525,
+   "n": 101,
    "status": "FAIL"
   },
   {
@@ -6419,18 +6430,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 544,
-      "eligible": 41,
-      "scored": 28,
-      "aboveBar": 10
-     },
-     "offTopic": [
-      "All the Devils Are Here",
-      "Blowback",
-      "Sharper"
-     ],
-     "precision": 0.625,
+     "truthMissing": "heist@2016-2026",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -10489,23 +10489,7 @@
      ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 535,
-      "eligible": 62,
-      "scored": 30,
-      "aboveBar": 9
-     },
-     "offTopic": [
-      "All the Devils Are Here",
-      "The Last Rodeo",
-      "I Know What You Did Last Summer",
-      "Moments: Six",
-      "Last and First Men",
-      "The Survivors",
-      "Amazing Stories",
-      "Red Roses Never Die"
-     ],
-     "precision": 0,
+     "truthMissing": "kidnapping@2021-2026",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [

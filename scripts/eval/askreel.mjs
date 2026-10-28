@@ -7,6 +7,7 @@
 //        --engine v1|v2 [--allow-unnamed-engine] [--build-info <BUILD_INFO.json from build-at.sh>] [--hold-build-slots]
 //        [--founder-key-signoff "<who, when>"]
 //   node scripts/eval/askreel.mjs replay <recording.json> [--out <dir>]
+//   node scripts/eval/askreel.mjs rematerialise <recording.json> --db <eval db> [--out <dir>]
 //   node scripts/eval/askreel.mjs check  [--scenarios <dir>] [--extra-scenarios <dir>] [--truth-dir <dir>] [--db <eval db>]
 //   node scripts/eval/askreel.mjs compare <metrics.json> --baseline <metrics.json>
 //
@@ -20,6 +21,9 @@
 //         metrics.json and report.md.
 // replay  re-scores a recording with no API, no database and no paid call — the CI mode. Everything
 //         the scorer needs (truth membership, supply counts, ledger delta) is frozen into the recording.
+// rematerialise adds to a recording only the truth sets its scenarios now need and it never froze (a year
+//         window added to an expectation after it ran), from the eval database it ran on; it refuses when
+//         any fact the recording holds no longer recomputes to the same value there. Then it re-scores.
 // compare applies the pre-registered regression tolerances (eval/askreel/gates.json) of a run against a
 //         baseline; exit 1 on any regression, exit 2 when the runs are incomparable (different scenario
 //         fingerprints, turn counts, snapshot or artifact). This is the merge gate of program §5.0 rule 6.
@@ -42,7 +46,7 @@ import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { score, renderReport, compare, replySupply, engineOf, answeredTurn, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
+import { score, renderReport, compare, replySupply, engineOf, answeredTurn, conceptKey, yearWindow, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
 import { modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -144,6 +148,15 @@ export function validateScenarios(scenarios, truthDirs) {
         if (!(r.turn >= 1 && r.turn <= i && r.rank >= 1)) errors.push(`${s.id}#${i + 1}: reference T${r.turn}.${r.rank} does not point at an earlier turn`);
       }
       if (e.media && !["Movie", "Show"].includes(e.media)) errors.push(`${s.id}#${i + 1}: media must be Movie or Show`);
+      if (e.years !== undefined) {
+        const y = e.years ?? {};
+        const year = (v) => v === undefined || (Number.isInteger(v) && v >= 1870 && v <= 2200);
+        const keys = Object.keys(y);
+        const ok = !e.concept ? false
+          : "last" in y ? keys.length === 1 && Number.isInteger(y.last) && y.last >= 1 && y.last <= 100
+          : keys.length > 0 && keys.every((k) => k === "from" || k === "to") && year(y.from) && year(y.to) && !(y.from > y.to);
+        if (!ok) errors.push(`${s.id}#${i + 1}: years must be {last: N} or {from, to} (whole years, from <= to) on a turn with a concept`);
+      }
       for (const r of [...(e.rejectTurns ?? []), ...(e.noRepeatTurns ?? [])]) {
         if (!(r >= 1 && r <= i)) errors.push(`${s.id}#${i + 1}: turn ${r} is not an earlier turn`);
       }
@@ -341,9 +354,32 @@ export function compactTurn(raw) {
   };
 }
 
+// A turn the API's per-account Ask limiter refused (AskTurnLimiter via InboundLimits: 409 turn_in_progress
+// or 429 ask_rate_minute/hour/day, each with retryAfterSeconds) never reached the pipeline: the slot runs
+// with limits below the run's concurrency or size. It is the harness's failure, never the model's, so the
+// run stops instead of scoring it (H3-PLAT-01). A 409 the conversation itself returns (a turn still in
+// flight on that thread) carries no retryAfterSeconds and stays an ordinary refused turn.
+export function limiterRefusal(turn) {
+  if (turn.status !== 409 && turn.status !== 429) return null;
+  let body = null;
+  try { body = JSON.parse(turn.error ?? ""); } catch { return null; }
+  const code = typeof body?.code === "string" ? body.code : "";
+  if (typeof body?.retryAfterSeconds !== "number") return null;
+  if (!(turn.status === 409 && code === "turn_in_progress") && !(turn.status === 429 && /^ask_rate_[a-z]+$/.test(code))) return null;
+  return `HTTP ${turn.status} ${code} (retry after ${body.retryAfterSeconds} s)`;
+}
+
+// Whether --resume keeps a recorded scenario. One whose turn died on the transport (the API process was
+// gone), one stopped on an engine mismatch (resuming re-asks it under this run's guard) and one the Ask
+// limiter refused (that turn never reached the pipeline) are asked again; every other recorded scenario —
+// including the pipeline's own failures — is kept as it was.
+export function salvageable(r) {
+  return !r.engineMismatch && !r.limiterRefused && !r.turns.some((t) => (t.error ?? "").startsWith("transport:") || limiterRefusal(t));
+}
+
 // guard(turn) → { ok, why } after every turn; a turn that is not ok ends the scenario (and, via the
 // caller, the run) before another paid turn is sent.
-async function runScenario(api, getSession, renewSession, s, engine, guard) {
+export async function runScenario(api, getSession, renewSession, s, engine, guard) {
   let conversationId = null;
   const turns = [];
   for (const t of s.turns) {
@@ -358,6 +394,8 @@ async function runScenario(api, getSession, renewSession, s, engine, guard) {
     c.query = t.query; c.mediaTypes = media ?? null; c.startedAt = startedAt;
     conversationId = c.conversationId ?? conversationId;
     turns.push(c);
+    const refused = limiterRefusal(c);
+    if (refused) return { id: s.id, set: s.set, categories: s.categories, conversationId, turns, limiterRefused: `${s.id}#${turns.length}: ${refused}` };
     const verdict = guard(c);
     if (!verdict.ok) return { id: s.id, set: s.set, categories: s.categories, conversationId, turns, engineMismatch: `${s.id}#${turns.length}: ${verdict.why}` };
     if (c.status !== 200 || c.error) break; // a refused or dead turn ends the scenario; the scorer counts the rest as missing
@@ -413,26 +451,32 @@ function materialise(db, accountId, recording, scenarios) {
   const truth = {};
   const need = new Map(); // key -> set of media scopes
   const supplyNeed = new Map(); // concept key -> scope -> set of vote floors, for turns that carried supply counts
+  const windows = new Map(); // truth key -> { concept, window }
   for (const s of recording.scenarios) {
     const def = byId.get(s.id);
     s.turns.forEach((t, i) => {
       const e = def?.turns[i]?.expect ?? {};
       const m = e.media ?? mediaClause(t.mediaTypes) ?? "Any";
-      for (const k of [e.concept, ...(e.mustNot ?? [])].filter(Boolean)) {
+      // The concept is materialised inside the turn's own year window, under its windowed key.
+      const ck = conceptKey(e, recording.startedAt);
+      if (ck) windows.set(ck, { concept: e.concept, window: yearWindow(e.years, recording.startedAt) });
+      for (const k of (e.mustNot ?? [])) windows.set(k, { concept: k, window: null });
+      for (const k of [ck, ...(e.mustNot ?? [])].filter(Boolean)) {
         if (!need.has(k)) need.set(k, new Set());
         need.get(k).add(m);
       }
       // A turn that states supply counts — in its report or in its reply's words — is held to the truth
       // counted at the vote floor it states.
       const stated = t.supply ?? replySupply(t.reply);
-      if (e.concept && stated) {
-        const scopes = supplyNeed.get(e.concept) ?? new Map();
-        supplyNeed.set(e.concept, scopes.set(m, (scopes.get(m) ?? new Set()).add(Number(stated.minVotes ?? DEFAULT_MIN_VOTES))));
+      if (ck && stated) {
+        const scopes = supplyNeed.get(ck) ?? new Map();
+        supplyNeed.set(ck, scopes.set(m, (scopes.get(m) ?? new Set()).add(Number(stated.minVotes ?? DEFAULT_MIN_VOTES))));
       }
     });
   }
   for (const [key, scopes] of need) {
-    const body = readTruth(key);
+    const { concept, window } = windows.get(key);
+    const body = withinYears(readTruth(concept), window);
     const members = sql(db, `with c as (${body}) select "Id" from c where "Id" in (${inShown})`).map((r) => r[0]);
     const supply = {};
     for (const scope of scopes) {
@@ -480,6 +524,36 @@ function materialise(db, accountId, recording, scenarios) {
   }
 
   return { eligible: [...eligible], media, artifact: { id: artifact[0], version: artifact[1] ? Number(artifact[1]) : null }, forYouBar: bar === null ? null : Number(bar), truth, server, named };
+}
+
+// Where a fresh materialisation disagrees with the facts a recording froze: the eligibility of what it
+// showed, and every truth set both hold (members and supply). Empty when the database is in the state
+// the recording ran on, which is what makes adding a missing truth set from it sound.
+export function rematerialiseDrift(old, fresh) {
+  const drift = [];
+  const canon = (x) => JSON.stringify(x, (_, v) => (Array.isArray(v) && v.every((e) => typeof e === "string") ? [...v].sort() : v));
+  if (canon(old.eligible ?? []) !== canon(fresh.eligible ?? [])) drift.push("eligibility of the shown titles differs");
+  if ((old.artifact?.id ?? null) !== (fresh.artifact?.id ?? null)) drift.push(`active artifact ${fresh.artifact?.id ?? "none"}, recorded ${old.artifact?.id ?? "none"}`);
+  // Every field the recording froze must recompute to the same value; a field a newer runner adds (e.g.
+  // `clearing` beside an older recording's `aboveBar`) is not drift.
+  const differ = (o, f, path) => (o !== null && typeof o === "object" && !Array.isArray(o) && f !== null && typeof f === "object" && !Array.isArray(f)
+    ? Object.keys(o).flatMap((key) => differ(o[key], f[key], `${path}.${key}`))
+    : canon(o) === canon(f) ? [] : [`${path} ${canon(f)}, recorded ${canon(o)}`.slice(0, 160)]);
+  for (const k of Object.keys(fresh.truth ?? {})) {
+    if (!(k in (old.truth ?? {}))) continue;
+    drift.push(...differ(old.truth[k], fresh.truth[k], `truth '${k}'`));
+  }
+  return drift;
+}
+
+// A concept's truth query bounded to a turn's year window: the title's year (Year, else ReleasedAt, else
+// FirstAiredAt) inside the inclusive window. A title with no date passes, as the API's own year window
+// lets it (the eligibility truth's MinYear/MaxYear rule reads the same way). No window: the query as is.
+export function withinYears(conceptSql, window) {
+  if (!window || (window.from === null && window.to === null)) return conceptSql;
+  const year = `coalesce(t."Year", extract(year FROM t."ReleasedAt" AT TIME ZONE 'UTC')::int, extract(year FROM t."FirstAiredAt" AT TIME ZONE 'UTC')::int)`;
+  const bounds = [window.from !== null ? `${year} >= ${Number(window.from)}` : null, window.to !== null ? `${year} <= ${Number(window.to)}` : null].filter(Boolean).join(" AND ");
+  return `SELECT w."Id" FROM (${stripSql(conceptSql)}\n) w JOIN "Titles" t ON t."Id" = w."Id"\n WHERE ${year} IS NULL OR (${bounds})`;
 }
 
 // A query file as a view body: comment lines and a trailing semicolon dropped.
@@ -703,6 +777,32 @@ if (mode === "replay") {
   process.exit(metrics.summary.gatesFailed > 0 && args.strict ? 1 : 0);
 }
 
+if (mode === "rematerialise") {
+  // A recording whose scenarios now need a truth it never froze (a year window added to an expectation
+  // after it ran) gets ONLY those truth sets added, from the eval database it ran on. Every fact it
+  // already holds stays as recorded; the database must still be in the recording's state, so every truth
+  // set both hold is recomputed and compared first, and any difference refuses the whole write.
+  const file = args._[0] ?? die("rematerialise needs a recording.json");
+  const db = args.db ?? die("--db is required (the eval database the recording ran on, or a clone of its snapshot)");
+  guardTarget(db);
+  const recording = JSON.parse(readFileSync(file, "utf8"));
+  const scenarios = loadScenarios(recording.scenarioDirs.map((d) => resolve(repo, d)));
+  const fresh = materialise(db, recording.accountId, recording, scenarios);
+  const old = recording.facts ?? die("the recording has no facts to extend");
+  const drift = rematerialiseDrift(old, fresh);
+  if (drift.length) die(`refusing: ${db} is not in this recording's state — ${drift.slice(0, 8).join("; ")}`);
+  const added = Object.keys(fresh.truth).filter((k) => !(k in old.truth));
+  for (const k of added) old.truth[k] = fresh.truth[k];
+  if (added.length) (recording.rematerialised ??= []).push({ at: new Date().toISOString(), db, gitSha: gitSha(), added });
+  const outDir = args.out ?? dirname(file);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "recording.json"), JSON.stringify(recording));
+  const metrics = writeOutputs(outDir, recording);
+  console.error(`askreel: added ${added.length} truth set(s)${added.length ? ` (${added.join(", ")})` : ""}; wrote ${outDir}`);
+  console.log(JSON.stringify(metrics.summary, null, 1));
+  process.exit(0);
+}
+
 if (mode === "live") {
   const api = args.api ?? die("--api is required");
   const db = args.db ?? die("--db is required (the eval database the API runs on)");
@@ -762,9 +862,8 @@ if (mode === "live") {
     // other recorded scenario — including the pipeline's own failures — is kept as it was.
     for (const line of readFileSync(partialFile, "utf8").split("\n").filter(Boolean)) {
       const r = JSON.parse(line);
-      // A scenario stopped on an engine mismatch is not salvage: resuming re-asks it under this run's guard.
-      if (r.engineMismatch || r.turns.some((t) => (t.error ?? "").startsWith("transport:"))) resumed.delete(r.id);
-      else resumed.set(r.id, r);
+      if (salvageable(r)) resumed.set(r.id, r);
+      else resumed.delete(r.id);
     }
     writeFileSync(partialFile, [...resumed.values()].map((r) => JSON.stringify(r) + "\n").join(""));
     console.error(`askreel: resuming — ${resumed.size} scenarios already recorded`);
@@ -773,9 +872,12 @@ if (mode === "live") {
   // The first turn another engine answers stops the run: no further scenario starts, so no more paid
   // turns go on evidence that cannot count. Recorded scenarios from a resume are held to the same check.
   let mismatch = [...resumed.values()].flatMap((r) => r.turns.map((t) => guard(t)).filter((v) => !v.ok).map((v) => `${r.id}: ${v.why}`))[0] ?? null;
+  // The first turn the Ask limiter refuses stops the run the same way, and no recording is written.
+  let limited = null;
   const results = await pool(scenarios, concurrency, async (s) => {
-    if (mismatch && !resumed.has(s.id)) return null;
+    if ((mismatch || limited) && !resumed.has(s.id)) return null;
     const r = resumed.get(s.id) ?? await runScenario(api, getSession, renew, s, engine, guard);
+    if (r.limiterRefused && !limited) { limited = r.limiterRefused; console.error(`askreel: STOPPING — the API's Ask limiter refused ${limited}`); }
     if (r.engineMismatch && !mismatch) { mismatch = r.engineMismatch; console.error(`askreel: STOPPING — ${mismatch}`); }
     if (!resumed.has(s.id)) appendFileSync(partialFile, JSON.stringify(r) + "\n");
     done++;
@@ -783,6 +885,12 @@ if (mode === "live") {
     return r;
   });
   const finished = new Date();
+  if (limited) {
+    slots?.release();
+    die(`the API's per-account Ask limiter refused ${limited}: that turn never reached the pipeline, so this run is not scored. `
+      + `Start the slot with scripts/eval/run-api.sh (every ASK_TURNS_* raised; --dry-run lists them), or the compose eval stack, `
+      + `or lower --concurrency to the slot's ASK_TURNS_CONCURRENT; then --resume (refused scenarios are re-asked).`);
+  }
   // The ledger recorder flushes on a ~15 s window; wait it out so the delta is whole.
   await new Promise((r) => setTimeout(r, 20000));
   const after = ledger(db, session.accountId, day);
@@ -818,4 +926,4 @@ if (mode === "live") {
   process.exit(0);
 }
 
-if (isMain) die("usage: askreel.mjs live|replay|check|compare …");
+if (isMain) die("usage: askreel.mjs live|replay|rematerialise|check|compare …");

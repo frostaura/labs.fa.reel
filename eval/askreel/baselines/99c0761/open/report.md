@@ -4,13 +4,14 @@
 - 120 scenarios, 167 turns, concurrency 4, 1632 s wall, $0.3383 from the ledger
 - Latency gates do NOT apply (concurrency > 2) — latency below is reported, not gated
 - Model key: unrecorded · scenario fingerprint `cab2a605e71bc860`
+- **2 turn(s) have no materialised concept truth** (no-conflict-control#1: heist@2016-2026; refine-recent#2: kidnapping@2021-2026): no concept check scored them; re-materialise with `askreel.mjs rematerialise <recording.json> --db <eval db>`
 - Started 2026-10-24T18:08:54.347Z, finished 2026-10-24T18:36:06.119Z
 
 ## Gates
 
 | Metric | Value | n | Gate | Status |
 |---|---|---|---|---|
-| Constraint precision@8 (facet scenarios) | 0.467 | 103 | >= 0.9 | FAIL |
+| Constraint precision@8 (facet scenarios) | 0.470 | 101 | >= 0.9 | FAIL |
 | Honest-empty compliance | 0 | 17 | >= 1 | FAIL |
 | Missed supply (no pick while eligible titles clear the bar) | 0 | 167 | <= 0 | pass |
 | Supply counts equal the SQL truth (none-found replies) | — | 0 | >= 1 | no data |
@@ -35,7 +36,7 @@
 
 | Metric | Value | n |
 |---|---|---|
-| constraintPrecisionAt8 | 0.467 | 103 |
+| constraintPrecisionAt8 | 0.470 | 101 |
 | negationPrecisionAt8 | 0.942 | 15 |
 | honestEmptyCompliance | 0 | 17 |
 | referenceAccuracy | 0 | 15 |
@@ -462,8 +463,8 @@
   - grounding: stub why on Zoo
 
 ### no-conflict-control (conflict, facet)
-- T1 “tense heist movies from the last ten years” — 24 picks, precision@8 0.63, supply 41 eligible of 544
-  - off-topic in first 8: All the Devils Are Here; Blowback; Sharper
+- T1 “tense heist movies from the last ten years” — 24 picks
+  - concept truth `heist@2016-2026` was never materialised for this recording: no concept check scored
   - fallback: stub reply
   - reply echoes the user's message
 
@@ -725,9 +726,9 @@
   - off-topic in first 8: Abducted: The Mary Stauffer Story; Whisper; Ransom; Daddy's Little Girl
   - fallback: stub reply
   - reply echoes the user's message
-- T2 “only ones from the last five years” — 14 picks, precision@8 0, supply 62 eligible of 535
+- T2 “only ones from the last five years” — 14 picks
   - wrong media: I Know What You Did Last Summer; The Survivors; Amazing Stories; The One; Missing You; Apples Never Fall; We Were Liars; The Last Thing He Told Me
-  - off-topic in first 8: All the Devils Are Here; The Last Rodeo; I Know What You Did Last Summer; Moments: Six; Last and First Men; The Survivors; Amazing Stories; Red Roses Never Die
+  - concept truth `kidnapping@2021-2026` was never materialised for this recording: no concept check scored
   - fallback: stub reply
   - reply echoes the user's message
 

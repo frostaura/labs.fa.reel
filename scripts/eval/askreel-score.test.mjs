@@ -10,8 +10,8 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN, engineOf, renderReport } from "./askreel-score.mjs";
-import { compactTurn, streamEngine, askUrl, engineGuard, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES } from "./askreel.mjs";
+import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN, engineOf, renderReport, yearWindow, conceptKey } from "./askreel-score.mjs";
+import { compactTurn, streamEngine, askUrl, engineGuard, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES, withinYears, rematerialiseDrift, limiterRefusal, validateScenarios, runScenario, salvageable } from "./askreel.mjs";
 import { envKeyHash, classifyKey, modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -868,4 +868,212 @@ test("cli: a live run names its engine, and replay exits 1 on a mislabelled reco
       if (code) assert.match(r.err, /INVALID|engine/);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── HREV3-EVAL-A / HREV3-RET-05: a request's own year window bounds its truth ───────────────────────────
+test("yearWindow: `last N` counts back from the run's UTC year through it; from/to are absolute", () => {
+  assert.deepEqual(yearWindow({ last: 10 }, "2026-10-28T07:55:49.104Z"), { from: 2016, to: 2026 });
+  assert.deepEqual(yearWindow({ last: 10 }, "2027-01-01T00:00:00.000Z"), { from: 2017, to: 2027 }, "the window moves with the clock the API reads the request by");
+  assert.deepEqual(yearWindow({ last: 5 }, "2026-12-31T23:59:59.000Z"), { from: 2021, to: 2026 });
+  assert.deepEqual(yearWindow({ from: 2010, to: 2019 }, "2026-10-28T00:00:00Z"), { from: 2010, to: 2019 });
+  assert.deepEqual(yearWindow({ from: 2000 }, null), { from: 2000, to: null });
+  assert.equal(yearWindow(undefined, "2026-10-28T00:00:00Z"), null);
+  assert.equal(conceptKey({ concept: "heist", years: { last: 10 } }, "2026-10-28T00:00:00Z"), "heist@2016-2026");
+  assert.equal(conceptKey({ concept: "heist", years: { from: 2000 } }, "2026-10-28T00:00:00Z"), "heist@2000-");
+  assert.equal(conceptKey({ concept: "heist" }, "2026-10-28T00:00:00Z"), "heist", "no window: the concept itself, so every older recording scores as before");
+  assert.equal(conceptKey({ years: { last: 10 } }, "2026-10-28T00:00:00Z"), null);
+});
+
+// The h3 no-conflict-control turn, reduced: the all-years truth says 13 clear the bar and the reply's
+// counts are wrong; inside 2016–2026 the reply's counts are exactly the truth's.
+const heistSupply = (floored) => ({ Movie: { matching: floored.matching + 50, eligible: floored.eligible, scored: floored.eligible, aboveBar: 1, clearing: 1, floored: { 50: floored } } });
+const allYears = { minVotes: 50, matching: 487, lowVoteMatches: 56, alreadySeen: 124, savedOrDismissed: 6, excludedByConditions: 324, eligible: 33, unscored: 6, belowFloor: 16, clearingFloor: 11,
+  knockouts: [{ kind: "MinCrowdRating", value: "6.0", wouldUnlock: 61 }, { kind: "MinYear", value: "2000", wouldUnlock: 36 }] };
+const lastTen = { minVotes: 50, matching: 174, lowVoteMatches: 26, alreadySeen: 51, savedOrDismissed: 1, excludedByConditions: 106, eligible: 16, unscored: 0, belowFloor: 12, clearingFloor: 4,
+  knockouts: [{ kind: "MinCrowdRating", value: "6.0", wouldUnlock: 35 }] };
+const reported = { matchingInCatalogue: 174, lowVoteMatches: 26, alreadySeen: 51, savedOrDismissed: 1, excludedByConditions: 106, eligible: 16, unscored: 0, belowFloor: 12, clearingFloor: 4,
+  minVotes: 50, knockoutsMeasured: true, knockouts: [{ kind: "MinCrowdRating", value: "6.0", wouldUnlock: 35 }] };
+const heistTurn = (extra = {}) => turn("tense heist movies from the last ten years", [card(A, "Alpha")], { startedAt: "2026-10-28T07:55:49.104Z", supply: reported, reply: "Here you go.", ...extra });
+const heistFacts = () => facts({ truth: {
+  heist: { members: [A, B], supply: heistSupply(allYears) },
+  "heist@2016-2026": { members: [B], supply: heistSupply(lastTen) },
+} });
+const runAt = { startedAt: "2026-10-28T07:55:49.104Z" };
+
+test("a turn whose words set a year window is scored against the windowed truth, never every year's", () => {
+  const windowed = { expect: { concept: "heist", media: "Movie", years: { last: 10 } } };
+  const t = heistTurn({ cards: [card(A, "Alpha")] });
+  const r = evaluateTurn(windowed, t, 0, [t], heistFacts(), runAt);
+  assert.equal(r.precision, 0, "Alpha is a heist, but not one from the last ten years");
+  assert.deepEqual(r.supplyMismatches, [], "the reply's 174/51/16/4 is the windowed truth's, with no MinYear relaxation expected");
+  assert.equal(r.checks.supplyCounts, true);
+  // Vary the one field: without the window the same turn is held to the all-years truth.
+  const r2 = evaluateTurn({ expect: { concept: "heist", media: "Movie" } }, t, 0, [t], heistFacts(), runAt);
+  assert.equal(r2.precision, 1);
+  assert.equal(r2.checks.supplyCounts, false);
+  assert.ok(r2.supplyMismatches.includes("matching 174 vs truth 487"));
+  assert.ok(r2.supplyMismatches.includes("knockout MinYear absent vs truth 36"));
+});
+
+test("missed supply is counted inside the request's window: none clearing there, none missed", () => {
+  const f = heistFacts();
+  f.truth.heist.supply.Movie.clearing = 13;
+  f.truth["heist@2016-2026"].supply.Movie.clearing = 0;
+  const empty = heistTurn({ cards: [], mode: "NoneFound" });
+  const windowed = evaluateTurn({ expect: { concept: "heist", media: "Movie", years: { last: 10 } } }, empty, 0, [empty], f, runAt);
+  assert.equal(windowed.missedSupply, undefined);
+  assert.equal(windowed.checks.honestEmpty, true);
+  const unwindowed = evaluateTurn({ expect: { concept: "heist", media: "Movie" } }, empty, 0, [empty], f, runAt);
+  assert.equal(unwindowed.missedSupply, true, "the all-years truth's 13 is what made the h3 turn read as missed supply");
+});
+
+test("a windowed truth the recording never froze is reported missing, never scored as off-topic or missed supply", () => {
+  const f = heistFacts();
+  delete f.truth["heist@2016-2026"];
+  const def = { expect: { concept: "heist", media: "Movie", years: { last: 10 } } };
+  const empty = heistTurn({ cards: [], mode: "NoneFound" });
+  const r = evaluateTurn(def, empty, 0, [empty], f, runAt);
+  assert.equal(r.truthMissing, "heist@2016-2026");
+  assert.equal(r.missedSupply, undefined);
+  assert.equal(r.precision, undefined);
+  assert.equal(r.checks.supplyCounts, undefined);
+  const withPicks = heistTurn();
+  assert.equal(evaluateTurn(def, withPicks, 0, [withPicks], f, runAt).precision, undefined);
+  const recording = { label: "x", concurrency: 1, ledger: [], startedAt: runAt.startedAt, facts: f, scenarios: [{ id: "s", categories: ["facet"], turns: [empty] }] };
+  const m = score(recording, [{ id: "s", categories: ["facet"], turns: [{ query: empty.query, expect: def.expect }] }], prices, gates);
+  assert.deepEqual(m.summary.truthMissing, ["s#1: heist@2016-2026"]);
+  assert.equal(m.metrics.missedSupply.value, 0);
+  assert.match(renderReport(recording, m), /concept truth `heist@2016-2026` was never materialised/);
+  // The window resolves from the recording's own start, not from today's clock.
+  const later = { ...recording, startedAt: "2031-05-01T00:00:00.000Z" };
+  assert.deepEqual(score(later, [{ id: "s", categories: ["facet"], turns: [{ query: empty.query, expect: def.expect }] }], prices, gates).summary.truthMissing, ["s#1: heist@2021-2031"]);
+});
+
+test("withinYears bounds a truth query by the title's year and lets an undated title through", () => {
+  const body = "-- comment line\nSELECT t.\"Id\"\n  FROM \"Titles\" t\n WHERE true -- trailing comment\n";
+  const sql = withinYears(body, { from: 2016, to: 2026 });
+  assert.ok(!sql.includes("-- comment line"));
+  assert.match(sql, /\)\s*IS NULL OR \(coalesce\(t\."Year", extract\(year FROM t\."ReleasedAt" AT TIME ZONE 'UTC'\)::int, extract\(year FROM t\."FirstAiredAt" AT TIME ZONE 'UTC'\)::int\) >= 2016 AND coalesce\(.*\) <= 2026\)$/s);
+  assert.match(sql, /trailing comment\n\) w JOIN/, "a trailing line comment in the body cannot swallow the closing parenthesis");
+  assert.match(withinYears(body, { from: 2000, to: null }), /IS NULL OR \(coalesce\(.*\) >= 2000\)$/s);
+  assert.equal(withinYears(body, null), body);
+  assert.equal(withinYears(body, { from: null, to: null }), body);
+});
+
+test("scenario validation: years is {last: N} or {from, to}, and only on a turn with a concept", () => {
+  const sc = (expect) => [{ id: "s", file: "x.json", categories: ["facet"], turns: [{ query: "q", expect }] }];
+  const truthDir = join(repo, "eval", "askreel", "truth");
+  assert.deepEqual(validateScenarios(sc({ concept: "heist", years: { last: 10 } }), [truthDir]), []);
+  assert.deepEqual(validateScenarios(sc({ concept: "heist", years: { from: 2010, to: 2019 } }), [truthDir]), []);
+  assert.deepEqual(validateScenarios(sc({ concept: "heist", years: { to: 1999 } }), [truthDir]), []);
+  for (const years of [{ last: 0 }, { last: 2.5 }, { last: 10, from: 2000 }, { from: 2020, to: 2010 }, { from: "2010" }, {}, { since: 2010 }, null]) {
+    assert.equal(validateScenarios(sc({ concept: "heist", years }), [truthDir]).length, 1, JSON.stringify(years));
+  }
+  assert.equal(validateScenarios(sc({ years: { last: 10 } }), [truthDir]).length, 1, "a window bounds a concept's truth; with no concept it bounds nothing");
+});
+
+test("the open set holds every 'last N years' request to a window", () => {
+  const open = JSON.parse(readFileSync(join(repo, "eval", "askreel", "scenarios", "open.json"), "utf8")).scenarios;
+  const words = { ten: 10, five: 5, two: 2, three: 3, twenty: 20 };
+  for (const s of open) s.turns.forEach((t, i) => {
+    const m = /\blast (\w+) years\b/i.exec(t.query);
+    if (!m || !t.expect.concept) return;
+    assert.deepEqual(t.expect.years, { last: words[m[1].toLowerCase()] ?? Number(m[1]) }, `${s.id}#${i + 1} asks for the last ${m[1]} years`);
+  });
+});
+
+// ── HREV3-RET-05: a reference with no referent is answered by asking, so Clarify is the expectation ──────
+test("a reference to a card no earlier turn showed holds the turn to Clarify, not to the scripted act", () => {
+  const def = { expect: { act: "Refine", references: [{ turn: 1, rank: 2 }] } };
+  const empty = turn("ninja movies", [], { act: "NewRequest", mode: "NoneFound" });
+  const clarify = turn("more like the second one you showed me first time round", [], { act: "None", mode: "Clarify" });
+  const r = evaluateTurn(def, clarify, 1, [empty, clarify], facts(), { actObservable: true });
+  assert.equal(r.referenceUnresolvable, true);
+  assert.equal(r.checks.mode, true);
+  assert.equal(r.checks.act, undefined, "Refine assumed a referent the conversation never had");
+  // Vary the answer: picks for a referent that does not exist fail.
+  const invented = turn("more like the second one you showed me first time round", [card(C, "Charlie")], { act: "Refine" });
+  assert.equal(evaluateTurn(def, invented, 1, [empty, invented], facts(), { actObservable: true }).checks.mode, false);
+  // Vary the premise: one card shown is still no second one; two shown makes the reference real again.
+  const one = turn("ninja movies", [card(A, "Alpha")], { act: "NewRequest" });
+  assert.equal(evaluateTurn(def, clarify, 1, [one, clarify], facts(), { actObservable: true }).checks.mode, true);
+  const two = turn("ninja movies", [card(A, "Alpha"), card(B, "Bravo")], { act: "NewRequest" });
+  const real = evaluateTurn(def, clarify, 1, [two, clarify], facts(), { actObservable: true });
+  assert.equal(real.checks.act, false);
+  assert.equal(real.checks.mode, undefined);
+  assert.equal(real.referenceUnresolvable, undefined);
+  // A reference turn that failed is a failure, whatever the premise.
+  const crashed = { ...clarify, failed: true, status: 500, act: null, mode: null };
+  const f = evaluateTurn(def, crashed, 1, [empty, crashed], facts(), { actObservable: true });
+  assert.equal(f.checks.act, false);
+  assert.equal(f.checks.reference, false);
+});
+
+// ── rematerialise: only a database still in the recording's state may add a missing truth ───────────────
+test("rematerialiseDrift is silent on the recording's own state and names every field that moved", () => {
+  const old = { eligible: [A, B], artifact: { id: "art", version: 1 }, truth: { ninja: { members: [A], supply: { Movie: { matching: 70, eligible: 0, aboveBar: 0 } } } } };
+  const fresh = { eligible: [B, A], artifact: { id: "art", version: 1 }, truth: {
+    ninja: { members: [A], supply: { Movie: { matching: 70, eligible: 0, aboveBar: 0, clearing: 0 } } },
+    "heist@2016-2026": { members: [B], supply: {} },
+  } };
+  assert.deepEqual(rematerialiseDrift(old, fresh), [], "order is not drift, a field a newer runner adds is not drift, and a new key is what is being added");
+  const moved = structuredClone(fresh);
+  moved.truth.ninja.supply.Movie.matching = 71;
+  moved.eligible = [A];
+  moved.artifact = { id: "other", version: 2 };
+  const drift = rematerialiseDrift(old, moved);
+  assert.equal(drift.length, 3);
+  assert.ok(drift.includes("eligibility of the shown titles differs"));
+  assert.ok(drift.some((d) => d.startsWith("active artifact other")));
+  assert.ok(drift.includes("truth 'ninja'.supply.Movie.matching 71, recorded 70"));
+});
+
+// ── H3-PLAT-01: a turn the Ask limiter refused is the harness's failure, never the model's ───────────────
+test("limiterRefusal names the limiter's 409 and 429s, and nothing else", () => {
+  const refused = (status, body) => ({ status, error: JSON.stringify(body) });
+  assert.equal(limiterRefusal(refused(409, { error: "Another question is still being answered — one moment.", code: "turn_in_progress", retryAfterSeconds: 15 })), "HTTP 409 turn_in_progress (retry after 15 s)");
+  for (const code of ["ask_rate_minute", "ask_rate_hour", "ask_rate_day"]) assert.match(limiterRefusal(refused(429, { error: "x", code, retryAfterSeconds: 60 })), new RegExp(`429 ${code}`));
+  // The conversation's own 409 (a turn still in flight on that thread) carries no retry: an ordinary refused turn.
+  assert.equal(limiterRefusal(refused(409, { error: "There's already a question in flight on this thread — one moment.", code: "turn_in_progress" })), null);
+  assert.equal(limiterRefusal(refused(409, { error: "x", code: "client_turn_id_reused", retryAfterSeconds: 1 })), null);
+  assert.equal(limiterRefusal(refused(429, { error: "x", code: "rerank_budget", retryAfterSeconds: 1 })), null);
+  assert.equal(limiterRefusal(refused(500, { code: "turn_in_progress", retryAfterSeconds: 1 })), null);
+  assert.equal(limiterRefusal({ status: 429, error: "<html>Too Many Requests</html>" }), null);
+  assert.equal(limiterRefusal({ status: 200, error: null }), null);
+});
+
+test("a scenario stops at the limiter's refusal, and --resume never keeps it as recorded", async () => {
+  // A fake API whose Ask limiter refuses the second turn of a conversation (the run's concurrency over
+  // the slot's ASK_TURNS_CONCURRENT): the first turn streams a v2 none-found, the second is refused.
+  const { createServer } = await import("node:http");
+  let asks = 0;
+  const server = createServer((req, res) => {
+    asks++;
+    if (asks === 1) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end([
+        `event: conversation\ndata: ${JSON.stringify({ id: "c1", turnId: "t1", sequence: 1, engine: "v2" })}\n\n`,
+        `event: plan\ndata: ${JSON.stringify({ act: "NewRequest", conversationId: "c1", turnId: "t1" })}\n\n`,
+        `event: none-found\ndata: ${JSON.stringify({ text: "None left." })}\n\n`,
+      ].join(""));
+      return;
+    }
+    res.writeHead(409, { "Content-Type": "application/json", "Retry-After": "15" });
+    res.end(JSON.stringify({ error: "Another question is still being answered — one moment.", code: "turn_in_progress", retryAfterSeconds: 15 }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const api = `http://127.0.0.1:${server.address().port}`;
+    const session = async () => ({ cookie: "reel_access=x", at: Date.now() });
+    const s = { id: "ninja-critique", set: "open", categories: ["facet"], turns: [{ query: "ninja movies" }, { query: "none of those" }, { query: "more like the second one" }] };
+    const r = await runScenario(api, session, session, s, "v2", engineGuard("v2"));
+    assert.equal(r.turns.length, 2, "no turn is sent after the refusal");
+    assert.equal(r.limiterRefused, "ninja-critique#2: HTTP 409 turn_in_progress (retry after 15 s)");
+    assert.equal(r.engineMismatch, undefined, "a refused turn names no engine, and is not an engine mismatch");
+    assert.equal(salvageable(r), false);
+    // Vary one field: the same scenario without the limiter's mark (an older partial.jsonl) is still re-asked.
+    assert.equal(salvageable({ ...r, limiterRefused: undefined }), false);
+    assert.equal(salvageable({ ...r, limiterRefused: undefined, turns: [r.turns[0]] }), true);
+    assert.equal(salvageable({ ...r, limiterRefused: undefined, turns: [r.turns[0], { ...r.turns[1], status: 500, error: "{\"code\":\"internal\"}" }] }), true, "the pipeline's own failure is kept");
+  } finally { server.close(); }
 });

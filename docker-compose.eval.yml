@@ -115,13 +115,17 @@ services:
       ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
       ASK_ENGINE: ${ASK_ENGINE:-v1}
       # WS-8 inbound limits, raised on THIS stack only (section 7 lets the eval account have more; FD-8's
-      # defaults would block a golden run). Trusted proxies and the key-ring certificate as on the dev stack.
-      ASK_TURNS_CONCURRENT: ${ASK_TURNS_CONCURRENT:-2}
-      ASK_TURNS_PER_MINUTE: ${ASK_TURNS_PER_MINUTE:-120}
-      ASK_TURNS_PER_HOUR: ${ASK_TURNS_PER_HOUR:-2000}
-      ASK_TURNS_PER_DAY: ${ASK_TURNS_PER_DAY:-5000}
-      ASK_TURNS_PER_DAY_FOUNDER: ${ASK_TURNS_PER_DAY_FOUNDER:-5000}
-      ASK_TURNS_PER_DAY_FREE: ${ASK_TURNS_PER_DAY_FREE:-5000}
+      # defaults would block a golden run). Each is set by its EVAL_* twin, never by a live ASK_TURNS_* the
+      # caller's shell or env file carries, and equals scripts/eval/run-api.sh's slot allowances.
+      # Trusted proxies and the key-ring certificate as on the dev stack.
+      # Concurrent 4: askreel.mjs runs up to 4 scenarios at once on one dev/link session (§4.12), and a turn
+      # over this limit is answered 409 turn_in_progress, not by the pipeline (H3-PLAT-01).
+      ASK_TURNS_CONCURRENT: ${EVAL_ASK_TURNS_CONCURRENT:-4}
+      ASK_TURNS_PER_MINUTE: ${EVAL_ASK_TURNS_PER_MINUTE:-120}
+      ASK_TURNS_PER_HOUR: ${EVAL_ASK_TURNS_PER_HOUR:-5000}
+      ASK_TURNS_PER_DAY: ${EVAL_ASK_TURNS_PER_DAY:-5000}
+      ASK_TURNS_PER_DAY_FOUNDER: ${EVAL_ASK_TURNS_PER_DAY_FOUNDER:-5000}
+      ASK_TURNS_PER_DAY_FREE: ${EVAL_ASK_TURNS_PER_DAY_FREE:-5000}
       TRUSTED_PROXY_NETWORKS: "${TRUSTED_PROXY_NETWORKS:-127.0.0.0/8,::1/128,172.16.0.0/12}"
       DATAPROTECTION_CERT_PATH: ${DATAPROTECTION_CERT_PATH:-}
       DATAPROTECTION_CERT_PASSWORD: ${DATAPROTECTION_CERT_PASSWORD:-}

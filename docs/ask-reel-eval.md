@@ -13,7 +13,7 @@ integrator, which no build lane passes.
 |---|---|---|
 | Postgres | `fareel-eval-postgres`, `127.0.0.1:5434`, volume `fareel_eval_pgdata` | A separate container and volume; adopted (not recreated) by `docker-compose.eval.yml` behind the `db` profile |
 | Snapshot | `reel_eval_template` → `reel_eval` / lane slots | `scripts/eval/snapshot.sh` blanks every Trakt token (`''`: the app reads a non-empty token as a live connection, which armed the ratings back-fill on every clone), truncates the outbox, deletes pending jobs, push subscriptions, `AppSecrets` (the VAPID private key), `DataProtectionKeys` and `RefreshSessions`, archives the ledger of any database it is about to drop, and stamps the snapshot id (`COMMENT ON DATABASE`) |
-| API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances; refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), exports every credential the env file leaves unset as empty, and refuses an env file with no `JWT_SECRET`. It boots the copy the way the merged code needs: from the dll's own folder (the content root, so `appsettings.json` loads), with `Database__AutoMigrateOnStartup=true` and no dump handshake, `Background__DataRepairs` and `Background__TrustPurge` off, Trakt tokens empty and `TRAKT_CLIENT_ID=eval-no-trakt`; it never runs on a `*_template` database (`--dry-run` lists the names the API would get, and the values of the switches it sets) |
+| API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances (every Ask turn limit — 4 at once, 120 a minute, 5,000 an hour and a day on every tier — the same on both, set only by the `EVAL_ASK_TURNS_*` twins, never by a live `ASK_TURNS_*` in the env file or the caller's shell); refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), exports every credential the env file leaves unset as empty, and refuses an env file with no `JWT_SECRET`. It boots the copy the way the merged code needs: from the dll's own folder (the content root, so `appsettings.json` loads), with `Database__AutoMigrateOnStartup=true` and no dump handshake, `Background__DataRepairs` and `Background__TrustPurge` off, Trakt tokens empty and `TRAKT_CLIENT_ID=eval-no-trakt`; it never runs on a `*_template` database (`--dry-run` lists the names the API would get, and the values of the switches it sets) |
 | Model key | `EVAL_OPENROUTER_API_KEY` (its own $10/day cap) | **Not supplied yet.** The shared lane key in `~/src/fa.reel-ws/lane.env` **is the founder's own OpenRouter key** (SHA-256 match with the live clone's `.env`, compared without printing either). Every paid call WS-7 has made — the three 99c0761 baselines, the surface baseline and the aborted attempts — went on it. `run-api.sh`, `askreel.mjs live` and `surfaces.mjs` now refuse that key unless the founder's sign-off is passed (`EVAL_FOUNDER_KEY_SIGNOFF` / `--founder-key-signoff`) and recorded in the recording |
 
 **Trakt isolation, three layers.** (1) Inside the eval container Trakt's hosts resolve to `0.0.0.0`; for a
@@ -58,12 +58,18 @@ node scripts/eval/askreel.mjs live ... --concurrency 2 --hold-build-slots --only
 #    (conversation.engine, done.engine), and the run stops at the first turn another engine — or no named
 #    engine — answered, writes the recording marked INVALID and exits 1 (HREV2-ASK-05). Only a pre-§4.13 build
 #    (99c0761), which names no engine and has no v2, takes --allow-unnamed-engine with --engine v1.
+#    A turn the API's per-account Ask limiter refuses (409 turn_in_progress or 429 ask_rate_*, each with
+#    retryAfterSeconds) never reached the pipeline: the run stops starting scenarios, writes NO recording and
+#    exits 2 naming the turn (H3-PLAT-01); fix the slot's limits (run-api.sh or the compose stack set them)
+#    and --resume, which re-asks every refused scenario.
 # 4. Gate against the baseline: exit 1 on any regression, exit 2 when the runs are incomparable.
 node scripts/eval/askreel.mjs compare .tmp/eval/<date>/<name>/metrics.json --baseline eval/askreel/baselines/99c0761/open/metrics.json
 
 # Replay (CI, 0 paid calls) and scenario validation.
 node --test 'scripts/eval/*.test.mjs'
 node scripts/eval/askreel.mjs replay <recording.json>
+node scripts/eval/askreel.mjs rematerialise <recording.json> --db <the db it ran on>   # adds only truth sets the
+#    scenarios now need and the recording never froze; refuses when any frozen fact recomputes differently there
 node scripts/eval/askreel.mjs check [--db reel_eval]          # --db also executes every truth query used
 node scripts/eval/askreel.mjs check --db reel_eval --api http://127.0.0.1:5180   # + the truth against the API's own eligibility (cost meter)
 
@@ -128,7 +134,17 @@ authored (`provenance` says so) until the eval key exists. It runs in the integr
 A turn's `expect` block may carry: `act`, `mode` (`Picks`, `Answer`, `Clarify`, `NoneFound`, `Any`),
 `concept` (a truth key), `mustNot` (truth keys), `media` (`Movie`/`Show`, from the user's words),
 `conflict` (bool), `references` (`[{turn, rank}]`, resolved against the display order the run actually
-recorded), `rejectTurns` (critique) and `noRepeatTurns` (pagination).
+recorded), `rejectTurns` (critique), `noRepeatTurns` (pagination) and `years` — the year window the
+turn's own words set, `{ "last": N }` (the last N years through the run's UTC year: "from the last ten
+years" asked in 2026 is 2016–2026) or `{ "from", "to" }`. A turn with `years` is scored against its concept
+INSIDE that window (truth key `<concept>@<from>-<to>`), for precision, honest-empty, missed supply and the
+supply counts alike: the API counts a windowed request over the windowed population, and a standing rule
+the window subsumes ("released 2000 or later" under 2016+) knocks out nothing there. An undated title
+passes the window, as it passes the API's. Without `years` a "last ten years" request was held to every
+year's heists (487 matching, MinYear 2000 "unlocks 36"), so a correct reply read as wrong supply counts
+and missed supply (HREV3-EVAL-A, HREV3-RET-05). A recording made before a turn gained its window has no
+windowed truth: the turn is reported as unverified (`truthMissing`), never scored against an empty set,
+until `rematerialise` adds it from the database the recording ran on.
 
 ## SQL truth
 
@@ -179,7 +195,7 @@ is listed with its reason in `eval/askreel/gates.json` → `amendments`.
 |---|---|
 | Constraint precision@8 | Over turns with a concept and eligible supply > 0: share of the first 8 picks in the truth set and in no `mustNot` set; mean over turns. A failed or unrun turn scores 0 |
 | Honest-empty compliance | Over turns whose concept has **zero eligible supply**: the turn ran, reported `NoneFound` and shows zero picks (a near-miss tray is allowed). A 500, a timeout or a clarify is not honest |
-| Reference accuracy | The referenced card (by recorded display order) is what the turn resolved: v2 plan handles; v1 `debug.intent.referenceTitles`. A reference to a card an honest empty turn never showed is void; a reference turn that failed or never ran fails |
+| Reference accuracy | The referenced card (by recorded display order) is what the turn resolved: v2 plan handles; v1 `debug.intent.referenceTitles`. A reference to a card an honest empty turn never showed is void — and since it has no referent, the turn is then held to mode `Clarify` instead of its scripted act and mode (ninja-critique T3, HREV3-RET-05); a reference turn that failed or never ran fails |
 | Critique compliance | No title from the rejected turn(s) re-shown, and the turn is on topic (precision ≥ 0.75, or honest-empty when supply is zero) |
 | Act classification | Observed act equals expected. **No data for v1**, which emits no act (turn position is not behaviour); a failed v2 turn fails |
 | Conflict detection | The turn ran and its conflict flag equals the expectation (true for requests that collide with a standing exclusion, false for controls) |

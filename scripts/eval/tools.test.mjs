@@ -3,7 +3,7 @@
 //   node --test 'scripts/eval/*.test.mjs'
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -57,7 +57,9 @@ test("run-api.sh gives the API an empty environment: a key exported by the calle
     assert.ok(!names.some((n) => n.startsWith("SOME_OTHER_SECRET")), "nothing the env file and the script do not name is passed");
     assert.ok(names.includes("TMDB_READ_ACCESS_TOKEN") && names.includes("OPENROUTER_MODEL"));
     assert.ok(names.includes("Background__TokenRefresh=false") && names.includes("HTTPS_PROXY=http://127.0.0.1:9"));
-    assert.ok(names.includes("ASK_TURNS_PER_MINUTE=120"), "a back-to-back eval run is never refused by the live per-minute Ask limit");
+    for (const limit of ["ASK_TURNS_CONCURRENT=4", "ASK_TURNS_PER_MINUTE=120", "ASK_TURNS_PER_HOUR=5000", "ASK_TURNS_PER_DAY=5000", "ASK_TURNS_PER_DAY_FOUNDER=5000", "ASK_TURNS_PER_DAY_FREE=5000"]) {
+      assert.ok(names.includes(limit), `${limit}: an eval run is never refused by a live Ask turn limit (H3-PLAT-01)`);
+    }
     assert.equal(r.stdout.includes("sk-"), false, "dry-run prints names, never values");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -76,6 +78,37 @@ function dryRun(envText, { db = "reel_ws_test", withAppsettings = true } = {}) {
   return { ...r, dir, lines: r.stdout.trim().split("\n") };
 }
 const JWT = "JWT_SECRET=local-throwaway-secret-32-characters\n";
+
+// H3-PLAT-01: the env file's own (live-sized) Ask limits never reach an eval slot, an EVAL_* twin does, and
+// the slot gets exactly the compose eval stack's allowances.
+test("run-api.sh raises every Ask turn limit over the env file's, honours the EVAL_* twins, and matches the compose eval stack", () => {
+  const live = "ASK_TURNS_CONCURRENT=1\nASK_TURNS_PER_MINUTE=6\nASK_TURNS_PER_HOUR=20\nASK_TURNS_PER_DAY=100\nASK_TURNS_PER_DAY_FOUNDER=300\nASK_TURNS_PER_DAY_FREE=10\n";
+  const r = dryRun(`TMDB_READ_ACCESS_TOKEN=t\n${JWT}${live}`);
+  assert.equal(r.status, 0, r.stderr);
+  const limits = Object.fromEntries(r.lines.filter((l) => l.startsWith("ASK_TURNS_")).map((l) => l.split("=")));
+  const compose = Object.fromEntries([...readFileSync(join(here, "..", "..", "docker-compose.eval.yml"), "utf8")
+    .matchAll(/^\s+(ASK_TURNS_[A-Z_]+): \$\{EVAL_\1:-(\d+)\}$/gm)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(Object.keys(compose).sort(), ["ASK_TURNS_CONCURRENT", "ASK_TURNS_PER_DAY", "ASK_TURNS_PER_DAY_FOUNDER", "ASK_TURNS_PER_DAY_FREE", "ASK_TURNS_PER_HOUR", "ASK_TURNS_PER_MINUTE"],
+    "every limit AskTurnLimitOptions reads is set on the compose eval stack by its EVAL_* twin, never by the live name");
+  assert.deepEqual(limits, compose, "a run-api slot and the compose eval stack give the eval account the same allowances");
+  assert.ok(Number(limits.ASK_TURNS_CONCURRENT) >= 4, "askreel.mjs runs up to 4 scenarios at once on one session");
+  assert.ok(Number(limits.ASK_TURNS_PER_HOUR) >= 400 && Number(limits.ASK_TURNS_PER_DAY_FOUNDER) >= 400, "a ~200-turn golden run twice in one hour or day");
+  // An EVAL_* twin is the one way to set a slot's limit.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "ws7-runapi-")));
+  try {
+    mkdirSync(join(dir, "build"), { recursive: true });
+    writeFileSync(join(dir, "build", "Api.dll"), "");
+    writeFileSync(join(dir, "build", "appsettings.json"), "{}");
+    writeFileSync(join(dir, "founder.env"), "OPENROUTER_API_KEY=sk-founder\n");
+    writeFileSync(join(dir, "eval.env"), `${JWT}${live}`);
+    const twin = spawnSync("bash", [join(here, "run-api.sh"), "--dll", join(dir, "build", "Api.dll"), "--db", "reel_ws_test", "--port", "5999", "--env-file", join(dir, "eval.env"), "--dry-run"],
+      { env: { ...process.env, EVAL_FOUNDER_ENV: join(dir, "founder.env"), EVAL_ASK_TURNS_CONCURRENT: "2", ASK_TURNS_PER_HOUR: "7" }, encoding: "utf8" });
+    assert.equal(twin.status, 0, twin.stderr);
+    const out = twin.stdout.trim().split("\n");
+    assert.ok(out.includes("ASK_TURNS_CONCURRENT=2"));
+    assert.ok(out.includes("ASK_TURNS_PER_HOUR=5000"), "a live-named variable in the caller's shell never sets a slot's limit");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("run-api.sh refuses an env file with no JWT_SECRET, or a blank one, by name and before the API starts", () => {
   for (const text of ["TMDB_READ_ACCESS_TOKEN=t\n", "TMDB_READ_ACCESS_TOKEN=t\nJWT_SECRET=\n", "JWT_SECRET=\"   \"\n"]) {

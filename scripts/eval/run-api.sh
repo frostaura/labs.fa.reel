@@ -11,7 +11,8 @@
 #     proxy EXCEPT the model and TMDB hosts, so a Trakt call fails locally and never reaches Trakt
 #     (the ledger's Trakt row is the proof — see docs/ask-reel-eval.md);
 #   - the dev-link QA session resolves the existing account by slug, so it never touches Trakt tokens;
-#   - the eval account's Ask/rerank allowances are raised on THIS process only;
+#   - the eval account's Ask/rerank allowances are raised on THIS process only — every Ask turn limit
+#     (concurrent, minute, hour, day by tier) to the compose eval stack's, whatever the env file sets;
 #   - it never pays with the founder's own OpenRouter key (the env file's key is compared by SHA-256 with
 #     the live clone's, never printed) unless EVAL_FOUNDER_KEY_SIGNOFF="<who, when>" records his sign-off;
 #   - it never loads the founder's credentials: the API's DotEnv walks UP from the dll's folder to the
@@ -117,15 +118,24 @@ export NO_PROXY="openrouter.ai,api.themoviedb.org,image.tmdb.org,localhost,127.0
 # Eval-only allowances (never the live stack). The rerank family ceiling is the one an eval run exhausts.
 export LLM_RERANK_DAILY_CALLS="${EVAL_RERANK_DAILY_CALLS:-100000}"
 export LLM_RERANK_DAILY_TOKENS="${EVAL_RERANK_DAILY_TOKENS:-200000000}"
-# The per-account Ask turn limit per minute (6 on the live stack) refuses the 7th turn of a run that asks
-# back to back, so a golden or latency run on a slot was answered 429 ask_rate_minute from its 7th turn
-# (integrator round 3). Turns per hour stay whatever the env file sets.
+# The per-account Ask turn limits (AskTurnLimitOptions; FD-8's live defaults are 1 at a time, 6 a minute,
+# 20 an hour, 300 a day for the founder) refuse an eval run's own turns: one dev/link session runs up to 4
+# scenarios at once and a golden run is ~200 turns, so a slot on the live limits answered 409
+# turn_in_progress to every overlapping turn and 429 ask_rate_* inside the hour (integrator round 3,
+# H3-PLAT-01). The eval account gets the same allowances as the compose eval stack, on THIS process only,
+# whatever the env file sets (each overridable by its EVAL_* twin).
+export ASK_TURNS_CONCURRENT="${EVAL_ASK_TURNS_CONCURRENT:-4}"
 export ASK_TURNS_PER_MINUTE="${EVAL_ASK_TURNS_PER_MINUTE:-120}"
+export ASK_TURNS_PER_HOUR="${EVAL_ASK_TURNS_PER_HOUR:-5000}"
+export ASK_TURNS_PER_DAY="${EVAL_ASK_TURNS_PER_DAY:-5000}"
+export ASK_TURNS_PER_DAY_FOUNDER="${EVAL_ASK_TURNS_PER_DAY_FOUNDER:-5000}"
+export ASK_TURNS_PER_DAY_FREE="${EVAL_ASK_TURNS_PER_DAY_FREE:-5000}"
 
 # Exactly these variables reach the API, from an empty environment.
 pass=(HOME PATH TMPDIR USER LANG ${names[@]+"${names[@]}"} "${credentials[@]}" ConnectionStrings__Postgres ASPNETCORE_ENVIRONMENT QA_HELPERS_ENABLED
   TRAKT_DEV_PROFILE TRAKT_CLIENT_ID Database__AutoMigrateOnStartup BACKUP_REQUEST_DIR Background__DataRepairs Background__TrustPurge
-  Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS ASK_TURNS_PER_MINUTE)
+  Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS
+  ASK_TURNS_CONCURRENT ASK_TURNS_PER_MINUTE ASK_TURNS_PER_HOUR ASK_TURNS_PER_DAY ASK_TURNS_PER_DAY_FOUNDER ASK_TURNS_PER_DAY_FREE)
 for s in OutboxDispatcher TokenRefresh DeltaPoll Digest CatalogGrowth NightlyReconcile CatalogFollowThrough LanguageBackfill; do pass+=("Background__$s"); done
 [ "$jobs" = true ] && pass+=(LLM_XREF_DAILY_CALLS LLM_XREF_DAILY_TOKENS EXTRACT_DAILY_TOKENS EMBED_DAILY_TOKENS HYDRATE_MAX_TITLES_PER_DAY)
 envv=()
@@ -146,7 +156,7 @@ if [ "$dryrun" = true ]; then
   for kv in "${envv[@]}"; do
     n="${kv%%=*}"
     case "$n" in
-      Background__*|Database__*|BACKUP_REQUEST_DIR|TRAKT_CLIENT_ID|TRAKT_DEV_PROFILE|ASPNETCORE_ENVIRONMENT|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|LLM_RERANK_DAILY_*|ASK_TURNS_PER_MINUTE) echo "$kv" ;;
+      Background__*|Database__*|BACKUP_REQUEST_DIR|TRAKT_CLIENT_ID|TRAKT_DEV_PROFILE|ASPNETCORE_ENVIRONMENT|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|LLM_RERANK_DAILY_*|ASK_TURNS_*) echo "$kv" ;;
       *) if [ -n "${kv#*=}" ]; then echo "$n"; else echo "$n (empty)"; fi ;;
     esac
   done
