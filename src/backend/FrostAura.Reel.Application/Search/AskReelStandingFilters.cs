@@ -221,6 +221,8 @@ public static class AskReelStandingFilters
                 .Concat(requested?.Genres ?? [])
                 .Concat(requested?.Keywords ?? [])
                 .Concat(Tokens(rawQuery))
+                // A genre no single word names ("chick flicks", "love story"): HREV5-ASK-02.
+                .Concat(SearchVocabulary.GenresOfPhrases(AskReel.AskReelIntentSanitizer.Words(rawQuery)))
                 .Distinct(StringComparer.OrdinalIgnoreCase));
 
     /// <summary>

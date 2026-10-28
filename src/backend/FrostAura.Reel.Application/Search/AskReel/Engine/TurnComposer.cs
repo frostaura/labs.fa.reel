@@ -38,6 +38,10 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// like that the catalogue holds no title by): the reply leads with what was searched and never
 /// states the counts as the user's own shelf (HREV4-RET-02).
 /// </param>
+/// <param name="Unread">
+/// No model read the message — the plan is the keyless one or a carried-forward one — so a turn that
+/// found nothing at all owns up to the reading rather than claiming nothing exists (HREV5-RET-02).
+/// </param>
 /// <param name="HeldUnchecked">
 /// Of <paramref name="UnderBar"/>, the cards nobody judged (XM-06: the bar holds back an unchecked card
 /// too). They are in the floor tray but never said to FIT, and are named as held back by the bar —
@@ -68,7 +72,8 @@ public sealed record TurnContext(
     int HeldUnchecked = 0,
     int? CheckedOfTagged = null,
     bool FirstTurn = false,
-    bool Guessed = false);
+    bool Guessed = false,
+    bool Unread = false);
 
 /// <summary>The reply and the one-line reason, as composed.</summary>
 public sealed record ComposedTurn(string Reply, string? Reason);
@@ -199,7 +204,9 @@ public sealed class TurnComposer : ITurnComposer
             NearMissNames: c.NearMissNames,
             Checked: c.Judged,
             CheckedOfTagged: c.CheckedOfTagged,
-            Guessed: c.Guessed));
+            Guessed: c.Guessed,
+            Unread: c.Unread,
+            UnreadLed: c.CarriedForward || c.Guessed));
     }
 
     private static string Lead(TurnContext c, string reply)

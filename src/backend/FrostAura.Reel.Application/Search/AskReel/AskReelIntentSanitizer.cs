@@ -234,20 +234,41 @@ public static class AskReelIntentSanitizer
     /// </summary>
     public static KeylessReading ReadKeyless(string? raw)
     {
-        var content = Scoped(raw)
-            .Where(w => w.Word.Length > 2
-                        && !StopWords.Contains(w.Word) && !PointerWords.Contains(w.Word)
-                        && !SearchVocabulary.IsFloorWord(w.Word))
-            .ToList();
+        // Each content word with the length of the run of content words it stands in ("world war" is
+        // a run of two), so a later negation can be told apart from a narrower one.
+        var content = new List<(string Word, bool Negated, int Run)>();
+        var runStart = 0;
+        foreach (var (word, ruledOut) in ScopedWithBreaks(raw))
+        {
+            var isContent = word is { Length: > 2 }
+                && !StopWords.Contains(word) && !PointerWords.Contains(word) && !SearchVocabulary.IsFloorWord(word);
+            if (!isContent || (content.Count > runStart && content[^1].Negated != ruledOut))
+            {
+                runStart = content.Count;
+            }
+
+            if (isContent)
+            {
+                content.Add((word!, ruledOut, 0));
+                for (var k = runStart; k < content.Count; k++)
+                {
+                    content[k] = content[k] with { Run = content.Count - runStart };
+                }
+            }
+        }
 
         // The LATEST mention of a word decides it (IREV3-SYS-04). "those aren't ninja movies. I want
         // ninja movies" negates "ninja" in its first clause and asks for it in its second; reading the
         // negation as winning wherever it stood dropped the only word the user asked for, and the
         // turn answered that the message "only names what to skip". A word ruled out AFTER it was
-        // asked for ("ninja movies, no ninja") is still ruled out.
+        // asked for ("ninja movies, no ninja") is still ruled out — but only when it is ruled out on
+        // its own: "war movies but not World War II" rules out a narrower thing, and reading it as
+        // ruling out "war" left the request with no topic at all (HREV5-ASK-01).
         static bool Same(string a, string b) => NegationTerms.EqualsAnyForm(a, b) || NegationTerms.EqualsAnyForm(b, a);
         bool Superseded(int index) =>
-            content.Skip(index + 1).Any(later => later.Negated != content[index].Negated && Same(later.Word, content[index].Word));
+            content.Skip(index + 1).Any(later => later.Negated != content[index].Negated
+                && (!later.Negated || later.Run == 1)
+                && Same(later.Word, content[index].Word));
 
         var negated = content
             .Where((w, index) => w.Negated && !Superseded(index))
@@ -662,6 +683,11 @@ public static class AskReelIntentSanitizer
         }
 
         var suppressing = false;
+        // Whether the open negation scope has ruled out anything yet. "nothing WITH superheroes", "no
+        // movies with zombies": a "with" before the scope's object is part of the negation, not the
+        // conjunction that ends it — reading it as one made "action movies but nothing with
+        // superheroes" a request for superheroes (HREV5-ASK-01).
+        var scopeNamed = false;
         for (var i = 0; i < words.Count; i++)
         {
             var closes = words[i].Closes;
@@ -676,6 +702,11 @@ public static class AskReelIntentSanitizer
             else if (NegationCues.Contains(words[i].Word))
             {
                 suppressing = true;
+                scopeNamed = false;
+                yield return (null, false);
+            }
+            else if (words[i].Word == "with" && suppressing && !scopeNamed)
+            {
                 yield return (null, false);
             }
             else if (words[i].Word is "but" or "and" or "with")
@@ -685,6 +716,7 @@ public static class AskReelIntentSanitizer
             }
             else
             {
+                scopeNamed |= suppressing && !IsFiller(words[i].Word);
                 yield return (words[i].Word, suppressing);
             }
 

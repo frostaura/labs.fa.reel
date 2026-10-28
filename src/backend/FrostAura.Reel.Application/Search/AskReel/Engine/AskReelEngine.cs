@@ -349,6 +349,7 @@ public sealed class AskReelEngine(
         if (plan.Source == PlanSource.CarriedForward)
         {
             plan = await GroundFallbackReferencesAsync(turn, plan, state, ct);
+            plan = await GroundFallbackPeopleAsync(turn, plan, ct);
         }
 
         plan = plan.Failure is null
@@ -500,6 +501,141 @@ public sealed class AskReelEngine(
             Delta = delta,
             Tools = found.Count > 0 ? plan.Tools : [new ToolRequest(AskTool.SearchCatalog)],
         };
+    }
+
+    /// <summary>
+    /// A plan no model wrote names a person by the topic words the reader kept — "movies with Liam
+    /// Neeson" read "liam neeson" as a keyword no title carries, the supply was all zeros, and the
+    /// reply said nothing existed over a catalogue holding about 80 of his films (HREV5-RET-02). Every
+    /// keyed turn whose plan times out or truncates takes the same path. So each concept is checked
+    /// against the catalogue's people before it is searched as a topic: the longest run of its words
+    /// that is a person's whole name — the account's own rated people first, then the most credited —
+    /// becomes the person the request is about, and whatever words are left stay its topic. One word
+    /// alone ("zendaya") names a person only when the account has rated that person's work: as a bare
+    /// word it is a topic far more often than a name. A carried-forward follow-up adds its words as
+    /// soft preferences, and a person named there ("what about Liam Neeson?") is grounded the same way:
+    /// a preference for a name is no preference at all.
+    /// </summary>
+    private async Task<PlanResult> GroundFallbackPeopleAsync(Turn turn, PlanResult plan, CancellationToken ct)
+    {
+        var delta = plan.Delta;
+        var followUp = plan.Act == TurnAct.Refine && plan.Failure is not null;
+        if (!TurnActs.Searches(plan.Act) || delta.People.Count > 0 || (delta.Concepts.Count == 0 && !(followUp && delta.Moods.Count > 0)))
+        {
+            return plan;
+        }
+
+        var role = FallbackRole(turn.Input.Message);
+        var people = new List<PersonConstraint>();
+        var concepts = await WithoutPeopleAsync(delta.Concepts, single: true);
+        var moods = followUp ? await WithoutPeopleAsync(delta.Moods, single: false) : delta.Moods;
+        return people.Count == 0
+            ? plan
+            : plan with { Delta = delta with { Concepts = concepts, Moods = moods, People = people } };
+
+        async Task<IReadOnlyList<string>> WithoutPeopleAsync(IReadOnlyList<string> phrases, bool single)
+        {
+            var kept = new List<string>();
+            foreach (var phrase in phrases)
+            {
+                var words = AskReelIntentSanitizer.Words(phrase);
+                if (await PersonNamedAsync(turn.AccountId, words, single, ct) is not { } found)
+                {
+                    kept.Add(phrase);
+                    continue;
+                }
+
+                if (!people.Any(p => p.PersonId == found.Id))
+                {
+                    people.Add(new PersonConstraint(found.Name, found.Id, role));
+                }
+
+                var rest = words.Take(found.Start).Concat(words.Skip(found.Start + found.Length))
+                    .Where(w => !AskReelIntentSanitizer.IsFiller(w))
+                    .ToList();
+                if (rest.Count > 0)
+                {
+                    kept.Add(string.Join(' ', rest));
+                }
+            }
+
+            return kept;
+        }
+    }
+
+    /// <summary>How many credits a person needs before a model-less reading takes words for their name (one word needs an affinity).</summary>
+    internal const int MinFallbackPersonCredits = 3;
+
+    /// <summary>The credit a model-less person request means: directing or acting when its words say so, else any.</summary>
+    internal static PersonRole FallbackRole(string? message)
+    {
+        var words = AskReelIntentSanitizer.Words(message);
+        return words.Any(w => w is "directed" or "director" or "directors" or "directs" or "direct" or "directing")
+            ? PersonRole.Director
+            : words.Any(w => w is "starring" or "stars" or "actor" or "actress" or "acting" or "featuring")
+                ? PersonRole.Cast
+                : PersonRole.Any;
+    }
+
+    /// <summary>The words of a concept that name a person, longest run first, with where the run sits.</summary>
+    /// <param name="single">Whether one word may name a person the account has rated.</param>
+    private async Task<(Guid Id, string Name, int Start, int Length)?> PersonNamedAsync(
+        Guid accountId, IReadOnlyList<string> words, bool single, CancellationToken ct)
+    {
+        const int MaxNameWords = 4;
+        for (var length = Math.Min(words.Count, MaxNameWords); length >= (single ? 1 : 2); length--)
+        {
+            for (var start = 0; start + length <= words.Count; start++)
+            {
+                var span = words.Skip(start).Take(length).ToList();
+                var name = string.Join(' ', span);
+
+                // A curated topic or a genre is what the words mean even where someone bears them as a
+                // name: "time travel" and "film noir" are never a person request.
+                if (span.All(AskReelIntentSanitizer.IsFiller)
+                    || ConceptSynonyms.GenresNamedBy(name) is not null
+                    || ConceptSynonyms.GroupOfAnyForm(name).Skip(1).Any())
+                {
+                    continue;
+                }
+
+                // The words are letters, digits and apostrophes only (the tokenizer's), so the
+                // pattern carries no wildcard: an exact, case-insensitive name on the trigram index.
+                var rated = await db.PersonAffinities.AsNoTracking()
+                    .Where(a => a.AccountId == accountId)
+                    .Join(db.Persons, a => a.PersonId, p => p.Id, (a, p) => new { p.Id, p.Name, a.RatedTitleCount })
+                    .Where(p => EF.Functions.ILike(p.Name, name))
+                    .OrderByDescending(p => p.RatedTitleCount)
+                    .ThenBy(p => p.Id)
+                    .Select(p => new { p.Id, p.Name })
+                    .FirstOrDefaultAsync(ct);
+                if (rated is not null)
+                {
+                    return (rated.Id, rated.Name, start, length);
+                }
+
+                if (length < 2)
+                {
+                    continue;
+                }
+
+                var credited = await db.Persons.AsNoTracking()
+                    .Where(p => EF.Functions.ILike(p.Name, name))
+                    .Select(p => new { p.Id, p.Name, Credits = db.TitleCredits.Count(c => c.PersonId == p.Id) })
+                    // A name borne by someone with a credit or two is more likely a phrase the user
+                    // meant as a topic than the person; the people a request names have a filmography.
+                    .Where(p => p.Credits >= MinFallbackPersonCredits)
+                    .OrderByDescending(p => p.Credits)
+                    .ThenBy(p => p.Id)
+                    .FirstOrDefaultAsync(ct);
+                if (credited is not null)
+                {
+                    return (credited.Id, credited.Name, start, length);
+                }
+            }
+        }
+
+        return null;
     }
 
     private async Task<TurnOutcome> RefusedAsync(Turn turn, PlanResult plan, PlanFailure refusal, ConversationState state, CancellationToken ct)
@@ -2164,6 +2300,7 @@ public sealed class AskReelEngine(
         {
             FirstTurn = turn.FirstTurn,
             Guessed = turn.Guessed,
+            Unread = plan.Source == PlanSource.CarriedForward,
         };
 
     // ── State ───────────────────────────────────────────────────────────────────────────────

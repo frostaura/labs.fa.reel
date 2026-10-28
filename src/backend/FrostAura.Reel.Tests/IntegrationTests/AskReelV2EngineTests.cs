@@ -1691,6 +1691,11 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     [InlineData("something funny tonight", "comedy", false)]
     [InlineData("love stories", "romance", true)]
     [InlineData("a good love story", "romance", true)]
+    // HREV5-ASK-02 (round 6): a synonym the planner maps to the genre, and the same words with no model.
+    [InlineData("sitcoms", "comedy", false)]
+    [InlineData("chick flicks", "romance", false)]
+    [InlineData("sitcoms", "comedy", true)]
+    [InlineData("chick flicks", "romance", true)]
     public async Task A_genre_asked_for_by_another_name_keeps_its_conflict_frame_and_its_supply(string message, string genre, bool keyless)
     {
         if (!Fixture.Available)
@@ -2189,6 +2194,219 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             Assert.All(answers[0].GetProperty("trays").GetProperty("nearMiss").EnumerateArray(),
                 c => Assert.StartsWith("V2 Partial", c.GetProperty("name").GetString(), StringComparison.Ordinal));
             Assert.Equal(3, resumed.GetProperty("nearMiss").GetArrayLength());
+        }
+    }
+
+    /// <summary>
+    /// HREV5-RET-02: with no model — or a planner that failed twice — "movies with Liam Neeson" read the
+    /// name as a keyword concept, the supply was all zeros, and the reply said "I didn't find anything to
+    /// show for that this time" over a catalogue holding about 80 of his films. The name is a person:
+    /// the turn is a person request over their credits, and the reply names them. Varied over the
+    /// keyless and the failed-plan paths, over the name with a topic word left beside it, and over a name
+    /// nobody in the catalogue has, which says the reading failed rather than that nothing exists.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "movies with {0}", true)]
+    [InlineData(false, "movies with {0}", true)]
+    [InlineData(true, "{0} films", true)]
+    [InlineData(false, "{0} films", true)]
+    [InlineData(true, "movies with {0}", false)]
+    [InlineData(false, "movies with {0}", false)]
+    public async Task A_model_less_person_request_searches_the_persons_credits(bool keyless, string shape, bool known)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var name = $"Liamq{Guid.NewGuid():N}"[..13] + " " + $"Neesonq{Guid.NewGuid():N}"[..14];
+        var credited = new List<Guid>();
+        if (known)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            var person = new Person { Id = Guid.NewGuid(), TmdbId = Random.Shared.NextInt64(1_000_000_000, long.MaxValue), Name = name };
+            db.Persons.Add(person);
+            for (var i = 0; i < 3; i++)
+            {
+                var title = NewTitle($"Acted {i} {Guid.NewGuid():N}"[..16], 4_000 - i);
+                db.Titles.Add(title);
+                db.TitleCredits.Add(new TitleCredit { Id = Guid.NewGuid(), TitleId = title.Id, PersonId = person.Id, Role = CreditRole.Actor, CastOrder = 0 });
+                credited.Add(title.Id);
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        IAskReelPlanner planner = keyless
+            ? new KeylessPlanner()
+            : new ScriptedPlanner(_ => PlanResult.Failed(
+                new PlanFailure(AgentFailureKind.MalformedAnswer, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(CultureInfo.InvariantCulture, shape, name)), accountId, emit, CancellationToken.None);
+
+        var plan = Assert.Single(events, e => e.Event == "plan").Data;
+        Assert.DoesNotContain(NoneFoundCopy.NothingFoundUnchecked, outcome.AssistantText, StringComparison.Ordinal);
+        if (!known)
+        {
+            Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+            Assert.Contains(keyless ? NoneFoundCopy.UnreadNothing : NoneFoundCopy.UnreadNothingLed, outcome.AssistantText, StringComparison.Ordinal);
+            return;
+        }
+
+        Assert.Equal([name], plan.GetProperty("people").EnumerateArray().Select(p => p.GetProperty("name").GetString()));
+        Assert.Empty(plan.GetProperty("concepts").EnumerateArray());
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.Equal(credited.Order(), outcome.Cards.Select(c => c.TitleId).Order());
+        Assert.Contains($"with {name}", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Equal(0, judge.Batches);
+    }
+
+    /// <summary>
+    /// The control for HREV5-RET-02: words someone with a credit or two happens to bear as a name are
+    /// still the topic the user asked for — the people a request names have a filmography.
+    /// </summary>
+    [Fact]
+    public async Task A_model_less_topic_that_an_obscure_person_bears_as_a_name_stays_a_topic()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var phrase = $"{Topic()} {Topic()}";
+        var accountId = await SeedAccountAsync();
+        var tagged = await SeedTopicalAsync(phrase, ("V2 Yes", 3));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var person = new Person { Id = Guid.NewGuid(), TmdbId = Random.Shared.NextInt64(1_000_000_000, long.MaxValue), Name = phrase };
+            db.Persons.Add(person);
+            var title = NewTitle($"Bit part {Guid.NewGuid():N}"[..18], 10);
+            db.Titles.Add(title);
+            db.TitleCredits.Add(new TitleCredit { Id = Guid.NewGuid(), TitleId = title.Id, PersonId = person.Id, Role = CreditRole.Actor, CastOrder = 9 });
+            await db.SaveChangesAsync();
+        }
+
+        var (engine, events, emit) = Build(accountId, new KeylessPlanner(), new DownJudge(available: false));
+
+        var outcome = await engine.StreamAsync(Input($"{phrase} movies"), accountId, emit, CancellationToken.None);
+
+        var plan = Assert.Single(events, e => e.Event == "plan").Data;
+        Assert.Empty(plan.GetProperty("people").EnumerateArray());
+        Assert.Equal([phrase], plan.GetProperty("concepts").EnumerateArray().Select(c => c.GetString()));
+        Assert.Equal(tagged.Order(), outcome.Cards.Select(c => c.TitleId).Order());
+    }
+
+    /// <summary>
+    /// HREV5-ASK-01 through the engine: the planner forced to fail, "X movies but nothing with Y" planned
+    /// the concepts [X, Y], the judge was sent "Requires: X, Y", and the reply said "I searched for X Y"
+    /// above Y titles. What the user ruled out reaches neither the hard concepts nor the judge's
+    /// requirements, nor the reply's lead; it is a negation, and the titles carrying it are not shown.
+    /// Varied over the cue ("nothing with", "without", "except ones with").
+    /// </summary>
+    [Theory]
+    [InlineData("{0} movies but nothing with {1}")]
+    [InlineData("{0} movies without {1}")]
+    [InlineData("{0} movies except ones with {1}")]
+    public async Task A_failed_plan_never_searches_what_the_message_rules_out(string shape)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var ruledOut = $"supq{Guid.NewGuid():N}"[..12];
+        var accountId = await SeedAccountAsync();
+        var kept = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var both = await SeedTopicalAsync(topic, ("V2 Yes Both", 2));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            foreach (var title in await db.Titles.Where(t => both.Contains(t.Id)).ToListAsync())
+            {
+                title.Keywords = [topic, ruledOut];
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        var planner = new ScriptedPlanner(_ => PlanResult.Failed(
+            new PlanFailure(AgentFailureKind.MalformedAnswer, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(CultureInfo.InvariantCulture, shape, topic, ruledOut)), accountId, emit, CancellationToken.None);
+
+        Assert.Equal([topic], Assert.Single(events, e => e.Event == "plan").Data.GetProperty("concepts").EnumerateArray().Select(c => c.GetString()));
+        var state = ConversationStateJson.Read(outcome.ConversationStateJson);
+        Assert.NotNull(state);
+        Assert.DoesNotContain(state.Hard.Concepts, c => c.UserWords.Contains(ruledOut, StringComparison.Ordinal));
+        Assert.Contains(ruledOut, state.UserNegations);
+        Assert.NotEmpty(judge.Requests);
+        Assert.All(judge.Requests, r =>
+        {
+            Assert.Contains($"Requires: {topic}.", r, StringComparison.Ordinal);
+            Assert.Contains($"Rules out: {ruledOut}", r, StringComparison.Ordinal);
+            Assert.DoesNotContain($"Requires: {topic}, ", r, StringComparison.Ordinal);
+        });
+        Assert.StartsWith($"I couldn't fully read that, so I searched for {topic}.", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain(outcome.Cards, c => both.Contains(c.TitleId));
+        Assert.Equal(kept.Order(), outcome.Cards.Select(c => c.TitleId).Order());
+    }
+
+    /// <summary>
+    /// HREV5-ASK-01: with no model, "what can you do?" searched sixteen random titles and showed them
+    /// unchecked, and "what is Better Call Saul about?" counted "9 unseen call saul titles". Small talk
+    /// answers what Ask Reel does; a question about a named title is answered from its facts; neither
+    /// searches.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_model_less_question_about_ask_reel_or_a_named_title_is_answered_not_searched(bool aboutTitle)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var token = $"saulq{Guid.NewGuid():N}"[..12];
+        var name = $"Better Call {token}";
+        var accountId = await SeedAccountAsync();
+        Guid titleId;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var title = NewTitle(name, 9_000);
+            db.Titles.Add(title);
+            await SeedTopicalAsync(token, ("V2 Yes", 3));
+            await db.SaveChangesAsync();
+            titleId = title.Id;
+        }
+
+        var queries = new List<RetrievalQuery>();
+        var (engine, events, emit) = Build(
+            accountId, new KeylessPlanner(), new DownJudge(available: false), new NoAnswerer(),
+            wrap: r => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } }));
+
+        var outcome = await engine.StreamAsync(
+            Input(aboutTitle ? $"what is {name} about?" : "what can you do?"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
+        Assert.Empty(outcome.Cards);
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "clarify");
+        var answer = Assert.Single(events, e => e.Event == "answer").Data;
+        if (aboutTitle)
+        {
+            Assert.Equal(titleId, answer.GetProperty("titleId").GetGuid());
+            Assert.StartsWith(name, outcome.AssistantText, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(TurnComposer.ChitchatReply, outcome.AssistantText);
         }
     }
 

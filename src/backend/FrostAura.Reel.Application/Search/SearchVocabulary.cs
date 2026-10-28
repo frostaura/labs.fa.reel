@@ -79,10 +79,56 @@ public static class SearchVocabulary
             ["doc"] = ["documentary"],
             ["docos"] = ["documentary"],
             ["documentaries"] = ["documentary"],
+            // HREV5-ASK-02: the planner reads these as the genre — "sitcoms" is comedy on TV,
+            // "docuseries" a documentary — and the sanitiser, reading the user's words through this
+            // table, then stripped the genre as a standing condition the model had copied. The
+            // conflict frame never fired and the request opened up to The Wire and Stranger Things.
+            ["sitcom"] = ["comedy"],
+            ["sitcoms"] = ["comedy"],
+            ["docuseries"] = ["documentary"],
+            ["docu"] = ["documentary"],
+            ["docus"] = ["documentary"],
 
             ["animated"] = ["animation"],
             ["animations"] = ["animation"],
         };
+
+    /// <summary>
+    /// Two-word phrases that name a genre outright though neither word does on its own: "love" is a
+    /// floor word and "chick" names nothing, but "love story" and "chick flick" are romance. Read by
+    /// the conflict detector (<see cref="AskReelStandingFilters.AskedFor"/>), the plan sanitiser and
+    /// the model-less reader alike, so the three can never disagree about whether the user asked for
+    /// a genre (HREV5-ASK-02: "chick flicks" planned as romance was stripped as a copied condition).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> GenrePhrases =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["love story"] = ["romance"],
+            ["love stories"] = ["romance"],
+            ["chick flick"] = ["romance"],
+            ["chick flicks"] = ["romance"],
+            ["rom com"] = ["romance", "comedy"],
+            ["rom coms"] = ["romance", "comedy"],
+        };
+
+    /// <summary>
+    /// The genre slugs <paramref name="words"/> (lower-cased, in order) name by a two-word
+    /// <see cref="GenrePhrases"/> entry, in the order they appear, each once.
+    /// </summary>
+    public static IReadOnlyList<string> GenresOfPhrases(IReadOnlyList<string> words)
+    {
+        ArgumentNullException.ThrowIfNull(words);
+        var genres = new List<string>();
+        for (var i = 0; i + 1 < words.Count; i++)
+        {
+            if (GenrePhrases.TryGetValue($"{words[i]} {words[i + 1]}", out var slugs))
+            {
+                genres.AddRange(slugs.Where(g => !genres.Contains(g, StringComparer.Ordinal)));
+            }
+        }
+
+        return genres;
+    }
 
     /// <summary>
     /// The concepts a turn's own words may rule out. Deliberately closed, deliberately concrete:

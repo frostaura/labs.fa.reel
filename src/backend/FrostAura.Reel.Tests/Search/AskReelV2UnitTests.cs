@@ -237,6 +237,45 @@ public class AskReelV2UnitTests
     }
 
     /// <summary>
+    /// HREV5-ASK-02 (round 6): the planner mapped a synonym to its genre correctly — "sitcoms" to comedy
+    /// on TV, "docuseries" to documentary, "chick flicks" to romance — and the sanitiser, which read the
+    /// user's words through a vocabulary that knew none of them, stripped the genre as a copied
+    /// condition. No conflict frame, concepts [], and "16 shows that fit what you asked" (The Wire,
+    /// Stranger Things). The words now read as the genre, so it is kept; a copy beside an unrelated
+    /// request is still dropped.
+    /// </summary>
+    [Theory]
+    [InlineData("sitcoms", "comedy", "comedy")]
+    [InlineData("a sitcom for tonight", "comedy", "comedy")]
+    [InlineData("docuseries", "documentary", "documentary")]
+    [InlineData("a good docu", "documentary", "documentary")]
+    [InlineData("chick flicks", "romance", "romance")]
+    [InlineData("a chick flick please", "romance", "romance")]
+    [InlineData("rom coms", "romance,comedy", "romance,comedy")]
+    // The genre's own word still works, and a copy is still a copy.
+    [InlineData("comedy shows", "comedy", "comedy")]
+    [InlineData("samurai films", "comedy,documentary,romance", "")]
+    [InlineData("a chicken heist", "romance", "")]
+    public void A_standing_genre_named_by_a_synonym_is_kept_and_collides(string message, string modelGenres, string expectedGenres)
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "comedy" },
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "documentary" },
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "romance" },
+        ]);
+        static string[] List(string csv) => csv.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Genres = List(modelGenres) });
+
+        var clean = PlanSanitizer.Clean(plan, message, ConversationState.Empty, standing);
+
+        Assert.Equal(List(expectedGenres), clean.Delta.Genres);
+        // The conflict detector reads the same words the same way, so the frame names the collision.
+        var collides = AskReelStandingFilters.Colliding(standing.ExcludeGenres, AskReelStandingFilters.AskedForInWords(message));
+        Assert.Equal(List(expectedGenres).Order(), collides.Order());
+    }
+
+    /// <summary>
     /// HREV5-ASK-02, the keyless half: the model-less reader reads "love stories" as romance, and the
     /// sanitiser then dropped it on an account that excludes romance — the state was empty and the turn
     /// showed sixteen unrelated shows with no conflict frame.

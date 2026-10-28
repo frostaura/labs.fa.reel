@@ -17,6 +17,8 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// <param name="Years">The year window it names, or null.</param>
 /// <param name="YearWords">The words that named the window.</param>
 /// <param name="Media">The media its words name, or null.</param>
+/// <param name="Chitchat">The message asks what Ask Reel is or does ("what can you do?"), or greets it: no search.</param>
+/// <param name="QuestionName">For an item question that names its title ("what is Better Call Saul about?"), that name.</param>
 public sealed record FallbackReading(
     bool ItemQuestion,
     IReadOnlyList<string> Concepts,
@@ -27,8 +29,16 @@ public sealed record FallbackReading(
     IReadOnlyList<string> ReferenceNames,
     YearRange? Years,
     IReadOnlyList<string> YearWords,
-    MediaScope? Media)
+    MediaScope? Media,
+    bool Chitchat = false,
+    string? QuestionName = null)
 {
+    /// <summary>A question about one title, named or pointed at.</summary>
+    public static FallbackReading Question(string? name) => new(true, [], [], [], [], [], [], null, [], null, QuestionName: name);
+
+    /// <summary>Small talk about Ask Reel itself.</summary>
+    public static FallbackReading Talk { get; } = new(false, [], [], [], [], [], [], null, [], null, Chitchat: true);
+
     /// <summary>True when the reading names a topic, a genre or a reference — something a new request is about.</summary>
     public bool NamesSomething => Concepts.Count > 0 || Genres.Count > 0 || ReferenceNames.Count > 0;
 }
@@ -118,13 +128,7 @@ public static class FallbackReader
         "weirder", "fine", "okay", "alright", "sure", "cool", "instead", "else", "rather", "either", "whatever",
         "different", "another", "similar", "otherwise", "story", "stories", "tale", "tales", "flick", "flicks",
         "picture", "pictures", "options", "ideas", "recommendations", "suggestions", "content", "watching",
-    };
-
-    /// <summary>Phrases that name a genre outright but are not genre words on their own ("love" is a floor word).</summary>
-    private static readonly IReadOnlyDictionary<string, string> GenrePhrases = new Dictionary<string, string>(StringComparer.Ordinal)
-    {
-        ["love story"] = "romance",
-        ["love stories"] = "romance",
+        "actually", "honestly",
     };
 
     /// <summary>Words before "like" that make it "something like &lt;title&gt;" rather than the verb ("I'd like").</summary>
@@ -170,24 +174,49 @@ public static class FallbackReader
         "movie", "movies", "film", "films", "show", "shows", "series", "tv", "title", "titles",
     };
 
-    /// <summary>The message read with no model.</summary>
+    /// <summary>
+    /// The message read with no model. Before any topic is read: a question about a card or a title
+    /// is an item question, a question about Ask Reel itself is small talk, and a hyphenated genre word
+    /// ("sci-fi") is kept whole. A word a negation cue governs ("nothing with superheroes", "without
+    /// aliens") is a negation and never also a topic (HREV5-ASK-01).
+    /// </summary>
     public static FallbackReading Read(string? message, ConversationState state, int currentYear)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var request = AskReelIntentSanitizer.ReadKeylessRequest(message, currentYear);
-        var negations = AskReelIntentSanitizer.KeylessNegatedPhrases(message);
-        var media = PlanSanitizer.UserMedia(null, message);
-
-        if (IsItemQuestion(message, state))
+        var (text, compounds) = JoinGenreCompounds(message);
+        if (IsItemQuestion(text, state))
         {
-            return new FallbackReading(true, [], [], [], [], [], [], null, [], null);
+            return FallbackReading.Question(null);
         }
 
-        var words = AskReelIntentSanitizer.Words(message);
-        var reference = ReferenceName(message);
+        if (IsChitchat(text))
+        {
+            return FallbackReading.Talk;
+        }
+
+        if (AboutQuestion(text) is { } about)
+        {
+            return FallbackReading.Question(about.Length == 0 ? null : about);
+        }
+
+        var request = AskReelIntentSanitizer.ReadKeylessRequest(text, currentYear);
+        var negations = AskReelIntentSanitizer.KeylessNegatedPhrases(text)
+            .Select(n => string.Join(' ', n.Split(' ').Select(w => compounds.TryGetValue(w, out var c) ? c.Written : w)))
+            .ToList();
+        var media = PlanSanitizer.UserMedia(null, text);
+
+        var words = AskReelIntentSanitizer.Words(text);
+        var reference = ReferenceName(text);
         var referenceWords = reference is null ? [] : AskReelIntentSanitizer.Words(reference);
 
         var genres = GenresOfPhrases(words).ToList();
+        void AddGenres(IEnumerable<string> slugs)
+        {
+            foreach (var g in slugs.Where(g => !genres.Contains(g)))
+            {
+                genres.Add(g);
+            }
+        }
 
         var directions = words
             .Where(Comparisons.ContainsKey)
@@ -206,18 +235,24 @@ public static class FallbackReader
 
             foreach (var run in Runs(phraseWords.Where(w => !referenceWords.Contains(w)).ToList()))
             {
-                var (topic, runGenres) = SplitGenres(run);
-                foreach (var g in runGenres.Where(g => !genres.Contains(g)))
+                // A genre written another way, alone: "sci-fi" (kept whole), "sitcoms", "docs".
+                if (run.Count == 1 && WrittenGenre(run[0], compounds) is { Count: > 0 } named)
                 {
-                    genres.Add(g);
+                    AddGenres(named);
+                    continue;
                 }
 
+                var (topic, runGenres) = SplitGenres(run, compounds);
+                AddGenres(runGenres);
                 if (topic is { Length: > 0 } t && !concepts.Contains(t, StringComparer.Ordinal))
                 {
                     concepts.Add(t);
                 }
             }
         }
+
+        // What the user ruled out is never also what they asked for.
+        concepts.RemoveAll(c => negations.Any(n => NegationTerms.EqualsAnyForm(c, n) || NegationTerms.EqualsAnyForm(n, c)));
 
         return new FallbackReading(
             false,
@@ -233,23 +268,152 @@ public static class FallbackReader
     }
 
     /// <summary>
+    /// The message with each hyphenated genre word joined into one ("sci-fi" → "scifi", "rom-com" →
+    /// "romcom"), and what each joined word was written as and names. The tokenizer splits on hyphens,
+    /// so "sci-fi without aliens" was read as the topic "sci" — "None of your unseen sci movies…", over
+    /// a shelf of 19 where the catalogue holds 4,518 science fiction titles (HREV5-ASK-01). A hyphenated
+    /// word that names no genre ("feel-good", "action-packed") is left as it was.
+    /// </summary>
+    internal static (string Text, IReadOnlyDictionary<string, (string Written, IReadOnlyList<string> Genres)> Compounds) JoinGenreCompounds(string? message)
+    {
+        var compounds = new Dictionary<string, (string Written, IReadOnlyList<string> Genres)>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(message) || !message.Contains('-', StringComparison.Ordinal))
+        {
+            return (message ?? string.Empty, compounds);
+        }
+
+        var tokens = message.Split(' ');
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            var token = tokens[i];
+            var start = 0;
+            var end = token.Length;
+            while (start < end && !char.IsLetterOrDigit(token[start]))
+            {
+                start++;
+            }
+
+            while (end > start && !char.IsLetterOrDigit(token[end - 1]))
+            {
+                end--;
+            }
+
+            var core = token[start..end].ToLowerInvariant();
+            if (!core.Contains('-', StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var joined = core.Replace("-", string.Empty, StringComparison.Ordinal);
+            var slugs = ConceptSynonyms.GenresNamedBy(core) is { Count: > 0 } named
+                ? named
+                : SearchVocabulary.ResolveGenres(joined);
+            if (slugs.Count == 0)
+            {
+                continue;
+            }
+
+            compounds[joined] = (core, slugs);
+            tokens[i] = string.Concat(token.AsSpan(0, start), joined, token.AsSpan(end));
+        }
+
+        return (string.Join(' ', tokens), compounds);
+    }
+
+    /// <summary>
+    /// The genres one word names when the concept vocabulary would not read it as one: a joined
+    /// hyphenated genre ("scifi" from "sci-fi"), or a word the conflict detector reads as a genre and
+    /// the concept synonyms do not ("sitcoms", "docs", "sci"). A word the concept synonyms already
+    /// name ("horror", "romantic comedies") stays a topic, read as its genres downstream.
+    /// </summary>
+    private static IReadOnlyList<string>? WrittenGenre(
+        string word, IReadOnlyDictionary<string, (string Written, IReadOnlyList<string> Genres)> compounds)
+    {
+        if (compounds.TryGetValue(word, out var compound))
+        {
+            return compound.Genres;
+        }
+
+        return ConceptSynonyms.GenreSlugsOf(word) is null && SearchVocabulary.ResolveGenres(word) is { Count: > 0 } aliased
+            ? aliased
+            : null;
+    }
+
+    /// <summary>
+    /// Questions about Ask Reel itself, and greetings, written as their words alone: "what can you
+    /// do?" searched sixteen random titles and showed them unchecked (HREV5-ASK-01).
+    /// </summary>
+    private static readonly IReadOnlySet<string> TalkPhrases = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "what can you do", "what else can you do", "what do you do", "what can i ask", "what can i ask you",
+        "what can i ask for", "what should i ask", "how does this work", "how does it work", "how do you work",
+        "how do i use this", "how do i use you", "how do i use it", "what are you", "who are you", "help", "help me",
+        "hi", "hello", "hey", "hiya", "thanks", "thank you", "thank you so much", "cheers", "good morning",
+        "good evening", "good afternoon",
+    };
+
+    /// <summary>Words that pad small talk without changing it ("hey reel, what can you do please?").</summary>
+    private static readonly IReadOnlySet<string> TalkPadding = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "reel", "please", "so", "ok", "okay", "um", "hmm", "exactly", "actually",
+    };
+
+    /// <summary>True when the whole message is small talk about Ask Reel or a greeting.</summary>
+    internal static bool IsChitchat(string? message)
+    {
+        var words = AskReelIntentSanitizer.Words(message).Where(w => !TalkPadding.Contains(w)).ToList();
+        if (words.Count > 1 && words[0] is "hi" or "hey" or "hello" or "hiya")
+        {
+            var rest = string.Join(' ', words.Skip(1));
+            return TalkPhrases.Contains(rest);
+        }
+
+        return words.Count > 0 && TalkPhrases.Contains(string.Join(' ', words));
+    }
+
+    /// <summary>
+    /// The title a "what is &lt;title&gt; about?" question names — "what's Heat about", "what was The
+    /// Wire about" — or the empty string when the words between name nothing ("what is that about?"),
+    /// or null when the message is not that question. Searched, "what is Better Call Saul about?"
+    /// counted "9 unseen call saul titles" (HREV5-ASK-01).
+    /// </summary>
+    internal static string? AboutQuestion(string? message)
+    {
+        var words = AskReelIntentSanitizer.Words(message);
+        if (words.Count < 3 || words[^1] != "about")
+        {
+            return null;
+        }
+
+        int start;
+        if (words[0] is "what's" or "whats")
+        {
+            start = 1;
+        }
+        else if (words[0] == "what" && words[1] is "is" or "was" or "s")
+        {
+            start = 2;
+        }
+        else
+        {
+            return null;
+        }
+
+        var name = words.Skip(start).Take(words.Count - 1 - start).ToList();
+        if (name.Count == 0)
+        {
+            return null;
+        }
+
+        return name.All(AskReelIntentSanitizer.IsFiller) ? string.Empty : string.Join(' ', name);
+    }
+
+    /// <summary>
     /// The genres <paramref name="words"/> name by a phrase that is no genre word on its own ("love
     /// story" is romance), in the order they appear. The sanitiser reads the user's words through this
     /// too, so a genre this reader found is never then dropped as a copied standing value (HREV5-ASK-02).
     /// </summary>
-    internal static IReadOnlyList<string> GenresOfPhrases(IReadOnlyList<string> words)
-    {
-        var genres = new List<string>();
-        for (var i = 0; i + 1 < words.Count; i++)
-        {
-            if (GenrePhrases.TryGetValue($"{words[i]} {words[i + 1]}", out var genre) && !genres.Contains(genre))
-            {
-                genres.Add(genre);
-            }
-        }
-
-        return genres;
-    }
+    internal static IReadOnlyList<string> GenresOfPhrases(IReadOnlyList<string> words) => SearchVocabulary.GenresOfPhrases(words);
 
     /// <summary>
     /// True when the message asks about a card on screen: question-shaped, pointing at a card by its
@@ -373,14 +537,15 @@ public static class FallbackReader
     /// phrase made only of genre words stays whole — "romantic comedies" is already read as its genres
     /// downstream — and so does a curated concept phrase ("second world war").
     /// </summary>
-    private static (string? Topic, IReadOnlyList<string> Genres) SplitGenres(IReadOnlyList<string> run)
+    private static (string? Topic, IReadOnlyList<string> Genres) SplitGenres(
+        IReadOnlyList<string> run, IReadOnlyDictionary<string, (string Written, IReadOnlyList<string> Genres)> compounds)
     {
         var joined = string.Join(' ', run);
         // A curated concept phrase stays whole too: "second world war" is the World War II concept,
         // never "second world" in the war genre.
         if (run.Count < 2 || ConceptSynonyms.GenresNamedBy(joined) is { Count: > 0 }
             || ConceptSynonyms.GroupOfAnyForm(joined).Skip(1).Any()
-            || ConceptSynonyms.GenreSlugsOf(run[^1]) is not { Count: > 0 } slugs)
+            || (ConceptSynonyms.GenreSlugsOf(run[^1]) ?? WrittenGenre(run[^1], compounds)) is not { Count: > 0 } slugs)
         {
             return (joined, []);
         }
