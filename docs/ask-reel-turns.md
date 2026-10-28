@@ -169,7 +169,12 @@ run as designed: `plan`; `judge:{failed}/{batches}` (batches that ruled on nothi
 `judge-missing:{missing}/{judged}` (every title sent to the judge that came back without a request
 verdict, failed batches included — raised by a single skipped entry); and `no-model` (a keyless
 turn: nothing read the request, nothing checked a card). Any of the last three marks the reply
-"some cards unchecked". On a none-found turn the reply names the near misses ("Close, but not quite:
+"some cards unchecked". Every count the reply gives about a tray is that tray's (HREV4-ASK-03): an
+unjudged card the bar held back is named as held back by the bar ("Your 6.0 bar holds back 2 titles
+I couldn't check"), "marked as unchecked" counts the `unchecked` tray only, and with a floor tray on
+screen the reply describes it rather than the tagged supply's under-bar count. A turn that judged
+nothing and found nothing says so ("I didn't find anything to show for that this time"), never
+"nothing I found matches". On a none-found turn the reply names the near misses ("Close, but not quite:
 Blade of the 47 Ronin — tucked away below."), three at most. Every enum inside `supply` is written as its
 name (`"kind": "Language"`), never a number. A follow-up that names no media inherits the previous
 reading's single media type. A client-aborted turn stores its degraded flags, stage timings, model ids
@@ -523,7 +528,20 @@ uses it only to know which frames to expect.
    hard topics "tense heist" and "ten years". It reads "the last/past N years", "the last decade",
    "80s"/"1990s", "since/after/from/before/until/in YYYY", "YYYY to YYYY" and a bare year; mood words
    are the mood lexicon's (never a genre word: "romantic comedies" stays the topic); "good", "best"
-   and their like end a phrase.
+   and their like end a phrase. The same model-less reader (`FallbackReader`, HREV4-ASK-05 /
+   HREV4-RET-02) reads a **question about a card** ("is the first one violent?", or a shown title by
+   name) as `ItemQuestion`, answered from the title's facts with the search and its media left as
+   they were; **"like &lt;title&gt;"** / "similar to &lt;title&gt;" as a reference — searched near when the
+   catalogue holds a title by that name, otherwise the words searched as a topic and the reading
+   marked a **guess**; **comparisons** ("funnier", "darker") as attribute steers; connectives,
+   concessions and generic nouns ("instead", "older", "fine", "stories") never as topics, so "what
+   about movies instead" is a media switch that carries the topic; "love stories" as the romance
+   genre; a **genre word ending a topic phrase** as that phrase's genre ("spy thrillers" is spy in
+   thriller); and a **negation as the whole phrase** written ("no walking dead", never "dead").
+   A guessed reading's none-found reply leads with what it searched, never says "there are no X
+   left", and offers no relaxation. v1's degraded reading (the interpreter's heuristic) has its
+   keywords widened back to the user's phrase the same way ("time travel", never "travel";
+   HREV4-ASK-04).
    **Media:** the user's own media word outranks a plan that left media unset **or answered
    `any`** ("samurai films" is films); `any` stands only where the words name both media or neither,
    ask for one in addition ("shows too") or rule one out ("no tv shows" asks for films).
@@ -671,7 +689,10 @@ record and never accepted from the client.
 | `ItemQuestion` | unchanged | unchanged — `answer` |
 | `Chitchat` | unchanged | unchanged — `answer` |
 
-Negations come only from the user's words; standing conditions are never written into the state.
+Negations come only from the user's words; standing conditions are never written into the state —
+nor into what the user asked for: a standing value a plan copies into its concepts or genres (an
+excluded or only-these genre, an avoided keyword, the restricted language by code or name) is dropped
+unless the user's own words name it (HREV4-ASK-02).
 **People and seen titles (FD-3, lock-compliant default):** a person request returns only titles the
 account has not seen; the reply counts the seen ones and never names them. A person's credits are
 their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to
