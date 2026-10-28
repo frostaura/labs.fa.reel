@@ -297,6 +297,13 @@
       "dataSeen": "the three h1 smoke recordings (h1-smoke-v1, -v2, -v2b) and their Titles rows: Joy Ride 2001 d324e481 vs 2023 82a439e0; Blade of the 47 Ronin c97485b5 vs 47 Ronin 6b46af62",
       "change": "grounding violations match a named title as a whole name with its own capitalisation, prefer the longest cited name over a name it contains, treat a name as on screen when any card shown this turn or earlier has the same normalised name, and count one name once",
       "reason": "HREV1-ASK-04 / HREV1-RET-03: both h1 grounding violations were scorer artefacts (a catalogue twin of an on-screen pick; a substring of an on-screen tray title), so the gate failed on correct output. Every remaining violation is a stand-alone mention of an off-screen name; the 99c0761 baselines re-score byte-identical and the h1 recordings change only on those two rows."
+    },
+    {
+      "when": "2026-10-27",
+      "commit": "ws7-hardening-r3",
+      "dataSeen": "reports/hardening/h2/h2-smoke-v1-mislabelled-v2 (header engine v2, all 15 turns answered by v1) and h2-smoke-v2 (5 turns, all v2); no metric values",
+      "change": "a recording's engine is the engine its answered turns name (the stream's conversation.engine / done.engine), not the --engine flag; a recording whose answered turns name another engine than requested, name none, or mix engines with none requested is INVALID: every gate reads INVALID, replay exits 1 and compare refuses it. The runner now asks for the engine (?engine=) and stops at the first mismatched turn",
+      "reason": "HREV2-ASK-05 / HREV2-PLAT-3: the h2 smoke labelled 15 v1 turns as v2, so a G1 report could show v2 gates computed on v1 output. Validity only, no scoring rule moved: the 99c0761 baselines (v1 header, v1 turns) re-score to identical metrics"
     }
   ],
   "judge": {

@@ -10,8 +10,8 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN } from "./askreel-score.mjs";
-import { compactTurn, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES } from "./askreel.mjs";
+import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN, engineOf, renderReport } from "./askreel-score.mjs";
+import { compactTurn, streamEngine, askUrl, engineGuard, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES } from "./askreel.mjs";
 import { envKeyHash, classifyKey, modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -372,7 +372,7 @@ test("runner: a v2 turn without `done` ends on its terminal frame; a stream that
 // `assistant-message`, then one `done` carrying the trays, the mode, the supply report and `degraded`.
 const v1Frames = (done, assistant = { text: "Nothing I could check against your request.", conflict: false, degraded: false }) => ({
   status: 200, totalMs: 900, firstByteMs: 5, firstCardMs: null,
-  frames: [["conversation", { id: "conv-1", turnId: "turn-1", sequence: 2 }], ["assistant-message", assistant],
+  frames: [["conversation", { id: "conv-1", turnId: "turn-1", sequence: 2, engine: "v1" }], ["assistant-message", assistant],
     ["done", { results: [], belowFloor: [], nearMiss: [], unchecked: [], mode: "NoneFound", supply: null, degraded: [], reason: "x", ...done }]]
     .map(([ev, data], i) => ({ at: i, ev, data })),
 });
@@ -731,4 +731,122 @@ test("costMeterDrift skips rules past the meter's cap, which it reports without 
   const last = `ExcludeKeyword/k${COST_METER_MAX_COSTED_RULES}`;
   const truth = [["eligible", "", "10"], ["marginal", last, "4"]];
   assert.deepEqual(costMeterDrift(truth, { eligible: 10, byRule }), []);
+});
+
+// HREV2-ASK-05 / HREV2-PLAT-3: a recording's engine is the engine that answered, read from the stream's
+// own `conversation.engine` and `done.engine` — never from the `--engine` flag, and never guessed from
+// whether a `plan` frame arrived. The h2 smoke labelled 15 v1 turns as v2 that way.
+const withFrames = (raw, edit) => ({ ...raw, frames: raw.frames.map((x) => (edit[x.ev] ? { ...x, data: edit[x.ev](x.data) } : x)) });
+const dropEngine = (d) => { const { engine, ...rest } = d; return rest; };
+
+test("runner: a turn's engine is the one its stream names, not a guess from the plan frame", () => {
+  const v2 = v2ReplyFrames(["answer", { text: "Heat runs 170 minutes.", handle: null, titleId: null }]);
+  assert.equal(compactTurn(v1Frames({})).engine, "v1");
+  assert.equal(compactTurn(v2).engine, "v2");
+  // Vary one frame at a time: done alone still names it; the conversation frame alone still names it.
+  assert.equal(compactTurn(withFrames(v2, { conversation: dropEngine })).engine, "v2");
+  assert.equal(compactTurn(withFrames(v2, { done: dropEngine })).engine, "v2");
+  // Neither frame names an engine: unknown, even though a plan frame arrived (the old guess said v2).
+  assert.equal(compactTurn(withFrames(v2, { conversation: dropEngine, done: dropEngine })).engine, null);
+  // A v1 stream with no plan whose conversation frame says v2 is v2: the server said so.
+  assert.equal(compactTurn(withFrames(v1Frames({}), { conversation: (d) => ({ ...d, engine: "v2" }) })).engine, "v2");
+  // Two frames naming different engines is a conflict that matches neither.
+  const torn = streamEngine(withFrames(v2, { conversation: (d) => ({ ...d, engine: "v1" }) }).frames);
+  assert.notEqual(torn, "v1"); assert.notEqual(torn, "v2"); assert.match(torn, /v1.*v2|v2.*v1/);
+});
+
+test("runner: the request asks the API for the engine the run names", () => {
+  assert.equal(askUrl("http://127.0.0.1:5187", "v2"), "http://127.0.0.1:5187/api/search/ask?debug=1&engine=v2");
+  assert.equal(askUrl("http://127.0.0.1:5187", "v1"), "http://127.0.0.1:5187/api/search/ask?debug=1&engine=v1");
+});
+
+test("runner: the engine guard stops the run on the first turn another engine answered", () => {
+  const answered = (engine, extra = {}) => ({ status: 200, engine, frameCounts: { conversation: 1, done: 1 }, ...extra });
+  const g = engineGuard("v2");
+  assert.equal(g(answered("v2")).ok, true);
+  const bad = g(answered("v1"));
+  assert.equal(bad.ok, false); assert.match(bad.why, /v1/);
+  assert.equal(g(answered(null)).ok, false, "a turn whose stream named no engine is not evidence for either");
+  // A refused turn (no stream) answered nothing; it is the scorer's failed turn, not an engine mismatch.
+  assert.equal(g({ status: 429, engine: null, frameCounts: {} }).ok, true);
+  // A pre-§4.13 build names no engine; --allow-unnamed-engine with --engine v1 records it as assumed v1.
+  const legacy = engineGuard("v1", { allowUnnamed: true });
+  const t = answered(null);
+  assert.equal(legacy(t).ok, true);
+  assert.equal(t.engine, "v1"); assert.equal(t.engineAssumed, true);
+  // ...but never hides a stream that DID name another engine.
+  assert.equal(legacy(answered("v2")).ok, false);
+});
+
+const engineSc = [{ id: "e", categories: ["facet"], turns: [{ query: "heist movies", expect: {} }, { query: "more", expect: {} }] }];
+const engineRec = (header, engines, extra = {}) => ({ label: "e", concurrency: 4, ledger: [], facts: facts(), ...header,
+  scenarios: [{ id: "e", categories: ["facet"], turns: engines.map((engine, i) =>
+    turn(["heist movies", "more"][i], [], { engine, frameCounts: { conversation: 1, done: 1 }, ...extra })) }] });
+
+test("score: the header engine is the engine the turns name, and a run that disagrees with --engine is invalid", () => {
+  // The h2 artifact's shape: header (the flag) v2, every turn answered by v1.
+  const mislabelled = score(engineRec({ engine: "v2" }, ["v1", "v1"]), engineSc, prices, gates);
+  assert.equal(mislabelled.summary.engine, "v1");
+  assert.equal(mislabelled.summary.engineRequested, "v2");
+  assert.equal(mislabelled.summary.engineValid, false);
+  assert.ok(mislabelled.gates.every((g) => g.status.startsWith("INVALID")), "no gate passes or fails on another engine's output");
+  assert.match(renderReport(engineRec({ engine: "v2" }, ["v1", "v1"]), mislabelled), /INVALID[^\n]*v2[^\n]*v1/);
+  assert.match(renderReport(engineRec({ engine: "v2" }, ["v1", "v1"]), mislabelled), /Engine: v1/);
+  // Vary one field: the turns answered by v2 — valid, and the gates are scored.
+  const honest = score(engineRec({ engine: "v2" }, ["v2", "v2"]), engineSc, prices, gates);
+  assert.equal(honest.summary.engine, "v2"); assert.equal(honest.summary.engineValid, true);
+  assert.ok(honest.gates.every((g) => !g.status.startsWith("INVALID")));
+  // The new header shape (engineRequested beside a derived engine) reads the same way.
+  assert.equal(score(engineRec({ engine: "v1", engineRequested: "v2" }, ["v1", "v1"]), engineSc, prices, gates).summary.engineValid, false);
+  // One mismatched turn is enough.
+  assert.equal(score(engineRec({ engine: "v2" }, ["v2", "v1"]), engineSc, prices, gates).summary.engineValid, false);
+  // No --engine at all: two engines in one run is still invalid ("mixed"), one engine is valid.
+  const mixed = score(engineRec({ engine: null }, ["v2", "v1"]), engineSc, prices, gates);
+  assert.equal(mixed.summary.engine, "mixed"); assert.equal(mixed.summary.engineValid, false);
+  assert.equal(score(engineRec({ engine: null }, ["v1", "v1"]), engineSc, prices, gates).summary.engineValid, true);
+  // An answered turn whose stream named no engine is invalid evidence.
+  assert.equal(score(engineRec({ engine: "v2" }, ["v2", null]), engineSc, prices, gates).summary.engineValid, false);
+  // A refused turn (no stream) answered nothing and does not count either way.
+  const refused = engineRec({ engine: "v2" }, ["v2", null]);
+  refused.scenarios[0].turns[1] = { ...refused.scenarios[0].turns[1], status: 429, failed: true, frameCounts: {} };
+  assert.equal(score(refused, engineSc, prices, gates).summary.engineValid, true);
+});
+
+test("engineOf: counts turns per answering engine and names each mismatch", () => {
+  const e = engineOf(engineRec({ engine: "v2" }, ["v1", "v2"]));
+  assert.deepEqual(e.counts, { v1: 1, v2: 1 });
+  assert.equal(e.engine, "mixed");
+  assert.deepEqual(e.mismatches, ["e#1: v1"]);
+});
+
+test("compare: refuses an engine-invalid run on either side", () => {
+  const good = score(engineRec({ engine: "v2" }, ["v2", "v2"]), engineSc, prices, gates);
+  const bad = score(engineRec({ engine: "v2" }, ["v1", "v1"]), engineSc, prices, gates);
+  assert.equal(compare(good, good, gates).refused, null);
+  assert.match(compare(bad, good, gates).refused ?? "", /engine/);
+  assert.match(compare(good, bad, gates).refused ?? "", /engine/);
+});
+
+test("cli: a live run names its engine, and replay exits 1 on a mislabelled recording", async () => {
+  const run = (argv) => new Promise((res) => {
+    const p = spawn(process.execPath, [join(here, "askreel.mjs"), ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+    let err = ""; p.stderr.on("data", (d) => { err += d; });
+    p.on("close", (code) => res({ code, err }));
+  });
+  const noEngine = await run(["live", "--api", "http://127.0.0.1:9", "--db", "reel_eval", "--label", "x"]);
+  assert.equal(noEngine.code, 2); assert.match(noEngine.err, /--engine/);
+  const unnamedV2 = await run(["live", "--api", "http://127.0.0.1:9", "--db", "reel_eval", "--label", "x", "--engine", "v2", "--allow-unnamed-engine"]);
+  assert.equal(unnamedV2.code, 2); assert.match(unnamedV2.err, /allow-unnamed-engine/);
+  const dir = mkdtempSync(join(tmpdir(), "ws7-engine-"));
+  try {
+    const scDir = join(dir, "scenarios"); mkdirSync(scDir);
+    writeFileSync(join(scDir, "e.json"), JSON.stringify({ set: "open", scenarios: engineSc }));
+    for (const [name, engines, code] of [["bad", ["v1", "v1"], 1], ["good", ["v2", "v2"], 0]]) {
+      const file = join(dir, `${name}.json`);
+      writeFileSync(file, JSON.stringify({ ...engineRec({ engine: "v2" }, engines), scenarioDirs: [scDir] }));
+      const r = await run(["replay", file, "--out", join(dir, name)]);
+      assert.equal(r.code, code, `${name}: ${r.err}`);
+      if (code) assert.match(r.err, /INVALID|engine/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

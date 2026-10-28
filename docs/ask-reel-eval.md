@@ -53,6 +53,11 @@ node scripts/eval/askreel.mjs live --api http://127.0.0.1:5180 --db reel_eval --
      --api-env <eval env> --build-info <dir>/BUILD_INFO.json
 node scripts/eval/askreel.mjs live ... --concurrency 2 --hold-build-slots --only-file eval/askreel/latency-set.txt --label <name>-latency
 
+#    --engine is required and is ASKED FOR, not just recorded: every turn sends ?engine=v1|v2 (honoured for the
+#    founder account dev/link mints), the recording's engine is the one each turn's stream names
+#    (conversation.engine, done.engine), and the run stops at the first turn another engine — or no named
+#    engine — answered, writes the recording marked INVALID and exits 1 (HREV2-ASK-05). Only a pre-§4.13 build
+#    (99c0761), which names no engine and has no v2, takes --allow-unnamed-engine with --engine v1.
 # 4. Gate against the baseline: exit 1 on any regression, exit 2 when the runs are incomparable.
 node scripts/eval/askreel.mjs compare .tmp/eval/<date>/<name>/metrics.json --baseline eval/askreel/baselines/99c0761/open/metrics.json
 
@@ -89,7 +94,9 @@ holdout's baseline lives with the holdout in `~/src/fa.reel-eval-sealed/`.
 
 **Replay has two halves.** The scorer replay (`node --test 'scripts/eval/*.test.mjs'`, `askreel.mjs
 replay`) re-scores a frozen recording with no API, database or paid call, which proves the committed
-metrics and every scoring rule; `make ci-replay` runs it. The **engine replay** (§4.12) is
+metrics and every scoring rule; `make ci-replay` runs it. A recording whose answered turns name an engine other than the
+one it asked for (or older recordings, whose header held the `--engine` flag) is **invalid**: its report
+says so above the gates, every gate reads `INVALID`, replay exits 1 and `compare` refuses it (exit 2). The **engine replay** (§4.12) is
 `IT/AskReelGolden/Replay/AskReelV2ReplayTests` (`[Trait("Suite", "Replay")]`): each fixture in
 `eval/askreel/replay/v2/` is a small world (titles, standing conditions, footprint) and a conversation —
 per turn the planner's plan, the judge's verdict per title and an item question's answer — driven through

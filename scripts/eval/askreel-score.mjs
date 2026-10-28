@@ -419,6 +419,34 @@ function plannedTurns(s, def) {
 const sha = (x) => createHash("sha256").update(JSON.stringify(x)).digest("hex").slice(0, 16);
 export function scenarioFingerprint(id, queries) { return sha([id, queries]); }
 
+// A turn a stream answered: the API returned 200 and sent at least one frame. A refused turn (or one whose
+// stream never started) answered nothing, so no engine answered it.
+export function answeredTurn(t) {
+  return t.status === 200 && Object.keys(t.frameCounts ?? {}).length > 0;
+}
+
+// Which engine answered a recording, from its turns — never from the flag it was started with
+// (HREV2-ASK-05, HREV2-PLAT-3). `requested` is that flag: `engineRequested`, or `engine` on a recording
+// older than the field, where the header held the flag. The recording is invalid when any answered turn
+// names another engine than the one requested, names none, or — with nothing requested — the run mixes
+// engines: its gates would describe one engine's output under another's name.
+export function engineOf(recording) {
+  const requested = recording.engineRequested !== undefined ? recording.engineRequested ?? null : recording.engine ?? null;
+  const counts = {};
+  const mismatches = [];
+  for (const s of recording.scenarios ?? []) s.turns.forEach((t, i) => {
+    if (!answeredTurn(t)) return;
+    const e = t.engine ?? null;
+    counts[e ?? "unnamed"] = (counts[e ?? "unnamed"] ?? 0) + 1;
+    if (e === null || (requested !== null && e !== requested)) mismatches.push(`${s.id}#${i + 1}: ${e ?? "no engine named"}`);
+  });
+  const named = Object.keys(counts);
+  const engine = named.length === 0 ? null : named.length === 1 ? named[0] : "mixed";
+  if (requested === null && named.length > 1 && mismatches.length === 0) mismatches.push(`mixed engines: ${named.join(", ")}`);
+  if (recording.engineStopped && mismatches.length === 0) mismatches.push(String(recording.engineStopped));
+  return { engine, requested, counts, mismatches, valid: mismatches.length === 0 };
+}
+
 export function score(recording, scenarios, prices, gates) {
   const defs = new Map(scenarios.map((s) => [s.id, s]));
   const facts = recording.facts ?? {};
@@ -486,12 +514,14 @@ export function score(recording, scenarios, prices, gates) {
   // length (§4.12, §5.0 rule 1, §7 rule 5); any other run reports latency but never passes or fails on it.
   const latencyValid = recording.concurrency <= 2 && recording.buildSlotsHeld === true;
   const latencyWhy = recording.concurrency > 2 ? "concurrency > 2" : "build slots not held during the run";
+  const engine = engineOf(recording);
   const results = [];
   for (const g of gates.gates) {
     const metric = m[g.metric];
     const v = g.stat ? metric?.[g.stat] : metric?.value;
     let status;
-    if (g.latency && !latencyValid) status = `not-gated (${latencyWhy})`;
+    if (!engine.valid) status = `INVALID (engine: asked ${engine.requested ?? "none"}, answered ${engine.engine ?? "none"})`;
+    else if (g.latency && !latencyValid) status = `not-gated (${latencyWhy})`;
     else if (v === null || v === undefined || metric.n === 0) status = "no data";
     else status = (g.op === ">=" ? v >= g.target : v <= g.target) ? "pass" : "FAIL";
     results.push({ ...g, value: v ?? null, n: metric?.n ?? 0, status });
@@ -506,7 +536,8 @@ export function score(recording, scenarios, prices, gates) {
 
   return {
     summary: {
-      label: recording.label, engine: recording.engine, build: recording.build ?? null, buildInfo: recording.buildInfo ?? null, gitSha: recording.gitSha, snapshotId: recording.snapshotId,
+      label: recording.label, engine: engine.engine, engineRequested: engine.requested, engineCounts: engine.counts,
+      engineValid: engine.valid, engineMismatches: engine.mismatches.slice(0, 20), engineMismatchCount: engine.mismatches.length, build: recording.build ?? null, buildInfo: recording.buildInfo ?? null, gitSha: recording.gitSha, snapshotId: recording.snapshotId,
       artifact: facts.artifact ?? null, concurrency: recording.concurrency, scenarios: perScenario.length, turns: attempted,
       fingerprint: sha(perScenario.map((p) => [p.id, p.fingerprint]).sort((a, b) => (a[0] < b[0] ? -1 : 1))),
       staleScenarios: perScenario.filter((p) => p.stale).map((p) => p.id),
@@ -524,7 +555,8 @@ export function renderReport(recording, metrics) {
   const s = metrics.summary;
   const L = [];
   L.push(`# Ask Reel golden run — ${s.label}`, "");
-  L.push(`- Engine: ${s.engine ?? "unspecified"} · API build ${s.build ?? "unrecorded"} · runner ${s.gitSha ?? "?"} · snapshot \`${s.snapshotId ?? "?"}\` · artifact \`${s.artifact?.id ?? "?"}\` (v${s.artifact?.version ?? "?"})`);
+  if (s.engineValid === false) L.push(`- **INVALID: asked for engine ${s.engineRequested ?? "none"}, answered by ${Object.entries(s.engineCounts ?? {}).map(([k, n]) => `${k} ×${n}`).join(", ")}** (${s.engineMismatchCount} turn(s): ${(s.engineMismatches ?? []).slice(0, 5).join("; ")}). No gate below is scored; compare refuses this run.`);
+  L.push(`- Engine: ${s.engine ?? "no turn answered"}${s.engineRequested && s.engineRequested !== s.engine ? ` (requested ${s.engineRequested})` : ""} · API build ${s.build ?? "unrecorded"} · runner ${s.gitSha ?? "?"} · snapshot \`${s.snapshotId ?? "?"}\` · artifact \`${s.artifact?.id ?? "?"}\` (v${s.artifact?.version ?? "?"})`);
   L.push(`- ${s.scenarios} scenarios, ${s.turns} turns, concurrency ${s.concurrency}, ${s.wallSeconds ?? "?"} s wall, $${fmt(s.costUsd, 4)} from the ledger`);
   L.push(`- Latency gates ${s.latencyGated ? "APPLY (concurrency ≤ 2, every build slot held)" : `do NOT apply (${s.concurrency > 2 ? "concurrency > 2" : "build slots not held during the run"}) — latency below is reported, not gated`}`);
   L.push(`- Model key: ${s.modelKey} · scenario fingerprint \`${s.fingerprint}\``);
@@ -587,6 +619,9 @@ const PAIRED = {
 // change the expectations themselves; re-run the baseline on the new set instead.
 export function incomparable(current, baseline) {
   const c = current.summary, b = baseline.summary;
+  for (const [name, x] of [["current", c], ["baseline", b]]) {
+    if (x.engineValid === false) return `the ${name} run is invalid: asked for engine ${x.engineRequested}, answered by ${JSON.stringify(x.engineCounts)} — its metrics are not that engine's`;
+  }
   if (!b.fingerprint || !c.fingerprint) return "a metrics file predates scenario fingerprints — re-score it with `askreel.mjs replay`";
   for (const [name, run] of [["current", current], ["baseline", baseline]]) {
     const stale = run.scenarios.filter((s) => s.stale).map((s) => s.id);

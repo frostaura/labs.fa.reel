@@ -4,7 +4,8 @@
 //   node scripts/eval/askreel.mjs live   --api http://127.0.0.1:5180 --db reel_eval --label <name> --api-env <env file the API runs with>
 //        [--scenarios eval/askreel/scenarios] [--extra-scenarios <dir>] [--truth-dir <dir>] [--concurrency 4]
 //        [--only id,id | --only-file eval/askreel/latency-set.txt] [--limit N] [--resume] [--out .tmp/eval/<date>/<label>]
-//        [--engine v1|v2] [--build-info <BUILD_INFO.json from build-at.sh>] [--hold-build-slots] [--founder-key-signoff "<who, when>"]
+//        --engine v1|v2 [--allow-unnamed-engine] [--build-info <BUILD_INFO.json from build-at.sh>] [--hold-build-slots]
+//        [--founder-key-signoff "<who, when>"]
 //   node scripts/eval/askreel.mjs replay <recording.json> [--out <dir>]
 //   node scripts/eval/askreel.mjs check  [--scenarios <dir>] [--extra-scenarios <dir>] [--truth-dir <dir>] [--db <eval db>]
 //   node scripts/eval/askreel.mjs compare <metrics.json> --baseline <metrics.json>
@@ -25,6 +26,13 @@
 // check   validates the scenario files (ids, shapes, truth keys, counts, no unused open truth) without
 //         running anything; with --db it also executes every truth query on that eval database.
 //
+// --engine is required: every turn asks the API for that engine (?engine=, honoured for the founder
+// account dev/link mints), and the run stops at the first turn whose stream names another engine — or
+// none — and exits 1 with the recording marked invalid. The recording's engine is the one the turns
+// name, never the flag (HREV2-ASK-05, HREV2-PLAT-3). A pre-§4.13 build (99c0761) names no engine and
+// has no v2; only for such a build, --allow-unnamed-engine with --engine v1 records unnamed turns as
+// assumed v1 (each flagged engineAssumed).
+//
 // Latency gates come only from a run at concurrency ≤ 2 with --hold-build-slots, which takes every
 // machine build slot for the run's whole length (§5.0 rule 1, §7 rule 5).
 //
@@ -34,7 +42,7 @@ import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { score, renderReport, compare, replySupply, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
+import { score, renderReport, compare, replySupply, engineOf, answeredTurn, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
 import { modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -160,14 +168,40 @@ async function link(api) {
 const TURN_IDLE_MS = Number(process.env.EVAL_TURN_IDLE_MS ?? 120000);
 const TURN_CAP_MS = Number(process.env.EVAL_TURN_CAP_MS ?? DEFAULT_TURN_CAP_MS);
 
-async function askTurn(api, session, body) {
+// The ask URL for one turn: founder diagnostics, and the engine the run names (§4.13 per-request override).
+export function askUrl(api, engine) {
+  return `${api}/api/search/ask?debug=1&engine=${encodeURIComponent(engine)}`;
+}
+
+// The engine a stream names: the `conversation` frame's `engine` (every live turn since §4.13) and v2's
+// `done.engine`. Null when neither names one; two frames naming different engines is a conflict value
+// that equals neither engine. Never inferred from which frames arrived — a `plan` frame is not a label.
+export function streamEngine(frames) {
+  const named = [...new Set(frames.filter((x) => (x.ev === "conversation" || x.ev === "done") && typeof x.data?.engine === "string")
+    .map((x) => x.data.engine))];
+  return named.length === 0 ? null : named.length === 1 ? named[0] : `conflict(${named.join("/")})`;
+}
+
+// Checks each recorded turn against the engine the run asked for. Returns { ok, why }; a turn that
+// answered (a stream arrived) on another engine, or naming none, is not ok. allowUnnamed (a pre-§4.13
+// v1 build only) records an unnamed turn as assumed v1 instead.
+export function engineGuard(requested, { allowUnnamed = false } = {}) {
+  return (t) => {
+    if (!answeredTurn(t)) return { ok: true };
+    if (t.engine === null && allowUnnamed && requested === "v1") { t.engine = "v1"; t.engineAssumed = true; }
+    if (t.engine === requested) return { ok: true };
+    return { ok: false, why: `asked for ${requested}, answered by ${t.engine ?? "no named engine"}` };
+  };
+}
+
+async function askTurn(api, session, body, engine) {
   const t0 = performance.now();
   const controller = new AbortController();
   let idle = setTimeout(() => controller.abort("idle"), TURN_IDLE_MS);
   const cap = setTimeout(() => controller.abort("cap"), TURN_CAP_MS);
   const out = { status: 0, frames: [], firstByteMs: null, firstCardMs: null };
   try {
-    const res = await fetch(`${api}/api/search/ask?debug=1`, {
+    const res = await fetch(askUrl(api, engine), {
       method: "POST", headers: { "Content-Type": "application/json", Cookie: session.cookie }, body: JSON.stringify(body), signal: controller.signal,
     });
     out.status = res.status;
@@ -285,7 +319,7 @@ export function compactTurn(raw) {
     conversationId: conv.id ?? plan?.conversationId ?? done?.conversationId ?? null,
     turnId: conv.turnId ?? plan?.turnId ?? done?.turnId ?? null, sequence: conv.sequence ?? null,
     firstByteMs: raw.firstByteMs, firstCardMs: raw.firstCardMs, totalMs: raw.totalMs,
-    engine: plan ? "v2" : "v1",
+    engine: streamEngine(raw.frames),
     act: plan?.act ?? null, references: plan?.references ?? null,
     reply: answer ?? clarify ?? assistant?.text ?? null,
     conflict: Boolean(assistant?.conflict) || conflictFrame,
@@ -303,7 +337,9 @@ export function compactTurn(raw) {
   };
 }
 
-async function runScenario(api, getSession, renewSession, s) {
+// guard(turn) → { ok, why } after every turn; a turn that is not ok ends the scenario (and, via the
+// caller, the run) before another paid turn is sent.
+async function runScenario(api, getSession, renewSession, s, engine, guard) {
   let conversationId = null;
   const turns = [];
   for (const t of s.turns) {
@@ -312,12 +348,14 @@ async function runScenario(api, getSession, renewSession, s) {
     const media = t.mediaTypes ?? s.mediaTypes;
     if (media) body.mediaTypes = media;
     const startedAt = new Date().toISOString();
-    let raw = await askTurn(api, await getSession(), body);
-    if (raw.status === 401) raw = await askTurn(api, await renewSession(), body);
+    let raw = await askTurn(api, await getSession(), body, engine);
+    if (raw.status === 401) raw = await askTurn(api, await renewSession(), body, engine);
     const c = compactTurn(raw);
     c.query = t.query; c.mediaTypes = media ?? null; c.startedAt = startedAt;
     conversationId = c.conversationId ?? conversationId;
     turns.push(c);
+    const verdict = guard(c);
+    if (!verdict.ok) return { id: s.id, set: s.set, categories: s.categories, conversationId, turns, engineMismatch: `${s.id}#${turns.length}: ${verdict.why}` };
     if (c.status !== 200 || c.error) break; // a refused or dead turn ends the scenario; the scorer counts the rest as missing
   }
   return { id: s.id, set: s.set, categories: s.categories, conversationId, turns };
@@ -654,6 +692,10 @@ if (mode === "replay") {
   const outDir = args.out ?? dirname(file);
   const metrics = writeOutputs(outDir, recording);
   console.log(JSON.stringify(metrics.summary, null, 1));
+  if (!metrics.summary.engineValid) {
+    console.error(`askreel: INVALID recording — engine requested ${metrics.summary.engineRequested}, answered ${JSON.stringify(metrics.summary.engineCounts)}`);
+    process.exit(1);
+  }
   process.exit(metrics.summary.gatesFailed > 0 && args.strict ? 1 : 0);
 }
 
@@ -662,6 +704,10 @@ if (mode === "live") {
   const db = args.db ?? die("--db is required (the eval database the API runs on)");
   guardTarget(db);
   const label = args.label ?? die("--label is required");
+  const engine = ["v1", "v2"].includes(args.engine) ? args.engine : die("--engine v1|v2 is required: the run asks the API for that engine and refuses any turn another engine answers");
+  const allowUnnamed = Boolean(args["allow-unnamed-engine"]);
+  if (allowUnnamed && engine !== "v1") die("--allow-unnamed-engine is only for a pre-§4.13 build, which has no v2: use it with --engine v1");
+  const guard = engineGuard(engine, { allowUnnamed });
   const concurrency = Number(args.concurrency ?? 4);
   if (concurrency > 4) die("quality runs are capped at concurrency 4 (§4.12)");
   if (args["hold-build-slots"] && concurrency > 2) die("--hold-build-slots is for latency runs, which are capped at concurrency 2");
@@ -712,15 +758,21 @@ if (mode === "live") {
     // other recorded scenario — including the pipeline's own failures — is kept as it was.
     for (const line of readFileSync(partialFile, "utf8").split("\n").filter(Boolean)) {
       const r = JSON.parse(line);
-      if (r.turns.some((t) => (t.error ?? "").startsWith("transport:"))) resumed.delete(r.id);
+      // A scenario stopped on an engine mismatch is not salvage: resuming re-asks it under this run's guard.
+      if (r.engineMismatch || r.turns.some((t) => (t.error ?? "").startsWith("transport:"))) resumed.delete(r.id);
       else resumed.set(r.id, r);
     }
     writeFileSync(partialFile, [...resumed.values()].map((r) => JSON.stringify(r) + "\n").join(""));
     console.error(`askreel: resuming — ${resumed.size} scenarios already recorded`);
   } else writeFileSync(partialFile, "");
   let done = 0;
+  // The first turn another engine answers stops the run: no further scenario starts, so no more paid
+  // turns go on evidence that cannot count. Recorded scenarios from a resume are held to the same check.
+  let mismatch = [...resumed.values()].flatMap((r) => r.turns.map((t) => guard(t)).filter((v) => !v.ok).map((v) => `${r.id}: ${v.why}`))[0] ?? null;
   const results = await pool(scenarios, concurrency, async (s) => {
-    const r = resumed.get(s.id) ?? await runScenario(api, getSession, renew, s);
+    if (mismatch && !resumed.has(s.id)) return null;
+    const r = resumed.get(s.id) ?? await runScenario(api, getSession, renew, s, engine, guard);
+    if (r.engineMismatch && !mismatch) { mismatch = r.engineMismatch; console.error(`askreel: STOPPING — ${mismatch}`); }
     if (!resumed.has(s.id)) appendFileSync(partialFile, JSON.stringify(r) + "\n");
     done++;
     if (done % 5 === 0 || done === scenarios.length) console.error(`askreel: ${done}/${scenarios.length} scenarios (${Math.round((Date.now() - started) / 1000)} s)`);
@@ -733,7 +785,7 @@ if (mode === "live") {
   const exposuresAfter = Number(sql(db, `select count(*) from "ExposureEvents"`)[0][0]);
   slots?.release();
   const recording = {
-    kind: "askreel-recording", version: 2, label, engine: args.engine ?? null, build: buildInfo?.commit ?? null, buildInfo, api, db, snapshotId,
+    kind: "askreel-recording", version: 2, label, engine: null, engineRequested: engine, engineStopped: mismatch, build: buildInfo?.commit ?? null, buildInfo, api, db, snapshotId,
     modelKey: key.recorded, turnCapMs: TURN_CAP_MS, truthDirs: truthDirs.map((d) => (d.startsWith(repo) ? d.slice(repo.length + 1) : d)),
     // Latency is gated only when every build slot was held for the WHOLE run (a resume must hold them too).
     buildSlotsHeld: Boolean(slots) && startState.buildSlotsHeld === true,
@@ -741,17 +793,24 @@ if (mode === "live") {
     gitSha: gitSha(), startedAt: started.toISOString(), finishedAt: finished.toISOString(),
     wallSeconds: Math.round((finished - started) / 1000), concurrency, accountId: session.accountId,
     scenarioDirs: scenarioDirs.map((d) => (resolve(repo, d).startsWith(repo) ? resolve(repo, d).slice(repo.length + 1) : resolve(repo, d))),
-    scenarios: results, ledger: ledgerDelta(before, after), exposuresWritten: exposuresAfter - exposuresBefore,
+    scenarios: results.filter(Boolean), skippedScenarios: results.filter((r) => r === null).length, ledger: ledgerDelta(before, after), exposuresWritten: exposuresAfter - exposuresBefore,
     // A resumed run keeps its first attempt's ledger and exposure baselines (run-start.json), so spend
     // covers the whole run; wall time then includes the gap between attempts.
     resumedScenarios: resumed.size,
   };
+  // The engine that answered, from the turns (null when none answered) — the flag is engineRequested.
+  const answered = engineOf(recording);
+  recording.engine = answered.engine;
   recording.facts = materialise(db, session.accountId, recording, scenarios);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "recording.json"), JSON.stringify(recording));
   const metrics = writeOutputs(outDir, recording);
   console.log(JSON.stringify(metrics.summary, null, 1));
   console.error(`askreel: wrote ${outDir}`);
+  if (!metrics.summary.engineValid) {
+    console.error(`askreel: INVALID — asked for ${engine}, answered by ${JSON.stringify(answered.counts)}: ${answered.mismatches.slice(0, 5).join("; ")}`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 
