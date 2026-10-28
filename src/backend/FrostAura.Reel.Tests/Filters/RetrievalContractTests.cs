@@ -261,6 +261,81 @@ public class RetrievalContractTests
     public void The_name_arm_reads_only_the_users_own_words(string words, string[] labels, string[] expected) =>
         Assert.Equal(expected, HardConstraintFilter.NameLabelsOf(new ConceptTerm(words, labels, [])));
 
+    /// <summary>
+    /// HREV3-RET-A through the v1 entry point: a caller with no words of the user's — the v2 state
+    /// rebuilt from a v1 reading, a v1 topic no word of the user's anchored — reads the planner's
+    /// keywords as a stand-in, and a curated synonym among them never reaches a name. Joined into
+    /// "samurai ronin" they once said "ronin" for the user, and Ronin (1998) counted as a samurai film
+    /// he had seen. The concept's own name still does ("samurai", "ninja", "vampires"): reading none of
+    /// them dropped 7 of the founder's 70 ninja movies, the ones found by name alone.
+    /// </summary>
+    [Theory]
+    [InlineData(null, new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("  ", new[] { "ronin", "samurai" }, new[] { "samurai" })]
+    [InlineData(null, new[] { "ronin" }, new string[0])]
+    [InlineData(null, new[] { "ninja" }, new[] { "ninja" })]
+    [InlineData(null, new[] { "ninja", "shinobi", "kunoichi" }, new[] { "ninja" })]
+    [InlineData(null, new[] { "heist", "bank robbery", "robbery" }, new[] { "heist" })]
+    [InlineData(null, new[] { "courtroom", "trial" }, new[] { "courtroom" })]
+    [InlineData(null, new[] { "artificial intelligence", "ai", "robot" }, new[] { "artificial intelligence" })]
+    [InlineData(null, new[] { "natural disaster", "volcano", "tsunami" }, new[] { "natural disaster" })]
+    [InlineData(null, new[] { "vampires" }, new[] { "vampires" })]
+    [InlineData(null, new[] { "serial killer" }, new[] { "serial killer" })]
+    [InlineData("samurai films", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("ronin", new[] { "samurai", "ronin" }, new[] { "ronin" })]
+    public void Intent_keywords_without_the_users_words_never_name_a_synonym(string? userWords, string[] keywords, string[] expected)
+    {
+        var concept = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: keywords), userWords: userWords).Concepts);
+
+        Assert.Equal(expected, HardConstraintFilter.NameLabelsOf(concept));
+        // The keyword arm is untouched: every keyword still counts as a tag.
+        Assert.Equal(keywords, concept.CatalogueLabels);
+    }
+
+    [Fact]
+    public void A_stand_in_still_names_the_concept_and_the_flag_survives_every_reading()
+    {
+        var standIn = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: ["samurai", "ronin"])).Concepts);
+        var said = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: ["samurai", "ronin"]), userWords: "samurai films").Concepts);
+        var genres = Assert.Single(IntentConstraints.FromIntent(Intent(genres: ["romance", "comedy"])).Concepts);
+
+        // The planner, the semantic arm and TMDB discovery still read the keywords as the concept's words.
+        Assert.Equal("samurai ronin", standIn.UserWords);
+        Assert.True(standIn.StandInWords);
+        Assert.False(said.StandInWords);
+        Assert.True(genres.StandInWords);
+
+        // The stored conversation state keeps it, and a row written before the field reads as the user's words.
+        var state = new Application.Search.AskReel.Engine.ConversationState(
+            1, HardConstraints.None with { Concepts = [standIn, said] }, SoftPreferences.None, [], [], [], [], null);
+        var json = Application.Search.AskReel.Engine.ConversationStateJson.Write(state);
+        var back = Application.Search.AskReel.Engine.ConversationStateJson.Read(json)!;
+        Assert.Equal([true, false], back.Hard.Concepts.Select(c => c.StandInWords));
+        Assert.Contains("\"standInWords\":true", json, StringComparison.Ordinal);
+        var legacy = Application.Search.AskReel.Engine.ConversationStateJson.Read(
+            json.Replace(",\"standInWords\":true", string.Empty, StringComparison.Ordinal)
+                .Replace(",\"standInWords\":false", string.Empty, StringComparison.Ordinal))!;
+        Assert.Equal([false, false], legacy.Hard.Concepts.Select(c => c.StandInWords));
+
+        // The static genre reading splits a stand-in's genre words into stand-ins too.
+        var split = Application.Search.Retrieval.Concepts.ConceptResolver.GenreReading(new ConceptTerm("romantic comedy", [], [], StandInWords: true))!;
+        Assert.Equal(2, split.Count);
+        Assert.All(split, c => Assert.True(c.StandInWords));
+    }
+
+    [Theory]
+    [InlineData("ronin", true)]
+    [InlineData("robberies", true)]
+    [InlineData("volcano", true)]
+    [InlineData("ai", true)]
+    [InlineData("samurai", false)]
+    [InlineData("vampires", false)]
+    [InlineData("spies", false)]
+    [InlineData("serial killer", false)]
+    public void A_synonym_is_a_group_member_other_than_its_name(string stem, bool synonym) =>
+        Assert.Equal(synonym, Application.Search.Retrieval.Concepts.ConceptSynonyms.IsSynonym(stem));
+
     [Fact]
     public void A_concept_without_labels_matches_on_the_users_own_words()
     {

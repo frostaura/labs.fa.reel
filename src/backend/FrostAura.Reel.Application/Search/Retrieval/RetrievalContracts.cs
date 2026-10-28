@@ -59,11 +59,22 @@ public static class MediaScopes
 /// the same titles as long as the vocabulary is current (it is re-read every few minutes). Null for
 /// an unresolved concept, which keeps the containment regex.
 /// </param>
+/// <param name="StandInWords">
+/// True when the caller had no words of the user's for the concept and <paramref name="UserWords"/>
+/// holds the planner's keywords joined in their place (<see cref="IntentConstraints.FromIntent"/>
+/// without user words: a conversation state rebuilt from a v1 reading, or a v1 topic no word of the
+/// user's anchored). The stand-in still names the concept to the planner, embeds and discovers, but it
+/// is not something the user SAID, so the name arm reads only its labels that are not curated synonyms
+/// (<see cref="HardConstraintFilter.NameLabelsOf"/>): "samurai ronin" would otherwise say "ronin" and
+/// count Ronin (1998) as a samurai film by its name (HREV3-RET-A). False — the user's own words — when a
+/// stored state predates the field.
+/// </param>
 public sealed record ConceptTerm(
     string UserWords,
     IReadOnlyList<string> CatalogueLabels,
     IReadOnlyList<string> Genres,
-    IReadOnlyList<string>? ExactLabels = null);
+    IReadOnlyList<string>? ExactLabels = null,
+    bool StandInWords = false);
 
 /// <summary>A person the request is about, resolved to a catalogue person when possible.</summary>
 /// <param name="Name">The name as the user said it; matched case-insensitively when <paramref name="PersonId"/> is null.</param>

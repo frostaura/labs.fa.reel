@@ -76,10 +76,25 @@ public static class HardConstraintFilter
     /// preposition in Vacanze ai Caraibi (HREV3-RET-A). The user's own two-letter "AI" fails the same way,
     /// so it too is matched by keyword only. A word of the user's phrase is their word too ("alien
     /// invasion movies" says "alien"; "ai robot" says "robot").
+    ///
+    /// <para>When the user's words are not known (<see cref="ConceptTerm.StandInWords"/>: the planner's
+    /// keywords joined, for a state rebuilt from a v1 reading or a v1 topic no word of the user's
+    /// anchored), the name arm reads every label that is not a curated synonym
+    /// (<see cref="Concepts.ConceptSynonyms.IsSynonym"/>): [samurai, ronin] names "samurai" and never
+    /// "ronin". Reading none of them instead lost every title found by its name alone — 63 of the
+    /// founder's 70 ninja movies — and reading them all counted Ronin (1998) again.</para>
     /// </summary>
     public static IReadOnlyList<string> NameLabelsOf(ConceptTerm concept)
     {
         ArgumentNullException.ThrowIfNull(concept);
+        if (concept.StandInWords)
+        {
+            return LabelsOf(concept)
+                .Where(label => Concepts.ConceptResolver.Normalise(label) is { Length: >= MinNameLabelLength } normal
+                    && !Concepts.ConceptSynonyms.IsSynonym(normal))
+                .ToList();
+        }
+
         var said = SaidForms(concept.UserWords);
         if (said.Count == 0)
         {

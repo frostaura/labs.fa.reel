@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -220,6 +221,40 @@ public class SupplyTruthProbe(ITestOutputHelper output)
                 {
                     failures.Add($"{truth}/{media}/{reading}: app {actual} vs truth {expected}");
                 }
+            }
+        }
+
+        // The same labels with none of the user's words (IntentConstraints.FromIntent without them: the v2
+        // state rebuilt from a v1 reading, a v1 topic no word of the user's anchored). The name arm then
+        // reads the labels that are not curated synonyms — the concept's own name — so it is held to the
+        // same truth: "samurai ronin" once said "ronin" and counted Ronin (1998) here (HREV3-RET-A).
+        foreach (var (truth, _, labels, media, everyBucket) in Probes)
+        {
+            var standIn = IntentConstraints.FromIntent(
+                new SearchIntent([], labels, [], string.Empty, null, null), media switch
+                {
+                    MediaScope.Movies => [MediaType.Movie],
+                    MediaScope.Shows => [MediaType.Show],
+                    _ => null,
+                });
+            await using var db = Context();
+            var resolver = new ConceptResolver(
+                new KeywordVocabulary(db, cache),
+                new ConceptEmbeddings(new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+                db,
+                NullLogger<ConceptResolver>.Instance);
+            var report = await new SupplyReporter(db, new EligibilityQueryBuilder(db), resolver).ReportAsync(accountId, standIn, CancellationToken.None);
+            var expected = await TruthAsync(connection, truth, media, accountId, report.MinVotes);
+            var actual = (report.MatchingInCatalogue, report.AlreadySeen, report.Eligible, report.Unscored, report.BelowFloor);
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{truth} (no user words) [{string.Join(",", labels)}] {media} stand-in: app (matching, seen, eligible, unscored, below) = {actual}; truth = {expected}"));
+            var agrees = everyBucket
+                ? actual == expected
+                : (actual.MatchingInCatalogue, actual.AlreadySeen) == (expected.Matching, expected.Seen);
+            if (!agrees)
+            {
+                failures.Add($"{truth}/{media}/stand-in: app {actual} vs truth {expected}");
             }
         }
 
