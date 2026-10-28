@@ -32,9 +32,9 @@ public static class DevEndpoints
     /// <summary>
     /// Prefix written onto the stored <c>RefreshSessions.UserAgent</c> of every session dev/link
     /// issues, so QA sessions can be excluded from the founder's data by identity rather than by
-    /// clock (FD-18).
+    /// clock (FD-18). Rotation carries it to every successor (<see cref="SessionService.QaSessionMarker"/>).
     /// </summary>
-    public const string DevLinkSessionMarker = "reel-dev-link";
+    public const string DevLinkSessionMarker = SessionService.QaSessionMarker;
 
     public static void MapDevEndpoints(this WebApplication app)
     {
@@ -135,7 +135,7 @@ public static class DevEndpoints
             // The rest of this request acts as the account it just signed in (J-11): the session
             // payload reads scoped tables, and a stale cookie for another account must not narrow them.
             http.RequestServices.GetRequiredService<IAccountContext>().SetAccount(account.Id);
-            var session = await sessions.IssueAsync(account, MarkDevLinkUserAgent(http.Request.Headers.UserAgent.FirstOrDefault()), ct);
+            var session = await sessions.IssueQaAsync(account, http.Request.Headers.UserAgent.FirstOrDefault(), ct);
             SessionCookies.Write(http, session);
             return Results.Ok(await account.ToSessionPayloadAsync(http, ct));
         }).RequireLoopback();
@@ -507,18 +507,6 @@ public static class DevEndpoints
                 ? await ItemsAsync(db, account.Id, requested, skip ?? 0, take ?? MaxEvaluationItemsPerPage, ct)
                 : await LatestRunsAsync(db, account.Id, ct);
         });
-    }
-
-    /// <summary>
-    /// The stored user agent of a dev/link session: <see cref="DevLinkSessionMarker"/>, then the
-    /// caller's own agent when it sent one, cut to the column's 256 characters.
-    /// </summary>
-    internal static string MarkDevLinkUserAgent(string? userAgent)
-    {
-        var marked = string.IsNullOrWhiteSpace(userAgent)
-            ? DevLinkSessionMarker
-            : DevLinkSessionMarker + " " + userAgent.Trim();
-        return marked.Length <= 256 ? marked : marked[..256];
     }
 
     /// <summary>Per-title items returned in one page. A page is for reading, not for exporting.</summary>

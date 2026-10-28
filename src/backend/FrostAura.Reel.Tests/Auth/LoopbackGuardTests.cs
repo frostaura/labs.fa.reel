@@ -1,6 +1,7 @@
 using System.Net;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Security;
+using FrostAura.Reel.Application.Auth;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 
@@ -162,15 +163,19 @@ public class LoopbackGuardTests
     [InlineData("   ", "reel-dev-link")]
     [InlineData("curl/8.7.1", "reel-dev-link curl/8.7.1")]
     [InlineData("  curl/8.7.1  ", "reel-dev-link curl/8.7.1")]
+    // A refresh from a client whose own agent already carries the marker is not marked twice.
+    [InlineData("reel-dev-link curl/8.7.1", "reel-dev-link curl/8.7.1")]
+    [InlineData("reel-dev-link", "reel-dev-link")]
     public void A_dev_link_session_is_marked_by_its_user_agent(string? userAgent, string expected)
     {
-        Assert.Equal(expected, DevEndpoints.MarkDevLinkUserAgent(userAgent));
+        Assert.Equal(expected, SessionService.MarkQaUserAgent(userAgent));
+        Assert.True(SessionService.IsQaSession(SessionService.MarkQaUserAgent(userAgent)));
     }
 
     [Fact]
     public void A_marked_user_agent_still_fits_the_column()
     {
-        var marked = DevEndpoints.MarkDevLinkUserAgent(new string('x', 400));
+        var marked = SessionService.MarkQaUserAgent(new string('x', 400));
 
         Assert.Equal(256, marked.Length);
         Assert.StartsWith(DevEndpoints.DevLinkSessionMarker + " ", marked, StringComparison.Ordinal);

@@ -60,11 +60,72 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options,
     /// </summary>
     public static readonly TimeSpan RefreshGrace = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// The prefix on the stored <see cref="RefreshSession.UserAgent"/> of a QA session — one issued by
+    /// the dev/link sign-in, and every successor rotated from it — so QA traffic is excluded from the
+    /// founder's data by identity, not by clock (FD-18). The retention purge keeps rows that start
+    /// with it.
+    /// </summary>
+    public const string QaSessionMarker = "reel-dev-link";
+
+    /// <summary>The stored-agent column's width.</summary>
+    private const int UserAgentLength = 256;
+
     /// <summary>Mints a new refresh session for <paramref name="account"/>; the result carries its id.</summary>
-    public async Task<SessionTokens> IssueAsync(Account account, string? userAgent, CancellationToken ct = default)
+    public Task<SessionTokens> IssueAsync(Account account, string? userAgent, CancellationToken ct = default) =>
+        IssueAsync(account, userAgent, qaSession: false, ct);
+
+    /// <summary>
+    /// Mints a QA session (dev/link only): its stored agent carries <see cref="QaSessionMarker"/>, and
+    /// <see cref="RefreshAsync"/> passes the marker to every successor.
+    /// </summary>
+    public Task<SessionTokens> IssueQaAsync(Account account, string? userAgent, CancellationToken ct = default) =>
+        IssueAsync(account, userAgent, qaSession: true, ct);
+
+    /// <summary>
+    /// True when a stored agent marks a QA session — the same rule as the retention purge's
+    /// <c>LIKE 'reel-dev-link%'</c>, so what rotation keeps marked is exactly what the purge keeps.
+    /// </summary>
+    public static bool IsQaSession(string? storedUserAgent) =>
+        storedUserAgent is not null && storedUserAgent.StartsWith(QaSessionMarker, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The stored agent of a QA session: <see cref="QaSessionMarker"/>, then the caller's own agent
+    /// (minus any marker it already carries) when it sent one, cut to the column's width.
+    /// </summary>
+    public static string MarkQaUserAgent(string? userAgent)
+    {
+        var own = WithoutMarker(userAgent);
+        var marked = own is null ? QaSessionMarker : QaSessionMarker + " " + own;
+        return marked.Length <= UserAgentLength ? marked : marked[..UserAgentLength];
+    }
+
+    /// <summary>
+    /// The stored agent of an ordinary session. A request cannot claim the marker: an agent spelled
+    /// like it is stored without it, so only dev/link — and rotation from a dev/link session — ever
+    /// enters the QA chain.
+    /// </summary>
+    private static string? OrdinaryUserAgent(string? userAgent)
+    {
+        var own = WithoutMarker(userAgent);
+        return own is null ? null : own[..Math.Min(own.Length, UserAgentLength)];
+    }
+
+    private static string? WithoutMarker(string? userAgent)
+    {
+        var own = userAgent?.Trim();
+        while (own is not null && own.StartsWith(QaSessionMarker, StringComparison.Ordinal))
+        {
+            own = own[QaSessionMarker.Length..].Trim();
+        }
+
+        return string.IsNullOrEmpty(own) ? null : own;
+    }
+
+    private async Task<SessionTokens> IssueAsync(Account account, string? userAgent, bool qaSession, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
-        var (session, refreshToken) = NewSession(account.Id, Guid.NewGuid(), userAgent, now);
+        var (session, refreshToken) = NewSession(account.Id, Guid.NewGuid(), userAgent, qaSession, now);
         db.RefreshSessions.Add(session);
         await db.SaveChangesAsync(ct);
 
@@ -92,6 +153,10 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options,
     /// (it keeps the cookie the winner set). A token revoked by logout answers null. A ROTATED token
     /// presented after the window is reuse: the answer is null and its whole family is revoked
     /// (<see cref="RevokeFamilyAfterReuseAsync"/>).</para>
+    ///
+    /// <para>A successor of a QA session is a QA session (<see cref="QaSessionMarker"/>): the
+    /// frontend refreshes on every access-token expiry, so without that a dev/link session lost its
+    /// identity at the first rotation and was purged once it expired (HREV4-PLAT-01).</para>
     /// </summary>
     public async Task<SessionTokens?> RefreshAsync(string refreshToken, string? userAgent, CancellationToken ct = default)
     {
@@ -141,7 +206,7 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options,
             return current is null ? null : await GraceAnswerAsync(current, now, ct);
         }
 
-        var (successor, successorToken) = NewSession(account.Id, successorId, userAgent, now);
+        var (successor, successorToken) = NewSession(account.Id, successorId, userAgent, IsQaSession(session.UserAgent), now);
         db.RefreshSessions.Add(successor);
         account.LastSeenAt = now;
         await db.SaveChangesAsync(ct);
@@ -226,7 +291,7 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options,
     /// </summary>
     private const int MaxFamilyDepth = 1_000_000;
 
-    private (RefreshSession Session, string RefreshToken) NewSession(Guid accountId, Guid id, string? userAgent, DateTime now)
+    private (RefreshSession Session, string RefreshToken) NewSession(Guid accountId, Guid id, string? userAgent, bool qaSession, DateTime now)
     {
         var refreshToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         return (new RefreshSession
@@ -236,7 +301,7 @@ public class SessionService(IReelDbContext db, IOptions<SessionOptions> options,
             TokenHash = Hash(refreshToken),
             ExpiresAt = now.AddDays(RefreshDays),
             CreatedAt = now,
-            UserAgent = userAgent is { Length: > 0 } ua ? ua[..Math.Min(ua.Length, 256)] : null,
+            UserAgent = qaSession ? MarkQaUserAgent(userAgent) : OrdinaryUserAgent(userAgent),
         }, refreshToken);
     }
 
