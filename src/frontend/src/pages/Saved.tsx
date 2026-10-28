@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, ListChecks, RotateCw } from "lucide-react";
-import { useGetFiltersQuery, useGetSavedQuery, useUnsaveForLaterMutation } from "../store/api";
+import { skipToken } from "@reduxjs/toolkit/query/react";
+import {
+  useGetFiltersQuery,
+  useGetProvidersQuery,
+  useGetRecentlyWatchedQuery,
+  useGetSavedQuery,
+  useUnsaveForLaterMutation,
+} from "../store/api";
 import SavedSortControl from "../components/saved/SavedSortControl";
 import SavedQueueCard from "../components/saved/SavedQueueCard";
 import WatchTonightCard from "../components/saved/WatchTonightCard";
@@ -8,7 +15,47 @@ import PostWatchStrip from "../components/saved/PostWatchStrip";
 import PickConditionsButton from "../components/rec/PickConditionsButton";
 import { Button } from "../components/ui/button";
 import { formatRuntime } from "../lib/format";
+import { useSettledGate } from "../lib/useSettledGate";
 import { advancedPinLine, heldOutLine, MANAGED_LIST_TOOLTIP, pinnedPick, queueBelowPin, SAVED_INTRO, type SavedSort } from "../lib/savedQueue";
+
+/**
+ * How long the shelf waits for the reads that change its height (the pinned pick's where-to-watch,
+ * the post-watch prompt) before drawing anyway; see `useSettledGate`.
+ */
+const REVEAL_CAP_MS = 1500;
+
+/**
+ * The shelf's placeholder: the Watch tonight card's slot, the caption line under it and the queue's
+ * columns, so what lands, lands where its placeholders stood (HREV5-DESK-01).
+ */
+function SavedSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" data-testid="saved-loading">
+      <div className="fa-card p-4 sm:p-5" aria-hidden>
+        <div className="mb-3 h-4 w-28 rounded reel-shimmer bg-fa-ink-3" />
+        <div className="flex flex-col sm:flex-row gap-4">
+          <div className="w-32 shrink-0">
+            <div className="reel-poster reel-shimmer" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-3">
+            <div className="h-6 w-1/2 rounded reel-shimmer bg-fa-ink-3" />
+            <div className="h-4 w-1/3 rounded reel-shimmer bg-fa-ink-3" />
+            <div className="h-8 w-full rounded reel-shimmer bg-fa-ink-3" />
+            <div className="h-40 w-full rounded-lg reel-shimmer bg-fa-ink-3" />
+            <div className="h-11 w-40 rounded-lg reel-shimmer bg-fa-ink-3" />
+          </div>
+        </div>
+      </div>
+      <div className="h-4 w-56 rounded reel-shimmer bg-fa-ink-3" aria-hidden />
+      {/* Same columns as the queue (G-21: 4 at md, 6 at lg). */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4" aria-hidden>
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="reel-poster reel-shimmer" />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The queue. Not a bookmark folder: an ordered answer to "what do I put on tonight", with the
@@ -71,13 +118,28 @@ export default function Saved() {
             eveningBudgetMinutes: budget,
           })
         : null;
+  // The shelf is drawn once, whole (HREV5-DESK-01). Drawn the moment /saved answered, the pinned
+  // pick's where-to-watch then grew from four shimmer tiles into a wall of chips and pushed the
+  // "Started watching" row, the held-out line and the whole queue down 224 px: CLS 0.168 at 834 px,
+  // 0.053 at 1440, on every cold load. The post-watch prompt above the shelf can arrive late the
+  // same way. Their reads are the same ones the components make (RTK dedupes them), so holding the
+  // reveal costs no request; the cap keeps a hung provider read from holding the queue.
+  const pinProviders = useGetProvidersQuery(
+    pinned?.tmdbId != null ? { mediaType: pinned.mediaType.toLowerCase(), tmdbId: pinned.tmdbId } : skipToken
+  );
+  const { isLoading: recentLoading } = useGetRecentlyWatchedQuery();
+  const pinSettled = pinned?.tmdbId == null || !(pinProviders.isLoading || pinProviders.isUninitialized);
+  const revealed = useSettledGate(!isLoading && !recentLoading && pinSettled, REVEAL_CAP_MS);
+
   const candidateCount = items.filter(
     (i) => i.availableNow && i.predictedRating != null && i.runtimeMinutes != null && i.runtimeMinutes <= budget
   ).length;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      {/* min-h-11: the Trakt list button (44 px) arrives with the shelf; the row is that tall from
+          the first paint, so its arrival moves nothing. */}
+      <div className="flex min-h-11 items-center justify-between gap-4 flex-wrap">
         <h1 className="text-2xl font-light text-fa-frost-bright">Saved</h1>
         {data?.managedListUrl && (
           <a
@@ -94,9 +156,6 @@ export default function Saved() {
         )}
       </div>
 
-      {/* Loop-closing prompts sit above the queue on both surfaces that can carry them. */}
-      <PostWatchStrip />
-
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <p className="fa-caption text-3 max-w-xl">
           {SAVED_INTRO.before} <span className="text-fa-frost">{SAVED_INTRO.listName}</span> {SAVED_INTRO.after}
@@ -109,6 +168,11 @@ export default function Saved() {
           }}
         />
       </div>
+
+      {/* Loop-closing prompts sit above the queue on both surfaces that can carry them. Here it is
+          drawn with the shelf, in the slot the skeleton held, so a prompt that lands late pushes
+          neither the sort row nor the queue down (HREV5-DESK-01). */}
+      {revealed && <PostWatchStrip />}
 
       {/* Three states, not two (G-15): a failed read used to fall through `data?.items ?? []` into
           "Nothing in the queue yet", telling someone with 34 saves that they had none. */}
@@ -125,14 +189,8 @@ export default function Saved() {
             {isFetching ? "Retrying…" : "Retry"}
           </Button>
         </div>
-      ) : isLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4" aria-busy="true" data-testid="saved-loading">
-          {/* Same columns as the queue (G-21: 4 at md, 6 at lg), so the queue lands where its
-              placeholders stood. */}
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="reel-poster reel-shimmer" />
-          ))}
-        </div>
+      ) : isLoading || !revealed ? (
+        <SavedSkeleton />
       ) : items.length === 0 && heldOut ? (
         // Every save is held out by the conditions: the shelf is full, not empty, and says so.
         <div className="fa-card p-8 text-center space-y-3" data-testid="saved-all-held-out">
