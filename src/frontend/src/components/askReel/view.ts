@@ -1,5 +1,5 @@
 import { floorPartition, type ChatStatus } from "../../lib/askReel/reducer";
-import { failureCopy, floorHeldBack, footnote, formatFloor, noneFoundAnnouncement, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage, type NoneFoundShown } from "../../lib/askReel/copy";
+import { failureCopy, floorHeldBack, footnote, formatFloor, noneFoundAnnouncement, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage, type NoneFoundShown, type ResumedStore } from "../../lib/askReel/copy";
 import { answerRowIndex, leavesGrid } from "../../lib/askReel/transcript";
 import { pageRefusalMessage } from "../../lib/askReel/paging";
 import { skeletonCount, type AskReelChat } from "../../lib/askReel/useAskReelChat";
@@ -114,7 +114,9 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
     showsTurnConflict: !!turnConflictMessage && streaming && !chat.appending,
     pickCount, keptWholeAnswer, footnoteText, showsProvenance, stoppedText, refusalText,
     footnoteInSlot: chat.gridRow >= turns.length - 1,
-    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title, shown),
+    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title, shown, {
+      storedCards: chat.lastCardsAt != null, removed: chat.removed, removedEarlier: chat.removedEarlier,
+    }),
   };
 }
 
@@ -125,7 +127,7 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
  */
 function announce(
   status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number, failure: string,
-  shown: NoneFoundShown,
+  shown: NoneFoundShown, stored: ResumedStore,
 ): string {
   if (status === "streaming") return "";
   // The refusal is what the region says while it stands (R5-04): the state underneath is the one
@@ -144,7 +146,8 @@ function announce(
   // R1-04 screen, said aloud). The reply itself is already read out by the transcript's polite log.
   if (status === "done" && leavesGrid(mode) && picks === 0 && outside === 0) return "";
   if (status === "done") return pickSummary(picks, outside);
-  // F6-15: a resumed landing is announced as the seam shows it.
-  if (status === "resumed") return resumeAnnouncement(picks, outside);
+  // F6-15: a resumed landing is announced as the seam shows it — and, with nothing left on screen,
+  // as the card under it does (HREV5-PH-01: the all-removed card is not "no saved picks").
+  if (status === "resumed") return resumeAnnouncement(picks, outside, stored);
   return "";
 }

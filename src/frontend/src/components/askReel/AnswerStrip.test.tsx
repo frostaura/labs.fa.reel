@@ -187,6 +187,59 @@ describe("a resumed thread with no stored results — “Transcript only — thi
   });
 });
 
+/**
+ * HREV5-PH-01 — the status region on a resumed thread whose stored picks were all removed. It read
+ * "no saved picks" under a seam saying ten were gone and a card saying everything had been seen,
+ * because the post-removal count (0) was all it was given. Driven through the real hook and view.
+ */
+describe("a resumed thread whose picks were all removed — announced as the seam and the card show it", () => {
+  type Row = ConversationPayload["turns"][number];
+  const turns: Row[] = [
+    { role: "user", text: "christopher nolan", status: "Completed", kind: "ask" },
+    { role: "assistant", text: "Nolan picks.", status: "Completed", kind: "ask", mode: "Picks" },
+  ];
+  const announced = () => deriveAskView(live(), inputs).announcement;
+  const seam = () => screen.getByTestId("askreel-removed").textContent ?? "";
+  const cardLine = () => screen.getByTestId("askreel-all-removed").querySelector("p")?.textContent ?? "";
+
+  it("says the picks are gone and everything was seen, not that nothing was saved", async () => {
+    mount();
+    await settle(() => live().resume({ id: "c1", lastCardsAt: "2026-01-01T00:00:00Z", lastTurnAt: "2026-01-01T00:00:00Z", turns, cards: [], removed: 10, removedEarlier: 10 }));
+    expect(screen.getByTestId("askreel-all-removed")).toBeTruthy();
+    expect(announced()).not.toMatch(/no saved picks/);
+    // The region carries the seam's sentence and the card's, verbatim.
+    expect(announced()).toContain(seam());
+    expect(announced()).toContain(cardLine().replace(" Ask again for a fresh set.", ""));
+    expect(announced()).toBe(
+      "Picked up where you left off · 10 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given. You’ve watched or rated everything this thread found.",
+    );
+  });
+
+  it("still says no saved picks for a thread that never stored any", async () => {
+    // One field away: lastCardsAt. The transcript-only card, and nothing removed.
+    mount();
+    await settle(() => live().resume({ id: "c1", lastCardsAt: null, lastTurnAt: "2026-01-01T00:00:00Z", turns }));
+    expect(screen.getByTestId("askreel-transcript-only")).toBeTruthy();
+    expect(announced()).toBe("Picked up where you left off · no saved picks.");
+  });
+
+  it("follows the card when the last picks are dismissed on this visit", async () => {
+    // A different fixture: two picks restored, both removed here rather than by the server — the
+    // strip switches to the all-removed card and the region switches with it.
+    inputs = { removedKeys: ["t1", "t2"], floorBar: null };
+    mount();
+    await settle(() => live().resume({ id: "c1", lastCardsAt: "2026-01-01T00:00:00Z", lastTurnAt: "2026-01-01T00:00:00Z", turns, cards: [card(1), card(2)], removed: 0 }));
+    expect(screen.getByTestId("askreel-all-removed")).toBeTruthy();
+    expect(announced()).toBe("Picked up where you left off · You’ve watched or rated everything this thread found.");
+  });
+
+  it("names the removals beside the picks that are left", async () => {
+    mount();
+    await settle(() => live().resume({ id: "c1", lastCardsAt: "2026-01-01T00:00:00Z", lastTurnAt: "2026-01-01T00:00:00Z", turns, cards: [card(1)], removed: 3, removedEarlier: 3 }));
+    expect(announced()).toBe(`Picked up where you left off · 1 pick. ${seam()}`);
+  });
+});
+
 describe("a held answer — “the last question never replaced it.”", () => {
   it("says so when the next question failed and the answer is still the previous one", async () => {
     mount();

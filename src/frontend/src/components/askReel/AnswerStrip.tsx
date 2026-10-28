@@ -6,7 +6,7 @@ import CardTray from "./CardTray";
 import PillButton from "./PillButton";
 import RelaxationChip from "./RelaxationChip";
 import { CARD_GRID, CardSkeleton, ResultCard, RetryButton } from "./parts";
-import { failureCopy, nearMissHeading, noneFoundHeading, plural, removedNote } from "../../lib/askReel/copy";
+import { ALL_REMOVED_LINE, failureCopy, nearMissHeading, noneFoundHeading, plural, removedNote } from "../../lib/askReel/copy";
 import { relTime } from "../../lib/format";
 import type { AskReelChat } from "../../lib/askReel/useAskReelChat";
 import type { AskCard } from "../../lib/askReelStream";
@@ -195,7 +195,7 @@ export default function AnswerStrip({
       return (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-all-removed">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
-          <p className="fa-caption text-fa-frost-dim">You’ve watched or rated everything this thread found. Ask again for a fresh set.</p>
+          <p className="fa-caption text-fa-frost-dim">{ALL_REMOVED_LINE} Ask again for a fresh set.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       );

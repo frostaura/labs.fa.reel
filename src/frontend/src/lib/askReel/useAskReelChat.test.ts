@@ -2347,6 +2347,38 @@ describe("resumeAnnouncement", () => {
     // Fixture variation: the transcript-only thread, which is a fact about the THREAD and not an
     // empty answer — "no matches" would be a verdict on a question this visit never asked.
     expect(resumeAnnouncement(0, 0)).toBe("Picked up where you left off · no saved picks.");
+    expect(resumeAnnouncement(0, 0, { storedCards: false, removed: 0, removedEarlier: 0 }))
+      .toBe("Picked up where you left off · no saved picks.");
+  });
+
+  // HREV5-PH-01. The post-removal count is 0 on a thread whose stored picks were ALL removed, and
+  // "no saved picks" is what a thread that never stored any says — the region contradicted a seam
+  // reading "10 picks are gone" and a card reading "you've watched or rated everything".
+  it("a_thread_whose_stored_picks_were_all_removed_says_so_as_the_seam_and_card_do", () => {
+    expect(resumeAnnouncement(0, 0, { storedCards: true, removed: 10, removedEarlier: 10 })).toBe(
+      "Picked up where you left off · 10 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given. You’ve watched or rated everything this thread found.",
+    );
+    expect(resumeAnnouncement(0, 0, { storedCards: true, removed: 10, removedEarlier: 10 })).not.toMatch(/no saved picks/);
+  });
+
+  it.each([
+    // Fixture variations, one field each: acted on since rather than before; a single pick; and
+    // stored cards with no removal count (an older server) — the card still shows, so it is said.
+    [{ storedCards: true, removed: 4, removedEarlier: 0 }, "Picked up where you left off · 4 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them. You’ve watched or rated everything this thread found."],
+    [{ storedCards: true, removed: 1, removedEarlier: 1 }, "Picked up where you left off · 1 pick is gone from this answer — you’d already rated, watched, saved or dismissed it when it was given. You’ve watched or rated everything this thread found."],
+    [{ storedCards: true, removed: 0, removedEarlier: 0 }, "Picked up where you left off · You’ve watched or rated everything this thread found."],
+    // No stored cards but a removal count: the seam still prints the line, so the region does.
+    [{ storedCards: false, removed: 2, removedEarlier: 0 }, "Picked up where you left off · 2 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them."],
+  ])("an_empty_resume_follows_what_is_on_screen %#", (stored, said) => {
+    expect(resumeAnnouncement(0, 0, stored)).toBe(said);
+  });
+
+  it("a_resume_with_picks_left_names_the_removals_the_seam_prints", () => {
+    expect(resumeAnnouncement(9, 3, { storedCards: true, removed: 3, removedEarlier: 1 })).toBe(
+      "Picked up where you left off · 9 picks. 3 closest-but-outside shown separately. 3 picks are gone from this answer — you’d already rated, watched, saved or dismissed 1 of them when it was given, and you’ve acted on 2 since.",
+    );
+    // No removals: unchanged from F6-15.
+    expect(resumeAnnouncement(9, 0, { storedCards: true, removed: 0, removedEarlier: 0 })).toBe("Picked up where you left off · 9 picks.");
   });
 });
 

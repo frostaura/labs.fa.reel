@@ -109,11 +109,37 @@ export function pickSummary(pickCount: number, outsideCount: number): string {
  * announcing a silent zero — that is the transcript-only state, and it is a fact about the thread
  * rather than an empty answer.
  */
-export function resumeAnnouncement(pickCount: number, outsideCount: number): string {
-  if (pickCount === 0 && outsideCount === 0) return "Picked up where you left off · no saved picks.";
+export function resumeAnnouncement(pickCount: number, outsideCount: number, stored: ResumedStore = NOTHING_STORED): string {
+  const head = "Picked up where you left off ·";
+  // The seam's own removal line, verbatim — the region says what the seam says (HREV5-PH-01).
+  const gone = removedNote(stored.removed, stored.removedEarlier);
+  if (pickCount === 0 && outsideCount === 0) {
+    // HREV5-PH-01. A thread that STORED picks and has none left to show is the all-removed card,
+    // not "a thread with nothing stored": a resumed Nolan thread whose ten picks had all been seen
+    // was announced as "no saved picks" under a seam saying ten were gone. The region follows the
+    // branch the strip renders — `lastCardsAt` is what picks the all-removed card over the
+    // transcript-only one.
+    if (stored.storedCards) return [head, gone, ALL_REMOVED_LINE].filter(Boolean).join(" ");
+    return gone ? `${head} ${gone}` : `${head} no saved picks.`;
+  }
   const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
-  return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
+  return `${head} ${pickCount} ${plural(pickCount, "pick")}.${outside}${gone ? ` ${gone}` : ""}`;
 }
+
+/** What a resume stored beside the picks it hands back — the facts the seam and the strip print. */
+export interface ResumedStore {
+  /** Whether the thread ever stored cards (`lastCardsAt` set) — the all-removed card, not transcript-only. */
+  storedCards: boolean;
+  /** Stored cards the eligibility re-filter dropped, as the seam counts them. */
+  removed: number;
+  /** How many of `removed` were already acted on when the answer was given — see {@link removedNote}. */
+  removedEarlier: number;
+}
+
+const NOTHING_STORED: ResumedStore = { storedCards: false, removed: 0, removedEarlier: 0 };
+
+/** What the all-removed card says — shared with the status region so the two cannot drift. */
+export const ALL_REMOVED_LINE = "You’ve watched or rated everything this thread found.";
 
 /** What the none-found card is headed with — and what the status region opens on — in each case. */
 export const NONE_FOUND_HEADING = {
