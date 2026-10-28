@@ -210,72 +210,87 @@ export default function TitleDetail() {
                 {/* Screen-reader name for the dialog. The visible <h1> below stays a plain heading so
                     its own type scale is not overridden by the DialogTitle styling. */}
                 <DialogTitle className="sr-only">{title.name}</DialogTitle>
-                {/* Header art / trailer */}
-                <div className="relative aspect-[16/8] bg-fa-ink-3">
-                  {trailerOpen && trailerKey ? (
-                    <iframe
-                      src={`https://www.youtube-nocookie.com/embed/${trailerKey}?autoplay=1`}
-                      title={`${title.name} trailer`}
-                      allow="autoplay; encrypted-media"
-                      allowFullScreen
-                      className="absolute inset-0 h-full w-full"
-                    />
-                  ) : (
-                    <>
-                      {backdropUrl(title.backdropPath, "w1280") && (
-                        <img src={backdropUrl(title.backdropPath, "w1280")!} alt="" className="absolute inset-0 h-full w-full object-cover" />
-                      )}
-                      <div className="absolute inset-0 reel-scrim" />
-                      <div className="absolute bottom-0 inset-x-0 p-5 flex items-end gap-4">
-                        <div className="w-24 shrink-0 hidden sm:block drop-shadow-xl">
-                          <PosterImage path={title.posterPath} alt={title.name} size="w185" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <div className="flex items-center gap-3 flex-wrap">
-                            <h1 className="text-2xl sm:text-3xl font-light text-fa-frost-bright">{title.name}</h1>
-                            {/* Once you have rated it, your number is the headline: a "for you"
-                                guess beside your own score is the model talking over you (O+3). The
-                                prediction stays, demoted to a note, because the gap is the evidence. */}
-                            {title.userState.userRating != null ? (
-                              <span
-                                className="inline-flex items-baseline gap-1 rounded-full border border-fa-frost/50 bg-fa-ink/80 px-3 py-1 text-base font-medium tabular-nums text-fa-frost-bright"
-                                data-testid="title-your-rating"
-                              >
-                                You rated {title.userState.userRating}
-                              </span>
-                            ) : (
-                              // The same one chip the cards carry (FD-4): the banded prediction over
-                              // the crowd score.
-                              title.prediction && (
-                                <ScoreChip
-                                  predictedRating={title.prediction.predictedRating}
-                                  crowdRating={title.crowdRating ?? null}
-                                  crowdVotes={title.crowdVotes ?? null}
-                                  band={title.prediction.expectedAbsoluteError}
-                                  size="lg"
-                                />
-                              )
-                            )}
-                          </div>
-                          {title.userState.userRating != null && title.prediction && (
-                            <p className="fa-caption text-fa-frost" data-testid="title-prediction-note">
-                              Reel predicted {title.prediction.predictedRating.toFixed(1)} for you
-                            </p>
-                          )}
-                          <p className="fa-caption text-3">
-                            {[
-                              title.year,
-                              formatRuntime(title.runtimeMinutes),
-                              title.certification,
-                              title.network,
-                              title.genres.slice(0, 3).join(" / "),
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </p>
-                        </div>
+                {/* Header art / trailer, and the heading. Below `sm` the heading sits under the art on
+                    the sheet's own ink, the way the Home hero stacks below `lg`: on a phone the
+                    title wraps to two or three lines and climbs into the art, where no gradient
+                    could hold it to 4.5:1 over pale sky (PH2-01). From `sm` it overlays the art's
+                    foot on a panel whose LIGHTEST point is 0.85 opaque ink, so no artwork can bring
+                    any line under 4.5:1 (frost-bright over 0.85 ink on pure white is ~10:1); a fade above
+                    the panel eases its top edge into the art rather than ruling a line across it. */}
+                <div className="relative">
+                  <div className="relative aspect-[16/8] bg-fa-ink-3">
+                    {trailerOpen && trailerKey ? (
+                      <iframe
+                        src={`https://www.youtube-nocookie.com/embed/${trailerKey}?autoplay=1`}
+                        title={`${title.name} trailer`}
+                        allow="autoplay; encrypted-media"
+                        allowFullScreen
+                        className="absolute inset-0 h-full w-full"
+                      />
+                    ) : (
+                      <>
+                        {backdropUrl(title.backdropPath, "w1280") && (
+                          <img src={backdropUrl(title.backdropPath, "w1280")!} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                        )}
+                        {/* Only where text overlays the art: stacked art carries none, and darkening it
+                            would only hide the picture. */}
+                        <div className="absolute inset-0 hidden sm:block reel-scrim" />
+                      </>
+                    )}
+                  </div>
+                  {!(trailerOpen && trailerKey) && (
+                    <div
+                      className="relative px-gutter pt-5 flex items-end gap-4 sm:absolute sm:bottom-0 sm:inset-x-0 sm:p-5 sm:bg-gradient-to-t sm:from-fa-ink/95 sm:to-fa-ink/85 sm:before:pointer-events-none sm:before:absolute sm:before:inset-x-0 sm:before:bottom-full sm:before:h-16 sm:before:bg-gradient-to-t sm:before:from-fa-ink/85 sm:before:to-transparent"
+                      data-testid="title-heading"
+                    >
+                      <div className="w-24 shrink-0 hidden sm:block drop-shadow-xl">
+                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
                       </div>
-                    </>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <h1 className="text-2xl sm:text-3xl font-light text-fa-frost-bright">{title.name}</h1>
+                          {/* Once you have rated it, your number is the headline: a "for you"
+                              guess beside your own score is the model talking over you (O+3). The
+                              prediction stays, demoted to a note, because the gap is the evidence. */}
+                          {title.userState.userRating != null ? (
+                            <span
+                              className="inline-flex items-baseline gap-1 rounded-full border border-fa-frost/50 bg-fa-ink/80 px-3 py-1 text-base font-medium tabular-nums text-fa-frost-bright"
+                              data-testid="title-your-rating"
+                            >
+                              You rated {title.userState.userRating}
+                            </span>
+                          ) : (
+                            // The same one chip the cards carry (FD-4): the banded prediction over
+                            // the crowd score.
+                            title.prediction && (
+                              <ScoreChip
+                                predictedRating={title.prediction.predictedRating}
+                                crowdRating={title.crowdRating ?? null}
+                                crowdVotes={title.crowdVotes ?? null}
+                                band={title.prediction.expectedAbsoluteError}
+                                size="lg"
+                              />
+                            )
+                          )}
+                        </div>
+                        {title.userState.userRating != null && title.prediction && (
+                          <p className="fa-caption text-fa-frost" data-testid="title-prediction-note">
+                            Reel predicted {title.prediction.predictedRating.toFixed(1)} for you
+                          </p>
+                        )}
+                        <p className="fa-caption text-3" data-testid="title-meta">
+                          {[
+                            title.year,
+                            formatRuntime(title.runtimeMinutes),
+                            title.certification,
+                            title.network,
+                            title.genres.slice(0, 3).join(" / "),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                      </div>
+                    </div>
                   )}
                 </div>
 
