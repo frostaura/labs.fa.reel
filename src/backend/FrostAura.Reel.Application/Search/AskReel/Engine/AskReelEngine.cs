@@ -151,6 +151,13 @@ public sealed class AskReelEngine(
         /// <summary>The conversation had no answer before this turn (its state's version is 0).</summary>
         public bool FirstTurn { get; set; }
 
+        /// <summary>
+        /// No model read the message and part of the reading is a guess — a title it asked for
+        /// something like that the catalogue does not hold by that name, searched as a topic instead.
+        /// Its counts are about the searched words, so the reply says so (HREV4-RET-02).
+        /// </summary>
+        public bool Guessed { get; set; }
+
         /// <summary>The retrieval started beside the plan on the message's keyless reading, if any.</summary>
         public Speculation? Speculative { get; set; }
 
@@ -339,6 +346,11 @@ public sealed class AskReelEngine(
             return await RefusedAsync(turn, plan, refusal, state, ct);
         }
 
+        if (plan.Source == PlanSource.CarriedForward)
+        {
+            plan = await GroundFallbackReferencesAsync(turn, plan, state, ct);
+        }
+
         plan = plan.Failure is null
             ? PlanSanitizer.Clean(plan, input.Message, state, turn.Standing)
             : PlanSanitizer.PointFallback(plan, input.Message, state);
@@ -424,6 +436,46 @@ public sealed class AskReelEngine(
         }
 
         return plan;
+    }
+
+    /// <summary>
+    /// A plan no model wrote names a title the user asked for something like ("movies like
+    /// Inception") only when the catalogue holds a title by that name; otherwise those words are what
+    /// the user asked for, searched as a topic (or, on a carried-forward follow-up, as a soft
+    /// preference), and the reading is a guess the reply owns up to (HREV4-RET-02).
+    /// </summary>
+    private async Task<PlanResult> GroundFallbackReferencesAsync(Turn turn, PlanResult plan, ConversationState state, CancellationToken ct)
+    {
+        if (plan.Delta.ReferenceNames.Count == 0)
+        {
+            return plan;
+        }
+
+        var found = new List<string>();
+        var unfound = new List<string>();
+        foreach (var name in plan.Delta.ReferenceNames)
+        {
+            (await FindByNameAsync(name, ct) is not null ? found : unfound).Add(name);
+        }
+
+        if (unfound.Count == 0)
+        {
+            return plan;
+        }
+
+        turn.Guessed = true;
+        var asTopic = plan.Act == TurnAct.NewRequest || state.Version == 0;
+        var delta = plan.Delta with
+        {
+            ReferenceNames = found,
+            Concepts = asTopic ? [.. plan.Delta.Concepts, .. unfound] : plan.Delta.Concepts,
+            Moods = asTopic ? plan.Delta.Moods : [.. plan.Delta.Moods, .. unfound],
+        };
+        return plan with
+        {
+            Delta = delta,
+            Tools = found.Count > 0 ? plan.Tools : [new ToolRequest(AskTool.SearchCatalog)],
+        };
     }
 
     private async Task<TurnOutcome> RefusedAsync(Turn turn, PlanResult plan, PlanFailure refusal, ConversationState state, CancellationToken ct)
@@ -2061,6 +2113,7 @@ public sealed class AskReelEngine(
             JudgeFailed: false)
         {
             FirstTurn = turn.FirstTurn,
+            Guessed = turn.Guessed,
         };
 
     // ── State ───────────────────────────────────────────────────────────────────────────────

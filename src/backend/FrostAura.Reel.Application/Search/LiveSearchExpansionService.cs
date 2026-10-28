@@ -343,6 +343,20 @@ public sealed partial class LiveSearchExpansionService(
                 Intent = AskReelIntentSanitizer.Sanitize(agentReply.Intent, standingRules, trimmed),
             };
 
+            // A degraded reading is the interpreter's heuristic, which drops function words inside a
+            // topic: "time travel movies" was searched, counted and named as "travel" (HREV4-ASK-04).
+            // Its keywords are widened back to the phrases the user wrote.
+            if (agentReply.Degraded)
+            {
+                agentReply = agentReply with
+                {
+                    Intent = agentReply.Intent with
+                    {
+                        Keywords = [.. AskReelDegradedTopic.WholePhrases(agentReply.Intent.Keywords, trimmed, DateTime.UtcNow.Year)],
+                    },
+                };
+            }
+
             // ── The collision, computed from the words the user typed ────────────────────────
             var askedFor = AskReelStandingFilters.AskedFor(trimmed, agentReply.Intent, agentReply.Requested);
             var collidingGenres = AskReelStandingFilters.Colliding(standingRules.ExcludeGenres, askedFor);

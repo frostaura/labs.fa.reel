@@ -57,7 +57,7 @@ public static class AskReelIntentSanitizer
     /// </summary>
     private static readonly IReadOnlySet<string> StopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "i", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "they", "them", "their", "he",
+        "i", "i'd", "i'm", "i'll", "i've", "you'd", "we'd", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "they", "them", "their", "he",
         "him", "his", "she", "her", "it", "its", "this", "that", "these", "those", "one", "ones", "the", "a",
         "an", "and", "or", "of", "to", "in", "on", "at", "for", "with", "from", "by", "about", "as", "is",
         "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "have", "has", "had", "can",
@@ -380,6 +380,43 @@ public static class AskReelIntentSanitizer
 
                 run.Clear();
             }
+        }
+    }
+
+    /// <summary>
+    /// The phrases a raw sentence rules out, read with no model, kept whole as the user wrote them:
+    /// "no walking dead" rules out "walking dead", never "walking" and "dead" each on its own — as
+    /// single words they excluded every title whose name or overview says "dead" and missed the show
+    /// the user named (HREV4-RET-02). A phrase is a run of the negated words <see cref="ReadKeyless"/>
+    /// keeps; it ends at any other word or a clause break, so "no horror or gore" is two.
+    /// </summary>
+    public static IReadOnlyList<string> KeylessNegatedPhrases(string? raw)
+    {
+        var negated = ReadKeyless(raw).Negated.ToHashSet(StringComparer.Ordinal);
+        var phrases = new List<string>();
+        var run = new List<string>();
+        foreach (var (word, isNegated) in ScopedWithBreaks(raw))
+        {
+            if (word is not null && isNegated && negated.Contains(word))
+            {
+                run.Add(word);
+                continue;
+            }
+
+            Flush();
+        }
+
+        Flush();
+        return phrases;
+
+        void Flush()
+        {
+            if (run.Count > 0 && string.Join(' ', run) is var phrase && !phrases.Contains(phrase, StringComparer.Ordinal))
+            {
+                phrases.Add(phrase);
+            }
+
+            run.Clear();
         }
     }
 

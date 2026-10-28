@@ -156,6 +156,63 @@ public class AskReelV2UnitTests
     }
 
     /// <summary>
+    /// HREV4-ASK-02: the sanitiser stripped standing conditions from negations only, so a planner that
+    /// copied one into what the user ASKED FOR made it a requirement: "samurai films" planned with genre
+    /// animation (the input reads "excludes: animation") replied "no samurai animation movies left", and
+    /// "zombie movies" planned with concept "english" (from "language en") replied "no zombie english
+    /// movies". A standing value survives only when the user's own words name it.
+    /// </summary>
+    [Theory]
+    [InlineData("samurai films", "samurai", "animation", "samurai", "")]
+    [InlineData("samurai films", "samurai,anime", "", "samurai", "")]
+    [InlineData("samurai films", "samurai,animation", "", "samurai", "")]
+    [InlineData("zombie movies", "zombie,english", "", "zombie", "")]
+    [InlineData("zombie movies", "zombie,en", "", "zombie", "")]
+    [InlineData("zombie movies", "zombie", "drama", "zombie", "")]
+    [InlineData("Samurai films", "samurai", "animation", "samurai", "")]
+    // The user's own words keep it: a collision the conflict frame names, never a copy.
+    [InlineData("animated samurai films", "samurai", "animation", "samurai", "animation")]
+    [InlineData("samurai animation films", "samurai", "animation", "samurai", "animation")]
+    [InlineData("zombie movies in english", "zombie,english", "", "zombie,english", "")]
+    [InlineData("an anime about samurai", "samurai,anime", "", "samurai,anime", "")]
+    [InlineData("drama about zombies", "zombie", "drama", "zombie", "drama")]
+    // A requirement that is no standing value is untouched.
+    [InlineData("samurai films", "samurai", "thriller", "samurai", "thriller")]
+    public void A_standing_condition_copied_into_the_concepts_or_genres_is_dropped_unless_the_user_said_it(
+        string message, string modelConcepts, string modelGenres, string expectedConcepts, string expectedGenres)
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "animation" },
+            new ContentFilter { Kind = FilterKind.ExcludeKeyword, Value = "anime" },
+            new ContentFilter { Kind = FilterKind.IncludeGenre, Value = "drama" },
+            new ContentFilter { Kind = FilterKind.IncludeGenre, Value = "action" },
+            new ContentFilter { Kind = FilterKind.Language, Value = "en" },
+        ]);
+        static string[] List(string csv) => csv.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = List(modelConcepts), Genres = List(modelGenres) });
+
+        var clean = PlanSanitizer.Clean(plan, message, ConversationState.Empty, standing);
+
+        Assert.Equal(List(expectedConcepts), clean.Delta.Concepts);
+        Assert.Equal(List(expectedGenres), clean.Delta.Genres);
+    }
+
+    /// <summary>An account that allows every language has no language condition to copy: "english" is then the user's.</summary>
+    [Fact]
+    public void A_language_is_a_standing_value_only_when_the_account_restricts_language()
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = ["zombie", "english"] });
+        var every = FilterRuleSet.FromRows([new ContentFilter { Kind = FilterKind.Language, Value = FilterRuleSet.AllLanguages }]);
+        var japanese = FilterRuleSet.FromRows([new ContentFilter { Kind = FilterKind.Language, Value = "ja" }]);
+
+        Assert.Equal(["zombie", "english"], PlanSanitizer.Clean(plan, "zombie movies", ConversationState.Empty, every).Delta.Concepts);
+        Assert.Equal(["zombie", "english"], PlanSanitizer.Clean(plan, "zombie movies", ConversationState.Empty, japanese).Delta.Concepts);
+        var japaneseCopied = plan with { Delta = plan.Delta with { Concepts = ["zombie", "japanese"] } };
+        Assert.Equal(["zombie"], PlanSanitizer.Clean(japaneseCopied, "zombie movies", ConversationState.Empty, japanese).Delta.Concepts);
+    }
+
+    /// <summary>
     /// R1-30: "more like the second one" resolved once in six live runs — the planner, at effort none,
     /// mostly returned no reference at all, and the turn then searched the topic instead. The rank a
     /// pointer names is in the user's words, so the server guarantees it: a missing reference is filled
@@ -658,7 +715,7 @@ public class AskReelV2UnitTests
     [Theory]
     [InlineData("time travel movies", new[] { "time travel" }, MediaScope.Movies)]
     [InlineData("Liam Neeson movies", new[] { "liam neeson" }, MediaScope.Movies)]
-    [InlineData("found footage horror shows", new[] { "found footage horror" }, MediaScope.Shows)]
+    [InlineData("found footage horror shows", new[] { "found footage" }, MediaScope.Shows)]
     [InlineData("heist films, no gore", new[] { "heist" }, MediaScope.Movies)]
     [InlineData("kaiju or mecha", new[] { "kaiju", "mecha" }, null)]
     public void A_plan_no_model_wrote_searches_the_users_phrases_in_their_medium(string message, string[] concepts, MediaScope? media)
@@ -778,7 +835,8 @@ public class AskReelV2UnitTests
         Assert.Equal(PlanSource.CarriedForward, plan.Source);
         Assert.Empty(plan.Delta.Concepts);
         Assert.DoesNotContain("second", plan.Delta.Moods);
-        Assert.Contains("funnier", plan.Delta.Moods);
+        Assert.DoesNotContain("funnier", plan.Delta.Moods);
+        Assert.Equal([new AttributeDirection("humor", AttributeTrend.More)], plan.Delta.Directions);
         Assert.Equal(["gore"], plan.Delta.Negations);
     }
 
@@ -823,7 +881,8 @@ public class AskReelV2UnitTests
         });
 
         Assert.Equal(
-            "1 heist movie checked against your request, and 3 more I couldn't check. 4 more fit but sit under your 6.0 bar.",
+            "1 heist movie checked against your request, and 3 more I couldn't check. 4 more fit but sit under your 6.0 bar. "
+            + "Your bar also holds back 3 titles I couldn't check against your request.",
             reply.Reply);
         // …and the live "something quiet and slow-burning" turn's "1 title that fit what you asked".
         Assert.Equal(
@@ -832,6 +891,82 @@ public class AskReelV2UnitTests
         Assert.Equal(
             "4 picks for you · 3 more not checked against what you asked · 7 held back by your 6.0 bar, 3 of them not checked against what you asked — shown below",
             reply.Reason);
+    }
+
+    /// <summary>
+    /// HREV4-ASK-03: every count a none-found reply gives about the trays equals the tray it describes.
+    /// The keyless "samurai films" said "1 is under your 6.0 bar … 2 titles … marked as unchecked" above
+    /// a floor tray of 2 and no unchecked tray; the judge-failed "vampire movies" said 9 "marked as
+    /// unchecked" above trays of 4 held back and 5 unchecked; the resumed heist turn said 16 above an
+    /// unchecked tray of 8. Varied over who sits where, and over a supply whose under-bar count
+    /// differs from the tray's.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 2, 0, 0, 1, 0)]   // keyless samurai: floor tray of 2 unjudged, the tagged supply has 1 under the bar
+    [InlineData(0, 4, 5, 0, 7, 16)]  // vampire, judge 500: 4 held back, 5 unchecked
+    [InlineData(0, 8, 8, 0, 3, 0)]   // the resumed heist turn
+    [InlineData(2, 1, 3, 0, 5, 16)]  // judged matches under the bar, one unjudged held with them, three unchecked
+    [InlineData(1, 0, 0, 0, 4, 16)]  // judged under the bar only
+    [InlineData(0, 0, 3, 0, 2, 0)]   // unchecked tray only: the tagged supply's under-bar count is the only one given
+    [InlineData(0, 1, 0, 5, 0, 0)]   // unjudged held beside a tagged supply that clears the bar
+    public void Every_tray_count_in_a_none_found_reply_equals_its_tray(
+        int judgedUnderBar, int heldUnchecked, int uncheckedTray, int clearing, int supplyBelowFloor, int judged)
+    {
+        var names = Enumerable.Range(1, judgedUnderBar).Select(i => $"Under {i}").ToList();
+        var supply = new SupplyReport(
+            14 + clearing + supplyBelowFloor, 10, 0, 4, clearing + supplyBelowFloor, supplyBelowFloor, 0, [], 0, 50, 6.0m, true, 0);
+        var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
+        {
+            Topic = "samurai",
+            Supply = supply,
+            UnderBar = judgedUnderBar + heldUnchecked,
+            UnderBarNames = names,
+            HeldUnchecked = heldUnchecked,
+            Unchecked = uncheckedTray,
+            Judged = judged,
+            JudgeFailed = judged > 0 && heldUnchecked + uncheckedTray > 0,
+        }).Reply;
+
+        static int? Count(string text, string pattern) =>
+            System.Text.RegularExpressions.Regex.Match(text, pattern) is { Success: true } m
+                ? int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+                : null;
+
+        Assert.Equal(uncheckedTray > 0 ? uncheckedTray : null, Count(reply, @"(\d+) titles? I couldn't check against your request (?:is|are) below, marked as unchecked"));
+        Assert.Equal(heldUnchecked > 0 ? heldUnchecked : null, Count(reply, @"holds back (\d+) titles? I couldn't check"));
+        foreach (var name in names)
+        {
+            Assert.Contains(name, reply, StringComparison.Ordinal);
+        }
+
+        // With a floor tray on screen the reply describes that tray, never a second under-bar number.
+        var supplyUnderBar = Count(reply, @"(\d+) (?:is|are) under your 6\.0 bar");
+        Assert.Equal(judgedUnderBar + heldUnchecked == 0 && supplyBelowFloor > 0 ? supplyBelowFloor : null, supplyUnderBar);
+        Assert.DoesNotContain("Nothing I found matches", reply, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV4-ASK-05: a turn that checked nothing and found nothing to show never says "nothing I found
+    /// matches" — no verdict was reached. A turn that judged something still may.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 0, "I didn't find anything to show for that this time.")]
+    [InlineData(0, 2, 0, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(0, 0, 1, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(5, 0, 0, "Nothing I found matches what you asked closely enough to show.")]
+    public void A_none_found_reply_with_no_supply_claims_a_verdict_only_when_one_was_reached(
+        int judged, int uncheckedTray, int heldUnchecked, string expectedLead)
+    {
+        var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
+        {
+            Topic = "john wick funnier",
+            Judged = judged,
+            Unchecked = uncheckedTray,
+            UnderBar = heldUnchecked,
+            HeldUnchecked = heldUnchecked,
+        }).Reply;
+
+        Assert.StartsWith(expectedLead, reply, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -35,7 +35,11 @@ public static class NoneFoundCopy
     /// <param name="UnderBar">Names of judged matches the account's For-you bar put in the tray, in tray order.</param>
     /// <param name="NearMisses">How many partial matches went to the near-miss tray.</param>
     /// <param name="Floor">The account's For-you bar; 0 when none is set.</param>
-    /// <param name="Unchecked">How many cards the judge never ruled on, now in the "not checked" tray.</param>
+    /// <param name="Unchecked">
+    /// How many cards the judge never ruled on that sit in the "not checked" tray — that tray only. An
+    /// unchecked card the bar held back is in the floor tray and counted in <paramref name="HeldUnchecked"/>:
+    /// adding it here said "9 titles … marked as unchecked" above an unchecked tray of 5 (HREV4-ASK-03).
+    /// </param>
     /// <param name="JudgedAny">Whether the judge ruled on at least one card this turn.</param>
     /// <param name="ShownHere">
     /// How many of the titles the supply counts as clearing the bar this conversation has already
@@ -61,6 +65,16 @@ public static class NoneFoundCopy
     /// caller that did not count a check may not claim one (HREV1-RET-01, where v2 never counted and
     /// every none-found reply claimed to have checked titles nobody judged).
     /// </param>
+    /// <param name="Guessed">
+    /// The topic is a guess at the user's words: led by <see cref="GuessedLead"/>, the counts kept as
+    /// facts about the words searched, and no relaxation offered.
+    /// </param>
+    /// <param name="HeldUnchecked">
+    /// How many cards nobody judged sit in the floor tray because the bar held them back. They are named
+    /// as held back by the bar — the tray's own caption — never as "marked as unchecked", and with any
+    /// in the tray the floor sentence describes the tray, not the tagged supply's under-bar count, so
+    /// the reply and the tray beneath it never give two numbers for one tray (HREV4-ASK-03).
+    /// </param>
     public sealed record Facts(
         SupplyReport? Supply,
         string? ConceptWords,
@@ -74,7 +88,23 @@ public static class NoneFoundCopy
         IReadOnlyList<string>? UnscoredHeld = null,
         IReadOnlyList<string>? NearMissNames = null,
         int Checked = 0,
-        int? CheckedOfTagged = null);
+        int? CheckedOfTagged = null,
+        int HeldUnchecked = 0,
+        bool Guessed = false);
+
+    /// <summary>
+    /// The lead of a none-found reply whose topic is a guess at the user's words (no model read them):
+    /// it says nothing matched the READING, never "there are no X left", and offers no relaxation of
+    /// the user's conditions for a shelf they may not have asked for (HREV4-RET-02).
+    /// </summary>
+    public const string GuessedLead = "Nothing unseen inside your conditions matches my reading of that.";
+
+    /// <summary>
+    /// The lead of a turn that found nothing to show and checked nothing: no verdict was reached, so
+    /// "nothing I found matches" would claim one (HREV4-ASK-05: the model-less "like John Wick but
+    /// funnier" said it on a turn that judged nothing).
+    /// </summary>
+    public const string NothingFoundUnchecked = "I didn't find anything to show for that this time.";
 
     /// <summary>The lead a reply gets when it would otherwise repeat the previous answer word for word.</summary>
     public const string AgainLead = "Looking again turned up nothing new.";
@@ -102,6 +132,8 @@ public static class NoneFoundCopy
         var sentences = new List<string>(4);
         var topic = Topic(facts.ConceptWords, facts.Media);
         var supply = facts.Supply;
+        var heldBack = facts.Floor > 0m ? Math.Max(0, facts.HeldUnchecked) : 0;
+        var uncheckedTray = Math.Max(0, facts.Unchecked) + (facts.Floor > 0m ? 0 : Math.Max(0, facts.HeldUnchecked));
 
         if (supply is null || supply.MatchingInCatalogue == 0)
         {
@@ -109,9 +141,11 @@ public static class NoneFoundCopy
             // ("witty action playful tone"), not a tag anything carries — so they are not repeated
             // back as if they named a shelf that came up empty. With nothing judged, "nothing
             // matches" would be a verdict nobody reached.
-            sentences.Add(facts.JudgedAny || facts.Unchecked == 0
+            sentences.Add(facts.JudgedAny
                 ? "Nothing I found matches what you asked closely enough to show."
-                : "I couldn't check what I found against what you asked this time.");
+                : uncheckedTray + heldBack > 0
+                    ? "I couldn't check what I found against what you asked this time."
+                    : NothingFoundUnchecked);
         }
         else if (supply.ClearingFloor > 0)
         {
@@ -147,7 +181,7 @@ public static class NoneFoundCopy
             sentences.Add(supply.PredictedFloor is { } bar && supply.BelowFloor + supply.Unscored > 0
                 ? FormattableString.Invariant(
                     $"None of your unseen {topic ?? "matches"} clears your {AskReelReason.FormatFloor(bar)} bar.")
-                : $"There are no {topic ?? "matches"} left for you.");
+                : facts.Guessed ? GuessedLead : $"There are no {topic ?? "matches"} left for you.");
             sentences.Add(Partition(supply, topic));
         }
 
@@ -157,6 +191,18 @@ public static class NoneFoundCopy
             var list = JoinedWithMore(named, facts.UnderBar.Count - named.Count);
             sentences.Add(FormattableString.Invariant(
                 $"Under your {AskReelReason.FormatFloor(facts.Floor)} bar: {list} — shown below."));
+            if (heldBack > 0)
+            {
+                sentences.Add(FormattableString.Invariant(
+                    $"Your bar also holds back {heldBack} {(heldBack == 1 ? "title" : "titles")} I couldn't check against your request."));
+            }
+        }
+        else if (heldBack > 0)
+        {
+            // The floor tray holds only cards nobody judged: the reply counts that tray, as its caption
+            // does, rather than the tagged supply's under-bar count beside it (HREV4-ASK-03).
+            sentences.Add(FormattableString.Invariant(
+                $"Your {AskReelReason.FormatFloor(facts.Floor)} bar holds back {heldBack} {(heldBack == 1 ? "title" : "titles")} I couldn't check against your request — shown below."));
         }
         else if (supply is { BelowFloor: > 0 } s && s.PredictedFloor is { } bar)
         {
@@ -178,7 +224,7 @@ public static class NoneFoundCopy
                 $"{unscored.Unscored} {Have(unscored.Unscored)} no score from your model yet."));
         }
 
-        if (supply is { Knockouts.Count: > 0 } k)
+        if (supply is { Knockouts.Count: > 0 } k && !facts.Guessed)
         {
             var offers = k.Knockouts
                 .Take(MaxKnockoutsNamed)
@@ -187,10 +233,10 @@ public static class NoneFoundCopy
             sentences.Add(Capitalised(string.Join("; ", offers)) + ".");
         }
 
-        if (facts.Unchecked > 0)
+        if (uncheckedTray > 0)
         {
             sentences.Add(FormattableString.Invariant(
-                $"{facts.Unchecked} {(facts.Unchecked == 1 ? "title" : "titles")} I couldn't check against your request {Are(facts.Unchecked)} below, marked as unchecked."));
+                $"{uncheckedTray} {(uncheckedTray == 1 ? "title" : "titles")} I couldn't check against your request {Are(uncheckedTray)} below, marked as unchecked."));
         }
 
         if (facts.NearMissNames is { Count: > 0 } close)
