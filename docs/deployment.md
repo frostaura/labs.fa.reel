@@ -104,7 +104,7 @@ The QA helpers are also locked in code, independently of the bind address:
 - That last guarantee depends on Vite recording its client. A proxy that forwards without `X-Forwarded-For` looks exactly like a direct local caller, because its own hop to the API is loopback. On 2026-10-24 Vite's proxy did exactly that and listened on `0.0.0.0`, so a LAN host minted a Founder session through it. `make ci-vite-proxy` fails until the dev server listens on loopback by default (`VITE_HOST` opts in) and every proxy entry sets `xfwd: true`.
 - Every `/api/dev/*` route requires a signed-in Founder on this machine. An anonymous caller gets 401, any other tier 403, and a Founder session used from elsewhere gets 403 `loopback_only`.
 - `{"noCascade":true}` on dev/link issues a session for the already-linked dev account and nothing else: no Trakt call, no tier write and no sync job.
-- dev/link sessions are stored with the user agent `reel-dev-link …`, so QA sessions can be excluded by identity (FD-18).
+- dev/link sessions are stored with the user agent `reel-dev-link …`, so QA sessions can be excluded by identity (FD-18). Every refresh rotation passes the marker to the successor, so a QA session stays marked for its whole life, and the retention purge keeps the whole chain. The marker is assigned by the server: an ordinary sign-in or refresh whose request agent is spelled like it is stored without it.
 
 ## Edge security
 

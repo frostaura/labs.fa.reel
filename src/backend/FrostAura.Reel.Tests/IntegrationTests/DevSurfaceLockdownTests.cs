@@ -274,6 +274,112 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
         Assert.Equal("reel-dev-link curl/8.7.1", session.UserAgent);
     }
 
+    /// <summary>
+    /// HREV4-PLAT-01 (FD-18): the frontend refreshes on every access-token expiry, so a QA session
+    /// is a CHAIN of sessions, and the identity has to ride the whole chain. Before the fix the
+    /// successor took the raw request agent — <c>curl/8.7.1</c> — so the chain was unmarked from
+    /// the first rotation and the retention purge deleted it once it expired. Each refresh here
+    /// sends a different agent (another client, then none at all), so the marker cannot be passing
+    /// by coincidence of the request; and a plain session on the SAME account, refreshed and
+    /// expired the same way, is purged — so the purge did run over this account.
+    /// </summary>
+    [Fact]
+    public async Task A_dev_link_session_keeps_its_marker_across_every_refresh_and_survives_the_purge()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var slug = $"dev-lock-chain-{Guid.NewGuid():N}";
+        var accountId = await api.SeedAccountAsync(slug);
+        await using var host = WithDevProfile(slug);
+
+        var link = await EdgeSecurityTests.SendAsync(host, "POST", DevEndpoints.DevLinkRoute, cookie: null,
+            body: """{"noCascade":true}""", headers: new Dictionary<string, string> { ["User-Agent"] = "curl/8.7.1" });
+        Assert.Equal(StatusCodes.Status200OK, link.Status);
+
+        var first = await EdgeSecurityTests.SendAsync(host, "POST", "/api/auth/refresh", RefreshCookie(link.SetCookies),
+            headers: new Dictionary<string, string> { ["User-Agent"] = "Mozilla/5.0 (Macintosh) Playwright" });
+        Assert.Equal(StatusCodes.Status200OK, first.Status);
+        var second = await EdgeSecurityTests.SendAsync(host, "POST", "/api/auth/refresh", RefreshCookie(first.SetCookies));
+        Assert.Equal(StatusCodes.Status200OK, second.Status);
+
+        // A plain session on the same account: the contrast that proves the purge reached it.
+        string plainToken;
+        using (var scope = api.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var account = await db.Accounts.IgnoreQueryFilters().SingleAsync(a => a.Id == accountId);
+            var sessions = scope.ServiceProvider.GetRequiredService<SessionService>();
+            var issued = await sessions.IssueAsync(account, "curl/8.7.1");
+            plainToken = (await sessions.RefreshAsync(issued.RefreshToken!, "curl/8.7.1"))!.RefreshToken!;
+        }
+
+        await using (var db = Db())
+        {
+            var chain = await db.RefreshSessions.IgnoreQueryFilters()
+                .Where(s => s.AccountId == accountId && s.UserAgent != null && s.UserAgent.StartsWith(DevEndpoints.DevLinkSessionMarker))
+                .OrderBy(s => s.CreatedAt)
+                .Select(s => s.UserAgent)
+                .ToListAsync();
+            Assert.Equal(
+                ["reel-dev-link curl/8.7.1", "reel-dev-link Mozilla/5.0 (Macintosh) Playwright", "reel-dev-link"],
+                chain);
+            var all = await db.RefreshSessions.IgnoreQueryFilters().CountAsync(s => s.AccountId == accountId);
+            Assert.Equal(5, all);
+            Assert.NotNull(plainToken);
+
+            // Expire this account's sessions only (the purge is global; other tests' rows stay live).
+            var now = DateTime.UtcNow;
+            await db.Database.ExecuteSqlAsync(
+                $"""UPDATE "RefreshSessions" SET "ExpiresAt" = {now.AddDays(-1)} WHERE "AccountId" = {accountId}""");
+            await RetentionPurge.RunAsync(db, now, CancellationToken.None);
+
+            var kept = await db.RefreshSessions.IgnoreQueryFilters()
+                .Where(s => s.AccountId == accountId)
+                .Select(s => s.UserAgent)
+                .ToListAsync();
+            Assert.Equal(3, kept.Count);
+            Assert.All(kept, ua => Assert.StartsWith(DevEndpoints.DevLinkSessionMarker, ua, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// The marker is assigned by the server, never claimed by a request: a client that sends an
+    /// agent spelled like the marker on an ordinary sign-in or refresh is stored without it, so the
+    /// chain rule above cannot be entered from outside dev/link and FD-18's exclusion stays exact.
+    /// </summary>
+    [Theory]
+    [InlineData("reel-dev-link curl/8.7.1", "curl/8.7.1")]
+    [InlineData("reel-dev-link", null)]
+    [InlineData("reel-dev-linkish/2.0", "ish/2.0")]
+    public async Task An_ordinary_session_cannot_claim_the_dev_link_marker(string claimed, string? stored)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await api.SeedAccountAsync($"dev-lock-forge-{Guid.NewGuid():N}");
+        using var scope = api.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+        var account = await db.Accounts.IgnoreQueryFilters().SingleAsync(a => a.Id == accountId);
+        var sessions = scope.ServiceProvider.GetRequiredService<SessionService>();
+
+        var issued = await sessions.IssueAsync(account, claimed);
+        var rotated = await sessions.RefreshAsync(issued.RefreshToken!, claimed);
+        Assert.NotNull(rotated);
+
+        await using var read = Db();
+        var agents = await read.RefreshSessions.IgnoreQueryFilters()
+            .Where(s => s.AccountId == accountId)
+            .Select(s => s.UserAgent)
+            .ToListAsync();
+        Assert.Equal(2, agents.Count);
+        Assert.All(agents, ua => Assert.Equal(stored, ua));
+    }
+
     [Fact]
     public async Task Dev_link_with_no_cascade_and_no_linked_account_stops_before_trakt_and_starts_nothing()
     {
@@ -410,6 +516,12 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private sealed record Answer(int Status, string Body, bool SetCookie);
+
+    private static string RefreshCookie(IReadOnlyList<string> setCookies)
+    {
+        var cookie = Assert.Single(setCookies, c => c.StartsWith(SessionCookies.RefreshTokenCookie + "=", StringComparison.Ordinal));
+        return cookie[..cookie.IndexOf(';', StringComparison.Ordinal)];
+    }
 
     private List<(string Method, string Path)> DevRoutes() =>
         [.. api.Services.GetServices<EndpointDataSource>()
