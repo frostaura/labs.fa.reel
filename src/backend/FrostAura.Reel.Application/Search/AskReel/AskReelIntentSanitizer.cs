@@ -1,3 +1,4 @@
+using System.Globalization;
 using FrostAura.Reel.Domain.Ports;
 
 namespace FrostAura.Reel.Application.Search.AskReel;
@@ -158,6 +159,13 @@ public static class AskReelIntentSanitizer
         return words.All(w => PointerWords.Contains(w) || StopWords.Contains(w) || SearchVocabulary.IsFloorWord(w));
     }
 
+    /// <summary>
+    /// True when <paramref name="word"/> (lower-case) names no topic and no title on its own: a negation
+    /// cue, a pointer, a media word, a pronoun, a conversational verb or filler.
+    /// </summary>
+    internal static bool IsFiller(string word) =>
+        NegationCues.Contains(word) || PointerWords.Contains(word) || StopWords.Contains(word) || SearchVocabulary.IsFloorWord(word);
+
     /// <summary>Lower-cased words, split on anything that is not a letter, a digit or an apostrophe.</summary>
     internal static IReadOnlyList<string> Words(string? text)
     {
@@ -261,15 +269,87 @@ public static class AskReelIntentSanitizer
     /// any word that is not content; it may start with one of <see cref="PhraseLeads"/>, the stop
     /// words that pair with a topic word into a topic of their own ("found footage").
     /// </summary>
-    public static IReadOnlyList<string> KeylessPhrases(string? raw)
+    public static IReadOnlyList<string> KeylessPhrases(string? raw) => ReadKeylessRequest(raw, DateTime.UtcNow.Year).Phrases;
+
+    /// <summary>
+    /// A raw sentence read with no model into the request it states (HREV3-ASK-E): the topic PHRASES it
+    /// asks for (<see cref="KeylessPhrases"/>), the MOODS it names, and the YEAR window it names — so a
+    /// plan no model wrote never makes a mood or a year phrase into a topic every title must carry.
+    ///
+    /// <para><b>Why.</b> With the planner down, "tense heist movies from the last ten years" was searched
+    /// as the hard topics "tense heist" and "ten years": no title carries either, the supply read 0, and
+    /// the turn showed three unrelated titles. Read here, it is the topic "heist", the mood "tense" and
+    /// the years <c>currentYear − 10</c> to <c>currentYear</c> — exactly what the planner would say.</para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>Years</b>: "the last/past N years" (digits or words, "decade" = ten), "the 80s",
+    /// "1990s", "since/after/from 2010", "before/until 2000", "in 2019", "2010 to 2015", or a bare year.
+    /// The first window named wins; a negated one ("nothing from the 80s") is not a window.</item>
+    /// <item><b>Moods</b>: a word or two-word phrase <see cref="Retrieval.Concepts.MoodLexicon"/> reads
+    /// as a mood ("tense", "feel good", "slow burn") or one of the extractor's tones — never a word that
+    /// names a genre ("romantic" is the romance genre and stays in the topic).</item>
+    /// <item><b>Filler</b>: "good", "great", "best" and their like describe nothing and end a phrase.</item>
+    /// </list>
+    /// </summary>
+    public static KeylessRequest ReadKeylessRequest(string? raw, int currentYear)
     {
         var positive = ReadKeyless(raw).Positive.ToHashSet(StringComparer.Ordinal);
+        var stream = ScopedWithBreaks(raw).ToList();
+        var consumed = new bool[stream.Count];
+
+        Retrieval.YearRange? years = null;
+        var yearWords = new List<string>();
+        for (var i = 0; i < stream.Count && years is null; i++)
+        {
+            if (stream[i].Word is null || stream[i].Negated)
+            {
+                continue;
+            }
+
+            if (YearWindow(stream, i, currentYear) is { } window)
+            {
+                years = window.Range;
+                for (var j = i; j < i + window.Length; j++)
+                {
+                    consumed[j] = true;
+                    yearWords.Add(stream[j].Word!);
+                }
+            }
+        }
+
+        var moods = new List<string>();
+        for (var i = 0; i < stream.Count; i++)
+        {
+            if (consumed[i] || stream[i].Word is not { } word || stream[i].Negated)
+            {
+                continue;
+            }
+
+            if (i + 1 < stream.Count && !consumed[i + 1] && stream[i + 1].Word is { } next && !stream[i + 1].Negated
+                && IsMood($"{word} {next}"))
+            {
+                moods.Add($"{word} {next}");
+                consumed[i] = consumed[i + 1] = true;
+                i++;
+            }
+            else if (IsMood(word))
+            {
+                moods.Add(word);
+                consumed[i] = true;
+            }
+            else if (FillerAdjectives.Contains(word))
+            {
+                consumed[i] = true;
+            }
+        }
+
         var phrases = new List<string>();
         var run = new List<string>();
         string? lead = null;
-        foreach (var (word, negated) in ScopedWithBreaks(raw))
+        for (var index = 0; index < stream.Count; index++)
         {
-            if (word is not null && !negated && positive.Contains(word))
+            var (word, negated) = stream[index];
+            if (word is not null && !negated && !consumed[index] && positive.Contains(word))
             {
                 if (run.Count == 0 && lead is not null)
                 {
@@ -282,11 +362,11 @@ public static class AskReelIntentSanitizer
             }
 
             Flush();
-            lead = word is not null && !negated && PhraseLeads.Contains(word) ? word : null;
+            lead = word is not null && !negated && !consumed[index] && PhraseLeads.Contains(word) ? word : null;
         }
 
         Flush();
-        return phrases;
+        return new KeylessRequest(phrases, moods.Distinct(StringComparer.Ordinal).ToList(), years, yearWords);
 
         void Flush()
         {
@@ -301,6 +381,165 @@ public static class AskReelIntentSanitizer
                 run.Clear();
             }
         }
+    }
+
+    /// <summary>Words that praise or intensify without describing: never a topic, never a mood ("good heist movies" is "heist").</summary>
+    private static readonly IReadOnlySet<string> FillerAdjectives = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "good", "great", "best", "decent", "solid", "nice", "top", "awesome", "amazing", "excellent", "favourite", "favorite",
+        "genuinely", "truly", "properly", "seriously",
+    };
+
+    /// <summary>Number words a relative year window may use ("the last ten years").</summary>
+    private static readonly IReadOnlyDictionary<string, int> NumberWords = new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+        ["one"] = 1,
+        ["two"] = 2,
+        ["three"] = 3,
+        ["four"] = 4,
+        ["five"] = 5,
+        ["six"] = 6,
+        ["seven"] = 7,
+        ["eight"] = 8,
+        ["nine"] = 9,
+        ["ten"] = 10,
+        ["eleven"] = 11,
+        ["twelve"] = 12,
+        ["fifteen"] = 15,
+        ["twenty"] = 20,
+        ["thirty"] = 30,
+        ["forty"] = 40,
+        ["fifty"] = 50,
+        ["couple"] = 2,
+        ["few"] = 3,
+    };
+
+    /// <summary>True when <paramref name="words"/> is a mood the lexicon reads and not a genre word ("romantic").</summary>
+    private static bool IsMood(string words) =>
+        (Retrieval.Concepts.MoodLexicon.Words.Contains(words) || Retrieval.Concepts.MoodLexicon.KnownTones.Contains(words))
+        && Retrieval.Concepts.ConceptSynonyms.GenreSlugsOf(words) is null;
+
+    /// <summary>
+    /// The year window that starts at <paramref name="start"/> in the scoped word stream, and how many
+    /// entries it spans; null when none starts there. A window never runs across a clause break.
+    /// </summary>
+    private static (Retrieval.YearRange Range, int Length)? YearWindow(
+        IReadOnlyList<(string? Word, bool Negated)> stream, int start, int currentYear)
+    {
+        string? At(int offset) =>
+            start + offset < stream.Count && !stream[start + offset].Negated ? stream[start + offset].Word : null;
+
+        var first = At(0)!;
+
+        // "the last ten years", "past 5 years", "the last decade", "last couple of years".
+        if (first is "last" or "past" or "previous")
+        {
+            var offset = 1;
+            var count = 1;
+            if (At(offset) is { } n && (NumberWords.TryGetValue(n, out var named) || int.TryParse(n, NumberStyles.None, CultureInfo.InvariantCulture, out named)))
+            {
+                count = named;
+                offset++;
+                if (At(offset) == "of")
+                {
+                    offset++;
+                }
+            }
+
+            var unit = At(offset);
+            var span = unit switch
+            {
+                "year" or "years" => count,
+                "decade" or "decades" => count * 10,
+                _ => 0,
+            };
+            if (span is > 0 and <= 200)
+            {
+                // "last year" alone is the year before this one; a span of years runs up to now.
+                var range = unit == "year" && offset == 1
+                    ? new Retrieval.YearRange(currentYear - 1, currentYear - 1)
+                    : new Retrieval.YearRange(currentYear - span, currentYear);
+                return (range, offset + 1);
+            }
+
+            return null;
+        }
+
+        // "the 80s", "'90s", "1980s", "2000s".
+        if (Decade(first, currentYear) is { } decade)
+        {
+            return (new Retrieval.YearRange(decade, decade + 9), 1);
+        }
+
+        // "since 2010", "after 2015", "before 2000", "until 1999", "in 2019", "from 2010 to 2015".
+        if (first is "since" or "after" or "from" or "before" or "until" or "till" or "pre" or "in"
+            && Year(At(1), currentYear) is { } bound)
+        {
+            if (first == "from" && At(2) is "to" or "until" or "till" && Year(At(3), currentYear) is { } to && to >= bound)
+            {
+                return (new Retrieval.YearRange(bound, to), 4);
+            }
+
+            var range = first switch
+            {
+                "since" or "from" => new Retrieval.YearRange(bound, null),
+                "after" => new Retrieval.YearRange(bound + 1, null),
+                "before" or "pre" => new Retrieval.YearRange(null, bound - 1),
+                "until" or "till" => new Retrieval.YearRange(null, bound),
+                _ => new Retrieval.YearRange(bound, bound),
+            };
+            return (range, 2);
+        }
+
+        // A bare year, or "2010 to 2015".
+        if (Year(first, currentYear) is { } year)
+        {
+            if (At(1) is "to" or "until" or "till" && Year(At(2), currentYear) is { } to && to >= year)
+            {
+                return (new Retrieval.YearRange(year, to), 3);
+            }
+
+            return (new Retrieval.YearRange(year, year), 1);
+        }
+
+        return null;
+    }
+
+    /// <summary>A four-digit year from 1900 to next year, or null.</summary>
+    private static int? Year(string? word, int currentYear) =>
+        word is { Length: 4 } && int.TryParse(word, NumberStyles.None, CultureInfo.InvariantCulture, out var year)
+        && year >= 1900 && year <= currentYear + 1
+            ? year
+            : null;
+
+    /// <summary>The first year of a decade written "80s", "'80s", "80's", "1980s" or "2000s", or null.</summary>
+    private static int? Decade(string word, int currentYear)
+    {
+        var digits = word.TrimStart('\'');
+        if (digits.EndsWith("'s", StringComparison.Ordinal))
+        {
+            digits = digits[..^2];
+        }
+        else if (digits.EndsWith('s'))
+        {
+            digits = digits[..^1];
+        }
+        else
+        {
+            return null;
+        }
+
+        if (!int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value % 10 != 0)
+        {
+            return null;
+        }
+
+        return digits.Length switch
+        {
+            4 when value >= 1900 && value <= currentYear => value,
+            2 => 2000 + value <= currentYear ? 2000 + value : 1900 + value,
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -431,6 +670,14 @@ public static class AskReelIntentSanitizer
         return referent ? end - start : 0;
     }
 }
+
+/// <summary>A sentence read without a model into the request it states (<see cref="AskReelIntentSanitizer.ReadKeylessRequest"/>).</summary>
+/// <param name="Phrases">The topics it asks for, as the phrases it wrote them in.</param>
+/// <param name="Moods">The moods it names: soft preferences, never topics.</param>
+/// <param name="Years">The year window it names, or null.</param>
+/// <param name="YearWords">The words that named the window ("last", "ten", "years").</param>
+public sealed record KeylessRequest(
+    IReadOnlyList<string> Phrases, IReadOnlyList<string> Moods, Retrieval.YearRange? Years, IReadOnlyList<string> YearWords);
 
 /// <summary>A sentence read without a model: the words it asks for, and the words it rules out.</summary>
 /// <param name="Positive">Content words no negation cue governs — what a keyword search may run on.</param>

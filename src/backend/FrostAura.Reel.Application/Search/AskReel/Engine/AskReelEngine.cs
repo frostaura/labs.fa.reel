@@ -167,6 +167,15 @@ public sealed class AskReelEngine(
         public Dictionary<Guid, decimal?> Verdicts { get; } = [];
 
         /// <summary>
+        /// The search's hard constraints resolved to the catalogue's labels (<see cref="ResolvedAsync"/>),
+        /// once per turn: every count and predicate after retrieval reads the same resolution.
+        /// </summary>
+        public Task<HardConstraints>? Resolved { get; set; }
+
+        /// <summary>The facts of the titles this search is near, for the judge's request (HREV3-RET-07).</summary>
+        public IReadOnlyList<LikeFacts> Like { get; set; } = [];
+
+        /// <summary>
         /// Stored-only flags (<see cref="SearchTurnDegraded.ArmPrefix"/>): written to the turn's
         /// <c>DegradedFlags</c> so a thin retrieval is a query, never sent to the client — the reply
         /// and the cards are what they are, and a skipped arm is not a degraded answer (§4.10).
@@ -522,12 +531,7 @@ public sealed class AskReelEngine(
             return await AnswerAsync(turn, plan, next, ConditionsAnswer(turn.Standing, cost, ceiling, turn.Floor), null, ct);
         }
 
-        var titleId = ConversationStateReducer.ResolveHandles(plan.References, state.LastPresented).FirstOrDefault();
-        if (titleId == Guid.Empty && plan.Delta.ReferenceNames.Count > 0)
-        {
-            titleId = await FindByNameAsync(plan.Delta.ReferenceNames[0], ct) ?? Guid.Empty;
-        }
-
+        var titleId = await QuestionSubjectAsync(plan, state, turn.Input.Message, ct) ?? Guid.Empty;
         if (titleId == Guid.Empty)
         {
             // Nothing to answer about: asked back, deterministically, without a search.
@@ -716,6 +720,7 @@ public sealed class AskReelEngine(
 
         soft = soft with { ReferenceTitleIds = referenceIds };
         next = next with { Soft = soft };
+        turn.Like = await LikeFactsAsync(referenceIds, ct);
 
         await ConflictAsync(turn, hard, ct);
 
@@ -749,7 +754,8 @@ public sealed class AskReelEngine(
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
         var candidates = await JudgeOrderAsync(
-            turn, db, () => scorer, next, Judgeable(retrieval, titles, exclude, next), titles, exclude, turn.Timings, ct);
+            turn, db, () => scorer, () => ResolvedAsync(turn, hard, ct), next, Judgeable(retrieval, titles, exclude, next), titles, exclude,
+            turn.Timings, ct);
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
@@ -1041,8 +1047,11 @@ public sealed class AskReelEngine(
             // Ordered exactly as the turn will order it, or the early batch is spent on titles the turn
             // then judges after the bar-clearing ones — or never (HREV2-RET-01).
             var exclude = query.Exclude.ToHashSet();
+            var scopedResolver = services.GetService<IConceptResolver>();
             var ordered = await JudgeOrderAsync(
-                turn, scopedDb, services.GetRequiredService<OnDemandScorer>, next, Judgeable(result, titles, exclude, next), titles, exclude, null, ct);
+                turn, scopedDb, services.GetRequiredService<OnDemandScorer>,
+                () => scopedResolver is null ? Task.FromResult(next.Hard) : ResolveOrKeepAsync(scopedResolver, next.Hard, logger, ct),
+                next, Judgeable(result, titles, exclude, next), titles, exclude, null, ct);
             var slice = ordered.Take(RequestJudge.MaxJudged).ToList();
             if (slice.Count == 0)
             {
@@ -1121,6 +1130,7 @@ public sealed class AskReelEngine(
         Turn turn,
         IReelDbContext store,
         Func<OnDemandScorer> scoring,
+        Func<Task<HardConstraints>> resolve,
         ConversationState next,
         List<Candidate> candidates,
         Dictionary<Guid, Title> titles,
@@ -1162,7 +1172,7 @@ public sealed class AskReelEngine(
             if (topical && clearing < RequestJudge.MaxJudged)
             {
                 topUp = await SupplyTopUpAsync(
-                    turn, store, next, artifact, ids, exclude, RequestJudge.MaxJudged - clearing, titles, ct);
+                    turn, store, next, await resolve(), artifact, ids, exclude, RequestJudge.MaxJudged - clearing, titles, ct);
             }
 
             var missing = ids.Where(id => !predicted.ContainsKey(id)).ToList();
@@ -1197,6 +1207,7 @@ public sealed class AskReelEngine(
         Turn turn,
         IReelDbContext store,
         ConversationState next,
+        HardConstraints resolved,
         Guid artifact,
         IReadOnlyCollection<Guid> retrieved,
         IReadOnlySet<Guid> exclude,
@@ -1209,7 +1220,7 @@ public sealed class AskReelEngine(
         var outside = retrieved.Concat(exclude).Distinct().ToList();
         // Widened by a tenth in SQL; the exact test is the gate's, at the precision the badge renders.
         var lowest = turn.Floor - 0.1m;
-        var supply = CrowdVotes.AtLeast(HardConstraintFilter.Apply(eligible.EligibleTitles(accountId), store, next.Hard), CrowdVotes.MinRelaxVotes)
+        var supply = CrowdVotes.AtLeast(HardConstraintFilter.Apply(eligible.EligibleTitles(accountId), store, resolved), CrowdVotes.MinRelaxVotes)
             .Where(t => !outside.Contains(t.Id));
         var scored = await store.TitleScores
             .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact && s.PredictedRating >= lowest)
@@ -1242,7 +1253,7 @@ public sealed class AskReelEngine(
                     && JudgeableTitle(title, legacy, next))
                 {
                     titles[id] = title;
-                    topUp.Add(new Candidate(id, FusedScore: 0d, Similarity: null, HardConstraintFilter.EvidenceFor(title, next.Hard)));
+                    topUp.Add(new Candidate(id, FusedScore: 0d, Similarity: null, HardConstraintFilter.EvidenceFor(title, resolved)));
                     if (topUp.Count == need)
                     {
                         return topUp;
@@ -1449,7 +1460,7 @@ public sealed class AskReelEngine(
             return [];
         }
 
-        var resolved = await resolver.ResolveAsync(hard, ct);
+        var resolved = await ResolvedAsync(turn, hard, ct);
         var rules = turn.Standing.WithExclusions(query.ExcludeGenres, query.ExcludeKeywords);
         var exclude = query.Exclude.ToHashSet();
         var ids = hydrated.Where(id => !exclude.Contains(id)).ToList();
@@ -1531,7 +1542,7 @@ public sealed class AskReelEngine(
         try
         {
             await foreach (var verdict in judge.JudgeAsync(
-                               new JudgeInput(turn.AccountId, JudgeRequest(turn.Input.Message, next), persona, judgeTitles), ct))
+                               new JudgeInput(turn.AccountId, JudgeRequest(turn.Input.Message, next, turn.Like), persona, judgeTitles), ct))
             {
                 verdicts[verdict.TitleId] = verdict;
                 var index = batchOf[verdict.TitleId];
@@ -1839,6 +1850,36 @@ public sealed class AskReelEngine(
             turn.Input.SourceTurnId);
     }
 
+    /// <summary>
+    /// <paramref name="hard"/> resolved to the catalogue's own labels, once per turn (the first caller
+    /// resolves, every later one reads the same task).
+    ///
+    /// <para><b>Why (HREV3-ASK-B, HREV3-RET-03, WS-3 CR-3).</b> The stored conversation state holds the
+    /// user's words, unresolved, and the supply resolves them: "heist" counts heist, robbery and bank
+    /// robbery. The top-up and the checked count read the unresolved words, so a title tagged only
+    /// "robbery" that cleared the bar was never topped up into the judge (Criminal), and one the judge
+    /// DID rule on was reported as "not among the titles I checked" (Burn). One resolution for the
+    /// top-up, the admission of TMDB-only titles, the re-count and the checked count means every
+    /// number and every predicate after retrieval describes the same shelf.</para>
+    /// </summary>
+    private Task<HardConstraints> ResolvedAsync(Turn turn, HardConstraints hard, CancellationToken ct) =>
+        turn.Resolved ??= ResolveOrKeepAsync(resolver, hard, logger, ct);
+
+    /// <summary>The resolution, or the constraints as they are when resolving fails (a cancelled turn still throws).</summary>
+    private static async Task<HardConstraints> ResolveOrKeepAsync(
+        IConceptResolver conceptResolver, HardConstraints hard, ILogger logger, CancellationToken ct)
+    {
+        try
+        {
+            return await conceptResolver.ResolveAsync(hard, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel v2: the request's concepts could not be resolved; counting by the user's own words.");
+            return hard;
+        }
+    }
+
     private async Task<SupplyReport> RecountAsync(Turn turn, HardConstraints hard, SupplyReport discovered, CancellationToken ct)
     {
         if (!hard.HasConcepts && hard.People.Count == 0)
@@ -1848,7 +1889,7 @@ public sealed class AskReelEngine(
 
         try
         {
-            return await supplyReporter.ReportAsync(turn.AccountId, hard, turn.Input.ShownTitleIds, ct);
+            return await supplyReporter.ReportAsync(turn.AccountId, await ResolvedAsync(turn, hard, ct), turn.Input.ShownTitleIds, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1874,7 +1915,8 @@ public sealed class AskReelEngine(
         try
         {
             var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
-            return (await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId), db, hard)
+            var resolved = await ResolvedAsync(turn, hard, ct);
+            return (await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId), db, resolved)
                     .Where(t => ids.Contains(t.Id))
                     .AsNoTracking()
                     .ToListAsync(ct))
@@ -2061,19 +2103,93 @@ public sealed class AskReelEngine(
 
     // ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The title an item question is about, in the order the evidence is trusted: a handle the plan
+    /// pointed at, a name the plan wrote (as a reference name or on a tool request), then a name the
+    /// message itself carries (<see cref="AskReelTitleMention"/>). Null when none of them names a
+    /// catalogue title — only then is the question asked back.
+    ///
+    /// <para><b>Why the message is read too (HREV3-ASK-A, HREV3-RET-06).</b> The planner planned "is
+    /// Blade of the 47 Ronin a ninja film or a samurai film?" as an item question with no name at all,
+    /// and the turn replied "which title do you mean?" about a title held under that exact name.</para>
+    /// </summary>
+    private async Task<Guid?> QuestionSubjectAsync(PlanResult plan, ConversationState state, string message, CancellationToken ct)
+    {
+        var pointed = ConversationStateReducer.ResolveHandles(plan.References, state.LastPresented).FirstOrDefault();
+        if (pointed != Guid.Empty)
+        {
+            return pointed;
+        }
+
+        var named = plan.Delta.ReferenceNames
+            .Concat(plan.Tools.Select(t => t.Name).OfType<string>())
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in named)
+        {
+            if (await FindByNameAsync(name, ct) is { } id)
+            {
+                return id;
+            }
+        }
+
+        return await MentionedTitleAsync(message, ct);
+    }
+
+    /// <summary>
+    /// The catalogue title a name means: the stored name equal to it once quotes and a trailing
+    /// bracketed year are trimmed ("“Heat” (1995)" is Heat), the one of that year when it names one,
+    /// else the most voted; failing an exact name, the longest title the name's own words carry.
+    /// </summary>
     private async Task<Guid?> FindByNameAsync(string name, CancellationToken ct)
     {
-        var lowered = name.Trim().ToLowerInvariant();
+        var lowered = AskReelTitleMention.Normalise(name);
         if (lowered.Length == 0)
         {
             return null;
         }
 
-        return await db.Titles.AsNoTracking()
+        var year = AskReelTitleMention.YearOf(name);
+        var exact = await db.Titles.AsNoTracking()
             .Where(t => t.Name.ToLower() == lowered)
-            .OrderByDescending(t => t.TmdbVoteCount)
+            .OrderByDescending(t => year != null && t.Year == year)
+            .ThenByDescending(t => t.TmdbVoteCount)
+            .ThenBy(t => t.Id)
             .Select(t => (Guid?)t.Id)
             .FirstOrDefaultAsync(ct);
+        return exact ?? await MentionedTitleAsync(AskReelTitleMention.NameSpans(name), name, ct);
+    }
+
+    /// <summary>
+    /// The title <paramref name="text"/> names, read by <see cref="AskReelTitleMention"/>: the longest
+    /// run of its words equal to a stored name, then the title of a year the text mentions, then the
+    /// most voted. One equality scan over the lower-cased names, bounded by the runs a short message has.
+    /// </summary>
+    private Task<Guid?> MentionedTitleAsync(string? text, CancellationToken ct) =>
+        MentionedTitleAsync(AskReelTitleMention.Spans(text), text, ct);
+
+    private async Task<Guid?> MentionedTitleAsync(IReadOnlyList<AskReelTitleMention.Span> spans, string? text, CancellationToken ct)
+    {
+        if (spans.Count == 0)
+        {
+            return null;
+        }
+
+        var lengths = spans.GroupBy(s => s.Text, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Max(s => s.Words), StringComparer.Ordinal);
+        var texts = lengths.Keys.ToList();
+        var rows = await db.Titles.AsNoTracking()
+            .Where(t => texts.Contains(t.Name.ToLower()))
+            .Select(t => new { t.Id, Name = t.Name.ToLower(), t.Year, t.TmdbVoteCount })
+            .ToListAsync(ct);
+        var years = AskReelTitleMention.YearsIn(text);
+        return rows
+            .Where(r => lengths.ContainsKey(r.Name))
+            .OrderByDescending(r => lengths[r.Name])
+            .ThenByDescending(r => r.Year is { } y && years.Contains(y))
+            .ThenByDescending(r => r.TmdbVoteCount)
+            .ThenBy(r => r.Id)
+            .Select(r => (Guid?)r.Id)
+            .FirstOrDefault();
     }
 
     private async Task<int> SeenCreditsAsync(Guid accountId, IReadOnlyList<PersonConstraint> people, MediaScope media, CancellationToken ct)
@@ -2113,8 +2229,20 @@ public sealed class AskReelEngine(
     /// card from an earlier answer and ruled every title near the right one "partial" (R1-30). A
     /// reference the conversation no longer shows has no name here and is left out; one named in the
     /// message ("like John Wick") is already in the request.
+    ///
+    /// <para><b>Requirements, then preferences (HREV3-RET-01).</b> The plan's split between what the
+    /// request REQUIRES (concepts, people, years, media, the user's own negations) and what it merely
+    /// PREFERS (moods, steers) is carried to the judge, labelled. "Tense heist movies from the last ten
+    /// years" passed the mood as "Mood: tense" beside the requirements, and the judge ruled every
+    /// bar-clearing heist "partial" for its tone ("gritty rather than explicitly tense"), so a supply
+    /// of four answered none-found. A preference moves fit; it never decides satisfies.</para>
+    ///
+    /// <para><b>What "like it" means (HREV3-RET-07).</b> <paramref name="like"/> carries the facts of
+    /// the titles the request wants something like — pointed at or named — so the judge can rule a
+    /// title "yes" for what it shares with one, instead of reading "more like the third one" against
+    /// requirements the pivot dropped and calling every candidate "partial".</para>
     /// </summary>
-    internal static string JudgeRequest(string message, ConversationState state)
+    internal static string JudgeRequest(string message, ConversationState state, IReadOnlyList<LikeFacts>? like = null)
     {
         var parts = new List<string> { $"Request: {message.Trim()}" };
         var pointedAt = state.Soft.ReferenceTitleIds
@@ -2127,6 +2255,12 @@ public sealed class AskReelEngine(
         {
             parts.Add($"Points at: {string.Join(", ", pointedAt)}");
         }
+
+        foreach (var reference in like ?? [])
+        {
+            parts.Add($"Like: {reference}");
+        }
+
         if (state.Hard.Concepts.Count > 0)
         {
             parts.Add($"Requires: {string.Join(", ", state.Hard.Concepts.Select(c => c.UserWords))}");
@@ -2142,16 +2276,6 @@ public sealed class AskReelEngine(
             parts.Add(string.Create(CultureInfo.InvariantCulture, $"Years: {years.From?.ToString(CultureInfo.InvariantCulture) ?? "any"}-{years.To?.ToString(CultureInfo.InvariantCulture) ?? "any"}"));
         }
 
-        if (state.Soft.Moods.Count > 0)
-        {
-            parts.Add($"Mood: {string.Join(", ", state.Soft.Moods)}");
-        }
-
-        if (state.Soft.Directions.Count > 0)
-        {
-            parts.Add($"Steer: {string.Join(", ", state.Soft.Directions.Select(d => $"{d.Trend.ToString().ToLowerInvariant()} {d.Attribute}"))}");
-        }
-
         if (state.UserNegations.Count > 0)
         {
             parts.Add($"Rules out: {string.Join(", ", state.UserNegations)}");
@@ -2162,7 +2286,62 @@ public sealed class AskReelEngine(
             parts.Add($"Media: {state.Hard.Media.ToString().ToLowerInvariant()}");
         }
 
+        var preferences = state.Soft.Moods
+            .Concat(state.Soft.Directions.Select(d => $"{d.Trend.ToString().ToLowerInvariant()} {d.Attribute}"))
+            .ToList();
+        if (preferences.Count > 0)
+        {
+            parts.Add($"Prefers (never required): {string.Join(", ", preferences)}");
+        }
+
         return string.Join(". ", parts);
+    }
+
+    /// <summary>
+    /// What the judge is told about one title a request wants something like (<see cref="JudgeRequest"/>):
+    /// its name and year, its genres, and its first keywords.
+    /// </summary>
+    internal sealed record LikeFacts(string Name, int? Year, IReadOnlyList<string> Genres, IReadOnlyList<string> Keywords)
+    {
+        /// <summary>How many of a reference's keywords the judge reads.</summary>
+        public const int KeywordCount = 8;
+
+        public override string ToString()
+        {
+            var name = Year is { } year ? string.Create(CultureInfo.InvariantCulture, $"{Name} ({year})") : Name;
+            var facts = new List<string>(2);
+            if (Genres.Count > 0)
+            {
+                facts.Add($"genres {string.Join(", ", Genres)}");
+            }
+
+            if (Keywords.Count > 0)
+            {
+                facts.Add($"keywords {string.Join(", ", Keywords.Take(KeywordCount))}");
+            }
+
+            return facts.Count == 0 ? name : $"{name} — {string.Join("; ", facts)}";
+        }
+    }
+
+    /// <summary>The facts of the titles a search is near (its references), in the order referenced.</summary>
+    private async Task<IReadOnlyList<LikeFacts>> LikeFactsAsync(IReadOnlyList<Guid> referenceIds, CancellationToken ct)
+    {
+        if (referenceIds.Count == 0)
+        {
+            return [];
+        }
+
+        var rows = await db.Titles.AsNoTracking()
+            .Where(t => referenceIds.Contains(t.Id))
+            .Select(t => new { t.Id, t.Name, t.Year, t.Genres, t.Keywords })
+            .ToListAsync(ct);
+        return referenceIds
+            .Distinct()
+            .Select(id => rows.FirstOrDefault(r => r.Id == id))
+            .Where(r => r is not null)
+            .Select(r => new LikeFacts(r!.Name, r.Year, r.Genres, [.. r.Keywords.Take(LikeFacts.KeywordCount)]))
+            .ToList();
     }
 
     /// <summary>The previous answer's reply, without the handle suffix history lines carry.</summary>

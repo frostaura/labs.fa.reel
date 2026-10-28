@@ -226,6 +226,81 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
             reply);
     }
 
+    /// <summary>
+    /// HREV3-ASK-C / HREV3-RET-02: on v1 — the engine an unflagged deploy serves — a person request
+    /// applies the account's For-you bar. "Liam Neeson movies" returned The Mongoose (5.49), The Fix
+    /// (5.51) and After.Life (5.84) as picks under a 6.0 bar. A credit under the bar, or unscored while
+    /// it is set, is never streamed as a candidate and never a result: it is in the floor tray, stored
+    /// as a BelowFloor card, and counted in the reply. Varied: a credit that clears the bar beside two
+    /// that do not, every credit under the bar, and no bar at all (everything is a pick, as before).
+    /// </summary>
+    [Theory]
+    [InlineData("6.0", new[] { 8.4, 5.5, 5.84 }, 1)]
+    [InlineData("6.0", new[] { 5.49, 5.51 }, 0)]
+    [InlineData(null, new[] { 8.4, 5.5 }, 2)]
+    public async Task A_v1_person_query_never_offers_a_credit_under_the_bar_as_a_pick(string? bar, double[] predictions, int picks)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var name = $"Actor {Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        await SeedActiveArtifactAsync(accountId);
+        if (bar is not null)
+        {
+            await using var filters = Fixture.CreateContext(new AccountContext());
+            filters.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.MinPredictedRating,
+                Value = bar,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await filters.SaveChangesAsync();
+        }
+
+        var personId = await SeedPersonAsync(name);
+        var titles = new List<(string Name, decimal Predicted)>();
+        for (var i = 0; i < predictions.Length; i++)
+        {
+            var predicted = (decimal)predictions[i];
+            var title = $"Credit {i} {Guid.NewGuid():N}"[..17];
+            await SeedCreditedTitleAsync(personId, title, "en", seenBy: null, runtime: RuntimeEngine.RuntimeFor(predicted));
+            titles.Add((title, predicted));
+        }
+
+        var tmdb = new FakeTmdbClient { PersonResult = new TmdbPerson(727, name, "Acting") };
+        var agent = new FakePersonAgent(new PersonQuery(name, PersonRole.Cast), $"{name} is in lots of things.");
+        var (service, events) = BuildService(accountId, tmdb, out var emit, agent, new RuntimeEngine());
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput($"{name} movies", [], [], [], "US", [], ApiUsagePurpose.RerankAsk), emit, CancellationToken.None);
+
+        var floor = bar is null ? 0m : decimal.Parse(bar, System.Globalization.CultureInfo.InvariantCulture);
+        var clears = titles.Where(t => floor == 0m || t.Predicted >= floor).Select(t => t.Name).ToList();
+        var under = titles.Where(t => floor > 0m && t.Predicted < floor).Select(t => t.Name).ToList();
+        Assert.Equal(picks, clears.Count);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal(clears.Order(), done.GetProperty("results").EnumerateArray().Select(r => r.GetProperty("name").GetString()!).Order());
+        Assert.Equal(under.Order(), done.GetProperty("belowFloor").EnumerateArray().Select(r => r.GetProperty("name").GetString()!).Order());
+        Assert.Equal(under.Count, done.GetProperty("droppedByFloor").GetInt32());
+        var streamed = events.Where(e => e.Event == "candidate").Select(e => e.Data.GetProperty("name").GetString()).ToList();
+        Assert.All(under, n => Assert.DoesNotContain(n, streamed));
+
+        Assert.Equal(clears.Count, outcome.Cards.Count(c => c.Tier == Domain.Search.SearchTurnCardTier.Pick && !c.BelowFloor));
+        Assert.Equal(under.Count, outcome.Cards.Count(c => c.Tier == Domain.Search.SearchTurnCardTier.BelowFloor && c.BelowFloor));
+        var reply = string.Concat(events.Where(e => e.Event == "assistant-message").Select(e => e.Data.GetProperty("text").GetString()));
+        Assert.Equal(
+            // No media in the intent (the person path keeps the interpreter's), so the noun is "titles", as for every person reply here.
+            LiveSearchExpansionService.PersonReply(new PersonQuery(name, PersonRole.Cast), clears.Count, 0, [], under.Count, floor),
+            reply);
+        Assert.Contains(under.Count == 0 ? "titles starring" : "held back by your 6.0 bar", outcome.Reason, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_vibe_query_returns_multiple_semantic_neighbours_from_the_embedded_catalog()
     {
@@ -473,7 +548,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(
-        Guid accountId, ITmdbClient tmdb, out LiveSearchExpansionService.Emit emit, ISearchAgent? agent = null)
+        Guid accountId, ITmdbClient tmdb, out LiveSearchExpansionService.Emit emit, ISearchAgent? agent = null, IModelEngine? model = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -491,7 +566,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
-        var engine = new FastTreeModelEngine();
+        var engine = model ?? new FastTreeModelEngine();
         var residualModel = new OnlineResidualModel(
             db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
         var service = new LiveSearchExpansionService(
@@ -633,7 +708,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     /// <summary>A catalogued, hydrated film crediting <paramref name="personId"/> as cast, seen by <paramref name="seenBy"/> when given.</summary>
-    private async Task SeedCreditedTitleAsync(Guid personId, string name, string language, Guid? seenBy)
+    private async Task SeedCreditedTitleAsync(Guid personId, string name, string language, Guid? seenBy, int? runtime = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -651,6 +726,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
             Overview = "A life, told plainly.",
             TmdbVoteAverage = 7.4m,
             TmdbVoteCount = 5_000,
+            RuntimeMinutes = runtime,
             LastMetadataRefreshAt = DateTime.UtcNow,
             CreatedAt = DateTime.UtcNow,
         };
@@ -672,6 +748,46 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         }
 
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>An Active artifact for the account, so the on-demand scorer scores (its bytes are never read by <see cref="RuntimeEngine"/>).</summary>
+    private async Task SeedActiveArtifactAsync(Guid accountId)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.Add(new Domain.Ml.ModelArtifact
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Version = 1,
+            ArtifactBytes = [1],
+            TrainingRunId = Guid.NewGuid(),
+            Status = Domain.Ml.ArtifactStatus.Active,
+            TrainedAt = DateTime.UtcNow,
+            FeatureSchemaJson = JsonSerializer.Serialize(new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Predicts from the title's runtime (<see cref="RuntimeFor"/> inverts it), through the real scoring path.</summary>
+    private sealed class RuntimeEngine : IModelEngine
+    {
+        private static readonly int Runtime = Array.IndexOf(FeatureSchema.AllNames(), "runtimeMinutes");
+
+        public static int RuntimeFor(decimal predicted) => 100 + (int)Math.Round(predicted * 100m);
+
+        public TrainedModel Train(TrainingMatrix matrix, string hyperparamsJson) =>
+            throw new NotSupportedException("This fixture scores; it never trains.");
+
+        public float[] Score(byte[] artifactBytes, float[][] features) => [.. features.Select(f => (f[Runtime] - 100f) / 100f)];
+
+        public float[] ScoreCached(Guid modelKey, byte[] artifactBytes, float[][] features) => Score(artifactBytes, features);
+
+        public ScoredRow[] ScoreWithContributions(byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5) =>
+            [.. Score(artifactBytes, features).Select(s => new ScoredRow(s, []))];
+
+        public ScoredRow[] ScoreWithContributionsCached(
+            Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5) =>
+            ScoreWithContributions(artifactBytes, features, featureNames, topK);
     }
 
     /// <summary>Returns canned shark candidates for concept-discovery; trivial details for hydration.</summary>

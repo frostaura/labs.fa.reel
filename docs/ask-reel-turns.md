@@ -517,7 +517,13 @@ uses it only to know which frames to expect.
    a conversation's **first** turn there is nothing to carry: the user's positive words are searched
    as the **phrases** they wrote ("time travel", "liam neeson" — never each word as its own
    requirement), and the reply leads "I couldn't fully read that, so I searched for …", never "as
-   before". A plan no model wrote (carried forward, or keyless) takes the media the message names.
+   before". A plan no model wrote (carried forward, or keyless) takes the media the message names,
+   and reads a **mood as a mood and a year phrase as years** (HREV3-ASK-E): "tense heist movies from
+   the last ten years" is the topic `heist`, the mood `tense` and the years now−10 to now — never the
+   hard topics "tense heist" and "ten years". It reads "the last/past N years", "the last decade",
+   "80s"/"1990s", "since/after/from/before/until/in YYYY", "YYYY to YYYY" and a bare year; mood words
+   are the mood lexicon's (never a genre word: "romantic comedies" stays the topic); "good", "best"
+   and their like end a phrase.
    **Media:** the user's own media word outranks a plan that left media unset **or answered
    `any`** ("samurai films" is films); `any` stands only where the words name both media or neither,
    ask for one in addition ("shows too") or rule one out ("no tv shows" asks for films).
@@ -575,6 +581,17 @@ uses it only to know which frames to expect.
    cannot fill the slice and a retrieved title would otherwise go unjudged (HREV2-ASK-04: scoring it
    every time put 0.4–3 s before the first card). The speculation's early batch is chosen in the same
    order. With no bar, retrieval's first 16 are judged and nothing is read early.
+   **One resolution per turn** (HREV3-ASK-B): the top-up, the admission of TMDB-only titles, the
+   none-found re-count and the checked count all read the request's constraints **resolved** to the
+   catalogue's labels — the supply's own reading — so a title tagged only "robbery" is topped up for
+   "heist" and, once judged, is counted as checked.
+   **What the judge reads** (HREV3-RET-01, -07, HREV3-ASK-D): the request in its conversation, with
+   what it **Requires** (topics, people, years, media), what it **Rules out**, and what it
+   **Prefers (never required)** — moods and steers move fit, never satisfies; the titles it wants
+   something **Like** (pointed at or named), each with its genres and first eight keywords, where a
+   title sharing something specific with one is a `yes`; and per title, genres a TMDB taxonomy cannot
+   tag on its medium (TV has no thriller, horror, romance, history or music) read from the stand-in
+   keywords eligibility uses, marked `(inferred)`. A title's medium is never a reason against it.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
@@ -589,7 +606,11 @@ uses it only to know which frames to expect.
    credits, a turn with no model and a judge whose every batch failed checked nothing — and of the
    tagged supply only the part the judge saw ("I checked 16 of them … the other 4 weren't among the
    16 titles I checked"); titles this conversation already showed are named as shown. An
-   `ItemQuestion` answer names the title and states the answer; one that cites Reel's inputs ("the
+   `ItemQuestion` is about the card a handle points at, else a title the plan names (as a reference
+   name or on the tool request; quotes and a trailing "(1995)" trimmed), else a title the **message
+   itself names** (HREV3-ASK-A): the longest run of its words equal to a stored name — a single word
+   only when the user capitalised it, so "is it violent?" never answers about It. Only when none of
+   these names a title is the question asked back. The answer names the title and states the answer; one that cites Reel's inputs ("the
    runtime fact says…", "the keywords identify…") is discarded for the fact line, which names the title.
 6. **Persist** — cards are written **as they are emitted** (each `picks` / `tray` frame is a row
    write), so a turn that dies mid-stream still holds what it showed; the turn's act, mode, plan
@@ -658,6 +679,11 @@ the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`. The v
 same default (HREV2-ASK-03): its person path reads the account's full eligibility, takes the
 person's catalogued credits as well as TMDB's newest-first credit page, and its reply is the
 composer's counted sentence, not the model's, which was written before any credit was looked up.
+**The bar binds a person request on both engines** (HREV3-ASK-C): v1 scores every credit before
+showing any when a bar is set, and a credit under it (or unscored while it is set) goes only to
+`belowFloor` — never a `candidate` frame, never a result, stored as a `BelowFloor` card — and the
+reply counts it the composer's way ("2 more fit but sit under your 6.0 bar.", or "the 3 you haven't
+all sit under your 6.0 bar." when every unseen credit does).
 "You've seen N" is the same number in both engines: every seen title the person predicate credits to
 them in the request's media, whatever the account's conditions hold out — v1 once counted TMDB's
 credit page alone and said 11 where v2 said 39. The page is not counted beside the credits either:
