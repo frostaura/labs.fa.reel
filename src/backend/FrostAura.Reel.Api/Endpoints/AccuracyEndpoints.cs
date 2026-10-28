@@ -96,6 +96,10 @@ public static class AccuracyEndpoints
                     otherCount = w.OtherCount,
                     otherMeanRating = Round(w.OtherMeanRating, 2),
                     delta = Round(w.Delta, 2),
+                    // Via-Reel ratings with nothing else rated inside their band, and the band itself:
+                    // the means above are same-period comparisons, and the page owes the reader both.
+                    viaReelUnmatchedCount = w.ViaReelUnmatchedCount,
+                    matchDays = w.MatchDays,
                 }),
                 // Null when there is nothing honest to say — no predecessor artifact, or no
                 // evaluation yet. A band reading "learned from 0 new ratings" is worse than none.

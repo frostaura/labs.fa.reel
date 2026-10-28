@@ -432,6 +432,142 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
             report.WindowSummaries!.Select(w => (w.Key, w.Pairs, w.SameAs)));
     }
 
+    [Theory]
+    // 90 days: the two titles first shown 200 days back are outside the window, so the in-window
+    // save of one of them has no in-window exposure ahead of it and is not a step of this funnel.
+    [InlineData("90d", 5, 3, 1, 2)]
+    // A year: both old exposures and their saves come in, and the old title that was shown, saved
+    // and then watched is a second watched save.
+    [InlineData("365d", 7, 5, 2, 2)]
+    public async Task The_queue_funnel_counts_only_saves_and_ratings_that_came_after_reel_showed_the_title(
+        string window, int shown, int saved, int watched, int rated)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV4-DESK-01. The page captions this funnel "saves, watches and ratings made elsewhere for
+        // the same titles count only when they came after Reel showed them", so every step below
+        // "shown" must be a title Reel showed BEFORE the step happened. Each title here is one way
+        // a step can fail that test; the old query counted every one of them.
+        var (accountId, _, artifactId, _) = await SeedAsync("funnel");
+
+        await using (var seed = fixture.CreateContext(Scoped(accountId)))
+        {
+            Title Add(string name)
+            {
+                var t = NewTitle(name);
+                seed.Titles.Add(t);
+                return t;
+            }
+
+            ManagedListItem Save(Title t, int addedDay, int? watchedDay = null) => new()
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = t.Id,
+                AddedAt = Now.AddDays(addedDay),
+                RemovedAt = watchedDay is { } w ? Now.AddDays(w) : null,
+                RemovalReason = watchedDay is null ? null : ListRemovalReason.Watched,
+            };
+
+            var shownSavedWatchedRated = Add("shown-saved-watched-rated");
+            var shownSaved = Add("shown-saved");
+            var neverShown = Add("saved-watched-rated-never-shown");
+            var savedBeforeShown = Add("saved-before-shown-then-rated");
+            var ratedBeforeShown = Add("rated-before-shown-then-saved");
+            var shownOnly = Add("shown-only");
+            var oldShownSavedWatched = Add("old-shown-saved-watched");
+            var oldShownRecentSave = Add("old-shown-recent-save");
+
+            seed.ManagedListItems.AddRange(
+                Save(shownSavedWatchedRated, -8, watchedDay: -5),
+                Save(shownSaved, -8),
+                Save(neverShown, -6, watchedDay: -3),
+                Save(savedBeforeShown, -7, watchedDay: -3),
+                Save(ratedBeforeShown, -8),
+                Save(oldShownSavedWatched, -190, watchedDay: -180),
+                Save(oldShownRecentSave, -10));
+
+            seed.UserRatings.AddRange(
+                Rating(accountId, shownSavedWatchedRated.Id, 7, Now.AddDays(-4)),
+                Rating(accountId, neverShown.Id, 8, Now.AddDays(-2)),
+                Rating(accountId, savedBeforeShown.Id, 6, Now.AddDays(-2)),
+                // Rated before it was shown AND before it was saved: an opinion Reel never earned.
+                Rating(accountId, ratedBeforeShown.Id, 9, Now.AddDays(-20)));
+
+            var log = new ExposureLog(seed, NullLogger<ExposureLog>.Instance);
+            async Task Show(Title t, int day) => await log.Stage(
+                accountId, ExposureSurface.FeedRow, feedSnapshotId: null, artifactId, Now.AddDays(day),
+                [new ExposureCard(t.Id, 0, 7.5m)], CancellationToken.None);
+
+            await Show(shownSavedWatchedRated, -10);
+            await Show(shownSaved, -10);
+            await Show(savedBeforeShown, -5);
+            await Show(ratedBeforeShown, -10);
+            await Show(shownOnly, -10);
+            await Show(oldShownSavedWatched, -200);
+            await Show(oldShownRecentSave, -200);
+            await seed.SaveChangesAsync();
+        }
+
+        var report = await ComputeAccuracyAsync(accountId, window);
+        var funnel = report.Conversion;
+
+        Assert.Equal(shown, funnel.Shown);
+        Assert.Equal(saved, funnel.Saved);
+        Assert.Equal(watched, funnel.Watched);
+        Assert.Equal(rated, funnel.Rated);
+        // Shown → rated is the headline's own join, so the page cannot score n titles in one block
+        // and claim a different n were rated in the next.
+        Assert.Equal(report.Headline.Count, funnel.Rated);
+        Assert.Equal(saved / (double)shown, funnel.ShownToSaved!.Value, 6);
+        Assert.Equal(watched / (double)saved, funnel.SavedToWatched!.Value, 6);
+        Assert.Equal(rated / (double)shown, funnel.ShownToRated!.Value, 6);
+        Assert.True(funnel.Saved <= funnel.Shown && funnel.Watched <= funnel.Saved);
+        // The 3-day wait is the in-window shown-then-saved title; the never-shown and saved-before-
+        // shown titles' waits are not this funnel's.
+        Assert.Equal(window == "90d" ? 3d : 6.5d, funnel.MedianDaysToWatch!.Value, 6);
+    }
+
+    [Fact]
+    public async Task The_queue_funnel_is_empty_rather_than_borrowed_from_the_list_when_nothing_was_ever_shown()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The other face of the same rule: with no exposure log there is no "shown", so a save
+        // cannot be a step after it. The funnel reports zeros and unknown rates, never a
+        // saved → watched rate that the caption would then attribute to Reel showing the title.
+        var (accountId, _, _, _) = await SeedAsync("funnel-empty");
+        await using (var seed = fixture.CreateContext(Scoped(accountId)))
+        {
+            var title = NewTitle("saved-and-watched-without-a-serve");
+            seed.Titles.Add(title);
+            seed.ManagedListItems.Add(new ManagedListItem
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                AddedAt = Now.AddDays(-6),
+                RemovedAt = Now.AddDays(-2),
+                RemovalReason = ListRemovalReason.Watched,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var funnel = (await ComputeAccuracyAsync(accountId, "90d")).Conversion;
+
+        Assert.Equal((0, 0, 0, 0), (funnel.Shown, funnel.Saved, funnel.Watched, funnel.Rated));
+        Assert.Null(funnel.ShownToSaved);
+        Assert.Null(funnel.SavedToWatched);
+        Assert.Null(funnel.ShownToRated);
+        Assert.Null(funnel.MedianDaysToWatch);
+    }
+
     [Fact]
     public void Only_windows_that_differ_go_unmarked()
     {

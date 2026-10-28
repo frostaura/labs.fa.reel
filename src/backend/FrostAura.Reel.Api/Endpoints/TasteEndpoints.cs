@@ -19,6 +19,39 @@ public static class TasteEndpoints
     /// <summary>How many demoted genres / tones the one-line dislike summary names.</summary>
     private const int DislikeProfileTop = 3;
 
+    /// <summary>How many genres the fingerprint (and, from its head, the drift chart) carries.</summary>
+    internal const int FingerprintGenreCount = 8;
+
+    /// <summary>Ratings a genre needs before its shrunken mean is worth a bar.</summary>
+    internal const int FingerprintMinRatings = 10;
+
+    /// <summary>One genre row of the DNA fingerprint.</summary>
+    internal sealed record GenreFingerprintRow(string Genre, decimal Affinity, int Count);
+
+    /// <summary>
+    /// The genres the DNA page charts as "each genre you rate a lot": the
+    /// <see cref="FingerprintGenreCount"/> genres with the MOST ratings (at least
+    /// <see cref="FingerprintMinRatings"/> each), most-rated first, ties by name. Volume alone picks
+    /// the rows; affinity is only what each bar shows.
+    ///
+    /// <para>The rows were once ranked by affinity × log(1 + count) — "loved-ness" — which can never
+    /// admit a genre rated often and liked less than average: on the founder's account horror (363
+    /// ratings, the widest gap at −0.5) and mystery (339) were both missing while fantasy (270) was
+    /// shown, on a diverging chart whose whole job is to show the below-average side
+    /// (HREV4-DESK-03). The drift chart reads the first five, so it follows the same order.</para>
+    /// </summary>
+    internal static List<GenreFingerprintRow> FingerprintGenres(
+        IReadOnlyDictionary<string, List<(short Rating, DateTime RatedAt)>> genreRatings, decimal userMean) =>
+        [.. genreRatings
+            .Where(kv => kv.Value.Count >= FingerprintMinRatings)
+            .OrderByDescending(kv => kv.Value.Count)
+            .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+            .Take(FingerprintGenreCount)
+            .Select(kv => new GenreFingerprintRow(
+                kv.Key,
+                Math.Round(TasteMath.ShrunkenMean(kv.Value.Select(r => r.Rating).ToList(), userMean), 2),
+                kv.Value.Count))];
+
     public static void MapTasteEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/taste").RequireAccount();
@@ -50,17 +83,8 @@ public static class TasteEndpoints
             var now = DateTime.UtcNow;
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
 
-            // Genres & eras by loved-ness.
-            var topGenres = taste.GenreRatings
-                .Select(kv => new
-                {
-                    genre = kv.Key,
-                    affinity = Math.Round(TasteMath.ShrunkenMean(kv.Value.Select(r => r.Rating).ToList(), taste.UserMean), 2),
-                    count = kv.Value.Count,
-                })
-                .Where(g => g.count >= 10)
-                .OrderByDescending(g => (double)g.affinity * Math.Log(1 + g.count))
-                .Take(8)
+            var topGenres = FingerprintGenres(taste.GenreRatings, taste.UserMean)
+                .Select(g => new { genre = g.Genre, affinity = g.Affinity, count = g.Count })
                 .ToList();
 
             var eras = taste.DecadeRatings

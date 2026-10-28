@@ -24,10 +24,24 @@ public sealed record RetroConversionReport(
 
 /// <summary>
 /// The within-user counterfactual over one time window: how titles that reached the user through
-/// Reel rated against everything else they rated in the same period. This is the number that says
+/// Reel rated against what else the user rated AROUND THE SAME TIME. This is the number that says
 /// whether the product helped, and it is deliberately a comparison against the user's own baseline
 /// rather than against any model metric.
+///
+/// <para>Each via-Reel rating is matched to the user's other ratings made within
+/// <see cref="RetroLoopQuery.MatchBandDays"/> days of it, so a user whose ratings drift over the
+/// years is compared with themselves at the same moment, not with who they were in 2019. A via-Reel
+/// rating with nothing else rated inside its band has no same-period baseline and is counted in
+/// <paramref name="ViaReelUnmatchedCount"/> instead of in the means.</para>
 /// </summary>
+/// <param name="ViaReelCount">Via-Reel ratings that found a same-period baseline.</param>
+/// <param name="ViaReelMeanRating">Their mean.</param>
+/// <param name="OtherCount">Distinct other ratings inside at least one via-Reel rating's band.</param>
+/// <param name="OtherMeanRating">The matched baseline: the mean, over the matched via-Reel ratings, of
+/// each one's band mean — so <paramref name="Delta"/> is exactly the two means' difference.</param>
+/// <param name="Delta">Mean of (via-Reel rating − its band's mean of the user's other ratings).</param>
+/// <param name="ViaReelUnmatchedCount">Via-Reel ratings left out for want of a same-period baseline.</param>
+/// <param name="MatchDays">The half-width of the band, in days.</param>
 public sealed record CounterfactualWindow(
     string Window,
     int? Days,
@@ -35,7 +49,9 @@ public sealed record CounterfactualWindow(
     double? ViaReelMeanRating,
     int OtherCount,
     double? OtherMeanRating,
-    double? Delta);
+    double? Delta,
+    int ViaReelUnmatchedCount = 0,
+    int MatchDays = RetroLoopQuery.MatchBandDays);
 
 /// <summary>The whole founder-visible track record, computed live from existing tables — no new schema.</summary>
 public sealed record RetroLoopReport(
@@ -64,6 +80,15 @@ public sealed class RetroLoopQuery(IReelDbContext db, IAccountContext accountCon
 
     /// <summary>The rolling window the counterfactual reports alongside all-time.</summary>
     public const int RecentWindowDays = 365;
+
+    /// <summary>
+    /// Half-width, in days, of the same-period band each via-Reel rating is compared inside. Two
+    /// weeks either side is wide enough that an ordinary month of rating finds a baseline, and
+    /// narrow enough that a taste that drifts by half a point a year cannot pass for Reel's effect
+    /// (HREV4-DESK-02: the founder's yearly means fall from about 7.0 to 6.06, and an unmatched
+    /// all-time baseline turned that drift into a red −0.71).
+    /// </summary>
+    public const int MatchBandDays = 14;
 
     public async Task<RetroLoopReport> ComputeAsync(DateTime now, CancellationToken ct = default)
     {
@@ -206,10 +231,18 @@ public sealed class RetroLoopQuery(IReelDbContext db, IAccountContext accountCon
     }
 
     /// <summary>
-    /// "Titles I watched because of Reel average X; titles I found myself average Y." Via-Reel means
-    /// the title passed through a surface Reel owns: the managed list (live or removed) or any feed
-    /// item that survives the 7-snapshot prune. That prune makes the feed arm an UNDER-count, never
-    /// an over-count, which is the safe direction for a number meant to hold the product to account.
+    /// "Titles I watched because of Reel average X; titles I found myself, rated in the same weeks,
+    /// average Y." Via-Reel means the title passed through a surface Reel owns: the managed list
+    /// (live or removed) or any feed item that survives the 7-snapshot prune. That prune makes the
+    /// feed arm an UNDER-count, never an over-count, which is the safe direction for a number meant
+    /// to hold the product to account.
+    ///
+    /// <para><b>Matched by time, never pooled.</b> Every via-Reel rating sits in 2026 because that
+    /// is when Reel existed; the account's own finds span years, and its yearly means drift. Pooling
+    /// every other rating since 2019 as the baseline reported that drift as Reel's effect. Each
+    /// via-Reel rating is therefore compared with the user's other ratings within
+    /// <see cref="MatchBandDays"/> days of it, and the gap is the mean of those per-rating gaps.
+    /// Both halves of a window are limited to ratings inside it.</para>
     /// </summary>
     private async Task<IReadOnlyList<CounterfactualWindow>> CounterfactualAsync(DateTime now, CancellationToken ct)
     {
@@ -231,32 +264,85 @@ public sealed class RetroLoopQuery(IReelDbContext db, IAccountContext accountCon
 
         return
         [
-            Window($"last{RecentWindowDays}Days", RecentWindowDays, rows.Where(r => r.RatedAt >= cutoff)),
-            Window("allTime", null, rows),
+            MatchedWindow($"last{RecentWindowDays}Days", RecentWindowDays, rows.Where(r => r.RatedAt >= cutoff)),
+            MatchedWindow("allTime", null, rows),
         ];
+    }
 
-        static CounterfactualWindow Window(string name, int? days, IEnumerable<RatedTitleRow> source)
+    /// <summary>
+    /// The same-period comparison over one window's ratings. Internal and pure so the arithmetic is
+    /// pinned without a database: each via-Reel rating against the mean of the other ratings within
+    /// <see cref="MatchBandDays"/> days of it (inclusive), unmatched via-Reel ratings counted apart.
+    /// </summary>
+    internal static CounterfactualWindow MatchedWindow(string name, int? days, IEnumerable<RatedTitleRow> source)
+    {
+        var all = source.ToList();
+        var others = all.Where(r => !r.ViaReel).OrderBy(r => r.RatedAt).ToList();
+        var otherTimes = others.Select(r => r.RatedAt).ToList();
+        var band = TimeSpan.FromDays(MatchBandDays);
+
+        var matchedVia = new List<double>();
+        var matchedBaselines = new List<double>();
+        var usedOthers = new HashSet<int>();
+        var unmatched = 0;
+
+        foreach (var via in all.Where(r => r.ViaReel))
         {
-            var viaReel = new List<double>();
-            var other = new List<double>();
-            foreach (var row in source)
+            // First other rating at or after (via − band), then walk while inside (via + band).
+            var lo = LowerBound(otherTimes, via.RatedAt - band);
+            var sum = 0d;
+            var n = 0;
+            for (var i = lo; i < others.Count && others[i].RatedAt <= via.RatedAt + band; i++)
             {
-                (row.ViaReel ? viaReel : other).Add(row.Rating);
+                sum += others[i].Rating;
+                n++;
+                usedOthers.Add(i);
             }
 
-            var viaReelMean = RetroLoopStatistics.MeanOrNull(viaReel);
-            var otherMean = RetroLoopStatistics.MeanOrNull(other);
-            return new CounterfactualWindow(
-                name,
-                days,
-                viaReel.Count,
-                viaReelMean,
-                other.Count,
-                otherMean,
-                viaReelMean is not null && otherMean is not null ? viaReelMean - otherMean : null);
+            if (n == 0)
+            {
+                unmatched++;
+                continue;
+            }
+
+            matchedVia.Add(via.Rating);
+            matchedBaselines.Add(sum / n);
         }
+
+        var viaMean = RetroLoopStatistics.MeanOrNull(matchedVia);
+        var baseline = RetroLoopStatistics.MeanOrNull(matchedBaselines);
+        return new CounterfactualWindow(
+            name,
+            days,
+            matchedVia.Count,
+            viaMean,
+            usedOthers.Count,
+            baseline,
+            viaMean is not null && baseline is not null ? viaMean - baseline : null,
+            unmatched,
+            MatchBandDays);
+    }
+
+    /// <summary>Index of the first element of an ascending list that is ≥ <paramref name="value"/>.</summary>
+    private static int LowerBound(List<DateTime> sorted, DateTime value)
+    {
+        int lo = 0, hi = sorted.Count;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) / 2;
+            if (sorted[mid] < value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     /// <summary>One whole-title rating, tagged with whether the title ever passed through a Reel surface.</summary>
-    private sealed record RatedTitleRow(double Rating, DateTime RatedAt, bool ViaReel);
+    internal sealed record RatedTitleRow(double Rating, DateTime RatedAt, bool ViaReel);
 }
