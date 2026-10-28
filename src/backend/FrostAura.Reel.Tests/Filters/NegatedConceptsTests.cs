@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Search.Retrieval;
+using FrostAura.Reel.Domain.Catalog;
 
 namespace FrostAura.Reel.Tests.Filters;
 
@@ -93,4 +94,52 @@ public class NegatedConceptsTests
     [InlineData(false, false, false, false, false)]
     public void A_hit_is_prose_only_when_the_overview_alone_matched(bool name, bool keywords, bool themes, bool overview, bool proseOnly) =>
         Assert.Equal(proseOnly, new FullTextHit { InName = name, InKeywords = keywords, InThemes = themes, InOverview = overview }.ProseOnly);
+
+    [Theory]
+    [InlineData("The Wire", new[] { "organized crime", "baltimore" }, true)]
+    [InlineData("Snowfall", new[] { "gangster", "1980s" }, true)]
+    [InlineData("Godfather of Harlem", new[] { "mobster" }, true)]
+    [InlineData("Mobile", new[] { "mobile phone", "crime boss" }, false)]
+    [InlineData("Untagged", new string[0], false)]
+    public void A_materialised_title_is_rejected_by_the_widened_group_as_the_SQL_predicate_reads_it(
+        string name, string[] keywords, bool rejected)
+    {
+        // The engine's own checks run on loaded titles (the supply top-up, the judgeable filter): the
+        // keyless "crime dramas, no mafia stuff" must not top up a gangster-tagged title unchecked.
+        var stems = NegatedConcepts.Stems(["mafia stuff"], [new ConceptTerm("crime dramas", [], [])]);
+        var title = new Title { Id = Guid.NewGuid(), MediaType = MediaType.Show, Name = name, Keywords = keywords };
+
+        Assert.Equal(rejected, NegatedConcepts.Reaches(title, stems));
+    }
+
+    [Fact]
+    public void A_materialised_title_is_never_reached_by_prose_or_by_an_unwidened_rejection()
+    {
+        var prose = new Title { Name = "Angry Town", Keywords = ["small town"], Overview = "An angry mob of mobsters and the mafia." };
+        var gangster = new Title { Name = "Snowfall", Keywords = ["gangster"] };
+
+        // A synonym is a claim about the tags, never about the overview.
+        Assert.False(NegatedConcepts.Reaches(prose, NegatedConcepts.Stems(["mafia"])));
+
+        // The request itself asks for the group ("gangster films, no mafia"), a word outside every group, nothing rejected.
+        Assert.False(NegatedConcepts.Reaches(gangster, NegatedConcepts.Stems(["mafia"], [new ConceptTerm("gangster films", [], [])])));
+        Assert.False(NegatedConcepts.Reaches(gangster, NegatedConcepts.Stems(["crime boss"])));
+        Assert.False(NegatedConcepts.Reaches(gangster, []));
+        Assert.True(NegatedConcepts.Reaches(gangster, NegatedConcepts.Stems(["Mobsters"])));
+    }
+
+    [Theory]
+    [InlineData(new[] { "fts:overview" }, true)]
+    [InlineData(new[] { "fts:overview", "mood:dark", "steer:darker" }, true)]
+    [InlineData(new[] { "fts:overview", "keyword:shark" }, false)]
+    [InlineData(new[] { "fts:overview", "fts:themes" }, false)]
+    [InlineData(new[] { "fts:overview", "fts:name" }, false)]
+    [InlineData(new[] { "fts:overview", "fts:keywords" }, false)]
+    [InlineData(new[] { "fts:overview", "name:shark" }, false)]
+    [InlineData(new[] { "fts:overview", "genre:horror" }, false)]
+    [InlineData(new[] { "keyword:shark" }, false)]
+    [InlineData(new string[0], false)]
+    public void A_candidate_is_prose_only_when_the_overview_is_its_only_concept_evidence(string[] evidence, bool proseOnly) =>
+        // For a turn whose judge failed at runtime: the engine drops these from the unchecked tray (HREV5-RET-04).
+        Assert.Equal(proseOnly, FullTextHit.OnlyInProse(new Candidate(Guid.NewGuid(), 0d, null, evidence)));
 }

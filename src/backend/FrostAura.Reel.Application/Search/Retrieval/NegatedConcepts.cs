@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
+using FrostAura.Reel.Domain.Catalog;
 
 namespace FrostAura.Reel.Application.Search.Retrieval;
 
@@ -57,6 +58,23 @@ public static class NegatedConcepts
         }
 
         return stems.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// The in-memory twin of <see cref="HardConstraintFilter.NegatedConceptPredicate"/>, for a caller
+    /// that filters titles it has already loaded: true when one of <paramref name="title"/>'s keyword
+    /// tags is reached by one of <paramref name="stems"/> (<see cref="Stems"/>), by the very rule a
+    /// positive concept's tag is matched with (<see cref="HardConstraintFilter.KeywordMatches"/>). The
+    /// name and the overview are never read: a synonym is a claim about the tags. A check of the
+    /// rejected word alone misses its group — "crime dramas, no mafia stuff" would still top up a
+    /// title tagged only "gangster" into a keyless turn's unchecked tray.
+    /// </summary>
+    public static bool Reaches(Title title, IReadOnlyList<string> stems)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        ArgumentNullException.ThrowIfNull(stems);
+        return stems.Count > 0
+            && title.Keywords.Any(keyword => stems.Any(stem => HardConstraintFilter.KeywordMatches(keyword?.ToLowerInvariant(), stem)));
     }
 
     /// <summary>The curated group <paramref name="form"/> (or its singular) belongs to; null for a genre word or no group.</summary>

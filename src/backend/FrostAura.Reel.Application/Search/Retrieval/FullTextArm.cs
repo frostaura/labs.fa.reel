@@ -28,6 +28,25 @@ public sealed class FullTextHit
     /// </summary>
     public bool ProseOnly => InOverview && !InName && !InKeywords && !InThemes;
 
+    /// <summary>
+    /// True when <paramref name="candidate"/>'s only evidence for the request's concepts is an overview
+    /// hit (<c>fts:overview</c>, with no <c>keyword:</c>, <c>name:</c>, <c>genre:</c>, <c>fts:name</c>,
+    /// <c>fts:keywords</c> or <c>fts:themes</c>): the evidence-side reading of <see cref="ProseOnly"/>,
+    /// for a caller holding candidates rather than hits — a turn whose judge failed at runtime shows
+    /// what was found unchecked, and a prose-only lead is not a match nobody checked (HREV5-RET-04).
+    /// Soft evidence (a mood, a steer, a reference) is no evidence for a concept and changes nothing.
+    /// </summary>
+    public static bool OnlyInProse(Candidate candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return candidate.Evidence.Contains("fts:overview", StringComparer.Ordinal)
+            && !candidate.Evidence.Any(e =>
+                e.StartsWith("keyword:", StringComparison.Ordinal)
+                || e.StartsWith("name:", StringComparison.Ordinal)
+                || e.StartsWith("genre:", StringComparison.Ordinal)
+                || e is "fts:name" or "fts:keywords" or "fts:themes");
+    }
+
     /// <summary>The evidence strings this hit carries (<c>fts:name</c>, <c>fts:keywords</c>, <c>fts:themes</c>, <c>fts:overview</c>).</summary>
     public IReadOnlyList<string> Evidence()
     {
