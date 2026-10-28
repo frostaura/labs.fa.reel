@@ -241,6 +241,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         // read "the second one" itself, the live judge picked a card from another answer (R1-30).
         Assert.NotEmpty(judge.Requests);
         Assert.All(judge.Requests, r => Assert.Contains($"Points at: {expected.Name} (2010)", r, StringComparison.Ordinal));
+        // …and what that title IS, so the judge can rule a title like it "yes" (HREV3-RET-07).
+        Assert.All(judge.Requests, r => Assert.Contains($"(2010) — genres action; keywords {topic}", r, StringComparison.Ordinal));
+        Assert.All(judge.Requests, r => Assert.Single(Regex.Matches(r, "Like: ")));
         Assert.All(
             presented.Where(p => p.TitleId != expected.TitleId),
             p => Assert.All(judge.Requests, r => Assert.DoesNotContain(p.Name + " (", r, StringComparison.Ordinal)));
@@ -252,6 +255,175 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.DoesNotContain(
             events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray()),
             c => c.GetProperty("titleId").GetGuid() == expected.TitleId);
+    }
+
+    /// <summary>
+    /// HREV3-ASK-A / HREV3-RET-06: a question about a title the message names in full is answered about
+    /// that title with nothing on screen — whether the planner named it (with quotes and a year, as a
+    /// model writes it), named it on the tool request, or named nothing at all. "Is Blade of the 47
+    /// Ronin a ninja film or a samurai film?" was asked back "which title do you mean?". A title whose
+    /// name is a run inside the full one is not the one meant: the longest name wins, whatever the votes.
+    /// </summary>
+    [Theory]
+    [InlineData("message")]
+    [InlineData("reference")]
+    [InlineData("tool")]
+    public async Task A_question_about_a_title_named_in_full_is_answered_about_it_with_nothing_on_screen(string namedBy)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var token = $"r{Guid.NewGuid():N}"[..9];
+        var full = $"Blade of the {token} Ronin";
+        var accountId = await SeedAccountAsync();
+        Guid fullId;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var title = NewTitle(full, 236);
+            var inside = NewTitle($"Blade of the {token}", 90_000);
+            db.Titles.AddRange(title, inside);
+            await db.SaveChangesAsync();
+            fullId = title.Id;
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.ItemQuestion) with
+        {
+            Delta = ConversationStateDelta.None with { ReferenceNames = namedBy == "reference" ? [$"“{full}” (2010)"] : [] },
+            Tools = [new ToolRequest(AskTool.TitleFacts, Name: namedBy == "tool" ? full : null)],
+            Question = "is it a ninja film or a samurai film?",
+        });
+        var judge = new NameJudge();
+        var answerer = new ScriptedAnswerer("It is a samurai film: its keywords include samurai.");
+        var (engine, events, emit) = Build(accountId, planner, judge, answerer);
+
+        var outcome = await engine.StreamAsync(
+            Input($"wait, is {full} actually a ninja film or a samurai film?"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
+        Assert.Equal(fullId, answerer.AskedAbout);
+        Assert.Equal(fullId, Assert.Single(events, e => e.Event == "answer").Data.GetProperty("titleId").GetGuid());
+        Assert.DoesNotContain(events, e => e.Event == "clarify");
+        Assert.Equal(0, judge.Batches);
+    }
+
+    /// <summary>
+    /// The control: a single word names a title only when the user capitalised it, so "is it violent?"
+    /// never answers about It. Lower-cased, the question is asked back; capitalised, it is answered.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_single_word_names_a_title_only_when_the_user_capitalised_it(bool capitalised)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var word = $"Zq{Guid.NewGuid():N}"[..10];
+        var accountId = await SeedAccountAsync();
+        Guid id;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var title = NewTitle(word, 1_000);
+            db.Titles.Add(title);
+            await db.SaveChangesAsync();
+            id = title.Id;
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.ItemQuestion) with { Tools = [new ToolRequest(AskTool.TitleFacts)] });
+        var answerer = new ScriptedAnswerer("It is rated R.");
+        var (engine, _, emit) = Build(accountId, planner, new NameJudge(), answerer);
+
+        var outcome = await engine.StreamAsync(
+            Input($"is {(capitalised ? word : word.ToLowerInvariant())} violent?"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(capitalised ? SearchTurnMode.Answer : SearchTurnMode.Clarify, outcome.Mode);
+        Assert.Equal(capitalised ? id : null, answerer.AskedAbout);
+    }
+
+    /// <summary>
+    /// HREV3-ASK-B / HREV3-RET-03 (WS-3 CR-3): the top-up and the checked count read the request's
+    /// RESOLVED constraints, as the supply does. "Heist" resolves to heist and robbery; a title tagged
+    /// only "robbery" that cleared the bar was never topped up into the judge (Criminal), and one the
+    /// judge did rule on was called "not among the titles I checked" (Burn). Here retrieval reads the
+    /// user's own word, so the synonym-only title is reached only through the top-up. Varied: the judge
+    /// says it IS a match (a pick), and says it is not (a none-found that counts it as checked).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_title_tagged_only_with_a_synonym_that_clears_the_bar_is_topped_up_and_counted_as_checked(bool matches)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var synonym = Topic();
+        var accountId = await SeedAccountAsync();
+        var tagged = await SeedTopicalAsync(topic, ("V2 No tagged", 3));
+        var synonymOnly = await SeedTopicalAsync(synonym, (matches ? "V2 Yes synonym" : "V2 No synonym", 1));
+        await SeedPredictionsAsync(accountId, [.. tagged, .. synonymOnly], 8.4m);
+        await SeedBarAsync(accountId, 6.0m);
+        var judge = new CountingJudge();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, events, emit) = Build(
+            accountId, planner, judge, model: new RuntimeModelEngine(), resolver: new SynonymResolver(topic, synonym));
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(1, judge.SendsOf(synonymOnly[0]));
+        Assert.All(tagged, id => Assert.Equal(1, judge.SendsOf(id)));
+        if (matches)
+        {
+            Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+            var picks = events.Where(e => e.Event == "picks").SelectMany(e => e.Data.GetProperty("cards").EnumerateArray())
+                .Select(c => c.GetProperty("titleId").GetGuid()).ToList();
+            Assert.Equal(synonymOnly, picks);
+        }
+        else
+        {
+            Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+            Assert.Equal(
+                $"You have 4 unseen {topic} movies tagged that way, but none of the ones I checked is really a match.",
+                outcome.AssistantText);
+        }
+    }
+
+    /// <summary>
+    /// HREV3-ASK-E, through the engine: a first-turn plan failure reads the mood as a mood and the year
+    /// phrase as years, so "tense X movies from the 2010s" searches X in 2010–2019 and answers with the
+    /// titles tagged X — not none-found over the hard topics "tense X" and "2010s".
+    /// </summary>
+    [Fact]
+    public async Task A_first_turn_plan_failure_reads_the_mood_and_the_years_and_searches_the_topic()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var planner = new ScriptedPlanner(_ => PlanResult.Failed(
+            new PlanFailure(AgentFailureKind.TimedOut, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input($"tense {topic} movies from the 2010s"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal([topic], Assert.Single(events, e => e.Event == "plan").Data.GetProperty("concepts").EnumerateArray().Select(c => c.GetString()));
+        var state = ConversationStateJson.Read(outcome.ConversationStateJson);
+        Assert.NotNull(state);
+        Assert.Equal(["tense"], state.Soft.Moods);
+        Assert.Equal(new YearRange(2010, 2019), state.Hard.Years);
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.StartsWith("I couldn't fully read that, so I searched for ", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("tense", outcome.AssistantText, StringComparison.Ordinal);
     }
 
     /// <summary>Task 4: "how many X are left?" is the supply tool — counts only, no cards, no judge.</summary>
@@ -1569,6 +1741,21 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         public Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct) => Task.FromResult(concept);
     }
 
+    /// <summary>
+    /// Resolves <c>topic</c> to itself and a synonym, as the curated synonym table resolves "heist" to
+    /// heist, robbery and bank robbery; every other concept passes through.
+    /// </summary>
+    private sealed class SynonymResolver(string topic, string synonym) : IConceptResolver
+    {
+        public Task<HardConstraints> ResolveAsync(HardConstraints hard, CancellationToken ct) =>
+            Task.FromResult(hard with { Concepts = [.. hard.Concepts.Select(Resolve)] });
+
+        public Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct) => Task.FromResult(Resolve(concept));
+
+        private ConceptTerm Resolve(ConceptTerm concept) =>
+            concept.UserWords == topic ? new ConceptTerm(topic, [topic, synonym], [], null) : concept;
+    }
+
     private static string Topic() => $"vtopic{Guid.NewGuid():N}"[..18];
 
     private static PlanResult Plan(TurnAct act, ConversationStateDelta? delta = null, params TurnHandle[] references) =>
@@ -1581,7 +1768,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
         Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
         Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null,
-        IServiceScopeFactory? scopes = null, IMemoryCache? cache = null, IModelEngine? model = null, TimeSpan? planHedgeAfter = null)
+        IServiceScopeFactory? scopes = null, IMemoryCache? cache = null, IModelEngine? model = null, TimeSpan? planHedgeAfter = null,
+        IConceptResolver? resolver = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -1589,13 +1777,16 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         cache ??= new MemoryCache(new MemoryCacheOptions());
         var eligibility = new EligibilityQueryBuilder(db);
         var supply = new SupplyReporter(db, eligibility);
+        // The retriever reads the user's own words, as the facet arm does; the engine's supply and its
+        // resolver read the resolution, as production's do (HREV3-ASK-B).
+        var engineSupply = resolver is null ? supply : new SupplyReporter(db, eligibility, resolver);
         var features = new FeatureVectorBuilder(db);
         var scorer = Scorer(db, model ?? new ConstantModelEngine(8.4f), cache);
         var engine = new AskReelEngine(
             db, planner, new RequestJudge(judge, cache, NullLogger<RequestJudge>.Instance), judge, answerer ?? new ScriptedAnswerer("-"),
-            new TitleFacts(db), (wrap ?? (r => r))(new FacetRetriever(db, eligibility, supply)), supply, eligibility, scorer,
+            new TitleFacts(db), (wrap ?? (r => r))(new FacetRetriever(db, eligibility, supply)), engineSupply, eligibility, scorer,
             new ExposureLog(db, NullLogger<ExposureLog>.Instance), features, new PersonalisationContext(db, new DislikeSignal(db, cache)),
-            new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
+            new TurnComposer(), resolver ?? new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
             scopes ?? new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             cache, new ConceptEmbeddings(embeddings ?? new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
             NullLogger<AskReelEngine>.Instance)

@@ -1,8 +1,10 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
+using FrostAura.Reel.Domain.Search;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Pgvector;
@@ -16,7 +18,7 @@ namespace FrostAura.Reel.Application.Search;
 public sealed partial class LiveSearchExpansionService
 {
     /// <summary>
-    /// Streams a person's unseen credits: chronological (newest first), the top slice scored for the
+    /// Streams a person's unseen credits: chronological (newest first), scored for the
     /// predicted-rating badge — but never re-ordered or culled by LLM fit, because the user asked for
     /// the person's work, not a recommendation.
     ///
@@ -25,9 +27,18 @@ public sealed partial class LiveSearchExpansionService
     /// seen one that somehow did is dropped rather than badged, because a person query is a
     /// suggestion surface and the lock forbids seen titles on every one. The reply counts the seen
     /// credits (<see cref="PersonReply"/>) and names none of them.</para>
+    ///
+    /// <para><b>The account's bar binds here too (HREV3-ASK-C, HREV3-RET-02).</b> With a For-you bar
+    /// set, every credit is scored BEFORE anything is shown, and a credit under the bar — or with no
+    /// score, which a set bar holds back (<see cref="AskReelGate.Clears"/>) — goes only to the "Show the
+    /// N under your bar" tray: never streamed as a candidate, never a result, stored as a
+    /// <see cref="SearchTurnCardTier.BelowFloor"/> card, and counted in the reply. "Liam Neeson movies"
+    /// on the default engine returned The Mongoose (5.49), The Fix (5.51) and After.Life (5.84) as picks
+    /// under a 6.0 bar, against the recorded call that cards under the bar never go into picks. With no
+    /// bar, the credits stream at once and only the first slice is scored for the badge, as before.</para>
     /// </summary>
     private async Task<TurnOutcome> StreamFilmographyAsync(
-        Guid accountId, string? assistantText, SearchIntent intent, List<Title> eligible,
+        Guid accountId, SearchIntent intent, List<Title> eligible, decimal floor, Func<int, int, Task<string?>> replyAsync,
         FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
         var newestFirst = eligible
@@ -36,53 +47,97 @@ public sealed partial class LiveSearchExpansionService
             .ToList();
         var seenIds = await SeenTitleIdsAsync(accountId, newestFirst.Select(t => t.Id).ToList(), ct);
         var ordered = newestFirst.Where(t => !seenIds.Contains(t.Id)).ToList();
-        foreach (var t in ordered)
-        {
-            await emit("candidate", Card(t, similarity: null, predicted: null, seen: false));
-        }
+        var barred = floor > 0m;
 
-        // Score the top slice for the badge (no re-rank — the order is the filmography).
+        // Score for the badge (no re-rank — the order is the filmography). Under a bar every credit is
+        // scored first, because the bar decides where each one may go; with none, the slice after the stream.
         var sliceIds = ordered.Take(HydrateScoreSlice).Select(t => t.Id).ToList();
-        IReadOnlyDictionary<Guid, decimal> scores;
-        using (timings.Stage(AskStageTimings.Score))
+        IReadOnlyDictionary<Guid, decimal> scores = new Dictionary<Guid, decimal>();
+        async Task ScoreAsync(IReadOnlyList<Guid> ids)
         {
-            await HydrateAsync(sliceIds, ct, timings);
-            scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+            using (timings.Stage(AskStageTimings.Score))
+            {
+                await HydrateAsync(sliceIds, ct, timings);
+                scores = await scorer.ScoreAsync(accountId, ids, now, ct, taste);
+            }
         }
 
-        foreach (var id in sliceIds)
+        decimal? PredictedOf(Title t) => scores.TryGetValue(t.Id, out var p) ? p : null;
+
+        List<Title> picks;
+        List<Title> underBar;
+        string? assistantText;
+        if (barred)
         {
-            await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? Ranking.ForYouBar.Shown(p) : (decimal?)null });
+            await ScoreAsync(ordered.Select(t => t.Id).ToList());
+            picks = ordered.Where(t => AskReelGate.Clears(PredictedOf(t), floor)).ToList();
+            underBar = ordered.Where(t => !AskReelGate.Clears(PredictedOf(t), floor)).ToList();
+            assistantText = await replyAsync(picks.Count, underBar.Count);
+            foreach (var t in picks)
+            {
+                await emit("candidate", Card(t, similarity: null, predicted: PredictedOf(t), seen: false));
+            }
+        }
+        else
+        {
+            picks = ordered;
+            underBar = [];
+            assistantText = await replyAsync(picks.Count, 0);
+            foreach (var t in ordered)
+            {
+                await emit("candidate", Card(t, similarity: null, predicted: null, seen: false));
+            }
+
+            await ScoreAsync(sliceIds);
+            foreach (var id in sliceIds)
+            {
+                await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? Ranking.ForYouBar.Shown(p) : (decimal?)null });
+            }
         }
 
-        var results = ordered
-            .Select(t => Card(t, similarity: null,
-                predicted: scores.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
-                seen: false))
-            .ToList();
+        var results = picks.Select(t => Card(t, similarity: null, predicted: PredictedOf(t), seen: false)).ToList();
+        var tray = underBar.Select(t => Card(t, similarity: null, predicted: PredictedOf(t), seen: false)).ToList();
 
         var who = intent.People is { Count: > 0 } ? intent.People[0] : null;
         var verb = who?.Role == PersonRole.Director ? "directed by" : who?.Role == PersonRole.Cast ? "starring" : "from";
-        var reason = who is null
-            ? $"{ordered.Count} titles in this filmography."
-            : $"{ordered.Count} titles {verb} {who.Name}.";
+        var lead = who is null
+            ? FormattableString.Invariant($"{picks.Count} titles in this filmography")
+            : FormattableString.Invariant($"{picks.Count} titles {verb} {who.Name}");
+        var reason = underBar.Count == 0
+            ? lead + "."
+            : lead + AskReelReason.Separator + FormattableString.Invariant(
+                $"{underBar.Count} held back by your {AskReelReason.FormatFloor(floor)} bar — shown below");
         using (timings.Stage(AskStageTimings.Emit))
         {
-            await emit("done", new { results, reason });
+            await emit("done", new
+            {
+                results,
+                reason,
+                // The turn's own accounting, as every v1 answer gives it: everything on the glass is
+                // either kept or in the floor tray.
+                streamed = picks.Count + underBar.Count,
+                kept = picks.Count,
+                droppedByFloor = underBar.Count,
+                belowFloor = tray,
+            });
         }
 
         logger.LogInformation(
-            "Ask Reel filmography: {Count} titles for {Person}. {StageTimings}",
-            ordered.Count, who?.Name ?? "?", timings);
+            "Ask Reel filmography: {Count} titles for {Person}, {Held} under the bar. {StageTimings}",
+            picks.Count, who?.Name ?? "?", underBar.Count, timings);
 
         // Chronological, not ranked — so the stored rank is the position in the filmography and
-        // there is no blend to record. Replaying it re-establishes the same list in the same order.
-        var stored = ordered
-            .Select((t, index) => new TurnCard(
-                t.Id, t.TmdbId, index, OutsideRequest: false,
-                Similarity: null,
-                scores.TryGetValue(t.Id, out var predicted) ? Math.Round(predicted, 2, MidpointRounding.AwayFromZero) : null,
-                LlmFit: null, Blend: 0m, Why: null, ExposureWhySource.Generic))
+        // there is no blend to record. Replaying it re-establishes the same list in the same order;
+        // the tray follows the picks, as on screen.
+        TurnCard Row(Title t, int index, string tier) => new(
+            t.Id, t.TmdbId, index, OutsideRequest: false,
+            Similarity: null,
+            PredictedOf(t) is { } predicted ? Math.Round(predicted, 2, MidpointRounding.AwayFromZero) : null,
+            LlmFit: null, Blend: 0m, Why: null, ExposureWhySource.Generic,
+            BelowFloor: tier != SearchTurnCardTier.Pick,
+            Tier: tier);
+        var stored = picks.Select((t, index) => Row(t, index, SearchTurnCardTier.Pick))
+            .Concat(underBar.Select((t, index) => Row(t, picks.Count + index, SearchTurnCardTier.BelowFloor)))
             .ToList();
         return TurnOutcome.Answered(assistantText, reason, stored);
     }
@@ -134,9 +189,12 @@ public sealed partial class LiveSearchExpansionService
 
     /// <summary>
     /// The person reply, counts only (FD-3): "You've seen 9 movies directed by Christopher Nolan; here
-    /// are 3 you haven't." — the v2 composer's sentence, so both engines say the same thing.
+    /// are 3 you haven't." — the v2 composer's sentence, so both engines say the same thing. Credits the
+    /// account's bar held back are counted as the composer counts them ("2 more fit but sit under your
+    /// 6.0 bar."), and when the bar held back every one, the reply says so instead of offering none.
     /// </summary>
-    internal static string PersonReply(PersonQuery person, int unseen, int seen, IReadOnlyList<MediaType> media)
+    internal static string PersonReply(
+        PersonQuery person, int unseen, int seen, IReadOnlyList<MediaType> media, int underBar = 0, decimal floor = 0m)
     {
         ArgumentNullException.ThrowIfNull(person);
         var credit = person.Role switch
@@ -145,7 +203,7 @@ public sealed partial class LiveSearchExpansionService
             PersonRole.Cast => $"starring {person.Name}",
             _ => $"with {person.Name}",
         };
-        var noun = (media.Distinct().ToList(), seen == 1) switch
+        string Noun(int count) => (media.Distinct().ToList(), count == 1) switch
         {
             ([MediaType.Movie], true) => "movie",
             ([MediaType.Movie], false) => "movies",
@@ -154,10 +212,30 @@ public sealed partial class LiveSearchExpansionService
             (_, true) => "title",
             _ => "titles",
         };
+        var bar = AskReelReason.FormatFloor(floor);
+        if (unseen == 0 && underBar > 0)
+        {
+            var held = underBar == 1
+                ? FormattableString.Invariant($"the one you haven't sits under your {bar} bar")
+                : FormattableString.Invariant($"the {underBar} you haven't all sit under your {bar} bar");
+            if (seen > 0)
+            {
+                return FormattableString.Invariant($"You've seen {seen} {Noun(seen)} {credit}; {held}.");
+            }
+
+            return underBar == 1
+                ? FormattableString.Invariant($"The one {Noun(1)} {credit} you haven't seen sits under your {bar} bar.")
+                : FormattableString.Invariant($"The {underBar} {Noun(underBar)} {credit} you haven't seen all sit under your {bar} bar.");
+        }
+
         var here = unseen == 1 ? "is one" : FormattableString.Invariant($"are {unseen}");
-        return seen > 0
-            ? FormattableString.Invariant($"You've seen {seen} {noun} {credit}; here {here} you haven't.")
+        var reply = seen > 0
+            ? FormattableString.Invariant($"You've seen {seen} {Noun(seen)} {credit}; here {here} you haven't.")
             : $"Here {here} {credit} you haven't seen.";
+        return underBar > 0
+            ? reply + FormattableString.Invariant(
+                $" {underBar} more {(underBar == 1 ? "fits" : "fit")} but {(underBar == 1 ? "sits" : "sit")} under your {bar} bar.")
+            : reply;
     }
 
     /// <summary>The subset of the given title ids the account has watched or rated.</summary>

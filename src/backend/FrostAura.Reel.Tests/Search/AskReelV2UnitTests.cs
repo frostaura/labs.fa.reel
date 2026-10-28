@@ -246,6 +246,128 @@ public class AskReelV2UnitTests
         }
     }
 
+    /// <summary>
+    /// HREV3-ASK-C: a v1 person request whose every unseen credit sits under the bar says so, rather
+    /// than "here are 0 you haven't". Varied over seen credits and the singular.
+    /// </summary>
+    [Theory]
+    [InlineData(39, 3, "You've seen 39 movies starring Liam Neeson; the 3 you haven't all sit under your 6.0 bar.")]
+    [InlineData(1, 1, "You've seen 1 movie starring Liam Neeson; the one you haven't sits under your 6.0 bar.")]
+    [InlineData(0, 2, "The 2 movies starring Liam Neeson you haven't seen all sit under your 6.0 bar.")]
+    [InlineData(0, 1, "The one movie starring Liam Neeson you haven't seen sits under your 6.0 bar.")]
+    public void A_v1_person_reply_whose_every_credit_is_under_the_bar_says_so(int seen, int underBar, string expected) =>
+        Assert.Equal(
+            expected,
+            LiveSearchExpansionService.PersonReply(
+                new PersonQuery("Liam Neeson", PersonRole.Cast), 0, seen, [MediaType.Movie], underBar, 6.0m));
+
+    /// <summary>
+    /// HREV3-RET-01: the judge is told what the request REQUIRES and what it only PREFERS, labelled, so
+    /// a mood never decides satisfies. "Tense heist movies from the last ten years" passed "Mood: tense"
+    /// beside the requirements and every bar-clearing heist was ruled partial for its tone. Varied over
+    /// a mood, a steer, both, and neither.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "tense" }, false, "Prefers (never required): tense")]
+    [InlineData(new string[0], true, "Prefers (never required): less darkness")]
+    [InlineData(new[] { "cozy" }, true, "Prefers (never required): cozy, less darkness")]
+    [InlineData(new string[0], false, null)]
+    public void The_judge_is_told_the_requirements_apart_from_the_preferences(string[] moods, bool steer, string? preferences)
+    {
+        var state = ConversationState.Empty with
+        {
+            Hard = new HardConstraints([new ConceptTerm("heist", [], [])], [], new YearRange(2016, 2026), null, MediaScope.Movies),
+            Soft = new SoftPreferences(moods, steer ? [new AttributeDirection("darkness", AttributeTrend.Less)] : [], []),
+        };
+
+        var request = AskReelEngine.JudgeRequest("tense heist movies from the last ten years", state);
+
+        Assert.Contains("Requires: heist", request, StringComparison.Ordinal);
+        Assert.Contains("Years: 2016-2026", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("Mood:", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("Requires: tense", request, StringComparison.Ordinal);
+        if (preferences is null)
+        {
+            Assert.DoesNotContain("Prefers", request, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.EndsWith(preferences, request, StringComparison.Ordinal);
+        }
+
+        // The prompt the request is read under says a preference never decides satisfies.
+        Assert.Contains("A preference (a mood, a tone, a steer) is NEVER a reason for \"partial\" or \"no\"", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV3-RET-07: "more like the third one" pivots to the card and drops the earlier topic, so the
+    /// judge had nothing to say yes TO. It is now told the facts of each title the request wants
+    /// something like, and the prompt says what likeness earns a yes. Varied over one reference, two,
+    /// a reference with no keywords, and none.
+    /// </summary>
+    [Fact]
+    public void The_judge_is_told_what_each_reference_is_like()
+    {
+        var state = Shown((A, 1, 1), (B, 1, 2), (C, 1, 3)) with { Soft = new SoftPreferences([], [], [C]) };
+        var like = new List<AskReelEngine.LikeFacts>
+        {
+            new("Shanghai", 2010, ["thriller", "drama"], ["spy", "shanghai, china", "1940s", "japanese occupation", "casino", "a", "b", "c", "dropped"]),
+            new("Heat", 1995, ["crime"], []),
+        };
+
+        var request = AskReelEngine.JudgeRequest("more like the third one", state, like);
+        var none = AskReelEngine.JudgeRequest("more like the third one", state);
+
+        Assert.Contains("Like: Shanghai (2010) — genres thriller, drama; keywords spy, shanghai, china, 1940s, japanese occupation, casino, a, b, c", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("dropped", request, StringComparison.Ordinal);
+        Assert.Contains("Like: Heat (1995) — genres crime", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("Like:", none, StringComparison.Ordinal);
+        Assert.Contains("Points at: Title 3 (2020)", none, StringComparison.Ordinal);
+        Assert.Contains("When the request lists Like titles", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV3-ASK-D: TMDB's TV taxonomy has no thriller (or horror, romance, history, music) genre, so
+    /// the judge ruled every spy series "partial" because "its listed genres omit thriller". It now
+    /// reads the genre the way eligibility does — from the stand-in keywords — marked inferred. Varied:
+    /// a film with the same keyword is NOT inferred a thriller (its taxonomy would have tagged it), a
+    /// show already tagged by an alias is, and a show with no stand-in keyword gets nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(MediaType.Show, new[] { "crime", "drama" }, new[] { "spy", "suspenseful" }, new[] { "crime", "drama", "thriller (inferred)" })]
+    [InlineData(MediaType.Movie, new[] { "crime", "drama" }, new[] { "spy", "suspenseful" }, new[] { "crime", "drama" })]
+    [InlineData(MediaType.Show, new[] { "drama", "suspense" }, new[] { "spy" }, new[] { "drama", "suspense", "thriller (inferred)" })]
+    [InlineData(MediaType.Show, new[] { "drama" }, new[] { "spy", "cia" }, new[] { "drama" })]
+    [InlineData(MediaType.Show, new[] { "drama" }, new[] { "spy thriller", "love triangle" }, new[] { "drama", "romance (inferred)", "thriller (inferred)" })]
+    public void The_judge_reads_a_genre_the_tv_taxonomy_cannot_tag_from_its_keywords(
+        MediaType media, string[] genres, string[] keywords, string[] expected)
+    {
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = media,
+            Name = "Covert Affairs",
+            TraktSlug = string.Empty,
+            Genres = [.. genres],
+            Keywords = [.. keywords],
+            CreatedAt = DateTime.UtcNow,
+        };
+
+        Assert.Equal(expected, TitleFacts.JudgeGenres(title));
+        Assert.Contains("A genre marked \"(inferred)\"", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("A title's medium (film or series) is never a reason", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>HREV3-ASK-A: the planner is shown a question about a title it NAMES, with the name as a reference name.</summary>
+    [Fact]
+    public void The_planner_is_shown_a_named_title_question()
+    {
+        Assert.Contains(
+            "\"is Heat violent?\" -> {act:ItemQuestion, referenceNames:[Heat], tools:[title_facts], question:\"is it violent?\"}",
+            OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("or the title a question is about", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void The_acceptance_follow_up_keeps_ninja_as_a_concept_not_a_negation()
     {
@@ -524,7 +646,8 @@ public class AskReelV2UnitTests
     [InlineData("I want some time travel", new[] { "time travel" })]
     [InlineData("more like the second one you showed me first time round", new string[0])]
     [InlineData("none of the above are ninja movies. I want ninja movies", new[] { "ninja" })]
-    [InlineData("dark gritty heist, no superheroes", new[] { "dark gritty heist" })]
+    // HREV3-ASK-E: "dark" and "gritty" are moods, read as moods, never part of the topic every title must carry.
+    [InlineData("dark gritty heist, no superheroes", new[] { "heist" })]
     public void The_keyless_phrases_are_the_positive_words_as_written(string message, string[] expected) =>
         Assert.Equal(expected, AskReelIntentSanitizer.KeylessPhrases(message));
 
@@ -733,14 +856,17 @@ public class AskReelV2UnitTests
 
     /// <summary>
     /// HREV2-ASK-03: v1's person reply is the v2 composer's sentence, counts only, so the default
-    /// engine and the new one say the same thing. Varied over role, media, the singular and no seen.
+    /// engine and the new one say the same thing. Varied over role, media, the singular and no seen —
+    /// and (HREV3-ASK-C) over credits the bar held back, which both count the same way.
     /// </summary>
     [Theory]
-    [InlineData(PersonRole.Director, MediaScope.Movies, 3, 9)]
-    [InlineData(PersonRole.Cast, MediaScope.Movies, 1, 1)]
-    [InlineData(PersonRole.Cast, MediaScope.Shows, 2, 0)]
-    [InlineData(PersonRole.Any, MediaScope.Any, 4, 39)]
-    public void The_v1_person_reply_is_the_composers_sentence(PersonRole role, MediaScope media, int unseen, int seen)
+    [InlineData(PersonRole.Director, MediaScope.Movies, 3, 9, 0)]
+    [InlineData(PersonRole.Cast, MediaScope.Movies, 1, 1, 0)]
+    [InlineData(PersonRole.Cast, MediaScope.Shows, 2, 0, 0)]
+    [InlineData(PersonRole.Any, MediaScope.Any, 4, 39, 0)]
+    [InlineData(PersonRole.Cast, MediaScope.Movies, 3, 39, 3)]
+    [InlineData(PersonRole.Cast, MediaScope.Movies, 2, 0, 1)]
+    public void The_v1_person_reply_is_the_composers_sentence(PersonRole role, MediaScope media, int unseen, int seen, int underBar)
     {
         MediaType[] types = media switch
         {
@@ -753,11 +879,12 @@ public class AskReelV2UnitTests
             Topic = null,
             Media = media,
             Picks = unseen,
+            UnderBar = underBar,
             Person = new PersonConstraint("Liam Neeson", null, role),
             PersonSeen = seen,
         });
 
-        var v1 = LiveSearchExpansionService.PersonReply(new PersonQuery("Liam Neeson", role), unseen, seen, types);
+        var v1 = LiveSearchExpansionService.PersonReply(new PersonQuery("Liam Neeson", role), unseen, seen, types, underBar, 6.0m);
 
         Assert.Equal(composed.Reply, v1);
         Assert.DoesNotContain("Here are films", v1, StringComparison.Ordinal);

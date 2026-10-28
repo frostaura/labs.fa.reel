@@ -251,8 +251,9 @@ public sealed class OpenRouterAskPlanner(
         "darkness, pacing, complexity, intensity, humor, optimism; trend more|less (\"funnier\" -> humor more). " +
         "negations = ONLY words the user says they do not want, copied from their message (\"no superheroes please\" " +
         "-> [\"superheroes\"]). references = handles from onScreen the message points at (\"the second one\" -> the " +
-        "handle at rank 2 of the newest answer); ONLY handles listed in onScreen. referenceNames = titles named as " +
-        "comparisons (\"like John Wick\" -> [\"John Wick\"]). tools = what the server should run: search_catalog, " +
+        "handle at rank 2 of the newest answer); ONLY handles listed in onScreen. referenceNames = every title the " +
+        "message NAMES, exactly as written: a comparison (\"like John Wick\" -> [\"John Wick\"]) or the title a question " +
+        "is about (\"is Heat violent?\" -> [\"Heat\"]). tools = what the server should run: search_catalog, " +
         "similar_to, title_facts, filmography, supply, conditions. question = for ItemQuestion, the question in the " +
         "user's words, else null.\n" +
         "RULES: Never copy a standing condition into any field — they are applied by the server already. \"None of " +
@@ -272,7 +273,10 @@ public sealed class OpenRouterAskPlanner(
         "\"more like the second one\" -> {act:Refine, references:[<rank-2 handle of the newest answer>], " +
         "tools:[similar_to]}. \"less dark than T2.1\" -> {act:CritiqueItem, references:[T2.1], " +
         "directions:[{attribute:darkness, trend:less}]}. \"is the first one violent?\" -> {act:ItemQuestion, " +
-        "references:[<rank-1 handle>], tools:[title_facts], question:\"is it violent?\"}. \"what has Christopher Nolan " +
+        "references:[<rank-1 handle>], tools:[title_facts], question:\"is it violent?\"}. \"is Heat violent?\" -> " +
+        "{act:ItemQuestion, referenceNames:[Heat], tools:[title_facts], question:\"is it violent?\"}. \"is Blade of the 47 " +
+        "Ronin a ninja film or a samurai film?\" -> {act:ItemQuestion, referenceNames:[Blade of the 47 Ronin], " +
+        "tools:[title_facts], question:\"is it a ninja film or a samurai film?\"}. \"what has Christopher Nolan " +
         "directed?\" -> {act:NewRequest, people:[{name:Christopher Nolan, role:director}], tools:[filmography]}. " +
         "\"how many ninja movies are left?\" -> {act:ItemQuestion, concepts:[ninja], tools:[supply]}. \"thanks!\" -> " +
         "{act:Chitchat}.\n" +

@@ -598,15 +598,20 @@ public sealed partial class LiveSearchExpansionService(
                 // The reply counts what it holds back and names none of it (FD-3): the model's sentence
                 // was written before any credit was looked up and can name a seen title.
                 var seenCredits = await SeenCreditCountAsync(accountId, hard, ct);
-                var shown = Math.Min(eligible.Count, PersonReturnCount);
-                var personReply = agentReply.Degraded
-                    ? modelSentence
-                    : PersonReply(agentReply.Intent.People![0], shown, seenCredits, intent.MediaTypes);
-                await ReplyAsync(hasConflict && !agentReply.Degraded
-                    ? AskReelStandingFilters.Qualify(personReply, collidingGenres, collidingKeywords, yearCollides, standingRules)
-                    : personReply);
+                var personFloor = MinPredictedFloor(filterRows);
+                async Task<string?> PersonReplyAsync(int unseen, int underBar)
+                {
+                    var personReply = agentReply.Degraded
+                        ? modelSentence
+                        : PersonReply(agentReply.Intent.People![0], unseen, seenCredits, intent.MediaTypes, underBar, personFloor);
+                    await ReplyAsync(hasConflict && !agentReply.Degraded
+                        ? AskReelStandingFilters.Qualify(personReply, collidingGenres, collidingKeywords, yearCollides, standingRules)
+                        : personReply);
+                    return assistantText;
+                }
+
                 return await StreamFilmographyAsync(
-                    accountId, assistantText, agentReply.Intent, eligible, taste, now, timings, emit, ct);
+                    accountId, agentReply.Intent, eligible, personFloor, PersonReplyAsync, taste, now, timings, emit, ct);
             }
 
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────

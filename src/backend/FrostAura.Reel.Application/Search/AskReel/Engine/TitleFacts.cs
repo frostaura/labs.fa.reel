@@ -77,10 +77,34 @@ public sealed class TitleFacts(IReelDbContext db) : ITitleFacts
                 var t = titles[id];
                 var found = attributes.TryGetValue(id, out var attr);
                 return new JudgeTitle(
-                    t.Id, t.Name, t.Year, t.MediaType, t.Genres, t.Keywords.Take(JudgeKeywords).ToList(),
+                    t.Id, t.Name, t.Year, t.MediaType, JudgeGenres(t), t.Keywords.Take(JudgeKeywords).ToList(),
                     Short(t.Overview, JudgeOverviewChars), found ? attr.Themes : [], found ? attr.Tone : null);
             })
             .ToList();
+    }
+
+    /// <summary>The marker on a genre the judge is given that the title's taxonomy could not tag (<see cref="JudgeGenres"/>).</summary>
+    public const string InferredMarker = " (inferred)";
+
+    /// <summary>
+    /// The genres the judge reads for <paramref name="title"/>: its own, then every genre a TMDB
+    /// taxonomy cannot tag on its medium that the catalogue nonetheless reads it as — by the stand-in
+    /// keywords, alias genres and composites an exclusion of that genre applies
+    /// (<see cref="Retrieval.GenreStandIns.ExcludedBy"/>) — marked <see cref="InferredMarker"/>.
+    ///
+    /// <para><b>Why (HREV3-ASK-D).</b> TMDB's TV list has no thriller, horror, romance, history or music
+    /// genre. Eligibility and the supply already read a TV thriller by its keywords, but the judge saw
+    /// only the raw genres, so for "spy thrillers" it ruled Alias, Nikita, Covert Affairs and Killing Eve
+    /// "partial" because "its listed genres omit thriller": no series could ever be a pick for a
+    /// thriller request. The judge now reads the genre the way the rest of the system does.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> JudgeGenres(Title title)
+    {
+        var inferred = Retrieval.GenreStandIns.Slugs
+            .Where(slug => !title.Genres.Contains(slug, StringComparer.Ordinal) && Retrieval.GenreStandIns.ExcludedBy(title, slug))
+            .Select(slug => slug + InferredMarker)
+            .ToList();
+        return inferred.Count == 0 ? title.Genres : [.. title.Genres, .. inferred];
     }
 
     /// <summary>

@@ -188,10 +188,19 @@ public sealed class OpenRouterAskJudge(
         "request asks for, judged only from what is given about the title (genres, keywords, overview, themes, tone). " +
         "Return ONLY {\"results\":[{\"id\",\"satisfies\",\"fit\",\"why\",\"evidence\"}]} with one entry per title, " +
         "id being the title's id exactly as given (\"1\", \"2\", …). " +
-        "satisfies: \"yes\" = plainly the thing asked for, every concept the request requires; \"partial\" = matches some " +
-        "of it, or only loosely; \"no\" = not what was asked for. A title missing a required concept is \"no\", however " +
-        "good it is. Never \"yes\" because a title is merely good, popular or similar in mood. A title carrying a thing " +
-        "the request rules out is \"no\". fit: 0.0-1.0, how well it fits this viewer AND the request. evidence: the " +
+        "The request lists what it Requires (topics, People, Years, Media), what it Rules out, and what it Prefers. " +
+        "satisfies is decided by the requirements and the rules-out ALONE: \"yes\" = plainly the thing asked for, every " +
+        "requirement met; \"partial\" = meets some of them, or only loosely; \"no\" = not what was asked for. A title " +
+        "missing a required topic is \"no\", however good it is. Never \"yes\" because a title is merely good, popular or " +
+        "similar in mood. A title carrying a thing the request rules out is \"no\". A preference (a mood, a tone, a steer) " +
+        "is NEVER a reason for \"partial\" or \"no\": a title meeting every requirement whose tone differs from a preference " +
+        "is still \"yes\", and the difference only lowers fit. Only when the request requires nothing at all does its mood " +
+        "decide satisfies. When the request lists Like titles, a title meeting every requirement that shares something " +
+        "specific with one of them (a keyword, a theme, a setting, a person, or its genre and tone together) is \"yes\"; " +
+        "sharing only a broad genre is \"partial\". A title's medium (film or series) is never a reason for \"partial\" or " +
+        "\"no\", and never mentioned, unless the request names a medium. A genre marked \"(inferred)\" is one the title's " +
+        "TMDB taxonomy cannot tag (TV has no thriller, horror, romance, history or music genre), read from its keywords: " +
+        "it counts exactly as a listed genre. fit: 0.0-1.0, how well it fits this viewer AND the request. evidence: the " +
         "specific given fact your verdict rests on, at most 40 characters (\"keyword: ninja\", \"overview: a shinobi clan\", " +
         "\"genre: comedy\"). why: at most 100 characters, addressed to the viewer as \"you\", naming that evidence — " +
         "never \"they\" or \"the user\", never generic (\"fits your taste\"), never hedging or arguing against the " +
