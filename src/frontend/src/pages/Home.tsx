@@ -317,6 +317,7 @@ export default function Home() {
                 filter={filter}
                 mood={mood}
                 onSeeWhy={() => setConditionsOpen(true)}
+                anchorName={row.anchorName ?? null}
               />
             ))}
 

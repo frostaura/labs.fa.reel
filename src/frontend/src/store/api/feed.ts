@@ -1,4 +1,5 @@
 import type {
+  AnchoredSupply,
   ContinueEntry,
   DigestPayload,
   FeedCard,
@@ -95,10 +96,18 @@ export const feedApi = api.injectEndpoints({
       query: (body) => ({ url: "feed/more", method: "POST", body }),
       // `supply` rides along: it is what lets a short rail say why it is short (RET-07). Dropping it
       // here was why no rail ever could.
-      transformResponse: (r: { items: FeedCard[]; exhausted?: boolean; supply?: RailSupply | null }) => ({
+      // So does `anchoredSupply` (HREV5-RET-01): without it an empty "More like this" could only
+      // guess at its cause, and guessed the founder's conditions when the anchored gate was why.
+      transformResponse: (r: {
+        items: FeedCard[];
+        exhausted?: boolean;
+        supply?: RailSupply | null;
+        anchoredSupply?: AnchoredSupply | null;
+      }) => ({
         items: r.items,
         exhausted: r.exhausted ?? true,
         supply: r.supply ?? null,
+        anchoredSupply: r.anchoredSupply ?? null,
       }),
     }),
     // Weekly digest — read-only snapshot of this week's "new & high for you" picks.
