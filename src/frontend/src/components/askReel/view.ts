@@ -1,5 +1,5 @@
 import { floorPartition, type ChatStatus } from "../../lib/askReel/reducer";
-import { failureCopy, floorHeldBack, footnote, formatFloor, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage } from "../../lib/askReel/copy";
+import { failureCopy, floorHeldBack, footnote, formatFloor, noneFoundAnnouncement, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage, type NoneFoundShown } from "../../lib/askReel/copy";
 import { answerRowIndex, leavesGrid } from "../../lib/askReel/transcript";
 import { pageRefusalMessage } from "../../lib/askReel/paging";
 import { skeletonCount, type AskReelChat } from "../../lib/askReel/useAskReelChat";
@@ -101,16 +101,20 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
   const stoppedText = stoppedMessage(chat.arrived);
   const refusalText = pageRefusalMessage(chat.pageRefusal);
 
+  const floorLabel = formatFloor(inputs.floorBar);
+  const nearMissVisible = chat.nearMiss.filter((c) => !removedSet.has(c.titleId));
+  const uncheckedVisible = chat.unchecked.filter((c) => !removedSet.has(c.titleId));
+  // What the none-found card has beside it — the same arrays its heading and trays are built from.
+  const shown: NoneFoundShown = { unchecked: uncheckedVisible.length, nearMiss: nearMissVisible.length, heldBack, floorLabel };
+
   return {
     streaming, stopped, removedSet, visible, outsideVisible, pendingSlots, reserveSlots,
-    belowFloorVisible, heldBack, floorLabel: formatFloor(inputs.floorBar),
-    nearMissVisible: chat.nearMiss.filter((c) => !removedSet.has(c.titleId)),
-    uncheckedVisible: chat.unchecked.filter((c) => !removedSet.has(c.titleId)),
+    belowFloorVisible, heldBack, floorLabel, nearMissVisible, uncheckedVisible,
     conflictMessage, turnConflictMessage, answerIndex: answerRowIndex(turns), liveReplyIndex,
     showsTurnConflict: !!turnConflictMessage && streaming && !chat.appending,
     pickCount, keptWholeAnswer, footnoteText, showsProvenance, stoppedText, refusalText,
     footnoteInSlot: chat.gridRow >= turns.length - 1,
-    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title),
+    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title, shown),
   };
 }
 
@@ -119,7 +123,10 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
  * the two live regions never talk over each other. Two counts, because they mean two different
  * things and folding them together is F4-05.
  */
-function announce(status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number, failure: string): string {
+function announce(
+  status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number, failure: string,
+  shown: NoneFoundShown,
+): string {
   if (status === "streaming") return "";
   // The refusal is what the region says while it stands (R5-04): the state underneath is the one
   // the screen was already in, and announcing THAT again says nothing about the gesture that failed.
@@ -129,8 +136,9 @@ function announce(status: ChatStatus, mode: string | null, refusal: string | nul
   if (status === "blocked") return "That question is still being answered.";
   if (status === "stopped") return stopped;
   // An honest "nothing left" is announced as one, not as "No matches": the reply beside it gives
-  // the counts, and the none-found card the relaxations (WS-2 task 3).
-  if (status === "done" && mode === "NoneFound" && picks === 0) return "Nothing left that matches — Reel’s reply says why.";
+  // the counts, and the none-found card the relaxations (WS-2 task 3). It follows the card's own
+  // branch — unchecked titles on screen are not "nothing left" (HREV4-PH-01).
+  if (status === "done" && mode === "NoneFound" && picks === 0) return noneFoundAnnouncement(shown);
   // A reply that answered beside an EMPTY grid — small talk, a title asked about by name, a question
   // back — is not a search, and "No matches for that one." would announce one that never ran (the
   // R1-04 screen, said aloud). The reply itself is already read out by the transcript's polite log.

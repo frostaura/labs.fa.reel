@@ -9,7 +9,7 @@ import { AskStreamError, type AskCard, type AskEvent, type DoneData } from "../.
 import type { ConversationPayload } from "../../lib/askReel/transcript";
 import { useAskReelChat, type AskReelChat } from "../../lib/askReel/useAskReelChat";
 import AnswerStrip from "./AnswerStrip";
-import { deriveAskView } from "./view";
+import { deriveAskView, type AskViewInputs } from "./view";
 
 /**
  * R1-49 — the claims register's `ask-reel-thread-state` family, held to the states that print it.
@@ -81,12 +81,14 @@ const live = (): AskReelChat => {
   if (!rendered) throw new Error("mount() first");
   return rendered;
 };
+/** What the page feeds the view beside the hook — the removed titles and the account's bar. */
+let inputs: AskViewInputs = { removedKeys: [], floorBar: null };
 function Harness() {
   const chat = useAskReelChat();
   useEffect(() => {
     rendered = chat;
   });
-  const view = deriveAskView(chat, { removedKeys: [], floorBar: null });
+  const view = deriveAskView(chat, inputs);
   return <AnswerStrip chat={chat} view={view} onSaveTapped={() => {}} />;
 }
 
@@ -113,6 +115,7 @@ const says = (text: string) => document.body.textContent?.includes(text) ?? fals
 beforeEach(() => {
   script.length = 0;
   rendered = null;
+  inputs = { removedKeys: [], floorBar: null };
 });
 afterEach(cleanup);
 
@@ -306,5 +309,67 @@ describe("a reply that answered beside the grid is never announced as an empty s
     script.push(answers([]));
     await settle(() => live().send("ninja movies"));
     expect(deriveAskView(live(), { removedKeys: [], floorBar: null }).announcement).toBe("No matches for that one.");
+  });
+});
+
+describe("a none-found answer is announced as the card on screen says it — HREV4-PH-01", () => {
+  /**
+   * The keyless path: the judge never ran, so nothing could be checked, and the server answers
+   * NoneFound with the unchecked titles (and the floor's cut) in their own trays. The status region
+   * said "Nothing left that matches" over a card reading "Reel couldn’t check what it found" and a
+   * tray of 11 unchecked titles — two live regions contradicting each other, one of them false.
+   */
+  function noneFound(extra: Partial<DoneData>): Turn {
+    return async (on) => {
+      on({ event: "conversation", data: { id: "c1", turnId: "turn-none" } });
+      on({ event: "assistant-message", data: { text: "I couldn't check what I found against what you asked this time." } });
+      on({ event: "done", data: done({ mode: "NoneFound", kept: 0, ...extra }) });
+    };
+  }
+  const heading = () => screen.getByTestId("askreel-none-found").querySelector("p")?.textContent ?? "";
+  const announced = () => deriveAskView(live(), inputs).announcement;
+
+  it("says the titles could not be checked, with what is shown and what the bar held back", async () => {
+    inputs = { removedKeys: [], floorBar: 6 };
+    mount();
+    script.push(noneFound({ unchecked: [card(1), card(2)], belowFloor: [card(3), card(4), card(5)] }));
+    await settle(() => live().send("heist movies"));
+    expect(heading()).toBe("Reel couldn’t check what it found");
+    expect(announced()).toBe("Reel couldn’t check what it found — 2 unchecked titles shown, 3 held back by your 6.0 bar.");
+    expect(announced()).not.toMatch(/Nothing left/);
+  });
+
+  it("counts one unchecked title as one, and names no bar the account does not have", async () => {
+    // Two fields away: one unchecked title, and no floor tray at all.
+    mount();
+    script.push(noneFound({ unchecked: [card(1)] }));
+    await settle(() => live().send("spy thrillers"));
+    expect(heading()).toBe("Reel couldn’t check what it found");
+    expect(announced()).toBe("Reel couldn’t check what it found — 1 unchecked title shown.");
+  });
+
+  it("names the partial matches when they are on screen too", async () => {
+    mount();
+    script.push(noneFound({ unchecked: [card(1)], nearMiss: [card(2), card(3)] }));
+    await settle(() => live().send("spy thrillers"));
+    expect(announced()).toBe("Reel couldn’t check what it found — 1 unchecked title shown, 2 close but not quite.");
+  });
+
+  it("says nothing is left once every unchecked title has been saved or dismissed — as the card then does", async () => {
+    // One field: the removed set. The tray is gone, the card switches, and the region follows it.
+    inputs = { removedKeys: ["t1"], floorBar: null };
+    mount();
+    script.push(noneFound({ unchecked: [card(1)] }));
+    await settle(() => live().send("spy thrillers"));
+    expect(heading()).toBe("Nothing left that matches");
+    expect(announced()).toBe("Nothing left that matches — Reel’s reply says why.");
+  });
+
+  it("still says nothing is left for a truly empty none-found answer", async () => {
+    mount();
+    script.push(noneFound({}));
+    await settle(() => live().send("ninja comedies"));
+    expect(heading()).toBe("Nothing left that matches");
+    expect(announced()).toBe("Nothing left that matches — Reel’s reply says why.");
   });
 });

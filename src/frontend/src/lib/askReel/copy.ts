@@ -115,6 +115,46 @@ export function resumeAnnouncement(pickCount: number, outsideCount: number): str
   return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
 }
 
+/** What the none-found card is headed with — and what the status region opens on — in each case. */
+export const NONE_FOUND_HEADING = {
+  /** An honest, empty "nothing left": nothing matched, and nothing is shown in its place. */
+  empty: "Nothing left that matches",
+  /** Titles were found but nothing could check them against the request — the keyless path. */
+  unchecked: "Reel couldn’t check what it found",
+} as const;
+
+/** What a none-found answer has on screen beside its card, as the trays count it. */
+export interface NoneFoundShown {
+  unchecked: number;
+  nearMiss: number;
+  heldBack: number;
+  /** The account's bar, as `formatFloor` writes it; null when none is set. */
+  floorLabel: string | null;
+}
+
+/** Which heading the none-found card carries: unchecked titles on screen change what it can claim. */
+export function noneFoundHeading(shown: Pick<NoneFoundShown, "unchecked">): string {
+  return shown.unchecked > 0 ? NONE_FOUND_HEADING.unchecked : NONE_FOUND_HEADING.empty;
+}
+
+/**
+ * What the status region says over a settled none-found answer. HREV4-PH-01.
+ *
+ * It follows the card's own branch, because the card sits in a polite region of its own and a
+ * screen reader hears both. It used to say "Nothing left that matches" whenever no pick survived —
+ * including the keyless turn, where the card read "Reel couldn’t check what it found" over a tray
+ * of 11 unchecked titles and 13 more under the bar: two announcements, one of them false, on the
+ * path every user gets when the model provider is down. When titles ARE on screen it says what
+ * they are, counted as their trays count them; "nothing left" stays for an answer that has nothing.
+ */
+export function noneFoundAnnouncement(shown: NoneFoundShown): string {
+  if (shown.unchecked === 0) return `${NONE_FOUND_HEADING.empty} — Reel’s reply says why.`;
+  const parts = [`${shown.unchecked} unchecked ${plural(shown.unchecked, "title")} shown`];
+  if (shown.nearMiss > 0) parts.push(`${shown.nearMiss} close but not quite`);
+  if (shown.heldBack > 0) parts.push(`${shown.heldBack} held back by your ${shown.floorLabel ? `${shown.floorLabel} ` : ""}bar`);
+  return `${NONE_FOUND_HEADING.unchecked} — ${parts.join(", ")}.`;
+}
+
 /**
  * Whether the provenance line belongs on screen.
  *
