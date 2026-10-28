@@ -289,8 +289,9 @@ public class HydrateCatalogJobHandler(
         // The metadata refresh sweep (E-11, FD-9) shares this run and this ceiling. The day's
         // allowance goes first to rows past the rolling interval — oldest first, because they are
         // the ones closing on TMDB's six-month cache limit — then to recent releases due their weekly
-        // refresh, and only then to rows never hydrated. The refresh load is bounded (see
-        // MetadataRefreshPolicy.Project), so the seed backlog still gets most of every day.
+        // refresh, then to rows never hydrated, and only then to the creator back-fill. The refresh
+        // load is bounded (see MetadataRefreshPolicy.Project), so the seed backlog still gets most of
+        // every day.
         IQueryable<Title> Overdue() => MetadataRefreshPolicy.Overdue(db, now)
             .Where(t => !skip.Contains(t.Id))
             .OrderBy(t => t.LastMetadataRefreshAt)
@@ -298,6 +299,14 @@ public class HydrateCatalogJobHandler(
         IQueryable<Title> RecentDue() => MetadataRefreshPolicy.RecentDue(db, now)
             .Where(t => !skip.Contains(t.Id))
             .OrderBy(t => t.LastMetadataRefreshAt)
+            .ThenBy(t => t.Id);
+
+        // Last, and only with what the three tiers above leave: shows hydrated before creators were
+        // stored (HREV2-D-02), most-voted first so the shows people open are fixed first. One fetch
+        // each, ever — see CreatorBackfillPolicy for why the selection terminates without a marker.
+        IQueryable<Title> CreatorsMissing() => CreatorBackfillPolicy.Due(db, now)
+            .Where(t => !skip.Contains(t.Id))
+            .OrderByDescending(t => t.TmdbVoteCount)
             .ThenBy(t => t.Id);
 
         async Task<List<Title>> NextBatchAsync(int size)
@@ -313,11 +322,17 @@ public class HydrateCatalogJobHandler(
                 batch.AddRange(await Pending().Take(size - batch.Count).ToListAsync(ct));
             }
 
+            if (batch.Count < size)
+            {
+                batch.AddRange(await CreatorsMissing().Take(size - batch.Count).ToListAsync(ct));
+            }
+
             return batch;
         }
 
         var refreshDue = await MetadataRefreshPolicy.Due(db, now).CountAsync(ct);
-        var backlog = await Pending().CountAsync(ct) + refreshDue;
+        var creatorBackfillDue = await CreatorsMissing().CountAsync(ct);
+        var backlog = await Pending().CountAsync(ct) + refreshDue + creatorBackfillDue;
         var processed = 0;
         var deadBatches = 0;
 
@@ -378,8 +393,8 @@ public class HydrateCatalogJobHandler(
         }
 
         logger.LogInformation(
-            "Global HydrateCatalog: {Processed} title(s) hydrated or refreshed of a {Backlog} backlog ({RefreshDue} due a refresh); "
-            + "daily allowance {Used}/{Limit}, {Failing} title(s) carrying failures.",
-            processed, backlog, refreshDue, allowance.Used, allowance.Limit, failures.Count);
+            "Global HydrateCatalog: {Processed} title(s) hydrated or refreshed of a {Backlog} backlog ({RefreshDue} due a refresh, "
+            + "{CreatorBackfillDue} show(s) due the creator back-fill); daily allowance {Used}/{Limit}, {Failing} title(s) carrying failures.",
+            processed, backlog, refreshDue, creatorBackfillDue, allowance.Used, allowance.Limit, failures.Count);
     }
 }

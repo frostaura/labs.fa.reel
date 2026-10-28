@@ -339,8 +339,11 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var genreContrarian = genrePairs.ToDictionary(kv => kv.Key, kv => TasteMath.ContrarianOffset(kv.Value));
 
         // Person affinities: ratings joined through credits of the rated titles.
+        // A show's Creator credit (HREV2-D-02) is not a role the model was trained on: it would add
+        // a second observation to the role-blind pool and open a (person, Creator) pool that
+        // PersonAffinityWriter would materialise. Using it is a feature-schema change and a retrain.
         var credits = await db.TitleCredits
-            .Where(c => ratedTitleIds.Contains(c.TitleId))
+            .Where(c => ratedTitleIds.Contains(c.TitleId) && c.Role != CreditRole.Creator)
             .Select(c => new { c.TitleId, c.PersonId, c.Role })
             .ToListAsync(ct);
         var ratingByTitle = titleRatings
@@ -636,8 +639,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Where(a => ids.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
             .ToDictionaryAsync(a => a.TitleId, ct);
         var embeddings = await LoadEmbeddingsAsync(ids, ct);
+        // Creator credits are left out for the reason the taste side leaves them out: the switch in
+        // the credit features would otherwise read a creator (order 0 or 1) as top-billed cast.
         var creditsByTitle = (await db.TitleCredits
-                .Where(c => ids.Contains(c.TitleId))
+                .Where(c => ids.Contains(c.TitleId) && c.Role != CreditRole.Creator)
                 .Select(c => new CreditRow(c.TitleId, c.PersonId, c.Role, c.CastOrder))
                 .ToListAsync(ct))
             .GroupBy(c => c.TitleId)

@@ -251,6 +251,11 @@ public static class TitleEndpoints
                 backdropPath = title.BackdropPath,
                 trailerUrl = title.TrailerUrl,
                 cast = cast.Where(c => c.role == "Actor").OrderBy(c => c.castOrder).Take(10),
+                // A show's creators (TMDB created_by) in TMDB's own order, which hydration stores as
+                // CastOrder: the person a show is "by". Its directors are per-episode, so they never
+                // stood in for this (HREV2-D-02). Empty for a film.
+                creators = cast.Where(c => c.role == "Creator").OrderBy(c => c.castOrder)
+                    .Select(c => new { c.personId, c.name, c.profilePath, c.userRating }),
                 directors = cast.Where(c => c.role == "Director").Select(c => new { c.personId, c.name, c.profilePath, c.userRating }),
                 writers = cast.Where(c => c.role == "Writer").Select(c => new { c.personId, c.name, c.profilePath, c.userRating }).Take(4),
                 prediction = score is null ? null : new

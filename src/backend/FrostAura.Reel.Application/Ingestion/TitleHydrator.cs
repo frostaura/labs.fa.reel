@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Application.Ingestion;
 public sealed record HydrationBatchResult(int Hydrated, IReadOnlyList<Title> Failed);
 
 /// <summary>
-/// Shared TMDB hydration core — artwork, popularity, trailer, credits — used by the catalog
+/// Shared TMDB hydration core — artwork, popularity, trailer, credits (a show's creators included) — used by the catalog
 /// hydration job (whole library) and the feed builder (top candidates need credits for
 /// affinity features before final scoring). One hydration per title, ever, for every tenant.
 /// </summary>
@@ -202,7 +202,7 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
 
     private async Task UpsertCreditsAsync(Title title, TmdbTitleDetails details, CancellationToken ct)
     {
-        if (details.Cast.Length == 0 && details.Crew.Length == 0)
+        if (details.Cast.Length == 0 && details.Crew.Length == 0 && details.Creators.Count == 0)
         {
             return;
         }
@@ -228,6 +228,21 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
             var person = GetOrAddPerson(member.Id, member.Name, member.Department, member.ProfilePath);
             AddCredit(title, person, role, null, null, creditKeys);
         }
+
+        // A show's creators (HREV2-D-02), in TMDB's order — the person the show is "by". A show's crew
+        // names a director per episode, so without these Breaking Bad's page listed thirteen episode
+        // directors and never Vince Gilligan as its creator. TMDB sends no created_by for a film.
+        for (var order = 0; order < details.Creators.Count; order++)
+        {
+            var creator = details.Creators[order];
+            if (creator.Id <= 0 || string.IsNullOrWhiteSpace(creator.Name))
+            {
+                continue;
+            }
+
+            var person = GetOrAddPerson(creator.Id, creator.Name, null, creator.ProfilePath);
+            AddCredit(title, person, CreditRole.Creator, order, null, creditKeys);
+        }
     }
 
     /// <summary>
@@ -239,6 +254,7 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
     {
         var wanted = details.Cast.Select(c => c.Id)
             .Concat(details.Crew.Select(c => c.Id))
+            .Concat(details.Creators.Select(c => c.Id))
             .Distinct()
             .Where(id => !_personCache.ContainsKey(id))
             .ToArray();
