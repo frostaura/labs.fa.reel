@@ -6,7 +6,7 @@ import CardTray from "./CardTray";
 import PillButton from "./PillButton";
 import RelaxationChip from "./RelaxationChip";
 import { CARD_GRID, CardSkeleton, ResultCard, RetryButton } from "./parts";
-import { failureCopy, nearMissHeading, plural, removedNote } from "../../lib/askReel/copy";
+import { failureCopy, nearMissHeading, noneFoundHeading, plural, removedNote } from "../../lib/askReel/copy";
 import { relTime } from "../../lib/format";
 import type { AskReelChat } from "../../lib/askReel/useAskReelChat";
 import type { AskCard } from "../../lib/askReelStream";
@@ -152,7 +152,7 @@ export default function AnswerStrip({
               <div className="flex items-center gap-2">
                 <Sparkles className="h-5 w-5 text-fa-frost-dim" />
                 <p className="fa-body text-fa-frost-bright">
-                  {view.uncheckedVisible.length > 0 ? "Reel couldn’t check what it found" : "Nothing left that matches"}
+                  {noneFoundHeading({ unchecked: view.uncheckedVisible.length })}
                 </p>
               </div>
               {chat.knockouts.length > 0 && (

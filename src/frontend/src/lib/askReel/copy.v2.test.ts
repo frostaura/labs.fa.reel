@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { earlierAnswerSummary, narrate, nearMissHeading, stoppedMessage } from "./copy";
+import { earlierAnswerSummary, narrate, nearMissHeading, NONE_FOUND_HEADING, noneFoundAnnouncement, noneFoundHeading, stoppedMessage } from "./copy";
 import { relaxationLabel } from "./relaxation";
 
 describe("narrate — the narration line follows the phase frames", () => {
@@ -33,5 +33,32 @@ describe("v2 copy", () => {
   it("summarises an earlier answer before it is opened", () => {
     expect(earlierAnswerSummary(8, 0)).toBe("Earlier answer · 8 picks");
     expect(earlierAnswerSummary(0, 2)).toBe("Earlier answer · No picks · 2 in its trays");
+  });
+});
+
+describe("noneFoundAnnouncement — the status region says what the none-found card says (HREV4-PH-01)", () => {
+  const none = { unchecked: 0, nearMiss: 0, heldBack: 0, floorLabel: null };
+
+  it("keeps “nothing left” for an answer with nothing on screen", () => {
+    expect(noneFoundAnnouncement(none)).toBe("Nothing left that matches — Reel’s reply says why.");
+  });
+  it("never says “nothing left” while unchecked titles are shown — the keyless walk’s numbers", () => {
+    expect(noneFoundAnnouncement({ unchecked: 11, nearMiss: 0, heldBack: 13, floorLabel: "6.0" }))
+      .toBe("Reel couldn’t check what it found — 11 unchecked titles shown, 13 held back by your 6.0 bar.");
+  });
+  it("names no number for a bar it does not know", () => {
+    expect(noneFoundAnnouncement({ unchecked: 1, nearMiss: 0, heldBack: 2, floorLabel: null }))
+      .toBe("Reel couldn’t check what it found — 1 unchecked title shown, 2 held back by your bar.");
+  });
+  it("leaves out the trays that are empty and counts those that are not", () => {
+    expect(noneFoundAnnouncement({ unchecked: 3, nearMiss: 1, heldBack: 0, floorLabel: "6.0" }))
+      .toBe("Reel couldn’t check what it found — 3 unchecked titles shown, 1 close but not quite.");
+  });
+  it("opens on the card's own heading in both branches", () => {
+    for (const shown of [none, { ...none, unchecked: 2 }, { ...none, heldBack: 4, floorLabel: "6.0" }]) {
+      expect(noneFoundAnnouncement(shown).startsWith(noneFoundHeading(shown))).toBe(true);
+    }
+    expect(noneFoundHeading({ unchecked: 1 })).toBe(NONE_FOUND_HEADING.unchecked);
+    expect(noneFoundHeading({ unchecked: 0 })).toBe(NONE_FOUND_HEADING.empty);
   });
 });
