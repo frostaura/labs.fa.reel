@@ -89,6 +89,12 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: building the planner's context (taste summary, persona), inside <see cref="Plan"/>.</summary>
     public const string PlanContext = "plan.context";
 
+    /// <summary>
+    /// Ask Reel v2: when the plan call was sent a second time (<c>AskReelHedge</c>), measured from the
+    /// first call, inside <see cref="Plan"/>. Absent on a turn whose plan answered in time.
+    /// </summary>
+    public const string PlanHedge = "plan.hedge";
+
     /// <summary>Ask Reel v2: the account's conditions and the conversation's state, read before the plan.</summary>
     public const string Load = "load";
 
@@ -107,6 +113,14 @@ public sealed class AskStageTimings
 
     /// <summary>Ask Reel v2: loading the retrieved titles, after retrieval and before judging.</summary>
     public const string RetrieveTitles = "retrieve.titles";
+
+    /// <summary>
+    /// Ask Reel v2: ordering the candidates for the judge against the account's bar — the stored
+    /// predictions read, the supply's top-up, and any on-demand scoring of the pool (HREV2-RET-01).
+    /// It sits between retrieval and the first judge batch, so it is timed apart from the slice
+    /// scoring that runs beside the judge. Present only on a turn with a bar.
+    /// </summary>
+    public const string JudgeOrder = "judge.order";
 
     /// <summary>Ask Reel v2: the judge's inputs (fact rows, persona) read before its first batch is sent.</summary>
     public const string JudgePrep = "judge.prep";
@@ -142,7 +156,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Load, Plan, PlanContext, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgePrep, Judge,
+            Load, Plan, PlanContext, PlanHedge, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgeOrder, JudgePrep, Judge,
             JudgeFirstBatch, JudgeSpeculative, Answer, Compose,
         ];
 

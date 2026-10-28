@@ -79,4 +79,84 @@ public static class AskReelTopic
             1 => keywords[0],
             _ => $"{string.Join(", ", keywords.Take(keywords.Count - 1))} or {keywords[^1]}",
         };
+
+    /// <summary>
+    /// The words that name the shelf a request's supply is counted over: the person, when one is
+    /// set, then every hard concept in the order they were intersected — "romantic comedy",
+    /// "Liam Neeson thriller" — or null when the request names neither.
+    ///
+    /// <para><b>Why every concept (HREV2-ASK-01).</b> The supply counts the AND of every hard
+    /// concept and every person, and the reply named only the first concept: "romantic comedies"
+    /// planned as romantic, comedy and romance, was counted as all three and described as "the 145
+    /// romantic titles in the catalogue" — a shelf the count was never taken over, and a different
+    /// number again when the plan ordered the concepts differently. A count and its label come from
+    /// the same constraints, or the sentence is false.</para>
+    ///
+    /// <para><b>A concept that restates another is named once.</b> "romantic" and "romance" both name
+    /// the romance genre; the intersection of the two is that genre, so the second adds no word
+    /// ("romantic comedy", never "romantic comedy romance"). So does a concept whose words already
+    /// stand inside a kept one ("comedy" beside "romantic comedy").</para>
+    /// </summary>
+    public static string? Shelf(Retrieval.HardConstraints hard)
+    {
+        ArgumentNullException.ThrowIfNull(hard);
+        var words = new List<string>(hard.Concepts.Count);
+        var genreSets = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var concept in hard.Concepts)
+        {
+            var said = concept.UserWords?.Trim();
+            if (string.IsNullOrEmpty(said))
+            {
+                continue;
+            }
+
+            if (words.Any(kept => NegationTerms.MatchesPhrase(kept, said) || NegationTerms.MatchesPhrase(said, kept)))
+            {
+                // One already standing inside the other: keep the longer phrase, in the earlier place.
+                var index = words.FindIndex(kept => NegationTerms.MatchesPhrase(said, kept));
+                if (index >= 0 && said.Length > words[index].Length)
+                {
+                    words[index] = said;
+                }
+
+                continue;
+            }
+
+            if (GenreSet(concept) is { } genres && !genreSets.Add(genres))
+            {
+                continue;
+            }
+
+            words.Add(said);
+        }
+
+        var people = hard.People.Select(p => p.Name.Trim()).Where(n => n.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var parts = new List<string>(2);
+        if (people.Count > 0)
+        {
+            parts.Add(string.Join(" and ", people));
+        }
+
+        if (words.Count > 0)
+        {
+            parts.Add(string.Join(' ', words));
+        }
+
+        return parts.Count == 0 ? null : string.Join(' ', parts);
+    }
+
+    /// <summary>The genres a concept stands for — its own, else the ones its words name — as one key; null when none.</summary>
+    private static string? GenreSet(Retrieval.ConceptTerm concept)
+    {
+        var genres = concept.Genres.Count > 0
+            ? concept.Genres
+            : Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(concept.UserWords)) ?? [];
+        var cleaned = genres
+            .Select(g => g.Trim().ToLowerInvariant())
+            .Where(g => g.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        return cleaned.Count == 0 ? null : string.Join('|', cleaned);
+    }
 }

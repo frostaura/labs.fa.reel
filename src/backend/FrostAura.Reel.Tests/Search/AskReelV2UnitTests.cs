@@ -315,6 +315,33 @@ public class AskReelV2UnitTests
         Assert.Equal(expected, PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([])).Delta.Media);
     }
 
+    /// <summary>
+    /// HREV2-ASK-01: "romantic comedies" was planned once as romantic + comedy + romance (145 titles,
+    /// because "romantic" as a concept also demanded the tag) and once as comedy + romance (every
+    /// romantic comedy). A concept whose words only restate a genre the plan requires is dropped, so
+    /// both plans search, count and name the same shelf. Varied: a concept naming a genre the plan does
+    /// not require, a concept naming no genre, and a phrase naming two required genres.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic", "comedy,romance", "")]
+    [InlineData("romantic comedies", "comedy,romance", "")]
+    [InlineData("romantic", "comedy", "romantic")]
+    [InlineData("ninja", "action", "ninja")]
+    [InlineData("heist,horror", "horror", "heist")]
+    public void A_concept_that_only_restates_a_planned_genre_is_dropped(string concepts, string genres, string kept)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+        {
+            Concepts = [.. concepts.Split(',')],
+            Genres = [.. genres.Split(',')],
+        });
+
+        var cleaned = PlanSanitizer.Clean(plan, $"{concepts.Replace(',', ' ')} {genres.Replace(',', ' ')}", ConversationState.Empty, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(kept, string.Join(',', cleaned.Delta.Concepts));
+        Assert.Equal(genres.Split(','), cleaned.Delta.Genres);
+    }
+
     [Fact]
     public void A_supply_answer_agrees_in_number()
     {
@@ -324,6 +351,132 @@ public class AskReelV2UnitTests
             "You have 1 unseen ninja movie left that clears your conditions and your bar; you've seen 19.",
             AskReelEngine.SupplyAnswer(one, hard));
     }
+
+    /// <summary>
+    /// HREV2-ASK-01: the supply is counted over the AND of every hard concept and the person, so the
+    /// words that name it are all of them — "romantic comedies" planned as romantic, comedy and
+    /// romance was described as "the 145 romantic titles". Varied over the plans the live runs
+    /// produced (three concepts with a restated genre, two genre concepts in either order), a phrase
+    /// that already holds another concept, a person with a concept, a person alone, and nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic|-;comedy|comedy;romance|romance", null, "romantic comedy")]
+    [InlineData("romance|romance;comedy|comedy", null, "romance comedy")]
+    [InlineData("comedy|comedy;romance|romance", null, "comedy romance")]
+    [InlineData("romantic comedy|-;comedy|comedy", null, "romantic comedy")]
+    [InlineData("comedy|comedy;romantic comedy|-", null, "romantic comedy")]
+    [InlineData("heist|-;bank robbery|-", null, "heist bank robbery")]
+    [InlineData("ninja|-", null, "ninja")]
+    [InlineData("thriller|thriller", "Liam Neeson", "Liam Neeson thriller")]
+    [InlineData("-", "Liam Neeson", "Liam Neeson")]
+    [InlineData("-", null, null)]
+    public void The_shelf_names_every_constraint_the_supply_intersects(string concepts, string? person, string? expected)
+    {
+        Assert.Equal(expected, AskReelTopic.Shelf(Hard(concepts, person, MediaScope.Movies)));
+    }
+
+    /// <summary>
+    /// HREV2-ASK-01, through the composer: the none-found counts and the picks line name the shelf the
+    /// count was taken over, for a two-concept request and a person-plus-concept request alike.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic|-;comedy|comedy;romance|romance", null,
+        "There are no romantic comedy movies left for you. Of the 145 romantic comedy movies in the catalogue with at least 50 votes, you've seen 140 and your conditions hold out 5.")]
+    [InlineData("thriller|thriller", "Liam Neeson",
+        "There are no Liam Neeson thriller movies left for you. Of the 145 Liam Neeson thriller movies in the catalogue with at least 50 votes, you've seen 140 and your conditions hold out 5.")]
+    public void A_none_found_reply_names_the_whole_shelf_it_counted(string concepts, string? person, string expected)
+    {
+        var hard = Hard(concepts, person, MediaScope.Movies);
+        var supply = new SupplyReport(145, 140, 0, 5, 0, 0, 0, [], 0, 50, null, true);
+        var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
+        {
+            Topic = AskReelTopic.Shelf(hard),
+            Floor = 0m,
+            Supply = supply,
+        });
+        Assert.Equal(expected, reply.Reply);
+    }
+
+    [Theory]
+    [InlineData("romance|romance;comedy|comedy", null, "4 romance comedy movies that fit what you asked.")]
+    [InlineData("thriller|thriller", "Liam Neeson", "4 Liam Neeson thriller movies that fit what you asked.")]
+    public void A_picks_reply_names_the_whole_shelf(string concepts, string? person, string expected)
+    {
+        var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with
+        {
+            Topic = AskReelTopic.Shelf(Hard(concepts, person, MediaScope.Movies)),
+            Picks = 4,
+        });
+        Assert.Equal(expected, reply.Reply);
+    }
+
+    [Fact]
+    public void A_supply_answer_names_every_concept_it_counted()
+    {
+        var hard = Hard("romance|romance;comedy|comedy", "Hugh Grant", MediaScope.Movies);
+        var report = new SupplyReport(30, 20, 0, 0, 10, 0, 0, [], 0, 50, null, true);
+        Assert.Equal(
+            "You have 10 unseen Hugh Grant romance comedy movies left inside your conditions; you've seen 20.",
+            AskReelEngine.SupplyAnswer(report, hard));
+    }
+
+    /// <summary>
+    /// HREV2-RET-01: the judge's order is the retrieved candidates the bar lets through, then the
+    /// supply's top-up ('t'), then the retrieved candidates with no prediction ('u'), then those under
+    /// the bar ('h') — and each group keeps its own order. Varied over every mix, with and without a
+    /// top-up, and with no candidate of a group at all.
+    /// </summary>
+    [Theory]
+    [InlineData("hhhhcc", 0, "cchhhh")]
+    [InlineData("chch", 0, "cchh")]
+    [InlineData("cccc", 0, "cccc")]
+    [InlineData("hhhh", 0, "hhhh")]
+    [InlineData("hhhh", 2, "tthhhh")]
+    [InlineData("huhcuc", 3, "cctttuuhh")]
+    [InlineData("uuu", 1, "tuuu")]
+    [InlineData("", 2, "tt")]
+    public void The_judge_order_puts_what_can_become_a_pick_first_and_keeps_each_groups_order(string retrieved, int topUps, string expected)
+    {
+        var candidates = retrieved.Select((kind, i) => (Kind: kind, Candidate: new Candidate(Guid.NewGuid(), 1d - (i / 100d), null, ["keyword:x"]))).ToList();
+        var topUp = Enumerable.Range(0, topUps).Select(_ => new Candidate(Guid.NewGuid(), 0d, null, ["keyword:x"])).ToList();
+        var kinds = candidates.ToDictionary(c => c.Candidate.TitleId, c => c.Kind);
+        foreach (var t in topUp)
+        {
+            kinds[t.TitleId] = 't';
+        }
+
+        var ordered = AskReelEngine.OrderForJudge(
+            candidates.Select(c => c.Candidate).ToList(),
+            topUp,
+            id => kinds[id] switch
+            {
+                'c' => AskReelEngine.JudgeTier.Clears,
+                'u' => AskReelEngine.JudgeTier.Unscored,
+                _ => AskReelEngine.JudgeTier.Under,
+            });
+
+        Assert.Equal(expected, string.Concat(ordered.Select(c => kinds[c.TitleId])));
+        foreach (var kind in "chu")
+        {
+            Assert.Equal(
+                candidates.Where(c => c.Kind == kind).Select(c => c.Candidate).ToList(),
+                ordered.Where(c => kinds[c.TitleId] == kind).ToList());
+        }
+
+        Assert.Equal(topUp, ordered.Where(c => kinds[c.TitleId] == 't').ToList());
+    }
+
+    /// <summary>"words|genre,genre;words|-" → concepts ("-" for none), plus an optional cast person.</summary>
+    private static HardConstraints Hard(string concepts, string? person, MediaScope media) =>
+        HardConstraints.None with
+        {
+            Concepts = concepts == "-"
+                ? []
+                : [.. concepts.Split(';').Select(c => c.Split('|')).Select(p =>
+                    new ConceptTerm(p[0], [], p[1] == "-" ? [] : [.. p[1].Split(',')]))],
+            People = person is null ? [] : [new PersonConstraint(person, null, PersonRole.Cast)],
+            Media = media,
+        };
 
     [Fact]
     public void Only_one_clarifying_question_is_asked_per_conversation()
@@ -576,6 +729,38 @@ public class AskReelV2UnitTests
             PersonSeen = 9,
         });
         Assert.Equal("You've seen 9 movies directed by Christopher Nolan; here are 3 you haven't.", reply.Reply);
+    }
+
+    /// <summary>
+    /// HREV2-ASK-03: v1's person reply is the v2 composer's sentence, counts only, so the default
+    /// engine and the new one say the same thing. Varied over role, media, the singular and no seen.
+    /// </summary>
+    [Theory]
+    [InlineData(PersonRole.Director, MediaScope.Movies, 3, 9)]
+    [InlineData(PersonRole.Cast, MediaScope.Movies, 1, 1)]
+    [InlineData(PersonRole.Cast, MediaScope.Shows, 2, 0)]
+    [InlineData(PersonRole.Any, MediaScope.Any, 4, 39)]
+    public void The_v1_person_reply_is_the_composers_sentence(PersonRole role, MediaScope media, int unseen, int seen)
+    {
+        MediaType[] types = media switch
+        {
+            MediaScope.Movies => [MediaType.Movie],
+            MediaScope.Shows => [MediaType.Show],
+            _ => [],
+        };
+        var composed = new TurnComposer().Compose(Context(FinalMode.Picks) with
+        {
+            Topic = null,
+            Media = media,
+            Picks = unseen,
+            Person = new PersonConstraint("Liam Neeson", null, role),
+            PersonSeen = seen,
+        });
+
+        var v1 = LiveSearchExpansionService.PersonReply(new PersonQuery("Liam Neeson", role), unseen, seen, types);
+
+        Assert.Equal(composed.Reply, v1);
+        Assert.DoesNotContain("Here are films", v1, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -79,8 +79,9 @@ public sealed partial class LiveSearchExpansionService
             supply = null;
         }
 
-        // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.
-        var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
+        // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used —
+        // every concept it intersected and the person, never the first concept alone (HREV2-ASK-01).
+        var concept = AskReelTopic.Shelf(hard);
         var shownHere = supply is { ClearingFloor: > 0 }
             ? await ClearingInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct) ?? 0
             : 0;

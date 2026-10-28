@@ -141,7 +141,14 @@ COUNTS and the reply NAMES is the subset the user said — in this message, else
 earlier asks, newest first. When the user's words anchor none of them, the whole list is the topic
 and the reply names every keyword it counted ("swordplay or warrior movies"). A request with a named
 topic never widens past it: one discovery pass, no popularity last resort (§4.8); mood and genre
-requests still widen, keeping their genres on every rung.
+requests still widen, keeping their genres on every rung. Neither does a person request: a person
+whose every credit is seen is an honest none-found.
+
+**The shelf is named whole** (HREV2-ASK-01). The supply counts the AND of every hard concept and
+every person, so the reply, the phase line and the "how many are left" answer name all of them, in
+the order they were intersected — "romantic comedy movies", "Liam Neeson thriller movies" — never
+the first concept alone. A concept that restates another (two words for the same genre, or a word
+already inside a kept phrase) is named once (`AskReelTopic.Shelf`).
 
 **`mode: "Clarify"`** when the message points at a card by position ("the second one", "the last
 one", "#3") and no answer in the conversation shows that many cards (R1-04). It is answered before any
@@ -179,7 +186,7 @@ A **replay** (the same `clientTurnId` again) emits the same grammar — `convers
 carrying **every key a live `done` carries**, plus four a live turn cannot state: `replayed: true`,
 `removed` (how many stored cards the eligibility re-filter dropped since), `removedEarlier` (how many
 of those the account had already rated, watched, saved or dismissed when the answer was given — a
-person query shows seen titles, so the client says "since" only of the rest), and `failed` /
+person query showed seen titles before HREV2-ASK-03, so the client says "since" only of the rest), and `failed` /
 `failureCode` when the stored turn was a failure. `timingsMs` and `debug` are present and `null`,
 under the same founder gating as a live turn: one event name, one shape, always. A replay makes zero
 model calls, writes zero rows and writes **no exposures**.
@@ -536,7 +543,7 @@ uses it only to know which frames to expect.
    plan that reads the request differently costs one wasted batch. `judge.spec` records the early
    call's length on a turn that took the speculation; `judge.first` is the catalogue pass's first
    batch only (an admitted-provisional pass no longer adds to it).
-   Stage timings also record `load`, `retrieve.titles` and `judge.prep`.
+   Stage timings also record `load`, `retrieve.titles`, `judge.order` (ordering for the judge against the bar, step 3; only with a bar) and `judge.prep`.
 2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
    sheet an `ItemQuestion` answer is written from. `search_catalog` passes the user's own rejections
    (genres, and keywords in every spelling), the message and the account's region into retrieval.
@@ -550,6 +557,24 @@ uses it only to know which frames to expect.
 3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6** (the first
    **4**), at most **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and
    **emitted as it returns**. On a speculated topic the first batch may already be judged (above).
+   **Hedged and bounded** (HREV2-ASK-04): a batch call (the early one included) still out after
+   **4 s** is sent once more and the first good answer is used, the other cancelled; the stage has a
+   **12 s** deadline, after which a batch still out is a failed batch. The plan call is hedged the
+   same way after **3 s**, recorded as `plan.hedge` (when the second call was sent). A healthy turn
+   never hedges; both calls of a hedged one are on the usage ledger.
+   **With a bar set, the judge's slots go to what can become a pick** (HREV2-RET-01): the
+   retrieved titles whose stored prediction (the active model's rows, the ones the supply splits the
+   bar by) clears the bar, in retrieval order; then, when those are fewer than 16 and the request
+   names a topic or a person, a **top-up from the supply itself** — titles that clear the bar on a
+   stored prediction, pass the request's hard constraints, the account's eligibility, the supply's
+   vote floor and maturity ceiling, and every exclusion a retrieved title passes, but were never
+   retrieved — best prediction first; then the retrieved titles with no stored prediction; then those
+   under the bar. A title under the bar can only reach the floor tray, and retrieval's depth is not the
+   supply's: "Show me more" on horror retrieved forty titles of which six cleared the bar while the
+   supply held 43 more. The retrieved pool is **scored on demand only** when the titles known to clear
+   cannot fill the slice and a retrieved title would otherwise go unjudged (HREV2-ASK-04: scoring it
+   every time put 0.4–3 s before the first card). The speculation's early batch is chosen in the same
+   order. With no bar, retrieval's first 16 are judged and nothing is read early.
 4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
    shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
    a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
@@ -629,7 +654,14 @@ Negations come only from the user's words; standing conditions are never written
 **People and seen titles (FD-3, lock-compliant default):** a person request returns only titles the
 account has not seen; the reply counts the seen ones and never names them. A person's credits are
 their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to
-the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`.
+the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`. The v1 engine holds to the
+same default (HREV2-ASK-03): its person path reads the account's full eligibility, takes the
+person's catalogued credits as well as TMDB's newest-first credit page, and its reply is the
+composer's counted sentence, not the model's, which was written before any credit was looked up.
+"You've seen N" is the same number in both engines: every seen title the person predicate credits to
+them in the request's media, whatever the account's conditions hold out — v1 once counted TMDB's
+credit page alone and said 11 where v2 said 39. The page is not counted beside the credits either:
+it lists uncredited cameos the catalogue leaves out, which made v1 say 40.
 
 ### Pre-v2 conversations
 

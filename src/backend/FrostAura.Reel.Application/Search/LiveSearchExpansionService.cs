@@ -413,9 +413,13 @@ public sealed partial class LiveSearchExpansionService(
             agentReply = agentReply with { Intent = intent };
 
             var shownSet = input.ShownTitleIds.ToHashSet();
-            var baseQuery = isPersonQuery
-                ? eligibility.ContentFilteredTitles(accountId)
-                : eligibility.EligibleTitles(accountId);
+
+            // A person request is held to the same eligibility as every other request: titles the
+            // account has seen, rated, saved, dropped or declined are never offered as picks (FD-3's
+            // default, HREV2-ASK-03). It used to read the content rules alone, so "Denis Villeneuve
+            // films" offered Dune: Part Two, Arrival, Sicario and Prisoners — all watched — as picks.
+            // The seen credits are COUNTED for the reply (StreamFilmographyAsync), never shown.
+            var baseQuery = eligibility.EligibleTitles(accountId);
 
             var (referenceTitles, referenceVectors) = isPersonQuery
                 ? (new List<Title>(), new List<float[]>())
@@ -487,9 +491,18 @@ public sealed partial class LiveSearchExpansionService(
                                 relaxation == 0 ? conceptVector : null, ct);
                     }
 
+                    // A person's credits the catalogue already holds, past TMDB's newest-first page:
+                    // "Liam Neeson movies" read the forty newest credits, found two unseen ones under
+                    // the bar, and never saw Kinsey or Seraphim Falls, unseen and clearing it
+                    // (HREV2-ASK-03). Read through the account's eligibility, so nothing seen arrives.
+                    var credited = relaxation == 0 && isPersonQuery && hard.People.Count > 0
+                        ? await CataloguedCreditIdsAsync(baseQuery, hard, ct)
+                        : [];
+
                     discovered = discovered
                         .Concat(facet?.Candidates.Select(c => c.TitleId) ?? [])
                         .Concat(candidateIds)
+                        .Concat(credited)
                         .Concat(semanticIds)
                         .Distinct()
                         .ToList();
@@ -531,8 +544,10 @@ public sealed partial class LiveSearchExpansionService(
             // is still JUDGED against the request before it can reach the screen, so a last resort
             // that matches nothing ends as an honest none-found rather than as filler. Never for a
             // request with a named topic: popular titles are not ninja films, and judging them only
-            // spends a judge call and the user's time to say so (§4.8, R1-07).
-            if (eligible.Count == 0 && !namedTopic)
+            // spends a judge call and the user's time to say so (§4.8, R1-07). Nor for a person: popular
+            // titles are not their films, and a person whose every credit is seen is an honest
+            // none-found, not a filmography of strangers (HREV2-ASK-03).
+            if (eligible.Count == 0 && !namedTopic && !isPersonQuery)
             {
                 using var lastResortStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
@@ -580,7 +595,16 @@ public sealed partial class LiveSearchExpansionService(
             // you've seen, score for the predicted-rating badge — but never re-order or cull by fit.
             if (isPersonQuery)
             {
-                await ReplyAsync(pickReply);
+                // The reply counts what it holds back and names none of it (FD-3): the model's sentence
+                // was written before any credit was looked up and can name a seen title.
+                var seenCredits = await SeenCreditCountAsync(accountId, hard, ct);
+                var shown = Math.Min(eligible.Count, PersonReturnCount);
+                var personReply = agentReply.Degraded
+                    ? modelSentence
+                    : PersonReply(agentReply.Intent.People![0], shown, seenCredits, intent.MediaTypes);
+                await ReplyAsync(hasConflict && !agentReply.Degraded
+                    ? AskReelStandingFilters.Qualify(personReply, collidingGenres, collidingKeywords, yearCollides, standingRules)
+                    : personReply);
                 return await StreamFilmographyAsync(
                     accountId, assistantText, agentReply.Intent, eligible, taste, now, timings, emit, ct);
             }

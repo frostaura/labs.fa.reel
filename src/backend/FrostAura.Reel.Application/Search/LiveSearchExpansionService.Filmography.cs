@@ -16,23 +16,29 @@ namespace FrostAura.Reel.Application.Search;
 public sealed partial class LiveSearchExpansionService
 {
     /// <summary>
-    /// Streams a person's filmography: chronological (newest first), already-watched entries kept
-    /// and badged, the top slice scored for the predicted-rating badge — but never re-ordered or
-    /// culled by LLM fit, because the user asked for the WHOLE list, not a recommendation.
+    /// Streams a person's unseen credits: chronological (newest first), the top slice scored for the
+    /// predicted-rating badge — but never re-ordered or culled by LLM fit, because the user asked for
+    /// the person's work, not a recommendation.
+    ///
+    /// <para><b>Unseen only (FD-3's default, HREV2-ASK-03).</b> The caller reads the credits through
+    /// the account's full eligibility, so a seen, rated, saved or declined title never arrives here; a
+    /// seen one that somehow did is dropped rather than badged, because a person query is a
+    /// suggestion surface and the lock forbids seen titles on every one. The reply counts the seen
+    /// credits (<see cref="PersonReply"/>) and names none of them.</para>
     /// </summary>
     private async Task<TurnOutcome> StreamFilmographyAsync(
         Guid accountId, string? assistantText, SearchIntent intent, List<Title> eligible,
         FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
-        var ordered = eligible
+        var newestFirst = eligible
             .OrderByDescending(t => t.ReleasedAt ?? t.FirstAiredAt ?? DateTime.MinValue)
             .Take(PersonReturnCount)
             .ToList();
-
-        var seenIds = await SeenTitleIdsAsync(accountId, ordered.Select(t => t.Id).ToList(), ct);
+        var seenIds = await SeenTitleIdsAsync(accountId, newestFirst.Select(t => t.Id).ToList(), ct);
+        var ordered = newestFirst.Where(t => !seenIds.Contains(t.Id)).ToList();
         foreach (var t in ordered)
         {
-            await emit("candidate", Card(t, similarity: null, predicted: null, seen: seenIds.Contains(t.Id)));
+            await emit("candidate", Card(t, similarity: null, predicted: null, seen: false));
         }
 
         // Score the top slice for the badge (no re-rank — the order is the filmography).
@@ -52,7 +58,7 @@ public sealed partial class LiveSearchExpansionService
         var results = ordered
             .Select(t => Card(t, similarity: null,
                 predicted: scores.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
-                seen: seenIds.Contains(t.Id)))
+                seen: false))
             .ToList();
 
         var who = intent.People is { Count: > 0 } ? intent.People[0] : null;
@@ -81,7 +87,80 @@ public sealed partial class LiveSearchExpansionService
         return TurnOutcome.Answered(assistantText, reason, stored);
     }
 
-    /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>
+    /// <summary>
+    /// How many of a person's credits the account has seen (watched or rated): every catalogued title
+    /// the supply's person predicate credits to them in the request's media — the number v2 and the
+    /// none-found supply give for the same question. Not narrowed by the account's conditions: "you've
+    /// seen N" is a fact about the person's work and the account's history, and the conditions only
+    /// decide what may be offered.
+    ///
+    /// <para><b>Why (HREV2-ASK-03).</b> It was counted over the discovered titles — TMDB's forty newest
+    /// credits — inside the conditions, so "Liam Neeson movies" said "You've seen 11" to an account
+    /// that had seen 39 of his catalogued films, while v2 said 39. TMDB's page is not a second source
+    /// either: it lists uncredited cameos the catalogue's credits leave out (his voice in Star Wars:
+    /// The Rise of Skywalker), and counting those made v1 say 40 where v2 says 39.</para>
+    /// </summary>
+    private async Task<int> SeenCreditCountAsync(Guid accountId, Retrieval.HardConstraints hard, CancellationToken ct)
+    {
+        if (hard.People.Count == 0)
+        {
+            return 0;
+        }
+
+        var seen = db.Titles.Where(t =>
+            db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
+            || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id));
+        var person = new Retrieval.HardConstraints([], hard.People, null, null, hard.Media);
+        return await Retrieval.HardConstraintFilter.Apply(seen, db, person).CountAsync(ct);
+    }
+
+    /// <summary>
+    /// The person's catalogued credits the account may be offered (<paramref name="eligible"/> is its
+    /// eligibility), in the request's media and years, dated newest first and capped — the ones past
+    /// TMDB's page included. Not narrowed by the request's concepts, exactly as TMDB's page is not: the
+    /// filmography is the person's work, and the interpreter can add a genre of its own to "Liam
+    /// Neeson movies" (a "thriller" one is recorded), which would hide Kinsey, a drama. Two live runs
+    /// of that question on unchanged data showed Kinsey once and dropped it once, the pattern a
+    /// thriller genre on the second explains exactly.
+    /// </summary>
+    private async Task<List<Guid>> CataloguedCreditIdsAsync(IQueryable<Title> eligible, Retrieval.HardConstraints hard, CancellationToken ct) =>
+        await Retrieval.HardConstraintFilter.Apply(eligible, db, hard with { Concepts = [] })
+            .OrderBy(t => t.ReleasedAt == null && t.FirstAiredAt == null)
+            .ThenByDescending(t => t.ReleasedAt ?? t.FirstAiredAt)
+            .ThenBy(t => t.Id)
+            .Take(PersonReturnCount * 2)
+            .Select(t => t.Id)
+            .ToListAsync(ct);
+
+    /// <summary>
+    /// The person reply, counts only (FD-3): "You've seen 9 movies directed by Christopher Nolan; here
+    /// are 3 you haven't." — the v2 composer's sentence, so both engines say the same thing.
+    /// </summary>
+    internal static string PersonReply(PersonQuery person, int unseen, int seen, IReadOnlyList<MediaType> media)
+    {
+        ArgumentNullException.ThrowIfNull(person);
+        var credit = person.Role switch
+        {
+            PersonRole.Director => $"directed by {person.Name}",
+            PersonRole.Cast => $"starring {person.Name}",
+            _ => $"with {person.Name}",
+        };
+        var noun = (media.Distinct().ToList(), seen == 1) switch
+        {
+            ([MediaType.Movie], true) => "movie",
+            ([MediaType.Movie], false) => "movies",
+            ([MediaType.Show], true) => "show",
+            ([MediaType.Show], false) => "shows",
+            (_, true) => "title",
+            _ => "titles",
+        };
+        var here = unseen == 1 ? "is one" : FormattableString.Invariant($"are {unseen}");
+        return seen > 0
+            ? FormattableString.Invariant($"You've seen {seen} {noun} {credit}; here {here} you haven't.")
+            : $"Here {here} {credit} you haven't seen.";
+    }
+
+    /// <summary>The subset of the given title ids the account has watched or rated.</summary>
     private async Task<HashSet<Guid>> SeenTitleIdsAsync(Guid accountId, IReadOnlyList<Guid> titleIds, CancellationToken ct)
     {
         var watched = await db.WatchedTitles

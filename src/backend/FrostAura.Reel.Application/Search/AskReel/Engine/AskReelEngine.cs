@@ -74,6 +74,15 @@ public sealed class AskReelEngine(
     /// <summary>How many candidates the executor asks retrieval for.</summary>
     public const int RetrievalWant = 40;
 
+    /// <summary>
+    /// How long the plan call may run before it is sent once more (<see cref="AskReelHedge"/>,
+    /// HREV2-ASK-04): above the plan's healthy p95 (1.2–2.2 s live), at the §4.11 plan target of 3 s.
+    /// </summary>
+    public static readonly TimeSpan DefaultPlanHedgeAfter = TimeSpan.FromSeconds(3);
+
+    /// <summary>The plan's hedge threshold; a test may shorten it.</summary>
+    internal TimeSpan PlanHedgeAfter { get; init; } = DefaultPlanHedgeAfter;
+
     /// <summary>The most TMDB-only titles one turn hydrates and admits (each is a TMDB round trip).</summary>
     public const int MaxProvisional = 6;
 
@@ -375,14 +384,22 @@ public sealed class AskReelEngine(
         turn.Persona = persona.Taste.Length <= 300 ? persona.Taste : persona.Taste[..300];
         turn.PersonaReady.TrySetResult(turn.Persona);
 
-        var plan = await planner.PlanAsync(
-            new PlanInput(
-                turn.Input.Message,
-                state,
-                turn.Input.History.TakeLast(6).ToList(),
-                new StandingConditionsView(AskReelStandingFilters.Describe(turn.Standing)),
-                tasteSummary,
-                mediaFilter),
+        var input = new PlanInput(
+            turn.Input.Message,
+            state,
+            turn.Input.History.TakeLast(6).ToList(),
+            new StandingConditionsView(AskReelStandingFilters.Describe(turn.Standing)),
+            tasteSummary,
+            mediaFilter);
+
+        // A plan stuck on a slow route is sent once more (HREV2-ASK-04): "romantic comedies" planned
+        // in 7.6 s against a p50 under 2 s. The hedge is recorded as the moment it was sent.
+        var planClock = Stopwatch.StartNew();
+        var plan = await AskReelHedge.RunAsync(
+            token => planner.PlanAsync(input, token),
+            p => p.Failure is null,
+            PlanHedgeAfter,
+            () => turn.Timings.Mark(AskStageTimings.PlanHedge, planClock.Elapsed.TotalMilliseconds),
             ct);
         turn.Calls.Add(plan.Meta);
         turn.Models["plan"] = plan.Meta.Model ?? planner.ModelId;
@@ -644,7 +661,8 @@ public sealed class AskReelEngine(
     /// </summary>
     internal static string SupplyAnswer(SupplyReport report, HardConstraints hard)
     {
-        var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords + " " : string.Empty;
+        // The shelf the supply was counted over — every concept and the person, never the first concept alone (HREV2-ASK-01).
+        var topic = AskReelTopic.Shelf(hard) is { } shelf ? shelf + " " : string.Empty;
         var barred = report.PredictedFloor is > 0m;
         var left = Math.Max(0, barred ? report.Offerable : report.Eligible - report.AlreadyShown);
         var noun = (hard.Media, left == 1) switch
@@ -703,7 +721,8 @@ public sealed class AskReelEngine(
 
         var query = QueryFor(turn, next);
         var exclude = query.Exclude.ToHashSet();
-        var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
+        // Named by every constraint the supply intersects, so a count and its label describe one shelf (HREV2-ASK-01).
+        var topic = AskReelTopic.Shelf(hard);
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
 
         await WarmMoodAsync(turn, hard, soft, ct);
@@ -729,7 +748,8 @@ public sealed class AskReelEngine(
         }
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
-        var candidates = Judgeable(retrieval, titles, exclude, next);
+        var candidates = await JudgeOrderAsync(
+            turn, db, () => scorer, next, Judgeable(retrieval, titles, exclude, next), titles, exclude, turn.Timings, ct);
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
@@ -1018,7 +1038,12 @@ public sealed class AskReelEngine(
             var scopedDb = services.GetRequiredService<IReelDbContext>();
             var ids = result.Candidates.Select(c => c.TitleId).ToList();
             var titles = await scopedDb.Titles.AsNoTracking().Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
-            var slice = Judgeable(result, titles, query.Exclude.ToHashSet(), next).Take(RequestJudge.MaxJudged).ToList();
+            // Ordered exactly as the turn will order it, or the early batch is spent on titles the turn
+            // then judges after the bar-clearing ones — or never (HREV2-RET-01).
+            var exclude = query.Exclude.ToHashSet();
+            var ordered = await JudgeOrderAsync(
+                turn, scopedDb, services.GetRequiredService<OnDemandScorer>, next, Judgeable(result, titles, exclude, next), titles, exclude, null, ct);
+            var slice = ordered.Take(RequestJudge.MaxJudged).ToList();
             if (slice.Count == 0)
             {
                 return null;
@@ -1047,9 +1072,216 @@ public sealed class AskReelEngine(
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
         return retrieval.Candidates
             .Where(c => titles.ContainsKey(c.TitleId) && !exclude.Contains(c.TitleId))
-            .Where(c => titles[c.TitleId].TmdbId is not { } tmdb || !legacy.Contains(tmdb))
-            .Where(c => !next.UserNegations.Any(n => Trips(titles[c.TitleId], n)))
+            .Where(c => JudgeableTitle(titles[c.TitleId], legacy, next))
             .ToList();
+    }
+
+    /// <summary>Not a legacy exclusion, and carrying none of the user's own negations as a keyword or a genre.</summary>
+    private static bool JudgeableTitle(Title title, IReadOnlySet<long> legacy, ConversationState next) =>
+        (title.TmdbId is not { } tmdb || !legacy.Contains(tmdb))
+        && !next.UserNegations.Any(n => Trips(title, n));
+
+    /// <summary>
+    /// The candidates the judge takes, in the order it takes them. With no bar it is retrieval's
+    /// candidates in retrieval's order. With a bar, the titles it rules on first are the ones that can
+    /// become a pick: the retrieved titles the bar lets through, then — when those are fewer than the
+    /// judge rules on — the request's own supply that clears the bar but was never retrieved, then the
+    /// retrieved titles with no prediction, then the ones under the bar. Each group keeps its order:
+    /// retrieval's, and the top-up's best prediction first.
+    ///
+    /// <para><b>Why (HREV2-RET-01, IREV2-SYS-01 carried to v2).</b> The judge rules on the first
+    /// <see cref="RequestJudge.MaxJudged"/> titles, and a title under the bar can only ever reach the
+    /// floor tray. "Scary horror films" spent all sixteen judgements on titles under the bar and
+    /// answered none-found while Dead Silence and Lake Mungo cleared it unjudged. Reordering the
+    /// retrieved pool fixed the first page and not the second: "Show me more" retrieved forty horror
+    /// titles of which only six cleared the bar, judged ten under it, and answered none-found while the
+    /// supply held 43 more that cleared it — retrieval simply never returned them. So the pool is
+    /// topped up from the supply itself: the reply already counts those titles as "clearing your bar",
+    /// and the judge now sees them.</para>
+    ///
+    /// <para><b>The top-up is the supply's clearing set and nothing wider</b>
+    /// (<see cref="SupplyTopUpAsync"/>): the request's hard constraints over the account's eligibility,
+    /// the supply's vote floor and maturity ceiling, and a STORED prediction from the active model that
+    /// clears the bar — the very split the reply's counts come from. Then the same exclusions every
+    /// retrieved title passes: shown, rejected, referenced, legacy, and the user's negations.</para>
+    ///
+    /// <para><b>Ordered on stored predictions; scored on demand only when that cannot fill the
+    /// judge.</b> The active model stores predictions for about 1,400 of 38,000 titles, so a pool title
+    /// often has none. Scoring every one before the judge starts put 0.4–3 s in front of the first card
+    /// (HREV2-ASK-04), so it happens only when the titles known to clear — retrieved or topped up —
+    /// cannot fill the judge's slice and some retrieved title would otherwise be left unjudged. The slice
+    /// the judge takes is still placed on fresh predictions, scored beside the judge as before.</para>
+    ///
+    /// <para>Timed as <see cref="AskStageTimings.JudgeOrder"/> on <paramref name="timings"/> — null from the
+    /// speculation, which runs beside the turn and may not touch its (unsynchronised) timings. The
+    /// scorer is resolved only when a candidate needs it. A topped-up title is added to
+    /// <paramref name="titles"/>.</para>
+    /// </summary>
+    private static async Task<List<Candidate>> JudgeOrderAsync(
+        Turn turn,
+        IReelDbContext store,
+        Func<OnDemandScorer> scoring,
+        ConversationState next,
+        List<Candidate> candidates,
+        Dictionary<Guid, Title> titles,
+        IReadOnlySet<Guid> exclude,
+        AskStageTimings? timings,
+        CancellationToken ct)
+    {
+        var hard = next.Hard;
+        var topical = hard.HasConcepts || hard.People.Count > 0;
+        if (turn.Floor <= 0m || (!topical && candidates.Count <= RequestJudge.MaxJudged))
+        {
+            return candidates;
+        }
+
+        var ids = candidates.Select(c => c.TitleId).ToList();
+        var predicted = new Dictionary<Guid, decimal>();
+        List<Candidate> topUp = [];
+        using (timings?.Stage(AskStageTimings.JudgeOrder))
+        {
+            var activeId = await store.ModelArtifacts
+                .Where(a => a.AccountId == turn.AccountId && a.Status == ArtifactStatus.Active)
+                .OrderByDescending(a => a.Version)
+                .Select(a => (Guid?)a.Id)
+                .FirstOrDefaultAsync(ct);
+            if (activeId is not { } artifact)
+            {
+                return candidates;
+            }
+
+            foreach (var row in await store.TitleScores
+                         .Where(s => s.AccountId == turn.AccountId && s.ModelArtifactId == artifact && ids.Contains(s.TitleId))
+                         .Select(s => new { s.TitleId, s.PredictedRating })
+                         .ToListAsync(ct))
+            {
+                predicted.TryAdd(row.TitleId, row.PredictedRating);
+            }
+
+            var clearing = ids.Count(id => ClearsOn(predicted, id, turn.Floor));
+            if (topical && clearing < RequestJudge.MaxJudged)
+            {
+                topUp = await SupplyTopUpAsync(
+                    turn, store, next, artifact, ids, exclude, RequestJudge.MaxJudged - clearing, titles, ct);
+            }
+
+            var missing = ids.Where(id => !predicted.ContainsKey(id)).ToList();
+            if (missing.Count > 0
+                && candidates.Count + topUp.Count > RequestJudge.MaxJudged
+                && clearing + topUp.Count < RequestJudge.MaxJudged)
+            {
+                foreach (var (id, p) in await scoring().ScoreAsync(turn.AccountId, missing, DateTime.UtcNow, ct))
+                {
+                    predicted[id] = p;
+                }
+            }
+        }
+
+        return OrderForJudge(candidates, topUp, id =>
+            !predicted.ContainsKey(id) ? JudgeTier.Unscored
+            : ClearsOn(predicted, id, turn.Floor) ? JudgeTier.Clears
+            : JudgeTier.Under);
+    }
+
+    private static bool ClearsOn(IReadOnlyDictionary<Guid, decimal> predicted, Guid id, decimal floor) =>
+        AskReelGate.Clears(predicted.TryGetValue(id, out var p) && p > 0m ? p : null, floor);
+
+    /// <summary>
+    /// Up to <paramref name="need"/> titles of the request's supply that clear the bar and were not
+    /// retrieved (<see cref="JudgeOrderAsync"/>): the supply's own predicate — hard constraints over
+    /// the account's eligibility, at least <see cref="CrowdVotes.MinRelaxVotes"/> votes, inside the
+    /// maturity ceiling, a stored prediction from the active model clearing the bar at badge
+    /// precision — less every title this turn may not show, best prediction first.
+    /// </summary>
+    private static async Task<List<Candidate>> SupplyTopUpAsync(
+        Turn turn,
+        IReelDbContext store,
+        ConversationState next,
+        Guid artifact,
+        IReadOnlyCollection<Guid> retrieved,
+        IReadOnlySet<Guid> exclude,
+        int need,
+        Dictionary<Guid, Title> titles,
+        CancellationToken ct)
+    {
+        var accountId = turn.AccountId;
+        var eligible = new EligibilityQueryBuilder(store);
+        var outside = retrieved.Concat(exclude).Distinct().ToList();
+        // Widened by a tenth in SQL; the exact test is the gate's, at the precision the badge renders.
+        var lowest = turn.Floor - 0.1m;
+        var supply = CrowdVotes.AtLeast(HardConstraintFilter.Apply(eligible.EligibleTitles(accountId), store, next.Hard), CrowdVotes.MinRelaxVotes)
+            .Where(t => !outside.Contains(t.Id));
+        var scored = await store.TitleScores
+            .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact && s.PredictedRating >= lowest)
+            .Where(s => supply.Any(t => t.Id == s.TitleId))
+            .Select(s => new { s.TitleId, s.PredictedRating })
+            .ToListAsync(ct);
+        var ranked = scored
+            .GroupBy(s => s.TitleId)
+            .Select(g => (Id: g.Key, Predicted: g.First().PredictedRating))
+            .Where(s => AskReelGate.Clears(s.Predicted, turn.Floor))
+            .OrderByDescending(s => s.Predicted)
+            .ThenBy(s => s.Id)
+            .Select(s => s.Id)
+            .ToList();
+        if (ranked.Count == 0)
+        {
+            return [];
+        }
+
+        var ceiling = await eligible.MaturityCeilingAsync(accountId, ct);
+        var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
+        var topUp = new List<Candidate>(need);
+        foreach (var chunk in ranked.Chunk(Math.Max(need * 2, RequestJudge.MaxJudged)))
+        {
+            var loaded = await store.Titles.AsNoTracking().Where(t => chunk.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
+            foreach (var id in chunk)
+            {
+                if (loaded.TryGetValue(id, out var title)
+                    && EligibilityQueryBuilder.PassesMaturity(title, ceiling)
+                    && JudgeableTitle(title, legacy, next))
+                {
+                    titles[id] = title;
+                    topUp.Add(new Candidate(id, FusedScore: 0d, Similarity: null, HardConstraintFilter.EvidenceFor(title, next.Hard)));
+                    if (topUp.Count == need)
+                    {
+                        return topUp;
+                    }
+                }
+            }
+        }
+
+        return topUp;
+    }
+
+    /// <summary>Where a retrieved candidate stands against the bar, for the judge's order.</summary>
+    internal enum JudgeTier
+    {
+        /// <summary>Its prediction clears the bar.</summary>
+        Clears,
+
+        /// <summary>No prediction: it may clear the bar once scored.</summary>
+        Unscored,
+
+        /// <summary>Its prediction is under the bar: it can only reach the floor tray.</summary>
+        Under,
+    }
+
+    /// <summary>
+    /// The retrieved candidates that clear the bar, then the supply's top-up, then the retrieved
+    /// candidates with no prediction, then those under the bar — each group in its own order.
+    /// </summary>
+    internal static List<Candidate> OrderForJudge(
+        IReadOnlyList<Candidate> candidates, IReadOnlyList<Candidate> topUp, Func<Guid, JudgeTier> tierOf)
+    {
+        var tiers = candidates.Select(c => (c, Tier: tierOf(c.TitleId))).ToList();
+        return
+        [
+            .. tiers.Where(t => t.Tier == JudgeTier.Clears).Select(t => t.c),
+            .. topUp,
+            .. tiers.Where(t => t.Tier == JudgeTier.Unscored).Select(t => t.c),
+            .. tiers.Where(t => t.Tier == JudgeTier.Under).Select(t => t.c),
+        ];
     }
 
     /// <summary>
