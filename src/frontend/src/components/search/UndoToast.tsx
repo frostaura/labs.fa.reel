@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type FocusEvent } from "react";
 import { Undo2, X } from "lucide-react";
 import { Button } from "../ui/button";
 import { ToastPortal } from "../ui/toast-stack";
@@ -26,6 +26,12 @@ export const UNDO_WINDOW_MS = 6000;
  * destructive action actually commits, so it must fire exactly once per toast. Keyed on the
  * caller's own `id`, which is what makes a second action restart the clock rather than inherit
  * the first one's remaining time.
+ *
+ * The clock holds while someone is on the toast (HREV4-PH-02, WCAG 2.2.1 Timing Adjustable): while
+ * keyboard focus is inside it or a pointer rests on it, nothing commits. A keyboard or screen-reader
+ * user who has just reached "Undo" must not lose it to a timer they cannot see, and a person reading
+ * the message with the cursor on it is plainly still deciding. Leaving restarts a fresh full window
+ * rather than resuming the remainder, so letting go never leaves a few milliseconds to act in.
  */
 export default function UndoToast({
   id,
@@ -46,14 +52,29 @@ export default function UndoToast({
   undoLabel?: string;
   ms?: number;
 }) {
+  const [pointerOn, setPointerOn] = useState(false);
+  const [focusIn, setFocusIn] = useState(false);
+  const held = pointerOn || focusIn;
+
+  // The newest closure, so a window that outlives a re-render commits what the caller means now,
+  // without the closure itself being a key: callers pass a fresh one on every render, and keying on
+  // it would restart the window on every keystroke elsewhere on the page — which is how a
+  // six-second undo becomes an indefinite one. The `id` is the real key.
+  const expire = useRef(onExpire);
   useEffect(() => {
-    const timer = window.setTimeout(onExpire, ms);
+    expire.current = onExpire;
+  });
+
+  useEffect(() => {
+    if (held) return;
+    const timer = window.setTimeout(() => expire.current(), ms);
     return () => window.clearTimeout(timer);
-    // `onExpire` is deliberately not a dependency: callers pass a fresh closure on every render,
-    // and depending on it would restart the window on every keystroke elsewhere on the page —
-    // which is how a six-second undo becomes an indefinite one. The `id` is the real key.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, ms]);
+  }, [id, ms, held]);
+
+  // Moving between Undo and Dismiss is still "on the toast"; only focus going elsewhere lets go.
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusIn(false);
+  };
 
   // Into the shared toast column (ui/toast-stack), so a second toast stacks above this one instead
   // of covering it.
@@ -63,6 +84,10 @@ export default function UndoToast({
         role="status"
         aria-live="polite"
         data-testid={testId}
+        onFocus={() => setFocusIn(true)}
+        onBlur={onBlur}
+        onPointerEnter={() => setPointerOn(true)}
+        onPointerLeave={() => setPointerOn(false)}
         className="flex items-center gap-3 rounded-xl border border-fa-edge bg-fa-ink/95 px-4 py-3 shadow-lg backdrop-blur-md"
       >
         <p className="fa-body flex-1 text-fa-frost-bright">{message}</p>

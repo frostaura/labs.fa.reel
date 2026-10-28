@@ -16,7 +16,7 @@ const card = (n: number) => ({
   crowdVotes: 9000, whyThis: "Explores a heist crew coming apart, like Heat.", isReleased: true,
 });
 
-async function bootHome(page: Page) {
+async function bootHome(page: Page, options: { clock?: boolean } = {}) {
   await stubEventSource(page);
   await mockHomeChrome(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
@@ -34,6 +34,7 @@ async function bootHome(page: Page) {
     userRating: 3,
     verdict: { predictedBefore: 8.1, surface: "feed", shownAt: new Date().toISOString(), delta: 5.1 },
   });
+  if (options.clock) await page.clock.install();
   await page.goto("/home");
   await expect(page.getByTestId("rec-card")).toHaveCount(4);
 }
@@ -77,4 +78,71 @@ test("on a phone the stacked toasts clear the bottom tab bar", async ({ browser 
   const bar = await box(page.getByTestId("mobile-tabbar"));
   for (const t of toasts) expect(t.y + t.height).toBeLessThanOrEqual(bar.y);
   await context.close();
+});
+
+/**
+ * HREV4-PH-02 (WCAG 2.2.1): the undo window holds while someone is on the toast. Before, a keyboard
+ * user who reached "Undo" after the six seconds found the action already committed, and the clock
+ * ran on under a resting pointer. The page's clock is driven, so "long after the window" is exact.
+ */
+const UNDO_WINDOW_MS = 6000; // UndoToast's UNDO_WINDOW_MS; a change there turns the expiry check below red.
+
+async function notForMeByKeyboard(page: Page, calls: string[]) {
+  await page.route("**/api/titles/movie/1007/reactions/not_interested", (route) => {
+    calls.push(route.request().method());
+    return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+  const seven = page.getByTestId("rec-card").filter({ hasText: "Pick 7" });
+  await seven.getByTestId("quick-not-interested").focus();
+  await page.keyboard.press("Enter");
+  await expect(seven).toHaveCount(0);
+  await expect(page.getByTestId("card-undo-toast")).toContainText("“Pick 7” won’t be picked for you again.");
+  return seven;
+}
+
+test("a keyboard user on the card undo keeps it past the window, and Enter undoes", async ({ page }) => {
+  await bootHome(page, { clock: true });
+  const calls: string[] = [];
+  const seven = await notForMeByKeyboard(page, calls);
+  // Focus arriving on Undo — the keyboard or screen-reader user has got there.
+  await page.getByTestId("card-undo-toast-undo").focus();
+  await page.clock.runFor(UNDO_WINDOW_MS * 3);
+  await expect(page.getByTestId("card-undo-toast")).toBeVisible();
+  await expect(page.getByTestId("card-undo-toast-undo")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("card-undo-toast")).toHaveCount(0);
+  await expect(seven).toHaveCount(1);
+  expect(calls).toEqual(["POST", "DELETE"]);
+});
+
+test("Tab from Undo to Dismiss still holds the window; tabbing out gives a fresh full one", async ({ page, browserName }) => {
+  await bootHome(page, { clock: true });
+  await notForMeByKeyboard(page, []);
+  const toast = page.getByTestId("card-undo-toast");
+  await page.getByTestId("card-undo-toast-undo").focus();
+  // WebKit on macOS moves Tab between buttons only with Option held (a11y.spec's tabKey).
+  await page.keyboard.press(browserName === "webkit" ? "Alt+Tab" : "Tab");
+  await expect(page.getByTestId("card-undo-toast-dismiss")).toBeFocused();
+  await page.clock.runFor(UNDO_WINDOW_MS * 2);
+  await expect(toast).toBeVisible();
+  // Out of the toast, to the page.
+  await page.getByTestId("rec-card").first().getByTestId("quick-not-interested").focus();
+  await page.clock.runFor(UNDO_WINDOW_MS - 500);
+  await expect(toast).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(toast).toHaveCount(0);
+});
+
+test("a pointer resting on the card undo holds the window until it leaves", async ({ page }) => {
+  await bootHome(page, { clock: true });
+  await notForMeByKeyboard(page, []);
+  const toast = page.getByTestId("card-undo-toast");
+  await toast.hover();
+  await page.clock.runFor(UNDO_WINDOW_MS * 2);
+  await expect(toast).toBeVisible();
+  await page.mouse.move(5, 5);
+  await page.clock.runFor(UNDO_WINDOW_MS - 500);
+  await expect(toast).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(toast).toHaveCount(0);
 });
