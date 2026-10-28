@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { enterTarget, hiddenLine, peopleFirst, shouldQueryGlobal, strongMatchCount } from "./globalTypeahead";
+import {
+  enterTarget,
+  hasFootprint,
+  hiddenLine,
+  peopleFirst,
+  scoredTitleIds,
+  shouldQueryGlobal,
+  strongMatchCount,
+} from "./globalTypeahead";
 import type { TypeaheadPayload, TypeaheadPerson, TypeaheadTitle } from "../store/api/typeahead";
 
 const title = (name: string, tier?: TypeaheadTitle["tier"]): TypeaheadTitle => ({
@@ -81,5 +89,34 @@ describe("hiddenLine", () => {
   it("says nothing when nothing is hidden", () => {
     expect(hiddenLine(0)).toBeNull();
     expect(hiddenLine(undefined)).toBeNull();
+  });
+});
+
+describe("footprint and the for-you badge (HREV5-RET-05)", () => {
+  const row = (name: string, extra: Partial<TypeaheadTitle>): TypeaheadTitle => ({ ...title(name, "exact"), ...extra });
+
+  it("asks the badge only for rows the account has done nothing with", () => {
+    const rows = [
+      row("untouched", { footprint: false }),
+      row("rated, part-watched", { footprint: true, userRating: 7, inProgress: true }),
+      row("saved", { footprint: true }),
+      row("seen", { footprint: true, isFullyWatched: true }),
+      row("also untouched", { footprint: false }),
+    ];
+    expect(scoredTitleIds(rows)).toBe("untouched,also untouched");
+    expect(scoredTitleIds([])).toBe("");
+  });
+
+  it("reads an older server's rows from what they do send", () => {
+    expect(hasFootprint(row("old seen", { isFullyWatched: true }))).toBe(true);
+    expect(hasFootprint(row("old rated", { userRating: 6 }))).toBe(true);
+    expect(hasFootprint(row("old in progress", { inProgress: true }))).toBe(true);
+    expect(hasFootprint(row("old untouched", {}))).toBe(false);
+  });
+
+  it("trusts the server's flag over the fields it can see", () => {
+    // Saved or dropped: no rating, no watch, still a footprint.
+    expect(hasFootprint(row("saved", { footprint: true }))).toBe(true);
+    expect(hasFootprint(row("someone else's watch", { footprint: false }))).toBe(false);
   });
 });

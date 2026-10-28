@@ -227,3 +227,45 @@ test.describe("tiered lookup", () => {
     await expect(page.getByTestId("typeahead-person")).toHaveAttribute("aria-selected", "true");
   });
 });
+
+test.describe("what the account did with a title (HREV5-RET-05, HREV5-DESK-06)", () => {
+  const CHOSEN = {
+    ...INCEPTION, titleId: "00000000-0000-0000-0000-0000000000c7", tmdbId: 103768, name: "The Chosen",
+    mediaType: "Show", tier: "word", footprint: true, userRating: 7, inProgress: true,
+  };
+  const CROWN = {
+    ...INCEPTION, titleId: "00000000-0000-0000-0000-0000000000c1", tmdbId: 65494, name: "The Crown",
+    mediaType: "Show", tier: "exact", footprint: false, userRating: null, inProgress: false,
+  };
+
+  test("a rated, half-watched title shows the user's rating and progress, and is never scored", async ({ page }) => {
+    await bootHome(page);
+    await localLeg(page, { titles: [CROWN, CHOSEN], people: [], strongMatches: 6, hiddenByConditions: 0 });
+    const scored: string[] = [];
+    page.on("request", (r) => {
+      const url = new URL(r.url());
+      if (url.pathname === "/api/search/typeahead/scores") scored.push(url.searchParams.get("ids") ?? "");
+    });
+
+    await page.getByTestId("search-input").fill("the crown");
+    const chosen = page.getByTestId("typeahead-result").filter({ hasText: "The Chosen" });
+    await expect(chosen.getByTestId("user-rating")).toContainText("7");
+    await expect(chosen.getByTestId("typeahead-watch-mark")).toContainText("in progress");
+    await expect(chosen.getByTestId("predicted-rating")).toHaveCount(0);
+    await expect.poll(() => scored).toEqual([CROWN.titleId]);
+  });
+
+  test("the panel is opaque over the hero grid", async ({ page }) => {
+    await bootHome(page);
+    await page.getByTestId("search-input").fill("jeanne");
+    const panel = page.getByTestId("typeahead-panel");
+    await expect(panel).toBeVisible();
+    const surface = await panel.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { background: style.backgroundColor, backdrop: style.backdropFilter };
+    });
+    // rgb(...) is opaque; rgba(..., a) with a < 1 is not.
+    expect(surface.background).toMatch(/^rgb\(/);
+    expect(surface.backdrop === "none" || surface.backdrop === "").toBe(true);
+  });
+});

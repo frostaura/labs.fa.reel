@@ -1,4 +1,4 @@
-import type { MatchTier, TypeaheadPayload } from "../store/api/typeahead";
+import type { MatchTier, TypeaheadPayload, TypeaheadTitle } from "../store/api/typeahead";
 
 /**
  * Whether the typeahead should reach beyond the ingested catalogue for a term.
@@ -49,4 +49,21 @@ export function enterTarget(payload: TypeaheadPayload | undefined): EnterTarget 
 export function hiddenLine(count: number | undefined): string | null {
   if (!count || count <= 0) return null;
   return `${count} ${count === 1 ? "match" : "matches"} hidden by your conditions`;
+}
+
+/**
+ * True when the account has a footprint on the row's title — watched any of it, rated it, saved or
+ * dropped it. A server that predates the flag is read from what it does send.
+ */
+export function hasFootprint(title: TypeaheadTitle): boolean {
+  return title.footprint ?? (title.isFullyWatched || title.inProgress === true || title.userRating != null);
+}
+
+/**
+ * The ids the "for you" badge is asked for, comma-joined: only rows with no footprint (HREV5-RET-05).
+ * A prediction beside a title the user already rated is an in-sample grade next to their own, and
+ * one on a show they are halfway through is a discovery number on a title that is no discovery.
+ */
+export function scoredTitleIds(titles: readonly TypeaheadTitle[]): string {
+  return titles.filter((t) => !hasFootprint(t)).map((t) => t.titleId).join(",");
 }

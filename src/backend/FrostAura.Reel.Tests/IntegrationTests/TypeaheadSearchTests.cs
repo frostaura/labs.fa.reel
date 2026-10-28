@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Search.Typeahead;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
@@ -347,6 +348,103 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
     private static TmdbListItem Item(long id, string name, string language, decimal popularity) =>
         new(id, true, name, "/p.jpg", null, "An overview.", popularity, 7m, 100,
             new DateTime(2015, 5, 14, 0, 0, 0, DateTimeKind.Utc), [18], language);
+
+    [Fact]
+    public async Task A_title_the_account_has_a_footprint_on_carries_it_and_is_never_scored()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV5-RET-05: "the crown" listed The Chosen — rated 7, partly watched — with a "for you"
+        // prediction and no mark at all, because only a FULL watch counted. Every footprint kind is
+        // carried on the row, the user's own rating is shown, and none of them is offered for scoring.
+        var token = Token();
+        var accountId = await SeedAccountAsync();
+        var ratedPartly = await SeedTitleAsync($"{token} Chosen", votes: 900);
+        var ratedOnly = await SeedTitleAsync($"{token} Rated", votes: 800);
+        var watching = await SeedTitleAsync($"{token} Watching", votes: 700);
+        var seen = await SeedTitleAsync($"{token} Seen", votes: 600);
+        var episodeRated = await SeedTitleAsync($"{token} Episode", votes: 500);
+        var saved = await SeedTitleAsync($"{token} Saved", votes: 400);
+        var untouched = await SeedTitleAsync($"{token} Untouched", votes: 300);
+        var revokedSave = await SeedTitleAsync($"{token} Revoked", votes: 200);
+        var someoneElses = await SeedTitleAsync($"{token} Elsewhere", votes: 100);
+        var other = await SeedAccountAsync();
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var now = DateTime.UtcNow;
+            db.AddRange(
+                Rating(accountId, ratedPartly, RatingSubjectType.Show, 7),
+                Watch(accountId, ratedPartly, full: false),
+                Rating(accountId, ratedOnly, RatingSubjectType.Movie, 4),
+                Watch(accountId, watching, full: false),
+                Watch(accountId, seen, full: true),
+                Rating(accountId, episodeRated, RatingSubjectType.Episode, 9),
+                new UserTitleReaction { Id = Guid.NewGuid(), AccountId = accountId, TitleId = saved, Kind = ReactionKind.SaveForLater, CreatedAt = now },
+                new UserTitleReaction { Id = Guid.NewGuid(), AccountId = accountId, TitleId = revokedSave, Kind = ReactionKind.SaveForLater, CreatedAt = now, RevokedAt = now },
+                Rating(other, someoneElses, RatingSubjectType.Movie, 10),
+                Watch(other, someoneElses, full: true));
+            await db.SaveChangesAsync();
+        }
+
+        var rows = (await LocalAsync(accountId, token)).Titles.ToDictionary(t => t.TitleId);
+
+        Assert.Equal((short)7, rows[ratedPartly].UserRating);
+        Assert.True(rows[ratedPartly].InProgress);
+        Assert.False(rows[ratedPartly].IsFullyWatched);
+        Assert.Equal((short)4, rows[ratedOnly].UserRating);
+        Assert.False(rows[ratedOnly].InProgress);
+        Assert.True(rows[watching].InProgress);
+        Assert.Null(rows[watching].UserRating);
+        Assert.True(rows[seen].IsFullyWatched);
+        Assert.False(rows[seen].InProgress);
+        Assert.Null(rows[episodeRated].UserRating);
+        foreach (var id in new[] { ratedPartly, ratedOnly, watching, seen, episodeRated, saved })
+        {
+            Assert.True(rows[id].Footprint, $"{id} carries a footprint");
+        }
+
+        foreach (var id in new[] { untouched, revokedSave, someoneElses })
+        {
+            Assert.False(rows[id].Footprint, $"{id} carries none");
+            Assert.Null(rows[id].UserRating);
+            Assert.False(rows[id].InProgress);
+            Assert.False(rows[id].IsFullyWatched);
+        }
+
+        await using var read = fixture.CreateContext(new AccountContext());
+        var asked = new[] { ratedPartly, untouched, ratedOnly, watching, seen, episodeRated, saved, revokedSave, someoneElses };
+        var scorable = await new TypeaheadSearch(read, new EligibilityQueryBuilder(read)).ScorableAsync(accountId, asked, default);
+        Assert.Equal([untouched, revokedSave, someoneElses], scorable);
+    }
+
+    private static UserRating Rating(Guid accountId, Guid titleId, RatingSubjectType subject, short rating) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = accountId,
+        TitleId = titleId,
+        SubjectType = subject,
+        SeasonNumber = subject is RatingSubjectType.Season or RatingSubjectType.Episode ? 1 : 0,
+        EpisodeNumber = subject == RatingSubjectType.Episode ? 1 : 0,
+        Rating = rating,
+        RatedAt = DateTime.UtcNow,
+        FirstRatedAt = DateTime.UtcNow,
+        SyncedAt = DateTime.UtcNow,
+    };
+
+    private static WatchedTitle Watch(Guid accountId, Guid titleId, bool full) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = accountId,
+        TitleId = titleId,
+        Plays = 1,
+        LastWatchedAt = DateTime.UtcNow,
+        IsFullyWatched = full,
+        FirstSyncedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow,
+    };
 
     private async Task<TypeaheadLocal> LocalAsync(Guid accountId, string term)
     {

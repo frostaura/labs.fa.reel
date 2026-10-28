@@ -57,10 +57,14 @@ public static class TypeaheadEndpoints
         });
 
         // The personal badge for a handful of rows, fetched after the rows render: scored live against
-        // the Active model (one model load + one taste build). No model yet ⇒ an empty map.
+        // the Active model (one model load + one taste build). No model yet ⇒ an empty map. A title
+        // the account has a footprint on (watched any of it, rated it, saved or dropped it) is never
+        // scored: "for you" is a discovery number, and on a title already rated it is an in-sample
+        // grade beside the user's own (HREV5-RET-05). The box leaves such ids out; this holds anyway.
         group.MapGet("/typeahead/scores", async (
-            string ids, IAccountContext accountContext, OnDemandScorer scorer, CancellationToken ct) =>
+            string ids, IAccountContext accountContext, OnDemandScorer scorer, TypeaheadSearch search, CancellationToken ct) =>
         {
+            var accountId = accountContext.AccountId!.Value;
             var parsed = (ids ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(id => Guid.TryParse(id, out var g) ? g : Guid.Empty)
@@ -68,12 +72,13 @@ public static class TypeaheadEndpoints
                 .Distinct()
                 .Take(MaxScoredIds)
                 .ToList();
+            parsed = [.. await search.ScorableAsync(accountId, parsed, ct)];
             if (parsed.Count == 0)
             {
                 return Results.Ok(new { scores = new Dictionary<Guid, decimal>() });
             }
 
-            var scores = await scorer.ScoreAsync(accountContext.AccountId!.Value, parsed, DateTime.UtcNow, ct);
+            var scores = await scorer.ScoreAsync(accountId, parsed, DateTime.UtcNow, ct);
             return Results.Ok(new { scores });
         });
 
@@ -94,6 +99,9 @@ public static class TypeaheadEndpoints
         year = t.Year,
         posterPath = t.PosterPath,
         isFullyWatched = t.IsFullyWatched,
+        userRating = t.UserRating,
+        inProgress = t.InProgress,
+        footprint = t.Footprint,
         // The badge is fetched after the rows (/typeahead/scores); the field stays for old clients.
         predictedRating = (decimal?)null,
         crowdRating = t.CrowdRating,
