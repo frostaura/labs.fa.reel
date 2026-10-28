@@ -67,6 +67,19 @@ interface Api {
   setNetwork(up: boolean): void;
   /** Requests for /api/saved the network (not the worker's cache) answered. */
   savedFetches(): number;
+  /** Requests the network is holding right now (it is down, and their connections have not dropped). */
+  held(): number;
+  /** How long the API has had nothing to do: no request held, none arriving. 0 while one is held. */
+  quietMs(): number;
+  /**
+   * Holds every session probe (`/api/auth/me`) until `releaseSession`, which answers them as if
+   * they got through just before the signal went: the page signs in, and every read the signed-in
+   * page then makes meets the outage.
+   */
+  holdSession(): void;
+  /** Session probes `holdSession` is holding. */
+  heldSessions(): number;
+  releaseSession(): void;
 }
 
 const TRIPWIRE = process.env.REEL_E2E_TRIPWIRE;
@@ -98,9 +111,17 @@ async function mockApi(): Promise<Api> {
   let savedName = A_PICK;
   let savedFetches = 0;
   const held = new Set<http.ServerResponse>();
+  let lastRequestAt = Date.now();
+  let sessionGate: (() => void)[] | null = null;
 
   const server = http.createServer((req, res) => {
     req.resume();
+    lastRequestAt = Date.now();
+    const path = new URL(req.url ?? "/", "http://mock.invalid").pathname;
+    if (sessionGate && path === "/api/auth/me") {
+      sessionGate.push(() => answer(path, res));
+      return;
+    }
     if (!networkUp) {
       held.add(res);
       setTimeout(() => {
@@ -109,7 +130,9 @@ async function mockApi(): Promise<Api> {
       }, DROP_AFTER_MS).unref();
       return;
     }
-    const path = new URL(req.url ?? "/", "http://mock.invalid").pathname;
+    answer(path, res);
+  });
+  const answer = (path: string, res: http.ServerResponse) => {
     const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
       res.writeHead(status, { "Content-Type": "application/json", ...headers }).end(JSON.stringify(body));
     if (path === "/api/auth/me") return session ? json(session) : json({}, 401);
@@ -124,7 +147,7 @@ async function mockApi(): Promise<Api> {
       return json(saved(savedName), 200, { Date: new Date().toUTCString() });
     }
     res.writeHead(204).end();
-  });
+  };
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   const handOver = await fetch(`${TRIPWIRE}/__tripwire/forward`, {
@@ -149,6 +172,17 @@ async function mockApi(): Promise<Api> {
       if (up) held.clear();
     },
     savedFetches: () => savedFetches,
+    held: () => held.size,
+    quietMs: () => (held.size > 0 ? 0 : Date.now() - lastRequestAt),
+    holdSession() {
+      sessionGate = [];
+    },
+    heldSessions: () => sessionGate?.length ?? 0,
+    releaseSession() {
+      const waiting = sessionGate ?? [];
+      sessionGate = null;
+      for (const release of waiting) release();
+    },
   };
 }
 
@@ -201,6 +235,21 @@ const cachedSaved = (page: Page) =>
     return names;
   });
 
+/**
+ * Opens Home and waits until it has read everything it reads on arrival and the API has gone quiet,
+ * so a network drop that follows meets only the reads the next step makes (PH-02). Going down the
+ * moment the shell painted raced Home's own reads: when they lost, six of them hung on the dead
+ * network, filled the browser's six connections to the host, and Saved's read queued behind them
+ * for a whole extra drop in WebKit (see the "lands while Home is still reading" test).
+ */
+async function openHomeAndSettle(page: Page, api: Api): Promise<void> {
+  const feedRead = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/feed");
+  await page.goto("/home");
+  await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
+  await feedRead;
+  await expect.poll(() => api.quietMs(), { timeout: 10_000 }).toBeGreaterThanOrEqual(750);
+}
+
 async function openSavedFromTheShell(page: Page): Promise<void> {
   await page.getByRole("link", { name: "Saved" }).first().click();
   await expect(page).toHaveURL(/\/saved$/);
@@ -224,8 +273,7 @@ test("an answer the worker serves from its cache is marked, and the page says so
 
   // A fresh page (the store starts empty), then the network goes. The worker has the shell and
   // the Saved chunk precached, and the Saved answer in its API cache.
-  await page.goto("/home");
-  await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
+  await openHomeAndSettle(page, api);
   const fetchesOnline = api.savedFetches();
   api.setNetwork(false);
   await openSavedFromTheShell(page);
@@ -257,8 +305,7 @@ test("after A signs out, B on the same browser offline is never shown A's Saved 
 
   // B links (Trakt redirects back: a full page load), then the network goes.
   api.signIn(SESSION_B, B_PICK);
-  await page.goto("/home");
-  await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
+  await openHomeAndSettle(page, api);
   api.setNetwork(false);
   await openSavedFromTheShell(page);
 
@@ -267,6 +314,48 @@ test("after A signs out, B on the same browser offline is never shown A's Saved 
   // The read settles as a failure (the queue's own error state), not as A's list.
   // The worker has no cache to fall back to, so the read fails when the connection drops.
   await expect(page.getByTestId("saved-error")).toBeVisible({ timeout: DROP_AFTER_MS + 10_000 });
+  await expect(page.getByText(A_PICK)).toHaveCount(0);
+  expect(await cachedSaved(page)).toBeNull();
+  api.setNetwork(true);
+});
+
+// The fixture varied (PH-02): the outage lands while Home is still making its arrival reads, which
+// is where the test above used to go down on a loaded machine. Those reads hang, and over the
+// preview server's HTTP/1.1 they hold all six of WebKit's connections to the host, which the page
+// and its worker share, so Saved's read waits for one before it can even hang itself. It still
+// settles as the queue's error, one drop later, and B is still never shown A's list. Measured
+// 2026-10-28: with a one-drop bound this fails in WebKit (the page stays on the Saved skeleton,
+// exactly as round 4 saw) and passes in Chromium.
+test("an outage that lands while Home is still reading settles Saved as an error, never A's list (I-11)", async ({ page }) => {
+  await stubEventSource(page);
+  const api = await mockApi();
+  api.signIn(SESSION_FOUNDER, A_PICK);
+  await openHomeAndSettle(page, api);
+  await workerInControl(page);
+  await openSavedFromTheShell(page);
+  await expect(page.getByText(A_PICK).first()).toBeVisible();
+  await expect.poll(() => cachedSaved(page)).toEqual([A_PICK]);
+  await page.getByRole("button", { name: `Account menu, ${SESSION_FOUNDER.displayName}` }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect.poll(() => cachedSaved(page)).toBeNull();
+
+  api.signIn(SESSION_B, B_PICK);
+  api.holdSession();
+  await page.goto("/home");
+  // The shell waits on the session probe; it gets through just before the signal goes.
+  await expect.poll(() => api.heldSessions()).toBeGreaterThanOrEqual(1);
+  api.setNetwork(false);
+  api.releaseSession();
+  await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
+  // Six: HTTP/1.1's per-host connection limit. Fewer held reads would not fill the pool, and this
+  // test would no longer be the case it names.
+  await expect.poll(() => api.held(), { timeout: 10_000 }).toBeGreaterThanOrEqual(6);
+  await openSavedFromTheShell(page);
+
+  await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+  // One drop for the reads ahead of it to free a connection, one for its own.
+  await expect(page.getByTestId("saved-error")).toBeVisible({ timeout: 2 * DROP_AFTER_MS + 10_000 });
   await expect(page.getByText(A_PICK)).toHaveCount(0);
   expect(await cachedSaved(page)).toBeNull();
   api.setNetwork(true);
