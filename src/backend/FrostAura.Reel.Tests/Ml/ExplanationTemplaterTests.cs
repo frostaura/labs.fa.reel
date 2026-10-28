@@ -475,6 +475,38 @@ public class ExplanationTemplaterTests
             sentences);
     }
 
+    [Theory]
+    [InlineData("hacker")]
+    [InlineData("revenge")]
+    [InlineData("time travel")]
+    [InlineData("serial killer")]
+    [InlineData("artificial intelligence")]
+    public void A_keyword_anchor_reads_as_a_thread_whatever_bare_noun_the_label_is(string label)
+    {
+        // HREV5-DESK-05: "Like The Girl in the Spider's Web, it turns on hacker" — a bare keyword
+        // label after "turns on" is broken English. Keyword labels are open-vocabulary nouns, so
+        // both variants carry the label in "the … thread", which takes any noun and no article.
+        var anchor = "The Girl in the Spider's Web";
+        var sentences = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < 24; i++)
+        {
+            var context = Context([("directorAffinity", 0.2f)], titleId: new Guid(i, 3, 5, 1, 2, 3, 4, 5, 6, 7, (byte)(i * 41)),
+                anchorName: anchor) with
+            {
+                AnchorEvidence = [new SharedEvidence("keyword", label)],
+            };
+            sentences.Add(ExplanationTemplater.BuildSentence(context));
+        }
+
+        Assert.Equal(
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                $"Shares the {label} thread with {anchor}.",
+                $"Picks up the {label} thread from {anchor}.",
+            },
+            sentences);
+    }
+
     [Fact]
     public void A_card_with_a_real_clause_still_gets_it_after_the_anchor()
     {

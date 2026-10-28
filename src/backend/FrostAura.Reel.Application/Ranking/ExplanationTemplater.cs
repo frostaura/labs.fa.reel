@@ -356,9 +356,12 @@ public static partial class ExplanationTemplater
                 ("person", _) => Pick(id, seed,
                     $"{top.Label} again, as in {anchor}",
                     $"Shares {top.Label} with {anchor}"),
+                // A keyword label is an open-vocabulary bare noun ("hacker", "time travel"), so it
+                // only ever sits in "the … thread", which takes any noun and needs no article.
+                // "Like X, it turns on hacker" did not (HREV5-DESK-05).
                 ("keyword", _) => Pick(id, seed,
                     $"Shares the {top.Label} thread with {anchor}",
-                    $"Like {anchor}, it turns on {top.Label}"),
+                    $"Picks up the {top.Label} thread from {anchor}"),
                 _ => Pick(id, seed,
                     $"Explores {top.Label}, like {anchor}",
                     $"Shares {anchor}'s theme of {top.Label}"),
