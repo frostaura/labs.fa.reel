@@ -208,7 +208,7 @@ public sealed partial class ConceptResolver(
             return [concept with { Genres = all }];
         }
 
-        return [concept with { Genres = [.. named[0].Slugs] }, .. named.Skip(1).Select(n => new ConceptTerm(n.Word, [], [.. n.Slugs]))];
+        return [concept with { Genres = [.. named[0].Slugs] }, .. named.Skip(1).Select(n => new ConceptTerm(n.Word, [], [.. n.Slugs], StandInWords: concept.StandInWords))];
     }
 
     private static ConceptTerm Mark(ConceptTerm concept)
@@ -248,7 +248,7 @@ public sealed partial class ConceptResolver(
 
         foreach (var genre in rest)
         {
-            yield return new ConceptTerm(genre.Word, [], genre.Slugs, []);
+            yield return new ConceptTerm(genre.Word, [], genre.Slugs, [], term.StandInWords);
         }
     }
 
@@ -376,7 +376,8 @@ public sealed partial class ConceptResolver(
             concept.UserWords,
             finalStems.Count > 0 ? finalStems : pureGenre ? [] : [lookFor.Length > 0 ? lookFor : words],
             [.. genres.Distinct(StringComparer.Ordinal)],
-            exactLabels);
+            exactLabels,
+            concept.StandInWords);
         return new Resolution(term, [.. phraseGenres.DistinctBy(p => string.Join(',', p.Slugs), StringComparer.Ordinal)]);
     }
 

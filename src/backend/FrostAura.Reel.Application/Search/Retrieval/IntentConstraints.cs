@@ -24,7 +24,12 @@ public static class IntentConstraints
     /// The request's own media filter (<see cref="AskMediaTypes.Resolve"/>); it wins over the intent's
     /// guess whenever it names anything, because it is what the user selected.
     /// </param>
-    /// <param name="userWords">The user's words for the topic, when the caller has them; otherwise the keywords joined.</param>
+    /// <param name="userWords">
+    /// The user's own words for the topic, when the caller has them. Without them the concept is named
+    /// by the keywords (or genres) joined, marked <see cref="ConceptTerm.StandInWords"/>, so the name arm
+    /// never reads a curated synonym among them as something the user said (HREV3-RET-A). A caller
+    /// holding only a label it built from the keywords passes null, not that label.
+    /// </param>
     public static HardConstraints FromIntent(
         SearchIntent intent, IReadOnlyCollection<MediaType>? requestMediaTypes = null, string? userWords = null)
     {
@@ -32,14 +37,15 @@ public static class IntentConstraints
 
         var keywords = Clean(intent.Keywords);
         var genres = Clean(intent.Genres);
+        var said = string.IsNullOrWhiteSpace(userWords) ? null : userWords;
         var concepts = new List<ConceptTerm>();
         if (keywords.Count > 0)
         {
-            concepts.Add(new ConceptTerm(userWords ?? string.Join(" ", keywords), keywords, []));
+            concepts.Add(new ConceptTerm(said ?? string.Join(" ", keywords), keywords, [], StandInWords: said is null));
         }
         else if (genres.Count > 0)
         {
-            concepts.Add(new ConceptTerm(userWords ?? string.Join(" ", genres), [], genres));
+            concepts.Add(new ConceptTerm(said ?? string.Join(" ", genres), [], genres, StandInWords: said is null));
         }
 
         var people = (intent.People ?? [])

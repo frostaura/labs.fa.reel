@@ -131,13 +131,68 @@ public class RetrievalContractTests
     [InlineData("overtime travel", "time travel", false)]
     [InlineData("the 1.5 rule", "1.5", true)]
     [InlineData("the 105 rule", "1.5", false)]
+    // HREV3-RET-04: the label ends at a word end, allowing only an inflection — "alienation" is not alien,
+    // "assassination" is not an assassin, but "aliens", "shipwrecked" and "treasure hunter" still match.
+    [InlineData("aliens", "alien", true)]
+    [InlineData("alien invasion", "alien", true)]
+    [InlineData("alienation", "alien", false)]
+    [InlineData("parental alienation", "alien", false)]
+    [InlineData("assassination attempt", "assassin", false)]
+    [InlineData("assassins", "assassin", true)]
+    [InlineData("shipwrecked", "shipwreck", true)]
+    [InlineData("treasure hunter", "treasure hunt", true)]
+    [InlineData("treasure hunting", "treasure hunt", true)]
+    [InlineData("submariner", "submarine", true)]
+    [InlineData("world war iii", "world war ii", false)]
+    [InlineData("pop culture", "cult", false)]
+    [InlineData("cults", "cult", true)]
+    [InlineData("mobile phone", "mob", false)]
+    [InlineData("c++ programming", "c++", true)]
+    [InlineData("shoujo-ai", "ai", false)]
+    [InlineData("rogue ai", "ai", true)]
     public void The_keyword_arm_matches_a_label_from_a_word_start(string keyword, string label, bool expected) =>
         Assert.Equal(expected, HardConstraintFilter.KeywordMatches(keyword, label));
 
-    [Fact]
-    public void The_keyword_arm_pattern_is_word_start_bounded_and_literal()
+    [Theory]
+    [InlineData("alien", "alienation", false)]
+    [InlineData("alien", "parental alienation", false)]
+    [InlineData("alien", "aliens", true)]
+    [InlineData("alien", "alien invasion", true)]
+    [InlineData("assassin", "assassination", false)]
+    [InlineData("space", "spacewalk", false)]
+    [InlineData("witch", "witches", true)]
+    [InlineData("heist", "heist gone wrong", true)]
+    [InlineData("time travel", "time traveler", true)]
+    [InlineData("mountaineer", "mountaineering", true)]
+    [InlineData("mob", "mobile phone", false)]
+    [InlineData("mob", "mobs", true)]
+    // A two-letter stem is no word of a hyphenated compound: "shoujo-ai" is girls' love, not AI.
+    [InlineData("ai", "shoujo-ai", false)]
+    [InlineData("ai", "rogue ai", true)]
+    [InlineData("ai", "ai-powered film", true)]
+    [InlineData("noir", "neo-noir", true)]
+    public void A_stem_reaches_vocabulary_labels_only_up_to_a_word_end_or_an_inflection(string stem, string label, bool expected) =>
+        Assert.Equal(expected, Application.Search.Retrieval.Concepts.KeywordVocabulary.Expand([new(label, 1)], stem).Any());
+
+    [Theory]
+    [InlineData("witch", "witchcraft")]
+    [InlineData("space", "spacecraft")]
+    public void A_compound_the_word_end_bound_no_longer_reaches_is_kept_as_a_synonym(string stem, string compound)
     {
-        Assert.Equal(@"\mheist", HardConstraintFilter.KeywordPattern("heist"));
+        // Open at the end, "witch" reached "witchcraft" (60 titles) and "space" "spacecraft" (104); bounded,
+        // they are reached only because the synonym table names them.
+        Assert.False(Application.Search.Retrieval.Concepts.KeywordVocabulary.Expand([new(compound, 1)], stem).Any());
+        Assert.Contains(compound, Application.Search.Retrieval.Concepts.ConceptSynonyms.GroupOf(stem));
+    }
+
+    [Fact]
+    public void The_keyword_arm_pattern_is_word_bounded_with_inflections_and_literal()
+    {
+        Assert.Equal(@"\mheist(e?s|e?rs?|ings?|e?d)?\M", HardConstraintFilter.KeywordPattern("heist"));
+        // A short stem is a whole word, plural allowed — as the vocabulary expands it.
+        Assert.Equal(@"\mmob(e?s)?\M", HardConstraintFilter.KeywordPattern("mob"));
+        Assert.Equal(@"(?<![[:alnum:]_-])ai(e?s)?\M", HardConstraintFilter.KeywordPattern("ai"));
+        // A label ending in punctuation cannot be bounded by \M (it needs a word character before it).
         Assert.Equal(@"\mc\+\+", HardConstraintFilter.KeywordPattern("c++"));
     }
 
@@ -163,6 +218,123 @@ public class RetrievalContractTests
             HardConstraintFilter.EvidenceFor(new Title { Name = "Ninja Scroll", Keywords = ["ninja", "anime"] }, hard));
         Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Ninjababy", Keywords = ["pregnancy"] }, hard));
     }
+
+    [Fact]
+    public void A_synonym_matches_by_keyword_but_never_by_name()
+    {
+        // HREV3-RET-A: "ronin" is a samurai word only as a keyword. Ronin (1998) carries no samurai tag, and
+        // matching the synonym against names told the founder he had seen 9 samurai films, not 8.
+        var samurai = HardConstraints.None with { Concepts = [new ConceptTerm("samurai", ["samurai", "ronin"], [])] };
+        Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Ronin", Keywords = ["mercenary"] }, samurai));
+        Assert.Equal(["keyword:ronin"], HardConstraintFilter.EvidenceFor(new Title { Name = "Harakiri", Keywords = ["ronin"] }, samurai));
+        Assert.Equal(["name:samurai"], HardConstraintFilter.EvidenceFor(new Title { Name = "Seven Samurai", Keywords = ["japan"] }, samurai));
+
+        var courtroom = HardConstraints.None with
+        {
+            Concepts = [new ConceptTerm("courtroom movies", ["courtroom", "court case", "legal drama", "trial", "lawyer"], [])],
+        };
+        Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Maze Runner: The Scorch Trials", Keywords = ["maze"] }, courtroom));
+        Assert.Equal(["keyword:trial"], HardConstraintFilter.EvidenceFor(new Title { Name = "Anatomy of a Fall", Keywords = ["trial"] }, courtroom));
+
+        var ai = HardConstraints.None with
+        {
+            Concepts = [new ConceptTerm("artificial intelligence", ["artificial intelligence", "ai", "robot", "android"], [])],
+        };
+        Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Vacanze ai Caraibi", Keywords = ["holiday"] }, ai));
+        Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Robot & Frank", Keywords = ["heist"] }, ai));
+        Assert.Equal(["keyword:ai"], HardConstraintFilter.EvidenceFor(new Title { Name = "Her", Keywords = ["ai"] }, ai));
+    }
+
+    [Theory]
+    [InlineData("samurai", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("samurai movies", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("ninjas", new[] { "ninja", "shinobi", "kunoichi" }, new[] { "ninja" })]
+    [InlineData("robberies", new[] { "heist", "bank robbery", "robbery" }, new[] { "robbery" })]
+    [InlineData("romantic heist", new[] { "heist", "bank robbery", "robbery" }, new[] { "heist" })]
+    [InlineData("ai robot", new[] { "artificial intelligence", "ai", "robot", "android" }, new[] { "robot" })]
+    // The user's own "AI" is two letters: in a name it is the Italian "ai" far more often than the topic.
+    [InlineData("AI movies", new[] { "artificial intelligence", "ai", "robot", "android" }, new string[0])]
+    [InlineData("disaster movies", new[] { "natural disaster", "disaster", "volcano", "earthquake", "tornado", "tsunami" }, new[] { "disaster" })]
+    [InlineData("natural disaster movies", new[] { "natural disaster", "disaster", "volcano", "earthquake", "tornado", "tsunami" }, new[] { "natural disaster", "disaster" })]
+    [InlineData("alien invasion movies", new[] { "alien invasion", "alien", "extraterrestrial" }, new[] { "alien invasion", "alien" })]
+    [InlineData(" Time Loop ", new string[0], new[] { "time loop" })]
+    public void The_name_arm_reads_only_the_users_own_words(string words, string[] labels, string[] expected) =>
+        Assert.Equal(expected, HardConstraintFilter.NameLabelsOf(new ConceptTerm(words, labels, [])));
+
+    /// <summary>
+    /// HREV3-RET-A through the v1 entry point: a caller with no words of the user's — the v2 state
+    /// rebuilt from a v1 reading, a v1 topic no word of the user's anchored — reads the planner's
+    /// keywords as a stand-in, and a curated synonym among them never reaches a name. Joined into
+    /// "samurai ronin" they once said "ronin" for the user, and Ronin (1998) counted as a samurai film
+    /// he had seen. The concept's own name still does ("samurai", "ninja", "vampires"): reading none of
+    /// them dropped 7 of the founder's 70 ninja movies, the ones found by name alone.
+    /// </summary>
+    [Theory]
+    [InlineData(null, new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("  ", new[] { "ronin", "samurai" }, new[] { "samurai" })]
+    [InlineData(null, new[] { "ronin" }, new string[0])]
+    [InlineData(null, new[] { "ninja" }, new[] { "ninja" })]
+    [InlineData(null, new[] { "ninja", "shinobi", "kunoichi" }, new[] { "ninja" })]
+    [InlineData(null, new[] { "heist", "bank robbery", "robbery" }, new[] { "heist" })]
+    [InlineData(null, new[] { "courtroom", "trial" }, new[] { "courtroom" })]
+    [InlineData(null, new[] { "artificial intelligence", "ai", "robot" }, new[] { "artificial intelligence" })]
+    [InlineData(null, new[] { "natural disaster", "volcano", "tsunami" }, new[] { "natural disaster" })]
+    [InlineData(null, new[] { "vampires" }, new[] { "vampires" })]
+    [InlineData(null, new[] { "serial killer" }, new[] { "serial killer" })]
+    [InlineData("samurai films", new[] { "samurai", "ronin" }, new[] { "samurai" })]
+    [InlineData("ronin", new[] { "samurai", "ronin" }, new[] { "ronin" })]
+    public void Intent_keywords_without_the_users_words_never_name_a_synonym(string? userWords, string[] keywords, string[] expected)
+    {
+        var concept = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: keywords), userWords: userWords).Concepts);
+
+        Assert.Equal(expected, HardConstraintFilter.NameLabelsOf(concept));
+        // The keyword arm is untouched: every keyword still counts as a tag.
+        Assert.Equal(keywords, concept.CatalogueLabels);
+    }
+
+    [Fact]
+    public void A_stand_in_still_names_the_concept_and_the_flag_survives_every_reading()
+    {
+        var standIn = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: ["samurai", "ronin"])).Concepts);
+        var said = Assert.Single(IntentConstraints.FromIntent(Intent(keywords: ["samurai", "ronin"]), userWords: "samurai films").Concepts);
+        var genres = Assert.Single(IntentConstraints.FromIntent(Intent(genres: ["romance", "comedy"])).Concepts);
+
+        // The planner, the semantic arm and TMDB discovery still read the keywords as the concept's words.
+        Assert.Equal("samurai ronin", standIn.UserWords);
+        Assert.True(standIn.StandInWords);
+        Assert.False(said.StandInWords);
+        Assert.True(genres.StandInWords);
+
+        // The stored conversation state keeps it, and a row written before the field reads as the user's words.
+        var state = new Application.Search.AskReel.Engine.ConversationState(
+            1, HardConstraints.None with { Concepts = [standIn, said] }, SoftPreferences.None, [], [], [], [], null);
+        var json = Application.Search.AskReel.Engine.ConversationStateJson.Write(state);
+        var back = Application.Search.AskReel.Engine.ConversationStateJson.Read(json)!;
+        Assert.Equal([true, false], back.Hard.Concepts.Select(c => c.StandInWords));
+        Assert.Contains("\"standInWords\":true", json, StringComparison.Ordinal);
+        var legacy = Application.Search.AskReel.Engine.ConversationStateJson.Read(
+            json.Replace(",\"standInWords\":true", string.Empty, StringComparison.Ordinal)
+                .Replace(",\"standInWords\":false", string.Empty, StringComparison.Ordinal))!;
+        Assert.Equal([false, false], legacy.Hard.Concepts.Select(c => c.StandInWords));
+
+        // The static genre reading splits a stand-in's genre words into stand-ins too.
+        var split = Application.Search.Retrieval.Concepts.ConceptResolver.GenreReading(new ConceptTerm("romantic comedy", [], [], StandInWords: true))!;
+        Assert.Equal(2, split.Count);
+        Assert.All(split, c => Assert.True(c.StandInWords));
+    }
+
+    [Theory]
+    [InlineData("ronin", true)]
+    [InlineData("robberies", true)]
+    [InlineData("volcano", true)]
+    [InlineData("ai", true)]
+    [InlineData("samurai", false)]
+    [InlineData("vampires", false)]
+    [InlineData("spies", false)]
+    [InlineData("serial killer", false)]
+    public void A_synonym_is_a_group_member_other_than_its_name(string stem, bool synonym) =>
+        Assert.Equal(synonym, Application.Search.Retrieval.Concepts.ConceptSynonyms.IsSynonym(stem));
 
     [Fact]
     public void A_concept_without_labels_matches_on_the_users_own_words()

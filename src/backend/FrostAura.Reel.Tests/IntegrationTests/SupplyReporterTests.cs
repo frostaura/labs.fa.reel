@@ -645,6 +645,256 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         }
     }
 
+    /// <summary>
+    /// HREV3-RET-A / HREV3-RET-04, the founder's live cases in miniature: a synonym ("ronin", "trial",
+    /// "ai", "volcano") answers a request only as a KEYWORD — Ronin (1998) is not a samurai film, nor
+    /// The Scorch Trials a courtroom drama, nor Vacanze ai Caraibi about AI — while the user's own word
+    /// still finds an untagged title by name. And a label ends at a word end (an inflection allowed):
+    /// "alienation" is not alien. Each case seeds a fixture of every shape, watches some of them, and
+    /// holds the reporter's "you've seen" to the titles that truly count, on the resolving reporter,
+    /// the bare one, and the planner's unresolved labels alike.
+    /// </summary>
+    [Theory]
+    [InlineData("samurai")]
+    [InlineData("courtroom")]
+    [InlineData("artificial intelligence")]
+    [InlineData("AI movies")]
+    [InlineData("alien")]
+    [InlineData("disaster")]
+    public async Task A_synonym_counts_by_keyword_never_by_name_and_a_label_ends_at_a_word_end(string words)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        (string Name, string[] Keywords, bool Watched, bool Counts)[] shapes = words switch
+        {
+            "samurai" =>
+            [
+                ("Ronin", ["mercenary"], true, false),
+                ($"47 Ronin {tag}", ["revenge"], false, false),
+                ($"Seven Samurai {tag}", ["samurai"], true, true),
+                ($"Harakiri {tag}", ["ronin"], true, true),
+                ($"Samurai Jack {tag}", ["cartoon network"], false, true),
+                ($"The Twilight {tag}", ["samurai sword"], false, true),
+            ],
+            "courtroom" =>
+            [
+                ("Maze Runner: The Scorch Trials", ["maze"], true, false),
+                ($"The Lawyer {tag}", ["drama"], false, false),
+                ($"Anatomy of a Fall {tag}", ["trial"], true, true),
+                ($"12 Angry Men {tag}", ["courtroom"], true, true),
+                ($"Courtroom Confessions {tag}", ["drama"], false, true),
+            ],
+            "artificial intelligence" =>
+            [
+                ("Vacanze ai Caraibi", ["holiday"], true, false),
+                ($"Robot & Frank {tag}", ["burglar"], true, false),
+                ($"Fragtime {tag}", ["shoujo-ai"], false, false),
+                ($"Ex Machina {tag}", ["artificial intelligence"], true, true),
+                ($"Her {tag}", ["ai"], false, true),
+                ($"Artificial Intelligence Rising {tag}", ["future"], false, true),
+            ],
+            "AI movies" =>
+            [
+                ("Vacanze ai Caraibi", ["holiday"], true, false),
+                ($"AI {tag}", ["future"], false, false),
+                ($"Kase-san {tag}", ["shoujo-ai"], true, false),
+                ($"Ex Machina {tag}", ["artificial intelligence"], true, true),
+                ($"Her {tag}", ["ai"], true, true),
+            ],
+            "alien" =>
+            [
+                ($"Taxi Driver {tag}", ["alienation"], true, false),
+                ($"The Savages {tag}", ["parental alienation"], true, false),
+                ($"Alienated {tag}", ["drama"], false, false),
+                ($"Paul {tag}", ["aliens"], true, true),
+                ($"Independence Day {tag}", ["alien invasion"], false, true),
+                ($"Alien Nation {tag}", ["police"], false, true),
+            ],
+            _ =>
+            [
+                ("Joe Versus the Volcano", ["lighthouse"], true, false),
+                ("Earthquake Bird", ["tokyo"], true, false),
+                ($"Dante's Peak {tag}", ["volcano"], true, true),
+                ($"The Impossible {tag}", ["tsunami"], false, true),
+                ($"Disaster Movie {tag}", ["parody"], false, true),
+            ],
+        };
+
+        var accountId = await SeedAccountAsync();
+        var counted = new HashSet<Guid>();
+        var mine = new List<Guid>();
+        var seen = 0;
+        foreach (var (name, keywords, watched, counts) in shapes)
+        {
+            var id = await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = (name, keywords));
+            mine.Add(id);
+            if (counts)
+            {
+                counted.Add(id);
+            }
+
+            if (watched)
+            {
+                await SeedWatchAsync(accountId, id);
+                seen += counts ? 1 : 0;
+            }
+        }
+
+        var asked = new HardConstraints([new ConceptTerm(words, [], [])], [], null, null, MediaScope.Any);
+        await using var db = fixture.CreateContext(new AccountContext());
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+        var eligibility = new EligibilityQueryBuilder(db);
+        var resolved = await resolver.ResolveAsync(asked, CancellationToken.None);
+
+        // The planner's reading of the same words, unresolved (the stored conversation state).
+        var concept = Assert.Single(resolved.Concepts);
+        var planned = asked with { Concepts = [new ConceptTerm(words, concept.CatalogueLabels, [])] };
+
+        foreach (var hard in new[] { resolved, planned })
+        {
+            var matched = await HardConstraintFilter.Apply(db.Titles, db, hard).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+            Assert.Equal(counted, matched.ToHashSet());
+        }
+
+        Assert.Equal(seen, (await new SupplyReporter(db, eligibility, resolver).ReportAsync(accountId, asked, CancellationToken.None)).AlreadySeen);
+        Assert.Equal(seen, (await new SupplyReporter(db, eligibility).ReportAsync(accountId, resolved, CancellationToken.None)).AlreadySeen);
+        Assert.Equal(seen, (await new SupplyReporter(db, eligibility).ReportAsync(accountId, planned, CancellationToken.None)).AlreadySeen);
+
+        // The retriever's evidence never names a synonym found in a title's name.
+        var result = await RetrieveAsync(new RetrievalQuery(accountId, resolved, SoftPreferences.None, [], Want: 50));
+        Assert.DoesNotContain(result.Candidates.Where(c => mine.Contains(c.TitleId)).SelectMany(c => c.Evidence),
+            e => e.StartsWith("name:", StringComparison.Ordinal) && !Application.Search.Retrieval.Concepts.ConceptResolver.Normalise(words).Contains(e[5..], StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// HREV3-RET-A through the v1 entry point (<see cref="IntentConstraints.FromIntent"/>): with the
+    /// planner's keywords and none of the user's words — the v2 state rebuilt from a v1 reading, a v1
+    /// topic no word of the user's anchored — Ronin (1998) is not counted, on the planned reading, the
+    /// resolved one and the reporter that resolves its own. The keyword arm is untouched (a title tagged
+    /// "ronin" counts), the concept's own name still finds untagged Samurai Jack, and only a user who
+    /// said "ronin" gets the titles named Ronin.
+    /// </summary>
+    [Theory]
+    [InlineData(null, new[] { "samurai", "ronin" }, new[] { "Seven Samurai", "Harakiri", "47 Ronin", "Samurai Jack" })]
+    [InlineData("samurai films", new[] { "samurai", "ronin" }, new[] { "Seven Samurai", "Harakiri", "47 Ronin", "Samurai Jack" })]
+    [InlineData(null, new[] { "ronin", "samurai" }, new[] { "Seven Samurai", "Harakiri", "47 Ronin", "Samurai Jack" })]
+    [InlineData("ronin", new[] { "samurai", "ronin" }, new[] { "Ronin", "Ronin Redux", "Seven Samurai", "Harakiri", "47 Ronin" })]
+    public async Task Intent_keywords_without_the_users_words_never_count_a_title_by_a_synonym_in_its_name(
+        string? userWords, string[] keywords, string[] expected)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        (string Name, string[] Keywords, bool Watched)[] shapes =
+        [
+            ("Ronin", ["mercenary"], true),
+            ("Ronin Redux", ["heist"], false),
+            ("Seven Samurai", ["samurai"], true),
+            ("Harakiri", ["ronin"], true),
+            ("47 Ronin", ["ronin"], false),
+            ("Samurai Jack", ["cartoon network"], true),
+        ];
+
+        var accountId = await SeedAccountAsync();
+        var counted = new HashSet<Guid>();
+        var mine = new List<Guid>();
+        var seen = 0;
+        foreach (var (name, tags, watched) in shapes)
+        {
+            // The bare "Ronin" is the founder's real title; the rest carry the run's tag so they are unique.
+            var counts = expected.Contains(name);
+            var id = await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = (name == "Ronin" ? name : $"{name} {tag}", tags));
+            mine.Add(id);
+            if (counts)
+            {
+                counted.Add(id);
+            }
+
+            if (watched)
+            {
+                await SeedWatchAsync(accountId, id);
+                seen += counts ? 1 : 0;
+            }
+        }
+
+        var intent = new SearchIntent([], keywords, [], string.Empty, null, null);
+        var planned = IntentConstraints.FromIntent(intent, userWords: userWords);
+        await using var db = fixture.CreateContext(new AccountContext());
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+        var resolved = await resolver.ResolveAsync(planned, CancellationToken.None);
+
+        foreach (var hard in new[] { planned, resolved })
+        {
+            var matched = await HardConstraintFilter.Apply(db.Titles, db, hard).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+            Assert.Equal(counted, matched.ToHashSet());
+        }
+
+        var eligibility = new EligibilityQueryBuilder(db);
+        Assert.Equal(seen, (await new SupplyReporter(db, eligibility, resolver).ReportAsync(accountId, planned, CancellationToken.None)).AlreadySeen);
+        Assert.Equal(seen, (await new SupplyReporter(db, eligibility).ReportAsync(accountId, planned, CancellationToken.None)).AlreadySeen);
+    }
+
+    [Fact]
+    public async Task Samurai_and_alien_supply_equal_an_independent_sql_statement_over_the_whole_catalogue()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Fixtures of every shape the eval truth rules on, so the statement is never vacuous here.
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = ("Ronin", ["mercenary"]));
+        await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = ($"Harakiri {tag}", ["ronin"]));
+        await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = ($"Samurai Jack {tag}", ["cartoon"]));
+        await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = ($"Taxi Driver {tag}", ["alienation"]));
+        await SeedTitleAsync(tag, t => (t.Name, t.Keywords) = ($"Paul {tag}", ["aliens"]));
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        await using var snapshot = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+
+        // The eval truth's reading (eval/askreel/truth/samurai.sql, alien.sql): the user's word in a name,
+        // whole and optionally plural; the word or a synonym in a keyword, to a word end or an inflection.
+        foreach (var (words, sql) in new[]
+        {
+            ("samurai", """SELECT t."Id" AS "Value" FROM "Titles" t WHERE lower(t."Name") ~ '\msamurai(e?s)?\M' OR EXISTS (SELECT 1 FROM unnest(t."Keywords") k WHERE k ~ '\m(samurai|ronin)(e?s|e?rs?|ings?|e?d)?\M')"""),
+            ("alien", """SELECT t."Id" AS "Value" FROM "Titles" t WHERE lower(t."Name") ~ '\malien(e?s)?\M' OR EXISTS (SELECT 1 FROM unnest(t."Keywords") k WHERE k ~ '\m(alien|extraterrestrial|alien invasion)(e?s|e?rs?|ings?|e?d)?\M')"""),
+        })
+        {
+            var resolved = await resolver.ResolveAsync(new HardConstraints([new ConceptTerm(words, [], [])], [], null, null, MediaScope.Any), CancellationToken.None);
+            var app = await HardConstraintFilter.Apply(db.Titles, db, resolved).Select(t => t.Id).ToListAsync();
+            var truth = await db.Database.SqlQueryRaw<Guid>(sql).ToListAsync();
+            Assert.NotEmpty(truth);
+            Assert.Equal(truth.ToHashSet(), app.ToHashSet());
+        }
+    }
+
     private static ConditionKnockout Single(SupplyReport report, FilterKind kind) =>
         Assert.Single(report.Knockouts, k => k.Kind == kind);
 

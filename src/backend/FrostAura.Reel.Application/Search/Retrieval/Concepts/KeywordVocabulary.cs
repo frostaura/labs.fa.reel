@@ -28,10 +28,33 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
 
     /// <summary>
     /// A stem this short or shorter matches only as a whole word (optionally pluralised): "mob" must
-    /// not expand to "mobile phone", nor "spy" to "spyware". Longer stems match from a word start and
-    /// stay open at the end ("heist" → "heists", "heist gone wrong"), as the facet regex always has.
+    /// not expand to "mobile phone", nor "spy" to "spyware". Longer stems match from a word start up to
+    /// a word end or one of the <see cref="Inflections"/> ("heist" → "heists", "heist gone wrong";
+    /// "treasure hunt" → "treasure hunter").
     /// </summary>
     public const int WholeWordStemLength = 4;
+
+    /// <summary>
+    /// The endings a longer stem may carry and still name itself: plural, agent, gerund, past. Open at
+    /// the end, "alien" reached "alienation" and "parental alienation" (14 titles: Taxi Driver, Pi…),
+    /// "assassin" reached "assassination" (82) and "world war ii" reached "world war iii"
+    /// (HREV3-RET-04). Ordered so a longer ending is tried after its prefix fails on a word end.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Inflections = ["s", "es", "r", "rs", "er", "ers", "ing", "ings", "d", "ed"];
+
+    /// <summary>The <see cref="Inflections"/> as an ARE/.NET group, for the regex twins of <see cref="Reaches"/>.</summary>
+    public const string InflectionPattern = "(e?s|e?rs?|ings?|e?d)?";
+
+    /// <summary>The plural a short (<see cref="WholeWordStemLength"/>) stem may carry, as a regex group.</summary>
+    public const string PluralPattern = "(e?s)?";
+
+    /// <summary>
+    /// A stem this short or shorter is no word of a hyphenated compound: "ai" reached "shoujo-ai" (girls'
+    /// love anime, 10 titles), counting Miss Kobayashi's Dragon Maid as a film about AI.
+    /// </summary>
+    public const int CompoundBlindStemLength = 2;
+
+    private static readonly string[] Plurals = ["s", "es"];
 
     internal const string CacheKey = "keyword-vocabulary:v1";
 
@@ -59,8 +82,8 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
     }
 
     /// <summary>
-    /// The labels <paramref name="stem"/> reaches: the stem from a word start (open at the end), or as
-    /// a whole word when it is <see cref="WholeWordStemLength"/> characters or shorter.
+    /// The labels <paramref name="stem"/> reaches: the stem from a word start up to a word end or an
+    /// inflection, and only a plural when it is <see cref="WholeWordStemLength"/> characters or shorter.
     /// </summary>
     public static IEnumerable<VocabularyLabel> Expand(IReadOnlyList<VocabularyLabel> vocabulary, string stem)
     {
@@ -74,9 +97,21 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
         return vocabulary.Where(l => Reaches(l.Label, needle, whole));
     }
 
-    /// <summary>True when <paramref name="stem"/> reaches <paramref name="label"/> (see <see cref="Expand"/>).</summary>
+    /// <summary>
+    /// True when <paramref name="stem"/> reaches <paramref name="label"/> (see <see cref="Expand"/>):
+    /// it starts at a word start and ends at a word end, directly or after one ending — a plural when
+    /// <paramref name="wholeWord"/>, any of the <see cref="Inflections"/> otherwise. A stem ending in
+    /// punctuation ("c++") has no word end to hold to, so its word start is enough.
+    /// </summary>
     public static bool Reaches(string label, string stem, bool wholeWord)
     {
+        if (string.IsNullOrEmpty(label) || string.IsNullOrEmpty(stem))
+        {
+            return false;
+        }
+
+        var endings = wholeWord ? Plurals : Inflections;
+        var bounded = IsWordChar(stem[^1]);
         var from = 0;
         while (from <= label.Length - stem.Length)
         {
@@ -86,20 +121,25 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
                 return false;
             }
 
-            if (at == 0 || !IsWordChar(label[at - 1]))
+            if (at == 0 || (!IsWordChar(label[at - 1]) && !(stem.Length <= CompoundBlindStemLength && label[at - 1] == '-')))
             {
-                if (!wholeWord)
+                if (!bounded)
                 {
                     return true;
                 }
 
-                var end = at + stem.Length;
-                var rest = label.AsSpan(end);
-                if (rest.IsEmpty || !IsWordChar(rest[0])
-                    || (rest.StartsWith("s") && (rest.Length == 1 || !IsWordChar(rest[1])))
-                    || (rest.StartsWith("es") && (rest.Length == 2 || !IsWordChar(rest[2]))))
+                var rest = label.AsSpan(at + stem.Length);
+                if (EndsWord(rest))
                 {
                     return true;
+                }
+
+                foreach (var ending in endings)
+                {
+                    if (rest.StartsWith(ending, StringComparison.Ordinal) && EndsWord(rest[ending.Length..]))
+                    {
+                        return true;
+                    }
                 }
             }
 
@@ -108,6 +148,8 @@ public sealed class KeywordVocabulary(IReelDbContext db, IMemoryCache cache)
 
         return false;
     }
+
+    private static bool EndsWord(ReadOnlySpan<char> rest) => rest.IsEmpty || !IsWordChar(rest[0]);
 
     private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 }

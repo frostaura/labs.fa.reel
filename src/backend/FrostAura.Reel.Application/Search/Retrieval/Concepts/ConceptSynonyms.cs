@@ -11,10 +11,20 @@ namespace FrostAura.Reel.Application.Search.Retrieval.Concepts;
 /// loop" is not "time travel"; "spy" is not "thriller"). Every member is matched through
 /// <see cref="KeywordVocabulary.Expand"/>, so each stem reaches its labels the usual way ("lawyer"
 /// reaches "lawyers" and "defense lawyer").</para>
+///
+/// <para><b>Keywords only.</b> A synonym is a claim about TMDB's tags, never about titles' names: the
+/// name arm reads only the user's own words (<see cref="HardConstraintFilter.NameLabelsOf"/>), so
+/// "ronin" finds the masterless-samurai tag and never Ronin (1998). A stem stops at a word end or an
+/// inflection (<see cref="KeywordVocabulary.Reaches"/>), so a compound the stem no longer reaches
+/// ("spacecraft", "witchcraft") is listed here when it names the same concept.</para>
 /// </summary>
 public static class ConceptSynonyms
 {
-    /// <summary>Stems that name one concept. Lower-case; matched as whole normalised phrases.</summary>
+    /// <summary>
+    /// Stems that name one concept. Lower-case; matched as whole normalised phrases. The FIRST stem is
+    /// the concept's own name and the rest are its synonyms (<see cref="IsSynonym"/>): when no words of
+    /// the user's are known, the name arm reads only the name.
+    /// </summary>
     public static readonly IReadOnlyList<string[]> Groups =
     [
         ["ninja", "shinobi", "kunoichi"],
@@ -32,7 +42,8 @@ public static class ConceptSynonyms
         ["alien", "extraterrestrial", "alien invasion"],
         ["pandemic", "epidemic", "virus outbreak"],
         ["natural disaster", "disaster", "volcano", "earthquake", "tornado", "tsunami"],
-        ["space", "outer space", "astronaut", "space station", "space travel", "spaceship", "space mission"],
+        ["space", "outer space", "astronaut", "space station", "space travel", "spaceship", "spacecraft", "space mission"],
+        ["witch", "witchcraft"],
         ["superhero", "superpower", "super power"],
         ["ghost", "haunting", "haunted"],
         ["hacker", "hacking"],
@@ -212,6 +223,26 @@ public static class ConceptSynonyms
         {
             yield return word[..^1];
         }
+    }
+
+    /// <summary>
+    /// True when <paramref name="stem"/> (normalised), or a singular of it, is a curated synonym — a
+    /// member of a group other than its first, naming stem ("ronin", "robbery", "volcano", "ai"). A
+    /// plural of the name is the name ("vampires", "spies"), and a stem in no group is no synonym.
+    /// </summary>
+    public static bool IsSynonym(string stem)
+    {
+        ArgumentNullException.ThrowIfNull(stem);
+        var forms = Singulars(stem).Prepend(stem).ToList();
+        foreach (var group in Groups)
+        {
+            if (forms.Contains(group[0], StringComparer.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return Groups.Any(group => forms.Any(form => group.Contains(form, StringComparer.Ordinal)));
     }
 
     /// <summary>The synonym group containing <paramref name="stem"/>, or just the stem.</summary>
