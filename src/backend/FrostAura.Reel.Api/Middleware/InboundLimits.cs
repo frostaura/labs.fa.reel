@@ -3,6 +3,7 @@ using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Middleware;
@@ -10,7 +11,7 @@ namespace FrostAura.Reel.Api.Middleware;
 /// <summary>
 /// Inbound request limits that sit in front of a route rather than inside it (J-8, B-14):
 /// <list type="bullet">
-/// <item><c>POST /api/search/ask</c> — the per-account turn limits (<see cref="AskTurnLimiter"/>).
+/// <item><c>POST /api/search/ask</c>, by whatever spelling routing maps to it (<see cref="IsAsk"/>) — the per-account turn limits (<see cref="AskTurnLimiter"/>).
 /// The in-flight slot is held until the whole streamed response has been written; a request the
 /// handler refuses with a 4xx gives its window slot back, so only answered turns count.</item>
 /// <item><c>/api/dev/*</c> — at most <see cref="DevConcurrency"/> requests at once, process-wide.
@@ -37,9 +38,7 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
     public async Task InvokeAsync(HttpContext context, IAccountContext accountContext, IReelDbContext db)
     {
         var path = context.Request.Path;
-        if (HttpMethods.IsPost(context.Request.Method)
-            && path.Equals(AskPath, StringComparison.OrdinalIgnoreCase)
-            && accountContext.AccountId is { } accountId)
+        if (IsAsk(context) && accountContext.AccountId is { } accountId)
         {
             // The tier picks the day's allowance; the zone says where the day starts (R1-15).
             var account = await db.Accounts.AsNoTracking()
@@ -101,6 +100,43 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
         }
 
         await next(context);
+    }
+
+    /// <summary>
+    /// Whether this request will be answered by the Ask route. Decided by the endpoint routing chose,
+    /// never by the raw path: routing answers <c>/api/search/ask/</c> and any casing of it as the same
+    /// route, and an exact path comparison let every such spelling through with no limit at all
+    /// (HREV2-PLAT-1). The gateway proxies the request URI unchanged, so it cannot normalise this for us.
+    /// With no endpoint selected (routing has not run, or nothing matched) the path is compared without
+    /// its trailing slash, so a pipeline reordered ahead of routing still limits every spelling.
+    /// </summary>
+    internal static bool IsAsk(HttpContext context)
+    {
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            return false;
+        }
+
+        if (context.GetEndpoint() is { } endpoint)
+        {
+            return endpoint is RouteEndpoint route
+                && SamePath(route.RoutePattern.RawText, AskPath)
+                && endpoint.Metadata.GetMetadata<IHttpMethodMetadata>() is { } methods
+                && methods.HttpMethods.Contains(HttpMethods.Post, StringComparer.OrdinalIgnoreCase);
+        }
+
+        return SamePath(context.Request.Path.Value, AskPath);
+    }
+
+    private static bool SamePath(string? candidate, string expected)
+    {
+        if (string.IsNullOrEmpty(candidate))
+        {
+            return false;
+        }
+
+        var trimmed = candidate.TrimEnd('/');
+        return (trimmed.StartsWith('/') ? trimmed : "/" + trimmed).Equals(expected, StringComparison.OrdinalIgnoreCase);
     }
 
     private static Task RefuseAsync(HttpContext context, int status, string code, string message, TimeSpan retryAfter)
