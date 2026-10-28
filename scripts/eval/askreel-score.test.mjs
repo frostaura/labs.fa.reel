@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN, engineOf, renderReport, yearWindow, conceptKey } from "./askreel-score.mjs";
-import { compactTurn, streamEngine, askUrl, engineGuard, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES, withinYears, rematerialiseDrift, limiterRefusal, validateScenarios, runScenario, salvageable } from "./askreel.mjs";
+import { compactTurn, streamEngine, askUrl, engineGuard, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES, withinYears, rematerialiseDrift, rematerialiseMerge, limiterRefusal, validateScenarios, runScenario, salvageable } from "./askreel.mjs";
 import { envKeyHash, classifyKey, modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1026,6 +1026,44 @@ test("rematerialiseDrift is silent on the recording's own state and names every 
   assert.ok(drift.includes("eligibility of the shown titles differs"));
   assert.ok(drift.some((d) => d.startsWith("active artifact other")));
   assert.ok(drift.includes("truth 'ninja'.supply.Movie.matching 71, recorded 70"));
+});
+
+// HREV4-RET-01: a truth file restated on purpose (heist's name arm, a2bef46) recomputes to new values on
+// the very database the recording ran on, so plain rematerialise can never extend that recording again.
+// --replace names the keys whose definition moved; only those are recomputed, every OTHER key must still
+// recompute to its recorded value (the proof the database is in the recording's state), and a named key
+// the recording never froze, or no scenario still needs, is refused rather than silently ignored.
+test("rematerialiseMerge replaces only the named truth keys and still refuses drift anywhere else", () => {
+  const old = { eligible: [A], artifact: { id: "art", version: 1 }, truth: {
+    heist: { members: [A], supply: { Movie: { matching: 200 } } },
+    ninja: { members: [B], supply: { Movie: { matching: 70 } } },
+  } };
+  const fresh = { eligible: [A], artifact: { id: "art", version: 1 }, truth: {
+    heist: { members: [A], supply: { Movie: { matching: 198 } } },
+    ninja: { members: [B], supply: { Movie: { matching: 70 } } },
+    "romantic-comedy": { members: [], supply: { Any: { matching: 3067 } } },
+  } };
+
+  const refused = rematerialiseMerge(old, fresh, []);
+  assert.deepEqual(refused.drift, ["truth 'heist'.supply.Movie.matching 198, recorded 200"], "without --replace the moved definition is drift");
+
+  const merged = rematerialiseMerge(old, fresh, ["heist"]);
+  assert.deepEqual(merged.drift, []);
+  assert.deepEqual(merged.added, ["romantic-comedy"]);
+  assert.deepEqual(merged.replaced, [{ key: "heist", changes: ["truth 'heist'.supply.Movie.matching 198, recorded 200"] }]);
+  assert.equal(merged.truth.heist.supply.Movie.matching, 198);
+  assert.equal(merged.truth["romantic-comedy"].supply.Any.matching, 3067);
+  assert.equal(old.truth.heist.supply.Movie.matching, 200, "the recording's own facts are never mutated in place");
+
+  // Replacing one key never excuses another that moved.
+  const twoMoved = structuredClone(fresh);
+  twoMoved.truth.ninja.supply.Movie.matching = 71;
+  assert.deepEqual(rematerialiseMerge(old, twoMoved, ["heist"]).drift, ["truth 'ninja'.supply.Movie.matching 71, recorded 70"]);
+  // A key to replace must be one the recording froze and the scenarios still need.
+  assert.deepEqual(rematerialiseMerge(old, fresh, ["kaiju"]).drift, ["--replace kaiju: the recording froze no such truth", "truth 'heist'.supply.Movie.matching 198, recorded 200"]);
+  const gone = structuredClone(fresh);
+  delete gone.truth.ninja;
+  assert.deepEqual(rematerialiseMerge(old, gone, ["heist", "ninja"]).drift, ["--replace ninja: no scenario in the recording needs it any more"]);
 });
 
 // ── H3-PLAT-01: a turn the Ask limiter refused is the harness's failure, never the model's ───────────────

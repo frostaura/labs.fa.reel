@@ -4,7 +4,8 @@ using FrostAura.Reel.Application.Search.Retrieval;
 namespace FrostAura.Reel.Tests.IntegrationTests.AskReelGolden;
 
 /// <summary>
-/// The eval's SQL truth (<c>eval/askreel/truth/_eligible.sql</c> and <c>eval/askreel/supply/rules.sql</c>)
+/// The eval's SQL truth (<c>eval/askreel/truth/_eligible.sql</c>, <c>eval/askreel/supply/rules.sql</c>, and a
+/// concept truth that reads a genre the way its exclusion does, <c>truth/romantic-comedy.sql</c>)
 /// states the ExcludeGenre rule the way the API applies it, taxonomy gaps included: an alias genre, or a
 /// stand-in keyword on a medium whose TMDB taxonomy cannot tag the genre (<see cref="GenreStandIns"/>).
 /// Which labels stand in, and on which media, is the rule's DATA — 200-odd labels chosen by measurement —
@@ -23,6 +24,8 @@ public class StandInTruthSqlTests
     [
         Path.Combine("eval", "askreel", "truth", "_eligible.sql"),
         Path.Combine("eval", "askreel", "supply", "rules.sql"),
+        // HREV4-RET-01: "romantic comedies" is romance read as its exclusion reads it, AND comedy.
+        Path.Combine("eval", "askreel", "truth", "romantic-comedy.sql"),
     ];
 
     [Fact]

@@ -4,7 +4,7 @@
 - 120 scenarios, 167 turns, concurrency 4, 1632 s wall, $0.3383 from the ledger
 - Latency gates do NOT apply (concurrency > 2) — latency below is reported, not gated
 - Model key: unrecorded · scenario fingerprint `cab2a605e71bc860`
-- **2 turn(s) have no materialised concept truth** (no-conflict-control#1: heist@2016-2026; refine-recent#2: kidnapping@2021-2026): no concept check scored them; re-materialise with `askreel.mjs rematerialise <recording.json> --db <eval db>`
+- **3 turn(s) have no materialised concept truth** (conflict-romcom#1: romantic-comedy; no-conflict-control#1: heist@2016-2026; refine-recent#2: kidnapping@2021-2026): no concept check scored them; re-materialise with `askreel.mjs rematerialise <recording.json> --db <eval db>`
 - Started 2026-10-24T18:08:54.347Z, finished 2026-10-24T18:36:06.119Z
 
 ## Gates
@@ -12,7 +12,7 @@
 | Metric | Value | n | Gate | Status |
 |---|---|---|---|---|
 | Constraint precision@8 (facet scenarios) | 0.470 | 101 | >= 0.9 | FAIL |
-| Honest-empty compliance | 0 | 17 | >= 1 | FAIL |
+| Honest-empty compliance | 0 | 16 | >= 1 | FAIL |
 | Missed supply (no pick while eligible titles clear the bar) | 0 | 167 | <= 0 | pass |
 | Supply counts equal the SQL truth (none-found replies) | — | 0 | >= 1 | no data |
 | Reference accuracy | 0 | 15 | >= 0.95 | FAIL |
@@ -38,12 +38,12 @@
 |---|---|---|
 | constraintPrecisionAt8 | 0.470 | 101 |
 | negationPrecisionAt8 | 0.942 | 15 |
-| honestEmptyCompliance | 0 | 17 |
+| honestEmptyCompliance | 0 | 16 |
 | referenceAccuracy | 0 | 15 |
 | critiqueCompliance | 0.200 | 5 |
 | actClassification | — | 0 |
 | conflictDetection | 0.643 | 14 |
-| modeAccuracy | 0 | 30 |
+| modeAccuracy | 0 | 29 |
 | noRepeatCompliance | 1 | 15 |
 | supplyCountAccuracy | — | 0 |
 | groundingViolations | 118 | 167 |
@@ -72,7 +72,7 @@
 |---|---|---|---|
 | ambiguous | 1 | 0 / 0 | 0 |
 | chitchat | 11 | 6 / 8 | 9 |
-| conflict | 15 | 29 / 38 | 12 |
+| conflict | 15 | 27 / 36 | 12 |
 | critique | 16 | 10 / 13 | 8 |
 | empty-supply | 12 | 14 / 15 | 8 |
 | facet | 114 | 27 / 45 | 68 |
@@ -395,9 +395,8 @@
   - reply echoes the user's message
 
 ### conflict-romcom (conflict)
-- T1 “romantic comedies” — 15 picks, supply 0 eligible of 4882
-  - failed: honestEmpty, mode
-  - off-topic in first 8: Love Finds You in Charm; Lorelei; The 7.39; Adoration; Famous in Love; Love Is Strange; Tyler Perry's If Loving You Is Wrong; Love Finds You In Sugarcreek
+- T1 “romantic comedies” — 15 picks
+  - concept truth `romantic-comedy` was never materialised for this recording: no concept check scored
   - fallback: stub reply
   - reply echoes the user's message
 

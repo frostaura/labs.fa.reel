@@ -138,7 +138,9 @@ services:
       Background__KeywordVocabulary: "false"
       Background__TraktRatingsBackfill: "false"
       Background__Retention: "false"
-      Tenancy__UnscopedReads: "Warn"
+      # The live default (blank = Throw, fail closed), as a literal so a Warn in the caller's shell cannot
+      # reach the eval API: a path that throws on live must throw here too (HREV4-PLAT-02).
+      Tenancy__UnscopedReads: ""
       CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8090,http://localhost:5173}
       EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}

@@ -1502,7 +1502,7 @@
      "expect": {
       "act": "NewRequest",
       "conflict": true,
-      "concept": "genre-romance",
+      "concept": "romantic-comedy",
       "mustNot": [
        "genre-comedy"
       ]

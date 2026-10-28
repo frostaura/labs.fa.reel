@@ -23,6 +23,7 @@
   "fingerprint": "cab2a605e71bc860",
   "staleScenarios": [],
   "truthMissing": [
+   "conflict-romcom#1: romantic-comedy",
    "no-conflict-control#1: heist@2016-2026",
    "refine-recent#2: kidnapping@2021-2026"
   ],
@@ -45,7 +46,7 @@
   },
   "honestEmptyCompliance": {
    "value": 0,
-   "n": 17
+   "n": 16
   },
   "referenceAccuracy": {
    "value": 0,
@@ -65,7 +66,7 @@
   },
   "modeAccuracy": {
    "value": 0,
-   "n": 30
+   "n": 29
   },
   "noRepeatCompliance": {
    "value": 1,
@@ -177,7 +178,7 @@
    "op": ">=",
    "target": 1,
    "value": 0,
-   "n": 17,
+   "n": 16,
    "status": "FAIL"
   },
   {
@@ -390,8 +391,8 @@
   },
   "conflict": {
    "turns": 15,
-   "failedChecks": 29,
-   "checks": 38,
+   "failedChecks": 27,
+   "checks": 36,
    "fallback": 12
   },
   "title-lookup": {
@@ -5630,30 +5631,13 @@
      "notRun": false,
      "picks": 15,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "conflict": true
      },
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 4882,
-      "eligible": 0,
-      "scored": 0,
-      "aboveBar": 0
-     },
-     "offTopic": [
-      "Love Finds You in Charm",
-      "Lorelei",
-      "The 7.39",
-      "Adoration",
-      "Famous in Love",
-      "Love Is Strange",
-      "Tyler Perry's If Loving You Is Wrong",
-      "Love Finds You In Sugarcreek"
-     ],
+     "truthMissing": "romantic-comedy",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [

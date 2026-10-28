@@ -7,7 +7,7 @@
 //        --engine v1|v2 [--allow-unnamed-engine] [--build-info <BUILD_INFO.json from build-at.sh>] [--hold-build-slots]
 //        [--founder-key-signoff "<who, when>"]
 //   node scripts/eval/askreel.mjs replay <recording.json> [--out <dir>]
-//   node scripts/eval/askreel.mjs rematerialise <recording.json> --db <eval db> [--out <dir>]
+//   node scripts/eval/askreel.mjs rematerialise <recording.json> --db <eval db> [--replace key,key] [--out <dir>]
 //   node scripts/eval/askreel.mjs check  [--scenarios <dir>] [--extra-scenarios <dir>] [--truth-dir <dir>] [--db <eval db>]
 //   node scripts/eval/askreel.mjs compare <metrics.json> --baseline <metrics.json>
 //
@@ -23,7 +23,9 @@
 //         the scorer needs (truth membership, supply counts, ledger delta) is frozen into the recording.
 // rematerialise adds to a recording only the truth sets its scenarios now need and it never froze (a year
 //         window added to an expectation after it ran), from the eval database it ran on; it refuses when
-//         any fact the recording holds no longer recomputes to the same value there. Then it re-scores.
+//         any fact the recording holds no longer recomputes to the same value there. --replace names truth
+//         keys whose truth FILE was restated on purpose after the run: only those are recomputed in place,
+//         and every other key must still match (HREV4-RET-01). Then it re-scores.
 // compare applies the pre-registered regression tolerances (eval/askreel/gates.json) of a run against a
 //         baseline; exit 1 on any regression, exit 2 when the runs are incomparable (different scenario
 //         fingerprints, turn counts, snapshot or artifact). This is the merge gate of program §5.0 rule 6.
@@ -546,6 +548,29 @@ export function rematerialiseDrift(old, fresh) {
   return drift;
 }
 
+// The truth a re-materialised recording holds (HREV4-RET-01): every key it froze, plus the keys its
+// scenarios now need and it never froze (`added`), plus — for the keys named in `replace`, whose truth FILE
+// was restated on purpose after the run — the fresh value in place of the recorded one (`replaced`, with
+// what changed). Every key NOT named must still recompute to its recorded value; that is what proves the
+// database is in the recording's state, so naming one key never excuses another. A named key the
+// recording never froze, or that no scenario still needs, is drift too. Pure: `old` is never mutated.
+export function rematerialiseMerge(old, fresh, replace = []) {
+  const named = new Set(replace);
+  const drift = [];
+  for (const k of named) {
+    if (!(k in (old.truth ?? {}))) drift.push(`--replace ${k}: the recording froze no such truth`);
+    else if (!(k in (fresh.truth ?? {}))) drift.push(`--replace ${k}: no scenario in the recording needs it any more`);
+  }
+  const keep = (truth) => Object.fromEntries(Object.entries(truth ?? {}).filter(([k]) => !named.has(k)));
+  drift.push(...rematerialiseDrift({ ...old, truth: keep(old.truth) }, { ...fresh, truth: keep(fresh.truth) }));
+  const added = Object.keys(fresh.truth ?? {}).filter((k) => !(k in (old.truth ?? {})));
+  const replaced = [...named].filter((k) => k in (old.truth ?? {}) && k in (fresh.truth ?? {}))
+    .map((k) => ({ key: k, changes: rematerialiseDrift({ truth: { [k]: old.truth[k] } }, { truth: { [k]: fresh.truth[k] } }) }));
+  const truth = { ...structuredClone(old.truth ?? {}) };
+  for (const k of [...added, ...replaced.map((r) => r.key)]) truth[k] = structuredClone(fresh.truth[k]);
+  return { drift, added, replaced, truth };
+}
+
 // A concept's truth query bounded to a turn's year window: the title's year (Year, else ReleasedAt, else
 // FirstAiredAt) inside the inclusive window. A title with no date passes, as the API's own year window
 // lets it (the eligibility truth's MinYear/MaxYear rule reads the same way). No window: the query as is.
@@ -789,16 +814,19 @@ if (mode === "rematerialise") {
   const scenarios = loadScenarios(recording.scenarioDirs.map((d) => resolve(repo, d)));
   const fresh = materialise(db, recording.accountId, recording, scenarios);
   const old = recording.facts ?? die("the recording has no facts to extend");
-  const drift = rematerialiseDrift(old, fresh);
+  const replace = typeof args.replace === "string" ? args.replace.split(",").map((k) => k.trim()).filter(Boolean) : [];
+  const { drift, added, replaced, truth } = rematerialiseMerge(old, fresh, replace);
   if (drift.length) die(`refusing: ${db} is not in this recording's state — ${drift.slice(0, 8).join("; ")}`);
-  const added = Object.keys(fresh.truth).filter((k) => !(k in old.truth));
-  for (const k of added) old.truth[k] = fresh.truth[k];
-  if (added.length) (recording.rematerialised ??= []).push({ at: new Date().toISOString(), db, gitSha: gitSha(), added });
+  old.truth = truth;
+  if (added.length || replaced.length) {
+    (recording.rematerialised ??= []).push({ at: new Date().toISOString(), db, gitSha: gitSha(), added, ...(replaced.length ? { replaced } : {}) });
+  }
   const outDir = args.out ?? dirname(file);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "recording.json"), JSON.stringify(recording));
   const metrics = writeOutputs(outDir, recording);
-  console.error(`askreel: added ${added.length} truth set(s)${added.length ? ` (${added.join(", ")})` : ""}; wrote ${outDir}`);
+  console.error(`askreel: added ${added.length} truth set(s)${added.length ? ` (${added.join(", ")})` : ""}`
+    + `${replaced.length ? `, replaced ${replaced.map((r) => `${r.key} [${r.changes.length} change(s)]`).join(", ")}` : ""}; wrote ${outDir}`);
   console.log(JSON.stringify(metrics.summary, null, 1));
   process.exit(0);
 }

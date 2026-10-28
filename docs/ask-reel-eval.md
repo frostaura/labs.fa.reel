@@ -69,7 +69,9 @@ node scripts/eval/askreel.mjs compare .tmp/eval/<date>/<name>/metrics.json --bas
 node --test 'scripts/eval/*.test.mjs'
 node scripts/eval/askreel.mjs replay <recording.json>
 node scripts/eval/askreel.mjs rematerialise <recording.json> --db <the db it ran on>   # adds only truth sets the
-#    scenarios now need and the recording never froze; refuses when any frozen fact recomputes differently there
+#    scenarios now need and the recording never froze; refuses when any frozen fact recomputes differently there.
+#    [--replace key,key] recomputes ONLY the named keys, whose truth file was restated on purpose after the run
+#    (every other frozen key must still match, which is what proves the db is in the recording's state)
 node scripts/eval/askreel.mjs check [--db reel_eval]          # --db also executes every truth query used
 node scripts/eval/askreel.mjs check --db reel_eval --api http://127.0.0.1:5180   # + the truth against the API's own eligibility (cost meter)
 
@@ -145,6 +147,13 @@ year's heists (487 matching, MinYear 2000 "unlocks 36"), so a correct reply read
 and missed supply (HREV3-EVAL-A, HREV3-RET-05). A recording made before a turn gained its window has no
 windowed truth: the turn is reported as unverified (`truthMissing`), never scored against an empty set,
 until `rematerialise` adds it from the database the recording ran on.
+
+A concept truth states the concept as the request's own words mean it, not as its nearest genre tag.
+"Romantic comedies" (`conflict-romcom`) is `truth/romantic-comedy.sql`: romance AND comedy, each read the way
+an exclusion of that genre reads it (the soap alias, romance's TV stand-in keywords and overview phrases,
+generated from `GenreStandIns` like `_eligible.sql`'s lists) — the app's own reading, held to it by
+`ConceptTruthParityTests`. Held to every romance title instead, the app's correct count (2,981 of 4,675 at
+50 votes) failed the supply gate and was filed as an app defect (HREV4-RET-01).
 
 ## SQL truth
 
