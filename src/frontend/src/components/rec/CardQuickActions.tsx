@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Bookmark, EyeOff, Star } from "lucide-react";
 import { useMarkNotInterestedMutation, useRateTitleMutation, useSaveForLaterMutation } from "../../store/api";
-import { Popover, PopoverAnchor, PopoverContent } from "../ui/popover";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { DEFAULT_DISLIKE_REASON, DISLIKE_REASONS } from "../../lib/dislikeReasons";
 import { useCardUndo } from "../../lib/cardUndo";
 import { Button } from "../ui/button";
@@ -92,6 +92,13 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // Set the moment a hold matures into the picker; consumed by the click that the same press
   // fires immediately afterwards, which must NOT also dismiss the card.
   const suppressClick = useRef(false);
+  // The reason picker is ANCHORED, not triggered — the button's own click is the one-tap dismiss —
+  // so Radix has no trigger to hand focus back to when it closes, and focus fell to <body>
+  // (H3REV-PH-01, WCAG 2.4.3). It is returned by hand, on Radix's own terms for a non-modal popover:
+  // to the button after Escape or a pick, but not after a click elsewhere, where focus belongs to
+  // whatever was clicked.
+  const notForMeRef = useRef<HTMLButtonElement | null>(null);
+  const reasonsDismissedOutside = useRef(false);
 
   const cancelLongPress = () => {
     if (longPressTimer.current !== null) {
@@ -160,9 +167,12 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
       .catch(() => undefined);
   };
 
-  const openReasons = () => {
+  // `fromPointer`: a hold or a right-click, whose press may still deliver a click that must not also
+  // dismiss. The keyboard openers (ArrowDown, Alt+Enter) produce no click, so a suppression armed by
+  // them would swallow the NEXT Enter — the fast path — once focus is back on the button.
+  const openReasons = (fromPointer: boolean) => {
     cancelLongPress();
-    suppressClick.current = true;
+    suppressClick.current = fromPointer;
     setReasonsOpen(true);
   };
 
@@ -189,20 +199,20 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             }}
             onPointerDown={() => {
               cancelLongPress();
-              longPressTimer.current = setTimeout(openReasons, LONG_PRESS_MS);
+              longPressTimer.current = setTimeout(() => openReasons(true), LONG_PRESS_MS);
             }}
             onPointerUp={cancelLongPress}
             onPointerLeave={cancelLongPress}
             onPointerCancel={cancelLongPress}
             onContextMenu={(e) => {
               e.preventDefault();
-              openReasons();
+              openReasons(true);
             }}
             onKeyDown={(e) => {
               // Keyboard equivalent of the hold. Space/Enter stay the fast path.
               if (e.key === "ArrowDown" || (e.key === "Enter" && e.altKey)) {
                 e.preventDefault();
-                openReasons();
+                openReasons(false);
               }
             }}
             aria-label={`Not for me — ${name}`}
@@ -214,6 +224,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
             tabIndex={KEYBOARD_REACHABLE}
             data-testid="quick-not-interested"
+            ref={notForMeRef}
           >
             <span className={pillClass}>
               <EyeOff className={iconClass} aria-hidden />
@@ -228,6 +239,14 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           // A named dialog (axe aria-dialog-name, PH-04): the overline is decoration under this name.
           aria-label={`Why not ${name}?`}
           data-testid="quick-reason-picker"
+          onInteractOutside={() => {
+            reasonsDismissedOutside.current = true;
+          }}
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            if (!reasonsDismissedOutside.current) notForMeRef.current?.focus();
+            reasonsDismissedOutside.current = false;
+          }}
         >
           <p className="fa-overline text-3 px-2 pb-1.5">why not?</p>
           <div className="flex flex-col">
@@ -265,8 +284,13 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           <Bookmark className={iconClass} aria-hidden />
         </span>
       </Button>
+      {/* A real TRIGGER, unlike the reason picker's anchor: this button has no action of its own, so
+          Radix returns focus to it when the picker closes (H3REV-PH-01), and a second press on it is
+          recognised as the trigger instead of an outside interaction — which, as an anchor, dismissed
+          the picker and let the same click's toggle reopen it. The manual toggle stays because the
+          `preventDefault` a nesting host needs also stops Radix's own. */}
       <Popover open={rateOpen} onOpenChange={setRateOpen}>
-        <PopoverAnchor asChild>
+        <PopoverTrigger asChild>
           <Button
             variant="ghost"
             onClick={(e) => {
@@ -287,7 +311,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
               <Star className={iconClass} aria-hidden />
             </span>
           </Button>
-        </PopoverAnchor>
+        </PopoverTrigger>
         {/* Two rows of five, not one row of ten: at 44 px a target (coarse pointers) a single row
             is 476 px wide and ran off a phone. Radix keeps it inside the viewport with 12 px to
             spare on every side, flipping or shifting it rather than clipping it (O-15). */}
