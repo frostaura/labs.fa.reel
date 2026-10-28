@@ -57,7 +57,7 @@ public static class AskReelIntentSanitizer
     /// </summary>
     private static readonly IReadOnlySet<string> StopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "i", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "they", "them", "their", "he",
+        "i", "i'd", "i'm", "i'll", "i've", "you'd", "we'd", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "they", "them", "their", "he",
         "him", "his", "she", "her", "it", "its", "this", "that", "these", "those", "one", "ones", "the", "a",
         "an", "and", "or", "of", "to", "in", "on", "at", "for", "with", "from", "by", "about", "as", "is",
         "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "have", "has", "had", "can",
@@ -69,6 +69,9 @@ public static class AskReelIntentSanitizer
         "thing", "things", "kind", "sort", "type", "lot", "lots", "bit", "just", "really", "very", "so",
         "too", "also", "then", "than", "now", "here", "there", "what", "which", "who", "how", "why", "when",
         "where", "let", "lets", "let's", "ok", "okay", "yes", "yeah", "maybe", "earlier", "before", "after",
+        // When the user means to watch, never what: "something funny tonight" searched the topic
+        // "tonight" and replied "There are no tonight titles left for you" (HREV5 keyless e2e).
+        "tonight", "tonite", "today", "tomorrow", "evening", "afternoon",
     };
 
     /// <summary>
@@ -351,7 +354,10 @@ public static class AskReelIntentSanitizer
             var (word, negated) = stream[index];
             if (word is not null && !negated && !consumed[index] && positive.Contains(word))
             {
-                if (run.Count == 0 && lead is not null)
+                // An ordinal leads a topic word, never a genre word: "first contact", "second world
+                // war", but "my first horror film" is horror.
+                if (run.Count == 0 && lead is not null
+                    && (PhraseLeads.Contains(lead) || Retrieval.Concepts.ConceptSynonyms.GenreSlugsOf(word) is null))
                 {
                     run.Add(lead);
                 }
@@ -362,11 +368,17 @@ public static class AskReelIntentSanitizer
             }
 
             Flush();
-            lead = word is not null && !negated && !consumed[index] && PhraseLeads.Contains(word) ? word : null;
+            lead = word is not null && !negated && !consumed[index]
+                && (PhraseLeads.Contains(word) || (TopicOrdinals.Contains(word) && !BeforeCardNoun(index)))
+                ? word
+                : null;
         }
 
         Flush();
         return new KeylessRequest(phrases, moods.Distinct(StringComparer.Ordinal).ToList(), years, yearWords);
+
+        bool BeforeCardNoun(int index) =>
+            index + 1 < stream.Count && stream[index + 1].Word is { } next && AskReelPointer.IsCardNoun(next);
 
         void Flush()
         {
@@ -380,6 +392,43 @@ public static class AskReelIntentSanitizer
 
                 run.Clear();
             }
+        }
+    }
+
+    /// <summary>
+    /// The phrases a raw sentence rules out, read with no model, kept whole as the user wrote them:
+    /// "no walking dead" rules out "walking dead", never "walking" and "dead" each on its own — as
+    /// single words they excluded every title whose name or overview says "dead" and missed the show
+    /// the user named (HREV4-RET-02). A phrase is a run of the negated words <see cref="ReadKeyless"/>
+    /// keeps; it ends at any other word or a clause break, so "no horror or gore" is two.
+    /// </summary>
+    public static IReadOnlyList<string> KeylessNegatedPhrases(string? raw)
+    {
+        var negated = ReadKeyless(raw).Negated.ToHashSet(StringComparer.Ordinal);
+        var phrases = new List<string>();
+        var run = new List<string>();
+        foreach (var (word, isNegated) in ScopedWithBreaks(raw))
+        {
+            if (word is not null && isNegated && negated.Contains(word))
+            {
+                run.Add(word);
+                continue;
+            }
+
+            Flush();
+        }
+
+        Flush();
+        return phrases;
+
+        void Flush()
+        {
+            if (run.Count > 0 && string.Join(' ', run) is var phrase && !phrases.Contains(phrase, StringComparer.Ordinal))
+            {
+                phrases.Add(phrase);
+            }
+
+            run.Clear();
         }
     }
 
@@ -549,6 +598,18 @@ public static class AskReelIntentSanitizer
     private static readonly IReadOnlySet<string> PhraseLeads = new HashSet<string>(StringComparer.Ordinal)
     {
         "time", "found",
+    };
+
+    /// <summary>
+    /// Ordinals, which point at a card only before a card noun ("the second one", "the third film"
+    /// — <see cref="AskReelPointer.Ordinal"/>) and otherwise belong to the topic they lead: the
+    /// model-less reader dropped them everywhere, so "is there a first contact movie?" counted
+    /// "contact movies" and "good second world war films" counted "world war" (HREV5-ASK-04).
+    /// "last" is left out: it opens a year window ("the last ten years") far more often than a topic.
+    /// </summary>
+    private static readonly IReadOnlySet<string> TopicOrdinals = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
     };
 
     /// <summary>

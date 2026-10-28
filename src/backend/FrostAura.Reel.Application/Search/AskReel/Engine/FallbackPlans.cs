@@ -18,6 +18,11 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// years" with the planner down searched the hard topics "tense heist" and "ten years", found nothing
 /// tagged either, and showed three unrelated titles.</para>
 ///
+/// <para>Both read the message through <see cref="FallbackReader"/> (HREV4-ASK-05, HREV4-RET-02): a
+/// question about a card is answered from its facts, "like &lt;title&gt;" is a reference, a comparison
+/// is a soft steer, a connective or a generic noun is never a topic, and a negation is the phrase the
+/// user wrote.</para>
+///
 /// <para>Both keep the user's topic as the PHRASE it was written in ("time travel", "liam neeson"),
 /// never as separate words each required on its own, and both take the media the user's words name
 /// (<see cref="PlanSanitizer.UserMedia"/>) — the sanitiser that does both for a model's plan never
@@ -29,27 +34,36 @@ public static class FallbackPlans
     {
         ArgumentNullException.ThrowIfNull(failed);
         ArgumentNullException.ThrowIfNull(state);
-        var reading = AskReelIntentSanitizer.ReadKeyless(message);
-        var request = AskReelIntentSanitizer.ReadKeylessRequest(message, currentYear ?? DateTime.UtcNow.Year);
+        var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
+        if (reading.ItemQuestion)
+        {
+            return ItemQuestion(PlanSource.CarriedForward, failed.Meta, failed.Failure);
+        }
+
         var known = state.Hard.Concepts.Select(c => c.UserWords).ToList();
-        var additive = reading.Positive
+        var additive = reading.Concepts
             .Where(w => !known.Any(k => NegationTerms.EqualsAnyForm(k, w) || NegationTerms.EqualsAnyForm(w, k)))
-            .Where(w => !request.YearWords.Contains(w, StringComparer.Ordinal))
+            .Where(w => !reading.YearWords.Contains(w, StringComparer.Ordinal))
             .ToList();
+        var first = state.Version == 0;
         return new PlanResult(
-            state.Version == 0 ? TurnAct.NewRequest : TurnAct.Refine,
+            first ? TurnAct.NewRequest : TurnAct.Refine,
             ConversationStateDelta.None with
             {
-                // A first turn has nothing to carry: its positive words are all it has, so they are its
-                // topic — less the moods and the year window it names, which are read as what they are.
-                Concepts = state.Version == 0 ? request.Phrases : [],
-                Moods = state.Version == 0 ? request.Moods : additive,
-                Years = request.Years,
-                Negations = reading.Negated,
-                Media = PlanSanitizer.UserMedia(null, message),
+                // A first turn has nothing to carry: its topics are all it has, so they are its
+                // requirement — less the moods, the comparisons and the year window it names, which
+                // are read as what they are. A later turn adds its words only as soft preferences.
+                Concepts = first ? reading.Concepts : [],
+                Genres = first ? reading.Genres : [],
+                Moods = first ? reading.Moods : [.. reading.Moods, .. additive],
+                Directions = reading.Directions,
+                Years = reading.Years,
+                Negations = reading.Negations,
+                ReferenceNames = reading.ReferenceNames,
+                Media = reading.Media,
             },
             [],
-            [new ToolRequest(AskTool.SearchCatalog)],
+            [new ToolRequest(reading.ReferenceNames.Count > 0 ? AskTool.SimilarTo : AskTool.SearchCatalog)],
             null,
             [],
             PlanSource.CarriedForward,
@@ -61,23 +75,48 @@ public static class FallbackPlans
     public static PlanResult Keyless(string message, ConversationState state, int? currentYear = null)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var reading = AskReelIntentSanitizer.ReadKeyless(message);
-        var request = AskReelIntentSanitizer.ReadKeylessRequest(message, currentYear ?? DateTime.UtcNow.Year);
+        var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
+        if (reading.ItemQuestion)
+        {
+            return ItemQuestion(PlanSource.CarriedForward, LlmCallMeta.None, null);
+        }
+
         return new PlanResult(
-            reading.Positive.Count > 0 || state.Version == 0 ? TurnAct.NewRequest : TurnAct.Refine,
+            reading.NamesSomething || state.Version == 0 ? TurnAct.NewRequest : TurnAct.Refine,
             ConversationStateDelta.None with
             {
-                Concepts = request.Phrases,
-                Moods = request.Moods,
-                Years = request.Years,
-                Negations = reading.Negated,
-                Media = PlanSanitizer.UserMedia(null, message),
+                Concepts = reading.Concepts,
+                Genres = reading.Genres,
+                Moods = reading.Moods,
+                Directions = reading.Directions,
+                Years = reading.Years,
+                Negations = reading.Negations,
+                ReferenceNames = reading.ReferenceNames,
+                Media = reading.Media,
             },
             [],
-            [new ToolRequest(AskTool.SearchCatalog)],
+            [new ToolRequest(reading.ReferenceNames.Count > 0 ? AskTool.SimilarTo : AskTool.SearchCatalog)],
             null,
             [],
             PlanSource.CarriedForward,
             LlmCallMeta.None);
     }
+
+    /// <summary>
+    /// A question about a card no model read: answered from the title's facts, the search left where it
+    /// was (the conversation's media included). The pointer is resolved by the sanitiser's rule
+    /// (<see cref="PlanSanitizer.PointFallback"/>), the subject by name when the message names one.
+    /// </summary>
+    private static PlanResult ItemQuestion(PlanSource source, LlmCallMeta meta, PlanFailure? failure) =>
+        new(
+            TurnAct.ItemQuestion,
+            ConversationStateDelta.None,
+            [],
+            [new ToolRequest(AskTool.TitleFacts)],
+            null,
+            [],
+            source,
+            meta,
+            null,
+            failure);
 }

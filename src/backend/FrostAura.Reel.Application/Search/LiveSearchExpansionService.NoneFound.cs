@@ -92,9 +92,10 @@ public sealed partial class LiveSearchExpansionService
             : 0;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             supply, concept, hard.Media, underBar, nearMiss.Count, floor,
-            // Every card nobody judged, in either tray: the bar holds some of them back (XM-06), and
-            // they are still cards the reply owes the "couldn't check" sentence for.
-            Unchecked: uncheckedTray.Count + heldUnchecked,
+            // Every card nobody judged, each counted in the tray it sits in (HREV4-ASK-03): the
+            // unchecked tray's as marked unchecked, the floor tray's as held back by the bar (XM-06).
+            Unchecked: uncheckedTray.Count,
+            HeldUnchecked: heldUnchecked,
             JudgedAny: judge?.JudgedAny ?? true,
             ShownHere: shownHere,
             UnscoredHeld: unscoredHeld,

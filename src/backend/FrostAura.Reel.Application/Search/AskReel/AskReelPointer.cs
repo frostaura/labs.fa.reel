@@ -53,6 +53,9 @@ public static class AskReelPointer
         "one", "ones", "movie", "film", "show", "series", "title", "pick", "option", "card", "suggestion",
     };
 
+    /// <summary>True when <paramref name="word"/> makes an ordinal before it a pointer at a card ("one", "film", "pick").</summary>
+    public static bool IsCardNoun(string word) => CardNouns.Contains(word);
+
     /// <summary>
     /// The position <paramref name="message"/> points at — 1-based, or <see cref="Last"/> — or null when
     /// it points at nothing. An ordinal counts only when a card noun follows it ("the second one",

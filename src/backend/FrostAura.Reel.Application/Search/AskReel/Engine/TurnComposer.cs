@@ -33,9 +33,15 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// The conversation had no earlier answer: a carried-forward plan has nothing "before" to carry,
 /// so its lead says it searched the user's own words (HREV1-ASK-06).
 /// </param>
+/// <param name="Guessed">
+/// No model read the message and the topic searched is a guess at it (a title it asked for something
+/// like that the catalogue holds no title by): the reply leads with what was searched and never
+/// states the counts as the user's own shelf (HREV4-RET-02).
+/// </param>
 /// <param name="HeldUnchecked">
 /// Of <paramref name="UnderBar"/>, the cards nobody judged (XM-06: the bar holds back an unchecked card
-/// too). They are in the floor tray but never said to FIT, and are counted with the unchecked cards.
+/// too). They are in the floor tray but never said to FIT, and are named as held back by the bar —
+/// never counted with the unchecked tray's cards (HREV4-ASK-03).
 /// </param>
 public sealed record TurnContext(
     TurnAct Act,
@@ -61,7 +67,8 @@ public sealed record TurnContext(
     int ShownHere = 0,
     int HeldUnchecked = 0,
     int? CheckedOfTagged = null,
-    bool FirstTurn = false);
+    bool FirstTurn = false,
+    bool Guessed = false);
 
 /// <summary>The reply and the one-line reason, as composed.</summary>
 public sealed record ComposedTurn(string Reply, string? Reason);
@@ -147,9 +154,16 @@ public sealed class TurnComposer : ITurnComposer
             sentences.Add(Inv($"{fitting} more {(fitting == 1 ? "fits" : "fit")} but {(fitting == 1 ? "sits" : "sit")} under your {AskReelReason.FormatFloor(c.Floor)} bar."));
         }
 
-        if (c.JudgeFailed && c.UnjudgedPicks == 0 && c.Unchecked + c.HeldUnchecked > 0)
+        if (c.JudgeFailed && c.UnjudgedPicks == 0 && c.Unchecked > 0)
         {
             sentences.Add(JudgeFailedNote);
+        }
+
+        // An unjudged card the bar held back sits in the floor tray, which marks nothing: it is named
+        // as held back there, never as "marked" (HREV4-ASK-03).
+        if (c.HeldUnchecked > 0)
+        {
+            sentences.Add(Inv($"Your bar also holds back {c.HeldUnchecked} {(c.HeldUnchecked == 1 ? "title" : "titles")} I couldn't check against your request."));
         }
 
         return string.Join(' ', sentences);
@@ -174,24 +188,30 @@ public sealed class TurnComposer : ITurnComposer
             c.UnderBarNames,
             c.NearMissNames.Count,
             c.Floor,
-            Unchecked: c.Unchecked + c.HeldUnchecked,
+            // Each unjudged card in the tray it sits in (HREV4-ASK-03): the unchecked tray's are
+            // "marked as unchecked", the floor tray's are held back by the bar.
+            Unchecked: c.Unchecked,
+            HeldUnchecked: c.HeldUnchecked,
             // Only a verdict that came back is a check: a judge sent sixteen titles that answered
             // none, a person's credits and a turn with no model all judged nothing (HREV1-ASK-01).
             JudgedAny: c.Judged > 0,
             ShownHere: c.ShownHere,
             NearMissNames: c.NearMissNames,
             Checked: c.Judged,
-            CheckedOfTagged: c.CheckedOfTagged));
+            CheckedOfTagged: c.CheckedOfTagged,
+            Guessed: c.Guessed));
     }
 
     private static string Lead(TurnContext c, string reply)
     {
-        if (!c.CarriedForward)
+        if (!c.CarriedForward && !c.Guessed)
         {
             return reply;
         }
 
-        var lead = (c.Topic, c.FirstTurn) switch
+        // A guessed reading of a new request searched the user's words, not anything "before".
+        var fresh = c.FirstTurn || (c.Guessed && c.Act == TurnAct.NewRequest);
+        var lead = (c.Topic, fresh) switch
         {
             ({ Length: > 0 } topic, true) => string.Format(CultureInfo.InvariantCulture, FirstTurnFallbackLead, topic),
             (_, true) => FirstTurnFallbackPlainLead,

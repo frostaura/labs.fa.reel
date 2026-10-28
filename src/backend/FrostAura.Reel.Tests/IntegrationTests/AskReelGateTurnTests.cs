@@ -718,7 +718,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     /// bar binds it all the same. Under a bar no card clears, the judged matches go to the floor tray
     /// and are named under the bar; the cards the judge skipped — a skipped entry in an answered batch
     /// and a whole failed batch alike — go to the floor tray too, with no verdict, are counted in the
-    /// reply as unchecked (never named), and raise the missing-verdict flag. The unchecked tray holds
+    /// reply as held back by the bar and not checked (never named, never "marked as unchecked" — that
+    /// is the unchecked tray's, HREV4-ASK-03), and raise the missing-verdict flag. The unchecked tray holds
     /// only unchecked cards that clear the bar, so none of it is under the bar.
     /// </summary>
     [Fact]
@@ -758,7 +759,10 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Contains("judge-missing:3/5", done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
 
         Assert.Contains("Under your 9.9 bar: Gate Yes", outcome.AssistantText, StringComparison.Ordinal);
-        Assert.Contains("3 titles I couldn't check against your request are below", outcome.AssistantText, StringComparison.Ordinal);
+        // HREV4-ASK-03: they are named as held back by the bar, the floor tray's own caption, never as
+        // "marked as unchecked" above an unchecked tray that is empty.
+        Assert.Contains("Your bar also holds back 3 titles I couldn't check against your request.", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("marked as unchecked", outcome.AssistantText, StringComparison.Ordinal);
         Assert.DoesNotContain("Gate Fail", outcome.AssistantText, StringComparison.Ordinal);
         Assert.Equal(2, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor && c.Satisfies == "yes"));
         Assert.Equal(3, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor && c.Satisfies is null));
@@ -853,6 +857,58 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         {
             Assert.DoesNotContain(martial, outcome.AssistantText, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// HREV4-ASK-04: with the provider failing, v1 searched the interpreter's heuristic reading, which
+    /// drops the floor word inside a topic — "time travel movies" became the keyword "travel", and the
+    /// reply counted and named the travel shelf ("19 unseen travel movies … crowd would unlock 33")
+    /// where the time-travel shelf holds 11 and 19. The degraded keywords are widened back to the
+    /// user's phrase, so the count and the name are the time-travel shelf's. Varied over both phrase
+    /// leads and over a shelf the bare word alone would count larger.
+    /// </summary>
+    [Theory]
+    [InlineData("time {0} movies", "time")]
+    [InlineData("found {0} movies", "found")]
+    [InlineData("{1} {0} loop movies", "time")]
+    public async Task A_degraded_reading_counts_and_names_the_users_whole_phrase(string shape, string lead)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var word = $"travq{Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        var phrase = shape.Contains("loop", StringComparison.Ordinal) ? $"{lead} {word} loop" : $"{lead} {word}";
+        for (var i = 0; i < 2; i++)
+        {
+            await SeedTopicalTitleAsync(phrase);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            await SeedTopicalTitleAsync(word);
+        }
+
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var agent = new VerdictAgent(
+            keywords: shape.Contains("loop", StringComparison.Ordinal) ? [word, "loop"] : [word],
+            degradedReading: true, degradedFailure: AgentFailureKind.ProviderUnavailable);
+        var (service, events) = BuildService(accountId, new ScriptedTmdbClient([]), agent, out var emit, withRetrieval: true);
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                string.Format(System.Globalization.CultureInfo.InvariantCulture, shape, word, lead), [], [], [], "US", [],
+                ApiUsagePurpose.RerankAsk),
+            emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Equal(2, done.GetProperty("supply").GetProperty("matchingInCatalogue").GetInt32());
+        Assert.Contains($"There are no {phrase} titles left for you. Of the 2 {phrase} titles in the catalogue", outcome.AssistantText, StringComparison.Ordinal);
+        // The bare word is never named as a topic of its own.
+        Assert.DoesNotContain(word, outcome.AssistantText!.Replace(phrase, string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     /// <summary>

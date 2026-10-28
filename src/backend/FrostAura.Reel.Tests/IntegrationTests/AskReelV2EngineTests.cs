@@ -1373,6 +1373,337 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV4-ASK-05: with no model at all, "is the first one violent?" was planned as a new request
+    /// with no topic — the conversation's Movies scope reset to any medium and 16 unchecked titles,
+    /// mostly shows, came back instead of an answer. A question about a card is answered from its
+    /// facts, nothing is searched or judged, and the conversation's media and topic stay as they were.
+    /// Varied over the ordinal and the question's shape.
+    /// </summary>
+    [Theory]
+    [InlineData("is the first one violent?", 0)]
+    [InlineData("how long is the second one?", 1)]
+    [InlineData("Is the last one any good?", 1)]
+    public async Task A_model_less_question_about_a_card_is_answered_from_its_facts_and_keeps_the_conversation(string message, int index)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        var shows = await SeedTopicalAsync(topic, ("V2 Show", 3));
+        await MakeShowsAsync(shows);
+        var presented = ids.Select((id, i) => new PresentedCard(1, i + 1, id, $"V2 Yes {i}", 2010, MediaType.Movie)).ToList();
+        var conversationId = await SeedConversationAsync(
+            accountId,
+            ConversationState.Empty with
+            {
+                Version = 1,
+                Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])], Media = MediaScope.Movies },
+            });
+        var (engine, events, emit) = Build(accountId, new KeylessPlanner(), new DownJudge(available: false), new NoAnswerer());
+
+        var outcome = await engine.StreamAsync(
+            Input(message) with { ConversationId = conversationId, AnswerNumber = 2, Presented = presented, ShownTitleIds = ids },
+            accountId, emit, CancellationToken.None);
+
+        var answer = Assert.Single(events, e => e.Event == "answer").Data;
+        Assert.Equal($"T1.{index + 1}", answer.GetProperty("handle").GetString());
+        Assert.Equal(ids[index], answer.GetProperty("titleId").GetGuid());
+        Assert.EndsWith("That's what I know about it — I can't say more than that.", answer.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal("ItemQuestion", outcome.Act);
+        Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
+        Assert.Empty(outcome.Cards);
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "none-found");
+        var state = ConversationStateJson.Read(outcome.ConversationStateJson);
+        Assert.NotNull(state);
+        Assert.Equal(MediaScope.Movies, state.Hard.Media);
+        Assert.Equal([topic], state.Hard.Concepts.Select(c => c.UserWords));
+    }
+
+    /// <summary>
+    /// HREV4-RET-02 / HREV4-ASK-05: with no model, "movies like Inception" searched the concept
+    /// "inception" and replied "There are no inception movies left for you. Of the 2 inception movies…".
+    /// A title the catalogue holds by that name is a reference — searched near, never returned, never a
+    /// topic. A name it does not hold is the user's words searched as a topic, and the reply owns up to
+    /// the guess: it leads with what it searched, never says "there are no X left", and offers no
+    /// relaxation of the user's conditions for a shelf they may not have asked for.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "movies like {0}")]
+    [InlineData(true, "like {0} but funnier")]
+    [InlineData(false, "movies like {0}")]
+    [InlineData(false, "something similar to {0}")]
+    public async Task A_model_less_like_a_title_is_a_reference_when_the_catalogue_holds_it_and_an_owned_guess_when_not(
+        bool held, string shape)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var name = $"refq{Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "drama");
+        Guid? reference = null;
+        if (held)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            var title = NewTitle(name, 9_000);
+            db.Titles.Add(title);
+            await db.SaveChangesAsync();
+            reference = title.Id;
+        }
+
+        // Titles TAGGED with the words: seen ones, and one only the standing drama exclusion holds out —
+        // the shelf a guess would count and the relaxation it must not offer.
+        var tagged = await SeedTopicalAsync(name, ("V2 Tagged", 2));
+        await MarkSeenAsync(accountId, tagged);
+        var heldOut = await SeedTopicalAsync(name, ("V2 Drama", 1));
+        await SetGenresAsync(heldOut, ["action", "drama"]);
+        var queries = new List<RetrievalQuery>();
+        var (engine, events, emit) = Build(
+            accountId, new KeylessPlanner(), new DownJudge(available: false), wrap: r => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } }));
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(System.Globalization.CultureInfo.InvariantCulture, shape, name)), accountId, emit, CancellationToken.None);
+
+        var query = Assert.Single(queries);
+        Assert.DoesNotContain("There are no", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("funnier", query.Hard.Concepts.Select(c => c.UserWords));
+        if (held)
+        {
+            Assert.Empty(query.Hard.Concepts);
+            Assert.Contains(reference!.Value, query.Soft.ReferenceTitleIds);
+            Assert.DoesNotContain(outcome.Cards, c => c.TitleId == reference);
+            Assert.DoesNotContain("I couldn't fully read that", outcome.AssistantText, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal([name], query.Hard.Concepts.Select(c => c.UserWords));
+            Assert.Empty(query.Soft.ReferenceTitleIds);
+            Assert.StartsWith(
+                $"I couldn't fully read that, so I searched for {name}. {NoneFoundCopy.GuessedLead}", outcome.AssistantText, StringComparison.Ordinal);
+            Assert.DoesNotContain("turning off", outcome.AssistantText, StringComparison.Ordinal);
+            Assert.Contains("you've seen 2", outcome.AssistantText, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// HREV5-RET-02: with no model, "movies like the matrix" replied "There are no matrix movies left
+    /// for you" — "the" was a pointer word, so no title starting with "The" was ever read as a name. A
+    /// held title is a reference; a name the catalogue lacks is the user's words without the article,
+    /// searched as an owned guess.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "movies like the {0}")]
+    [InlineData(true, "shows like The {0}, no cops")]
+    [InlineData(false, "movies like the {0}")]
+    public async Task A_model_less_like_the_title_is_a_reference_too(bool held, string shape)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var name = $"refq{Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        Guid? reference = null;
+        if (held)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            var title = NewTitle($"The {name}", 9_000);
+            db.Titles.Add(title);
+            await db.SaveChangesAsync();
+            reference = title.Id;
+        }
+
+        var tagged = await SeedTopicalAsync(name, ("V2 Tagged", 2));
+        await MarkSeenAsync(accountId, tagged);
+        var queries = new List<RetrievalQuery>();
+        var (engine, _, emit) = Build(
+            accountId, new KeylessPlanner(), new DownJudge(available: false), wrap: r => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } }));
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(System.Globalization.CultureInfo.InvariantCulture, shape, name)), accountId, emit, CancellationToken.None);
+
+        var query = Assert.Single(queries);
+        Assert.DoesNotContain("There are no", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("tagged that way", outcome.AssistantText, StringComparison.Ordinal);
+        if (held)
+        {
+            Assert.Empty(query.Hard.Concepts);
+            Assert.Contains(reference!.Value, query.Soft.ReferenceTitleIds);
+            Assert.DoesNotContain(outcome.Cards, c => c.TitleId == reference);
+        }
+        else
+        {
+            Assert.Equal([name], query.Hard.Concepts.Select(c => c.UserWords));
+            Assert.StartsWith(
+                $"I couldn't fully read that, so I searched for {name}. {NoneFoundCopy.GuessedLead}", outcome.AssistantText, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// HREV5-RET-02 residual: a model-less "like &lt;title&gt;" follow-up was a new request with no
+    /// media, so after "heist movies", "like John Wick but funnier" searched every medium and showed TV
+    /// shows. With no media word, the request searches the medium of the title it names.
+    /// </summary>
+    [Theory]
+    [InlineData(MediaScope.Movies, false, MediaScope.Movies)]
+    [InlineData(MediaScope.Shows, false, MediaScope.Movies)]
+    [InlineData(MediaScope.Movies, true, MediaScope.Shows)]
+    [InlineData(MediaScope.Any, false, MediaScope.Movies)]
+    public async Task A_model_less_like_a_title_searches_the_medium_of_the_title_it_names(MediaScope conversation, bool referenceIsShow, MediaScope expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var name = $"refq{Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        Guid reference;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var title = NewTitle(name, 9_000);
+            title.MediaType = referenceIsShow ? MediaType.Show : MediaType.Movie;
+            db.Titles.Add(title);
+            await db.SaveChangesAsync();
+            reference = title.Id;
+        }
+
+        await SeedTopicalAsync(topic, ("V2 Yes", 2));
+        var state = ConversationState.Empty with
+        {
+            Version = 1,
+            Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])], Media = conversation },
+        };
+        var queries = new List<RetrievalQuery>();
+        var (engine, _, emit) = Build(
+            accountId, new KeylessPlanner(), new DownJudge(available: false), wrap: r => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } }));
+
+        var outcome = await engine.StreamAsync(
+            Input($"like {name} but funnier") with { ConversationId = await SeedConversationAsync(accountId, state), AnswerNumber = 2 },
+            accountId, emit, CancellationToken.None);
+
+        var query = Assert.Single(queries);
+        Assert.Contains(reference, query.Soft.ReferenceTitleIds);
+        Assert.Equal(expected, query.Hard.Media);
+        Assert.Equal(expected, ConversationStateJson.Read(outcome.ConversationStateJson)!.Hard.Media);
+    }
+
+    /// <summary>
+    /// HREV5-ASK-02 (regression of the HREV4-ASK-02 fix): on an account that excludes romance and
+    /// comedy, "a good love story" planned as romance and "something funny tonight" planned as comedy
+    /// lost the genre — no conflict frame (or a frame with no supply behind it), an empty request and
+    /// "Nothing I found matches what you asked closely enough to show". With no model, "love stories" was
+    /// read as romance and then dropped the same way. The genre the words ask for stays the request, and
+    /// the collision with the standing exclusion is named.
+    /// </summary>
+    [Theory]
+    [InlineData("a good love story", "romance", false)]
+    [InlineData("something funny tonight", "comedy", false)]
+    [InlineData("love stories", "romance", true)]
+    [InlineData("a good love story", "romance", true)]
+    public async Task A_genre_asked_for_by_another_name_keeps_its_conflict_frame_and_its_supply(string message, string genre, bool keyless)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "romance");
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "comedy");
+        var held = await SeedTopicalAsync(Topic(), ("V2 Genre", 3));
+        await SetGenresAsync(held, [genre]);
+        IAskReelPlanner planner = keyless
+            ? new KeylessPlanner()
+            : new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Genres = [genre] }));
+        var queries = new List<RetrievalQuery>();
+        var (engine, events, emit) = Build(
+            accountId, planner, new DownJudge(available: false), wrap: r => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } }));
+
+        var outcome = await engine.StreamAsync(Input(message), accountId, emit, CancellationToken.None);
+
+        var conflict = Assert.Single(events, e => e.Event == "conflict").Data;
+        Assert.Equal([genre], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        var query = Assert.Single(queries);
+        Assert.Contains(query.Hard.Concepts, c => c.Genres.Contains(genre, StringComparer.Ordinal));
+        Assert.Contains(ConversationStateJson.Read(outcome.ConversationStateJson)!.Hard.Concepts, c => c.Genres.Contains(genre, StringComparer.Ordinal));
+        Assert.DoesNotContain("Nothing I found matches", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV4-RET-02: with no model, "what about movies instead" in a zombie-series conversation searched
+    /// the concept "instead" ("There are no instead movies left for you") and streamed 16 unrelated
+    /// movies; "no walking dead" ruled out "walking" and "dead" as separate words. A media switch carries
+    /// the topic forward into the medium named; a negation is the phrase the user wrote.
+    /// </summary>
+    [Fact]
+    public async Task A_model_less_media_switch_carries_the_topic_and_a_negation_is_the_whole_phrase()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var phrase = $"walkq{Guid.NewGuid():N}"[..12] + " " + $"deadq{Guid.NewGuid():N}"[..12];
+        var dead = phrase.Split(' ')[1];
+        var accountId = await SeedAccountAsync();
+        var movies = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var shows = await SeedTopicalAsync(topic, ("V2 Show", 3));
+        await MakeShowsAsync(shows);
+        var named = await SeedTopicalAsync(topic, ("V2 Named", 1));
+        var overview = await SeedTopicalAsync(topic, ("V2 Overview", 1));
+        await MakeShowsAsync([.. named, .. overview]);
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            (await db.Titles.SingleAsync(t => t.Id == named[0])).Name = $"The {phrase}";
+            (await db.Titles.SingleAsync(t => t.Id == overview[0])).Overview = $"Everyone here is {dead} tired.";
+            await db.SaveChangesAsync();
+        }
+
+        var state = ConversationState.Empty with
+        {
+            Version = 1,
+            Hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [], [])], Media = MediaScope.Shows },
+        };
+        var queries = new List<RetrievalQuery>();
+        IAskReelRetriever Recording(IAskReelRetriever r) => new SkippingRetriever(r, q => { lock (queries) { queries.Add(q); } });
+
+        var (switchEngine, _, switchEmit) = Build(accountId, new KeylessPlanner(), new DownJudge(available: false), wrap: Recording);
+        var switched = await switchEngine.StreamAsync(
+            Input("what about movies instead") with { ConversationId = await SeedConversationAsync(accountId, state), AnswerNumber = 2 },
+            accountId, switchEmit, CancellationToken.None);
+
+        var switchQuery = Assert.Single(queries);
+        Assert.Equal([topic], switchQuery.Hard.Concepts.Select(c => c.UserWords));
+        Assert.Equal(MediaScope.Movies, switchQuery.Hard.Media);
+        Assert.All(switched.Cards, c => Assert.Contains(c.TitleId, movies));
+        Assert.DoesNotContain("instead", switched.AssistantText, StringComparison.Ordinal);
+
+        queries.Clear();
+        var (negationEngine, _, negationEmit) = Build(accountId, new KeylessPlanner(), new DownJudge(available: false), wrap: Recording);
+        var negated = await negationEngine.StreamAsync(
+            Input($"no {phrase}") with { ConversationId = await SeedConversationAsync(accountId, state), AnswerNumber = 2 },
+            accountId, negationEmit, CancellationToken.None);
+
+        var negationQuery = Assert.Single(queries);
+        Assert.Equal([topic], negationQuery.Hard.Concepts.Select(c => c.UserWords));
+        // The phrase rides into retrieval as one exclusion (every arm reads the name, the overview and the
+        // tags by it); the bare word, which would rule out every title whose overview says "dead", never does.
+        Assert.Contains(phrase, negationQuery.ExcludeKeywords);
+        Assert.DoesNotContain(dead, negationQuery.ExcludeKeywords);
+        Assert.Equal([phrase], ConversationStateJson.Read(negated.ConversationStateJson)!.UserNegations);
+    }
+
+    /// <summary>
     /// HREV1-ASK-05: a plain topic request is retrieved WHILE the plan runs — the planner here waits
     /// until the speculative retrieval has started, so a turn that did not overlap them would time
     /// out — and the speculation is used only when the plan asks for exactly its query. Varied: a
@@ -2022,6 +2353,31 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         await db.SaveChangesAsync();
     }
 
+    private async Task SeedFilterAsync(Guid accountId, Domain.Filters.FilterKind kind, string value)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new Domain.Filters.ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SetGenresAsync(IEnumerable<Guid> titleIds, string[] genres)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        foreach (var title in await db.Titles.Where(t => titleIds.Contains(t.Id)).ToListAsync())
+        {
+            title.Genres = genres;
+        }
+
+        await db.SaveChangesAsync();
+    }
+
     private async Task SeedBarAsync(Guid accountId, decimal bar)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
@@ -2187,6 +2543,28 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
             return Task.FromResult(script(input));
         }
+    }
+
+    /// <summary>No planner configured: the keyless install, read by the deterministic fallback.</summary>
+    private sealed class KeylessPlanner : IAskReelPlanner
+    {
+        public bool IsAvailable => false;
+
+        public string ModelId => "none";
+
+        public Task<PlanResult> PlanAsync(PlanInput input, CancellationToken ct) =>
+            throw new InvalidOperationException("A keyless planner is never called.");
+    }
+
+    /// <summary>No answer model: an item question is answered from the facts alone.</summary>
+    private sealed class NoAnswerer : IAskReelAnswerer
+    {
+        public bool IsAvailable => false;
+
+        public string ModelId => "none";
+
+        public Task<AnswerResult> AnswerAsync(AnswerInput input, CancellationToken ct) =>
+            throw new InvalidOperationException("An unavailable answerer is never called.");
     }
 
     /// <summary>A planner whose answer is awaited — it can wait on something the turn should already have started.</summary>

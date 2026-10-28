@@ -9,6 +9,10 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// <item><b>Negations</b> only from the user's words: a negation none of whose forms appears in the
 /// message is dropped, and so is one that merely restates a standing condition (those are applied by
 /// eligibility and never stored in the state).</item>
+/// <item><b>Concepts and genres</b> never a standing condition copied from the planner's input
+/// (an excluded genre, an avoided keyword, the allowed language) unless the user's words ask for it —
+/// by name, by a genre word, or by a phrase the conflict detector or the model-less reader reads as
+/// that genre ("funny", "love story").</item>
 /// <item><b>Concepts</b> never a negation cue, never the whole message echoed back, never filler or a
 /// pointer ("the second one"), never a person or a title the plan names elsewhere, and never words that
 /// only restate a genre the plan already requires ("romantic" beside the romance genre).</item>
@@ -42,7 +46,33 @@ public static class PlanSanitizer
         var delta = plan.Delta;
         var negations = delta.Negations.Where(n => Said(n) && !Standing(n)).ToList();
         var named = delta.People.Select(p => p.Name).Concat(delta.ReferenceNames).ToList();
+
+        // A standing condition the model copied into what the user ASKED FOR becomes a requirement
+        // the user never made: "samurai films" planned with genre animation (the planner input reads
+        // "excludes: animation") counted "samurai animation movies", and "zombie movies" planned with
+        // concept "english" (from "language en") replied "no zombie english movies" (HREV4-ASK-02).
+        // The user's own words still win: "a comedy tonight" against an excluded comedy is a
+        // collision the conflict frame names, not a copy. Their words ask for a value whenever any
+        // reading of them does — its name, a genre word ("sci-fi"), the conflict detector's synonyms
+        // ("funny" is comedy) or the model-less reader's genre phrases ("love story" is romance).
+        // Reading only the name threw those away: "a good love story" planned as romance lost the
+        // genre, the conflict frame and the supply, and replied "Nothing I found matches" (HREV5-ASK-02).
+        var standingAsked = StandingRequirementValues(standing);
+        var genresSaid = GenresSaid(words);
+        genresSaid.UnionWith(FallbackReader.GenresOfPhrases(words));
+        var askedInWords = AskReelStandingFilters.AskedForInWords(message);
+        bool AskedByWords(string term) =>
+            askedInWords.Any(a => NegationTerms.EqualsAnyForm(term, a) || NegationTerms.EqualsAnyForm(a, term))
+            || genresSaid.Contains(term.Trim())
+            || (Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(term)) is { Count: > 0 } slugs
+                && slugs.Any(genresSaid.Contains));
+        bool CopiedStanding(string term) =>
+            !Said(term)
+            && !AskedByWords(term)
+            && standingAsked.Any(rule => NegationTerms.EqualsAnyForm(term, rule) || NegationTerms.EqualsAnyForm(rule, term));
+        var genres = delta.Genres.Where(g => !CopiedStanding(g)).ToList();
         var concepts = delta.Concepts
+            .Where(c => !CopiedStanding(c))
             .Where(c => !Rejected(c, message))
             .Where(c => !named.Any(n => string.Equals(n, c, StringComparison.OrdinalIgnoreCase)))
             // A concept the same message also negates is resolved by where it stands in the message:
@@ -55,7 +85,7 @@ public static class PlanSanitizer
         // and as a concept it also demanded the WORD as a tag: "romantic comedies" planned as romantic +
         // comedy + romance counted 145 titles tagged "romantic", while the same question planned as
         // comedy + romance counted every romantic comedy — two numbers for one question (HREV2-ASK-01).
-        concepts = concepts.Where(c => !RestatesGenres(c, delta.Genres)).ToList();
+        concepts = concepts.Where(c => !RestatesGenres(c, genres)).ToList();
 
         var media = UserMedia(delta.Media, message);
 
@@ -63,7 +93,7 @@ public static class PlanSanitizer
         return plan with
         {
             References = references,
-            Delta = delta with { Concepts = concepts, Negations = negations, Media = media },
+            Delta = delta with { Concepts = concepts, Genres = genres, Negations = negations, Media = media },
             ClarifyQuestion = clarify,
             ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
         };
@@ -109,6 +139,65 @@ public static class PlanSanitizer
         {
             var media = AskReelCarry.MediaIn(said);
             return media.Count == 0 ? null : Retrieval.MediaScopes.From(media);
+        }
+    }
+
+    /// <summary>
+    /// Every value a standing condition holds that a plan could copy into a requirement: the excluded
+    /// and only-these genres, the avoided keywords, and — when the account restricts language — each
+    /// allowed language as its code and its English name ("en", "english").
+    /// </summary>
+    internal static IReadOnlyList<string> StandingRequirementValues(FilterRuleSet standing)
+    {
+        var values = standing.ExcludeGenres.Concat(standing.IncludeGenres).Concat(standing.ExcludeKeywords).ToList();
+        if (!standing.AllLanguagesAllowed)
+        {
+            foreach (var code in standing.EffectiveLanguages)
+            {
+                values.Add(code);
+                if (LanguageName(code) is { } name)
+                {
+                    values.Add(name);
+                }
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// The genres the user's own words name, one word or an adjacent pair at a time ("sci-fi",
+    /// "science fiction"), so a model writing the genre in its catalogue form is still the user asking.
+    /// </summary>
+    private static HashSet<string> GenresSaid(IReadOnlyList<string> words)
+    {
+        var said = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < words.Count; i++)
+        {
+            foreach (var phrase in i + 1 < words.Count ? new[] { words[i], $"{words[i]} {words[i + 1]}" } : [words[i]])
+            {
+                if (Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(phrase) is { } slugs)
+                {
+                    said.UnionWith(slugs);
+                }
+            }
+        }
+
+        return said;
+    }
+
+    /// <summary>The English name of a language code, lower-cased ("en" → "english"), or null when the code names none.</summary>
+    private static string? LanguageName(string code)
+    {
+        try
+        {
+            var culture = System.Globalization.CultureInfo.GetCultureInfo(code.Trim());
+            var name = culture.EnglishName.Split(' ', '(')[0].Trim().ToLowerInvariant();
+            return name.Length == 0 || string.Equals(name, code.Trim(), StringComparison.OrdinalIgnoreCase) ? null : name;
+        }
+        catch (System.Globalization.CultureNotFoundException)
+        {
+            return null;
         }
     }
 
@@ -218,7 +307,7 @@ public static class PlanSanitizer
     /// True when <paramref name="message"/> carries every word of <paramref name="title"/>, in order and
     /// adjacent ("is Prometheus scarier…"). Whole words only: "Aliens" does not name "Alien".
     /// </summary>
-    private static bool NamesTitle(string message, string title)
+    internal static bool NamesTitle(string message, string title)
     {
         var name = AskReelIntentSanitizer.Words(title);
         var words = AskReelIntentSanitizer.Words(message);
