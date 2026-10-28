@@ -62,6 +62,15 @@ async function bootHome(page: Page) {
   await expect(page.getByTestId("rec-card")).toHaveCount(4);
 }
 
+/**
+ * Radix runs a popover's close auto-focus in a `setTimeout(0)` after the content unmounts, so a
+ * `not.toBeFocused()` straight after the close passes before any focus could have been stolen.
+ * A later timer runs after Radix's, so the assertion that follows sees where focus finally rests.
+ */
+async function settleCloseAutoFocus(page: Page) {
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 50)));
+}
+
 test.describe("card quick actions", () => {
   test("hover reveals Not for me + Save; Not for me fires the reaction and removes only that card, in place", async ({ page }) => {
     await bootHome(page);
@@ -324,6 +333,130 @@ test.describe("card quick actions", () => {
     await seven.getByTestId("rec-card-link").focus();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/title\/movie\/1007/);
+  });
+
+  test("closing the rating picker from the keyboard puts focus back on its trigger (H3REV-PH-01)", async ({ page }) => {
+    // The trigger used to be a PopoverAnchor with no PopoverTrigger, so Radix had nothing to return
+    // focus to: Escape closed the picker and left document.activeElement on <body>, and on desktop
+    // the actions are opacity 0 until hovered or focused, so there was no visible place to resume.
+    await bootHome(page);
+    const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+    const rate = six.getByTestId("quick-rate");
+    await rate.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("quick-rate-1")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-rate-picker")).toHaveCount(0);
+    await expect(rate).toBeFocused();
+    await expect(rate).toHaveCSS("opacity", "1");
+    await expect(rate).toHaveAttribute("aria-expanded", "false");
+    // And the trigger still works from where focus came back to.
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("quick-rate-1")).toBeFocused();
+  });
+
+  test("closing the reason picker from the keyboard puts focus back on Not for me, which still dismisses (H3REV-PH-01)", async ({ page }) => {
+    await bootHome(page);
+    const reasons: unknown[] = [];
+    await page.route("**/api/titles/movie/1006/reactions/not_interested", (route) => {
+      reasons.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+    const notForMe = six.getByTestId("quick-not-interested");
+
+    // Alt+Enter and ArrowDown both open it; both must hand focus back.
+    for (const opener of ["Alt+Enter", "ArrowDown"]) {
+      await notForMe.focus();
+      await page.keyboard.press(opener);
+      await expect(page.getByTestId("quick-reason-picker")).toBeVisible();
+      await expect.poll(() => page.evaluate(() =>
+        !!document.querySelector('[data-testid="quick-reason-picker"]')?.contains(document.activeElement))).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("quick-reason-picker")).toHaveCount(0);
+      await expect(notForMe).toBeFocused();
+      await expect(notForMe).toHaveCSS("opacity", "1");
+    }
+    expect(reasons).toEqual([]);
+
+    // A keyboard open is not a hold: no click follows it, so it must not swallow the NEXT press —
+    // Enter from the restored focus is the fast path and dismisses with the default reason at once.
+    await page.keyboard.press("Enter");
+    await expect(six).toHaveCount(0);
+    expect(reasons).toHaveLength(1);
+  });
+
+  test("on a phone, tap-open then Escape returns focus to the rate and reason triggers (H3REV-PH-01)", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page = await context.newPage();
+    await bootHome(page);
+    const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+
+    const rate = six.getByTestId("quick-rate");
+    await rate.tap();
+    await expect(page.getByTestId("quick-rate-picker")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-rate-picker")).toHaveCount(0);
+    await expect(rate).toBeFocused();
+
+    const notForMe = six.getByTestId("quick-not-interested");
+    await notForMe.click({ button: "right" });
+    await expect(page.getByTestId("quick-reason-picker")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-reason-picker")).toHaveCount(0);
+    await expect(notForMe).toBeFocused();
+    await context.close();
+  });
+
+  test("a second press on the rate trigger closes its picker, and a click elsewhere keeps focus where it landed (H3REV-PH-01)", async ({ page }) => {
+    await bootHome(page);
+    const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+    const rate = six.getByTestId("quick-rate");
+    await six.hover();
+    await rate.click();
+    await expect(page.getByTestId("quick-rate-picker")).toBeVisible();
+    // The press lands on the trigger, which sits OUTSIDE the content: as an anchor it was an outside
+    // interaction that dismissed the picker and the same click's toggle then reopened it.
+    await rate.click();
+    await expect(page.getByTestId("quick-rate-picker")).toHaveCount(0);
+    await expect(rate).toHaveAttribute("aria-expanded", "false");
+
+    // Dismissing by pointing somewhere else must not drag focus back to the trigger.
+    await rate.click();
+    await expect(page.getByTestId("quick-rate-picker")).toBeVisible();
+    const seven = page.getByTestId("rec-card").filter({ hasText: "Pick 7" }).getByTestId("quick-save");
+    await page.getByTestId("rec-card").filter({ hasText: "Pick 7" }).hover();
+    await page.route("**/api/titles/movie/1007/reactions/save_for_later", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+    await seven.click();
+    await expect(page.getByTestId("quick-rate-picker")).toHaveCount(0);
+    await settleCloseAutoFocus(page);
+    await expect(rate).not.toBeFocused();
+
+    // The same for the reason picker, whose focus return is by hand rather than Radix's.
+    const notForMe = six.getByTestId("quick-not-interested");
+    await six.hover();
+    await notForMe.click({ button: "right" });
+    await expect(page.getByTestId("quick-reason-picker")).toBeVisible();
+    // The picker opens to the RIGHT, over the neighbouring card's corner (WebKit lays Pick 8 under
+    // it), so click the first card's Save that the picker does not cover.
+    const pickerBox = (await page.getByTestId("quick-reason-picker").boundingBox())!;
+    let elsewhere = null;
+    for (const n of [8, 9]) {
+      const candidate = page.getByTestId("rec-card").filter({ hasText: `Pick ${n}` });
+      const box = (await candidate.getByTestId("quick-save").boundingBox())!;
+      const overlaps = box.x < pickerBox.x + pickerBox.width && pickerBox.x < box.x + box.width
+        && box.y < pickerBox.y + pickerBox.height && pickerBox.y < box.y + box.height;
+      if (!overlaps) { elsewhere = { card: candidate, n }; break; }
+    }
+    expect(elsewhere, "a Save outside the reason picker to click").not.toBeNull();
+    await page.route(`**/api/titles/movie/${1000 + elsewhere!.n}/reactions/save_for_later`, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "{}" }));
+    await elsewhere!.card.hover();
+    await elsewhere!.card.getByTestId("quick-save").click();
+    await expect(page.getByTestId("quick-reason-picker")).toHaveCount(0);
+    await settleCloseAutoFocus(page);
+    await expect(notForMe).not.toBeFocused();
   });
 
   test("on a coarse pointer every action is a 44 px target and the 2×5 rating picker stays inside a phone", async ({ browser }) => {
