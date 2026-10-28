@@ -8,6 +8,7 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -555,6 +556,93 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         var result = await RetrieveAsync(new RetrievalQuery(accountId, Concept(topic), SoftPreferences.None, [], Want: 5));
 
         Assert.Equal([allowed], result.Candidates.Select(c => c.TitleId));
+    }
+
+    /// <summary>
+    /// HREV2-RET-03: Ask Reel's supply answers count with the STORED conversation state, whose
+    /// concepts are unresolved. "romantic shows to binge" was planned as [romantic, romance]; read as
+    /// keywords containing "romantic" AND-ed with "romance", the reply said 94 romantic shows where the
+    /// product's own romance rule (genre, soap alias, stand-in labels, overview phrases) reads 1,306,
+    /// and "soap operas" said 16 where 230 shows carry the soap genre. Every alias form must count
+    /// exactly what its genre counts — through the reporter's resolver and, without one, through the
+    /// predicate's own genre-word reading — and the genre's count must equal independent SQL.
+    /// </summary>
+    [Theory]
+    [InlineData(MediaScope.Shows, "romance", new[] { "romantic" })]
+    [InlineData(MediaScope.Shows, "romance", new[] { "romantic", "romance" })]
+    [InlineData(MediaScope.Shows, "romance", new[] { "romances" })]
+    [InlineData(MediaScope.Movies, "romance", new[] { "romantic movies", "romance" })]
+    [InlineData(MediaScope.Any, "soap", new[] { "soap operas" })]
+    [InlineData(MediaScope.Shows, "soap", new[] { "soap opera", "soap" })]
+    public async Task An_unresolved_genre_word_counts_exactly_what_its_genre_counts(MediaScope media, string slug, string[] words)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        var topic = UniqueTopic();
+        var soap = await SeedTitleAsync(topic, t => { t.MediaType = MediaType.Show; t.Genres = ["drama", "soap"]; });
+        var keywordRomance = await SeedTitleAsync(topic, t => { t.MediaType = MediaType.Show; t.Keywords = [topic, "love triangle"]; });
+        var overviewRomance = await SeedTitleAsync(topic, t => { t.MediaType = MediaType.Show; t.Overview = "Two rivals fall in love."; });
+        var romanceFilm = await SeedTitleAsync(topic, t => t.Genres = ["romance", "drama"]);
+        var romanticKeywordFilm = await SeedTitleAsync(topic, t => t.Keywords = [topic, "romantic"]);
+        var bromanceShow = await SeedTitleAsync(topic, t => { t.MediaType = MediaType.Show; t.Overview = "A bromance on the force."; });
+        await SeedWatchAsync(accountId, soap);
+        var mine = new[] { soap, keywordRomance, overviewRomance, romanceFilm, romanticKeywordFilm, bromanceShow };
+
+        var asked = new HardConstraints([.. words.Select(w => new ConceptTerm(w, [], []))], [], null, null, media);
+        var canonical = new HardConstraints([new ConceptTerm(slug, [], [slug])], [], null, null, media);
+
+        // One snapshot for every count: the catalogue is shared with classes running in parallel.
+        await using var db = fixture.CreateContext(new AccountContext());
+        await using var snapshot = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+        var eligibility = new EligibilityQueryBuilder(db);
+        var resolving = new SupplyReporter(db, eligibility, resolver);
+        var bare = new SupplyReporter(db, eligibility);
+
+        var expected = Shape(await bare.ReportAsync(accountId, canonical, CancellationToken.None));
+        Assert.Equal(expected, Shape(await resolving.ReportAsync(accountId, asked, CancellationToken.None)));
+        Assert.Equal(expected, Shape(await bare.ReportAsync(accountId, asked, CancellationToken.None)));
+
+        // Already-resolved constraints (retrieval's) pass through the reporter untouched and agree too.
+        var resolved = await resolver.ResolveAsync(asked, CancellationToken.None);
+        Assert.Single(resolved.Concepts);
+        Assert.Equal(expected, Shape(await resolving.ReportAsync(accountId, resolved, CancellationToken.None)));
+
+        // The fixture's own titles, by the rule an exclusion of the genre applies: a soap is romance
+        // and soap; TV romance is also its stand-in labels and overview phrases; a film is judged by
+        // its genre; a keyword "romantic" on a film and a "bromance" are neither.
+        var matched = await HardConstraintFilter.Apply(db.Titles, db, asked).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+        var want = (slug, media) switch
+        {
+            ("soap", _) => new[] { soap },
+            (_, MediaScope.Movies) => new[] { romanceFilm },
+            _ => new[] { soap, keywordRomance, overviewRomance },
+        };
+        Assert.Equal(want.ToHashSet(), matched.ToHashSet());
+
+        // Independent SQL for the genre-tag half, all votes: soap is a tag on any medium; a romance FILM
+        // is its tag or the soap alias (films have no stand-ins).
+        if (slug == "soap" || media == MediaScope.Movies)
+        {
+            var sql = slug == "soap"
+                ? media == MediaScope.Shows
+                    ? """SELECT count(*)::int AS "Value" FROM "Titles" WHERE 'soap' = ANY ("Genres") AND "MediaType" = 'Show'"""
+                    : """SELECT count(*)::int AS "Value" FROM "Titles" WHERE 'soap' = ANY ("Genres")"""
+                : """SELECT count(*)::int AS "Value" FROM "Titles" WHERE ('romance' = ANY ("Genres") OR 'soap' = ANY ("Genres")) AND "MediaType" = 'Movie'""";
+            var truth = await db.Database.SqlQueryRaw<int>(sql).SingleAsync();
+            Assert.Equal(truth, (await resolving.ReportAsync(accountId, asked, 0, CancellationToken.None)).MatchingInCatalogue);
+        }
     }
 
     private static ConditionKnockout Single(SupplyReport report, FilterKind kind) =>

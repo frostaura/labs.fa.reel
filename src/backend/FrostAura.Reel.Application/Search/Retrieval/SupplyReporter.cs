@@ -30,8 +30,17 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// <para>Two locks hold here. "Already seen" is a bucket, never a relaxation: the knockouts are
 /// computed only over titles with no interaction footprint. And nothing here serves a title — the
 /// relaxed rule sets are questions about the catalogue, never permission to show anything.</para>
+///
+/// <para><b>Resolved, always.</b> The constraints are resolved here (<see cref="Concepts.IConceptResolver"/>)
+/// unless the caller passed concepts the resolver already produced, which pass through untouched: a
+/// caller holding the stored, unresolved conversation state (Ask Reel's supply answers and re-counts)
+/// once counted "romantic" as keywords containing the word, AND-ed with "romance", and quoted the
+/// founder 94 romantic shows where retrieval — and his own exclusion — read 1,306 (HREV2-RET-03).
+/// Without a resolver (a hand-built reporter) the predicate's own genre-word reading still applies
+/// (<see cref="HardConstraintFilter.Read"/>).</para>
 /// </summary>
-public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder eligibility) : ISupplyReporter
+public sealed class SupplyReporter(
+    IReelDbContext db, EligibilityQueryBuilder eligibility, Concepts.IConceptResolver? resolver = null) : ISupplyReporter
 {
     /// <summary>How many unlocked titles a knockout names.</summary>
     public const int KnockoutSampleSize = 5;
@@ -97,6 +106,11 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(alreadyShown);
+        if (resolver is not null)
+        {
+            hard = await resolver.ResolveAsync(hard, ct);
+        }
+
         var waive = includeGenre == IncludeGenreRules.Waived;
         minVotes = Math.Max(0, minVotes);
         var shown = alreadyShown.ToHashSet();

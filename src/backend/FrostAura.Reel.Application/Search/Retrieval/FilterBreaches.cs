@@ -36,7 +36,7 @@ public static class FilterBreaches
         ArgumentNullException.ThrowIfNull(rules);
         return rule.Kind switch
         {
-            FilterKind.ExcludeGenre => ExcludedGenre(rule.Value),
+            FilterKind.ExcludeGenre => AnyOf([ExcludedGenre(rule.Value), Untagged]),
             FilterKind.IncludeGenre => OutsideAllowList(rules.IncludeGenres),
             FilterKind.ExcludeKeyword => CarriesKeyword(rule.Value),
             FilterKind.Language => OutsideLanguages(rules),
@@ -46,6 +46,18 @@ public static class FilterBreaches
             _ => t => false,
         };
     }
+
+    /// <summary>
+    /// A title the catalogue holds no genre for at all. Under ANY ExcludeGenre rule it is unproven, and
+    /// it breaks every such rule: nothing shows it clears the exclusion, so it fails closed, as an
+    /// unknown language fails "English only" and an unrated title fails a crowd floor. Before this a
+    /// 5-minute making-of documentary with no genres was the only "More like this" for John Wick to an
+    /// account excluding documentary, and a "wickedly funny comedy" with no genres was eligible to one
+    /// excluding comedy (HREV2-RET-04); the global typeahead already hid such rows. It is a breach of
+    /// the RULE, never of the genre: <see cref="ExcludedGenre"/> stays the genre's own reading, so a
+    /// "romance" concept never matches a title merely because it has no genres.
+    /// </summary>
+    public static readonly Expression<Func<Title, bool>> Untagged = t => t.Genres.Length == 0;
 
     /// <summary>
     /// An ExcludeGenre of <paramref name="slug"/>: the genre itself, an alias genre (Trakt's

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
@@ -73,6 +74,17 @@ public sealed partial class ConceptResolver(
     /// <summary>How long the fallback waits for an uncached embedding.</summary>
     public static readonly TimeSpan EmbedBudget = TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// The concepts this resolver produced, by reference. Resolving is not idempotent (a resolved
+    /// concept's exact labels, read again as stems, can reach further labels; its nearest-label
+    /// fallback depends on whether an embedding arrived in time), so a concept it already resolved is
+    /// passed through untouched, and the counts a reply quotes are counted with the very labels the
+    /// cards were found with, however many callers resolve the same constraints.
+    /// </summary>
+    private static readonly ConditionalWeakTable<ConceptTerm, object> Produced = [];
+
+    private static readonly object Marker = new();
+
     private static readonly HashSet<string> MediaWords = new(StringComparer.Ordinal)
     {
         "movie", "movies", "film", "films", "show", "shows", "series", "tv", "television", "flick", "flicks",
@@ -104,14 +116,105 @@ public sealed partial class ConceptResolver(
             return hard;
         }
 
+        if (hard.Concepts.All(IsResolved))
+        {
+            return hard;
+        }
+
         var resolved = new List<ConceptTerm>(hard.Concepts.Count);
         foreach (var concept in hard.Concepts)
         {
+            if (IsResolved(concept))
+            {
+                resolved.Add(concept);
+                continue;
+            }
+
             var resolution = await ResolveCoreAsync(concept, ct);
-            resolved.AddRange(Split(resolution));
+            resolved.AddRange(Split(resolution).Select(Mark));
         }
 
-        return hard with { Concepts = resolved };
+        return hard with { Concepts = Merge(resolved) };
+    }
+
+    /// <summary>
+    /// True when <paramref name="concept"/> is one this resolver produced (see <see cref="Produced"/>);
+    /// any other concept — the planner's, the stored conversation state's, a test's — is unresolved,
+    /// whatever its fields hold.
+    /// </summary>
+    public static bool IsResolved(ConceptTerm concept) =>
+        concept is not null && Produced.TryGetValue(concept, out _);
+
+    /// <summary>
+    /// <paramref name="concepts"/> with every concept that requires exactly what an earlier one does
+    /// dropped (HREV2-RET-03). Concepts AND, so a duplicate changes no count — but "romantic shows" planned as
+    /// [romantic, romance] is ONE requirement, the romance genre, and a reply, a knockout or a cost
+    /// that reads two concepts reads two requirements. The first concept keeps the user's words.
+    /// </summary>
+    public static IReadOnlyList<ConceptTerm> Merge(IReadOnlyList<ConceptTerm> concepts)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var merged = new List<ConceptTerm>(concepts.Count);
+        foreach (var concept in concepts)
+        {
+            var genres = string.Join('\u001e', HardConstraintFilter.GenresOf(concept).Order(StringComparer.Ordinal));
+            var labels = string.Join('\u001e', HardConstraintFilter.LabelsOf(concept).Order(StringComparer.Ordinal));
+            var exact = concept.ExactLabels is { } set ? string.Join('\u001e', set.Order(StringComparer.Ordinal)) : "\u0000";
+            var key = $"{genres}\u001f{labels}\u001f{exact}";
+            if (seen.Add(key))
+            {
+                merged.Add(concept);
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// What a concept no resolver has touched means when its words are only genre words — the static
+    /// half of <see cref="ResolveAsync(HardConstraints, CancellationToken)"/>'s genre reading, for the
+    /// synchronous predicate (<see cref="HardConstraintFilter"/>), so a caller that counts with the
+    /// stored, unresolved constraints still counts "romantic" as the romance genre and "soap operas"
+    /// as the soap genre instead of as keywords containing the words (HREV2-RET-03). The same rules as
+    /// resolution: one genre key ("sci-fi &amp; fantasy", "soap operas") is one concept OR-ing its
+    /// slugs; a phrase of several genre words ("romantic comedy") is a concept per word, AND-ed, unless
+    /// it says "or" or carries planner labels that are not genre words. Null when the words are not
+    /// all genre words, or the concept already carries genres or exact labels.
+    /// </summary>
+    public static IReadOnlyList<ConceptTerm>? GenreReading(ConceptTerm concept)
+    {
+        ArgumentNullException.ThrowIfNull(concept);
+        if (concept.Genres.Count > 0 || concept.ExactLabels is not null || IsResolved(concept))
+        {
+            return null;
+        }
+
+        var words = Normalise(concept.UserWords);
+        if (ConceptSynonyms.GenreSlugsOf(words) is { } slugs)
+        {
+            return [concept with { Genres = [.. slugs] }];
+        }
+
+        var named = GenreWordsIn(words, pluralAware: true, out var others);
+        if (named.Count == 0 || !others.All(IsConjunction))
+        {
+            return null;
+        }
+
+        var all = named.SelectMany(n => n.Slugs).Distinct(StringComparer.Ordinal).ToList();
+        var labelled = concept.CatalogueLabels.Any(l => ConceptSynonyms.GenresNamedBy(Normalise(l)) is null);
+        if (others.Contains("or") || named.Count == 1 || labelled)
+        {
+            return [concept with { Genres = all }];
+        }
+
+        return [concept with { Genres = [.. named[0].Slugs] }, .. named.Skip(1).Select(n => new ConceptTerm(n.Word, [], [.. n.Slugs]))];
+    }
+
+    private static ConceptTerm Mark(ConceptTerm concept)
+    {
+        Produced.AddOrUpdate(concept, Marker);
+        return concept;
     }
 
     /// <inheritdoc />
@@ -121,7 +224,7 @@ public sealed partial class ConceptResolver(
     /// splits them into concepts of their own.
     /// </remarks>
     public async Task<ConceptTerm> ResolveAsync(ConceptTerm concept, CancellationToken ct) =>
-        (await ResolveCoreAsync(concept, ct)).Term;
+        IsResolved(concept) ? concept : (await ResolveCoreAsync(concept, ct)).Term;
 
     private static IEnumerable<ConceptTerm> Split(Resolution resolution)
     {

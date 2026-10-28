@@ -644,6 +644,56 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         }
     }
 
+    /// <summary>
+    /// HREV2-RET-04: a title with no genres breaks EVERY genre exclusion — it cannot be shown to clear
+    /// any of them — so relaxing one genre rule unlocks it only when that rule was the account's last
+    /// genre exclusion. The meter's single pass must say exactly what the subtractive re-count says,
+    /// over the whole catalogue, and the fixture's own titles must move as the rule reads.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task An_untagged_title_breaks_every_genre_exclusion_in_the_meter_as_in_eligibility(int genreExclusions)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var untagged = await SeedTitleAsync(t => { t.Genres = []; t.Year = 2017; t.TmdbVoteAverage = 7.0m; });
+        var tagged = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Year = 2017; t.TmdbVoteAverage = 7.0m; });
+        var mine = new[] { untagged, tagged };
+        var rules = FilterRuleSet.Create(
+            genreExclusions == 1 ? ["documentary"] : ["documentary", "comedy"], [], ["zeppelin"], ["en"], null, null, null);
+
+        Assert.Equal([tagged], await EligibleAsync(accountId, rules, mine));
+        foreach (var genre in rules.ExcludeGenres)
+        {
+            var relaxed = await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.ExcludeGenre, genre)), mine);
+            Assert.Equal((genre, genreExclusions == 1), (genre, relaxed.Contains(untagged)));
+        }
+
+        // The keyword rule is not a genre rule: relaxing it never unlocks an untagged title.
+        Assert.DoesNotContain(untagged, await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.ExcludeKeyword, "zeppelin")), mine));
+
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var check = fixture.CreateContext(scoped);
+        await using var snapshot = await check.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
+        var builder = new EligibilityQueryBuilder(check);
+        var report = await new FilterCostMeter(check, builder, scoped, new MemoryCache(new MemoryCacheOptions())).MeasureAsync(rules);
+        var eligible = await builder.EligibleTitles(accountId, rules).CountAsync();
+        Assert.Equal(eligible, report.Eligible);
+        foreach (var rule in rules.Rules())
+        {
+            var without = await builder.EligibleTitles(accountId, rules.Without(rule)).CountAsync();
+            Assert.Equal(
+                (rule.Kind, rule.Value, Math.Max(0, without - eligible)),
+                (rule.Kind, rule.Value, Marginal(report, rule.Kind, rule.Value)));
+        }
+    }
+
     private static int Marginal(FilterCostReport report, FilterKind kind, string value) =>
         report.ByRule.Single(r => r.Kind == kind.ToString() && r.Value == value).Marginal;
 

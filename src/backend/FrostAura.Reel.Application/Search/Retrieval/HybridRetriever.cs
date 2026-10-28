@@ -24,8 +24,15 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// <item><b>Mood</b> — <see cref="MoodArm"/>: each mood ("cosy", "tense") read as the extracted tone,
 /// keyword labels and genres that carry it, one ranked list per mood. Soft: it finds and orders, never
 /// filters.</item>
+/// <item><b>Reference</b> — for "more like X" (reference titles): the eligible titles sharing X's
+/// SPECIFIC keyword labels and themes (<see cref="KeywordNeighbours"/>), the most specific shared
+/// evidence first, with X's genres as a tie-break.</item>
 /// <item><b>Semantic</b> — kNN on the positive concept text (moods included, rejected words never),
-/// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/> (none at all
+/// blended toward any reference titles — each read as a NAME-FREE description (its genres, keyword
+/// labels and overview, never its name; <see cref="ReferenceText"/>), because the shared title
+/// embedding is dominated by the name: "more like Red-Eyed" came back Red Hill, Red Right Hand, Red
+/// (2008) and Red Road, and After.Life came back The Living and the Dead and Birth/Rebirth
+/// (HREV2-ASK-02). The embedding gets <see cref="SemanticBudget"/> (none at all
 /// for a concept request, where the arm only re-ranks what the catalogue admits); an uncached
 /// text that misses it falls back to the mean of the precomputed embeddings of the labels the
 /// concepts and moods reached, and only with none of those is the arm fused without and reported in
@@ -59,6 +66,7 @@ public sealed class HybridRetriever(
     IConceptResolver resolver,
     FullTextArm fullText,
     ConceptEmbeddings embeddings,
+    KeywordNeighbours neighbours,
     IServiceScopeFactory scopes,
     ILogger<HybridRetriever> logger) : IAskReelRetriever
 {
@@ -106,8 +114,20 @@ public sealed class HybridRetriever(
         var hard = await resolver.ResolveAsync(q.Hard, ct);
         timings["resolve"] = clock.ElapsedMilliseconds;
 
+        // The reference titles as the arms read them: never by name (see ReferenceText).
+        var referenceIds = q.Soft.ReferenceTitleIds.Distinct().ToList();
+        List<Title> references = referenceIds.Count == 0
+            ? []
+            : await db.Titles.AsNoTracking()
+                .Where(t => referenceIds.Contains(t.Id))
+                .Select(t => new Title { Id = t.Id, Name = t.Name, Genres = t.Genres, Keywords = t.Keywords, Overview = t.Overview })
+                .ToListAsync(ct);
+
         // Network work starts first and overlaps everything the database does below.
         var semanticText = q.Arms.HasFlag(RetrievalArms.Semantic) ? SemanticText(hard, q.Soft) : string.Empty;
+        var referenceEmbedding = q.Arms.HasFlag(RetrievalArms.Semantic) && references.Count > 0
+            ? ReferenceEmbeddingAsync(references, ct)
+            : Task.FromResult<float[]?>(null);
         var semanticClock = Stopwatch.StartNew();
         var embedding = semanticText.Length > 0
             ? embeddings.EmbedAsync(semanticText, SemanticBudget, ct)
@@ -124,6 +144,7 @@ public sealed class HybridRetriever(
         if (want == 0)
         {
             await DrainAsync(embedding, tmdb);
+            await DrainAsync(referenceEmbedding, Task.FromResult<TmdbDiscoveryResult?>(null));
             var only = await FinishSupplyAsync(supplyTask, q, hard, timings, ct);
             return new RetrievalResult([], only, new StageTimings(timings)) { SkippedArms = skipped };
         }
@@ -161,6 +182,22 @@ public sealed class HybridRetriever(
             }
 
             timings["fulltext"] = clock.ElapsedMilliseconds;
+        }
+
+        // "More like X": the titles sharing X's specific labels and themes. With a concept it can only
+        // re-rank what the concept admits (fusion ignores the rest).
+        if (q.Arms.HasFlag(RetrievalArms.Facet) && references.Count > 0)
+        {
+            clock.Restart();
+            var shared = await neighbours.ForPoolAsync(
+                hard.HasConcepts ? conceptPool : basePool, [.. references.Select(r => r.Id)], ArmDepth, exclude, creditGenres: true, ct);
+            lists["reference"] = [.. shared.Select(n => n.TitleId)];
+            foreach (var neighbour in shared)
+            {
+                Add(evidence, neighbour.TitleId, neighbour.Evidence);
+            }
+
+            timings["reference"] = clock.ElapsedMilliseconds;
         }
 
         // With a concept, only titles carrying catalogue evidence may be returned (§4.7).
@@ -216,7 +253,20 @@ public sealed class HybridRetriever(
                 }
             }
 
-            var anchor = await AnchorAsync(vector, q.Soft.ReferenceTitleIds, ct);
+            var referenceVector = rerankOnlySemantic && !referenceEmbedding.IsCompleted ? null : await referenceEmbedding;
+            if (referenceVector is null && references.Count > 0)
+            {
+                // The description missed its budget (or there is no provider): the reference titles'
+                // own labels' precomputed embeddings stand in, as they do for a concept's text.
+                var (centroid, used) = await LabelCentroidAsync([.. references.SelectMany(r => r.Keywords).Distinct(StringComparer.Ordinal)], ct);
+                if (centroid is not null)
+                {
+                    referenceVector = centroid;
+                    timings["semantic-reference-labels"] = used;
+                }
+            }
+
+            var anchor = Anchor(vector, referenceVector);
             if (anchor is null)
             {
                 if (late)
@@ -524,51 +574,96 @@ public sealed class HybridRetriever(
     }
 
     /// <summary>
-    /// The query vector: the concept embedding, blended toward the reference titles' embeddings (the
-    /// mean of the two halves), or the references alone when there is no text. Null when neither is
-    /// available.
+    /// The query vector: the concept embedding, blended toward the reference titles' name-free
+    /// description (the mean of the two halves), or either alone. Null when neither is available.
     /// </summary>
-    private async Task<float[]?> AnchorAsync(float[]? concept, IReadOnlyList<Guid> references, CancellationToken ct)
+    internal static float[]? Anchor(float[]? concept, float[]? reference)
     {
-        List<float[]> refs = [];
-        if (references.Count > 0)
+        if (concept is null || reference is null || concept.Length != reference.Length)
         {
-            var ids = references.ToList();
-            refs = (await db.TitleEmbeddings.Where(e => ids.Contains(e.TitleId)).Select(e => e.Embedding).ToListAsync(ct))
-                .Select(v => v.ToArray())
-                .ToList();
+            return concept ?? reference;
         }
 
-        if (concept is null && refs.Count == 0)
+        var anchor = new float[concept.Length];
+        Accumulate(anchor, concept, 0.5f);
+        Accumulate(anchor, reference, 0.5f);
+        return anchor;
+    }
+
+    /// <summary>
+    /// What a reference title is ABOUT, without its name: its genres, its keyword labels and its
+    /// overview with the name taken out. The semantic arm embeds this rather than reading the
+    /// title's stored embedding, whose text leads with the name (<c>EmbeddingText</c>) and so finds
+    /// titles that are CALLED alike — Red-Eyed's nearest stored vectors were Red Right Hand, River Runs
+    /// Red, The Red Goodnight, Red, Redemption, Restless (HREV2-ASK-02). The stored text is shared by
+    /// the feed and the model and does not change (§4.7). Empty when the title carries nothing but a
+    /// name and genres: a bare genre list is too generic to search near.
+    /// </summary>
+    internal static string ReferenceText(Title title)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        var overview = title.Overview ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(title.Name))
+        {
+            overview = overview.Replace(title.Name.Trim(), " ", StringComparison.OrdinalIgnoreCase);
+        }
+
+        overview = string.Join(' ', overview.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var keywords = title.Keywords.Where(k => !string.IsNullOrWhiteSpace(k)).Take(MaxReferenceKeywords).ToList();
+        if (overview.Length == 0 && keywords.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>(3);
+        if (title.Genres.Length > 0)
+        {
+            parts.Add(string.Join(", ", title.Genres));
+        }
+
+        if (keywords.Count > 0)
+        {
+            parts.Add(string.Join(", ", keywords));
+        }
+
+        if (overview.Length > 0)
+        {
+            parts.Add(overview);
+        }
+
+        return string.Join(". ", parts);
+    }
+
+    /// <summary>The most keyword labels a reference description carries.</summary>
+    public const int MaxReferenceKeywords = 12;
+
+    /// <summary>
+    /// The mean of the reference titles' description embeddings (<see cref="ReferenceText"/>), each
+    /// waited for at most <see cref="SemanticBudget"/> (an uncached one finishes in the background and
+    /// is cached for the next turn); null when none arrived.
+    /// </summary>
+    private async Task<float[]?> ReferenceEmbeddingAsync(IReadOnlyList<Title> references, CancellationToken ct)
+    {
+        var texts = references.Select(ReferenceText).Where(t => t.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+        if (texts.Count == 0)
         {
             return null;
         }
 
-        var dims = concept?.Length ?? refs[0].Length;
-        var anchor = new float[dims];
-        var halves = 0;
-        if (concept is not null)
+        var vectors = (await Task.WhenAll(texts.Select(t => embeddings.EmbedAsync(t, SemanticBudget, ct)))).OfType<float[]>().ToList();
+        if (vectors.Count == 0)
         {
-            Accumulate(anchor, concept, 1f);
-            halves++;
+            return null;
         }
 
-        if (refs.Count > 0)
+        var dims = vectors[0].Length;
+        var mean = new float[dims];
+        foreach (var v in vectors.Where(v => v.Length == dims))
         {
-            foreach (var r in refs.Where(r => r.Length == dims))
-            {
-                Accumulate(anchor, r, 1f / refs.Count);
-            }
-
-            halves++;
+            Accumulate(mean, v, 1f / vectors.Count);
         }
 
-        for (var i = 0; i < dims; i++)
-        {
-            anchor[i] /= halves;
-        }
-
-        return anchor;
+        return mean;
     }
 
     private static void Accumulate(float[] into, float[] value, float weight)

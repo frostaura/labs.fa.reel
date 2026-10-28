@@ -269,7 +269,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         var retriever = new HybridRetriever(
             db, eligibility, new SupplyReporter(db, eligibility),
             new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
-            new FullTextArm(db), embeddings,
+            new FullTextArm(db), embeddings, new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             NullLogger<HybridRetriever>.Instance);
 
@@ -513,7 +513,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
             var retriever = new HybridRetriever(
                 db, eligibility, new SupplyReporter(db, eligibility),
                 new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
-                new FullTextArm(db), embeddings,
+                new FullTextArm(db), embeddings, new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
                 new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
                 NullLogger<HybridRetriever>.Instance);
             var words = key.Replace('-', ' ');
@@ -556,7 +556,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
             var retriever = new HybridRetriever(
                 db, eligibility, new SupplyReporter(db, eligibility),
                 new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
-                new FullTextArm(db), embeddings,
+                new FullTextArm(db), embeddings, new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
                 new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
                 NullLogger<HybridRetriever>.Instance);
             var clock = Stopwatch.StartNew();

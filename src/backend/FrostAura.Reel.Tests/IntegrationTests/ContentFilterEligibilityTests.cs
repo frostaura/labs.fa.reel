@@ -414,6 +414,55 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         Assert.Equal(new HashSet<Guid> { liveActionAdaptation, instrumentsFilm }, survivors);
     }
 
+    [Fact]
+    public async Task A_title_with_no_genres_is_unproven_and_ineligible_under_any_genre_exclusion()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV2-RET-04, on the founder snapshot: "Retro Wick" (a 5-minute making-of documentary, no
+        // genres) was the only "More like this" for John Wick to an account excluding documentary, and
+        // The Thanksgiving Play ("wickedly funny comedy", no genres) was eligible to one excluding comedy.
+        var accountId = await SeedAccountAsync();
+        var untaggedFilm = await SeedTitleAsync(t => { t.Genres = []; t.Overview = "Exploring the unexpected success of a film."; });
+        var untaggedShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = []; });
+        var tagged = await SeedTitleAsync(t => t.Genres = ["thriller"]);
+        var mine = new[] { untaggedFilm, untaggedShow, tagged };
+
+        // No genre rule: nothing to prove, so the untagged titles stay — as do they under a rule of another kind.
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+        await SeedFilterAsync(accountId, FilterKind.ExcludeKeyword, "zeppelin");
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        // One genre exclusion, of a genre neither untagged title could be shown to avoid: both go.
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "documentary");
+        var expected = new HashSet<Guid> { tagged };
+        Assert.Equal(expected, (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        // The draft-rules path (cost meter, supply knockouts) reads the same rule, and a rail (which
+        // waives only the include allow-list) never waives it.
+        await using var db = fixture.CreateContext(new AccountContext());
+        var rows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync();
+        var builder = new EligibilityQueryBuilder(db);
+        var drafted = await builder.EligibleTitles(accountId, FilterRuleSet.FromRows(rows))
+            .Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+        Assert.Equal(expected, drafted.ToHashSet());
+        Assert.Equal(expected, (await EligibleAsync(accountId, mine, ignoreIncludeGenreFilters: true)).ToHashSet());
+
+        // Suppressing the genre kind (the starvation diagnostic's "drop this kind") lets them back.
+        var suppressed = await builder.EligibleTitles(accountId, suppressed: new HashSet<FilterKind> { FilterKind.ExcludeGenre })
+            .Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+        Assert.Equal(mine.ToHashSet(), suppressed.ToHashSet());
+
+        // And the draft path without any genre exclusion admits them again.
+        var withoutGenres = FilterRuleSet.FromRows(rows.Where(r => r.Kind != FilterKind.ExcludeGenre).ToList());
+        var relaxed = await builder.EligibleTitles(accountId, withoutGenres)
+            .Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+        Assert.Equal(mine.ToHashSet(), relaxed.ToHashSet());
+    }
+
     /// <summary>Eligible ids among <paramref name="mine"/> — the discovery path (Tonight's picks).</summary>
     private async Task<IReadOnlyList<Guid>> EligibleAsync(
         Guid accountId, IReadOnlyCollection<Guid> mine, bool ignoreIncludeGenreFilters = false)
