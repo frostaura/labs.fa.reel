@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -11,8 +12,28 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// returns them as <c>creators</c> — never as cast, never folded into directors.
 /// </summary>
 [Collection("postgres")]
-public class TitleCreatorsEndpointTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>
+public class TitleCreatorsEndpointTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>, IAsyncLifetime
 {
+    private readonly List<Guid> _creators = [];
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// Creator credits are taken back out after each test: the creator back-fill's watermark is the
+    /// oldest refresh among shows holding ANY Creator credit, so one left in the shared catalogue moves
+    /// TitleCreatorCreditsTests' watermark.
+    /// </summary>
+    public async Task DisposeAsync()
+    {
+        if (!fixture.Available || _creators.Count == 0)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        await db.TitleCredits.Where(c => c.Role == CreditRole.Creator && _creators.Contains(c.PersonId)).ExecuteDeleteAsync();
+    }
+
     /// <summary>
     /// Creators in TMDB's order whatever order the rows were written in, with and without the
     /// creator also directing an episode, and with one or two creators.
@@ -31,6 +52,7 @@ public class TitleCreatorsEndpointTests(PostgresFixture fixture, ReelApiFactory 
         var (_, client) = await api.CreateSignedInAccountAsync($"creators-{Guid.NewGuid():N}"[..24]);
         var show = NewTitle(MediaType.Show);
         var creators = Enumerable.Range(0, creatorCount).Select(i => NewPerson($"Creator {i}")).ToList();
+        _creators.AddRange(creators.Select(c => c.Id));
         var episodeDirectors = Enumerable.Range(0, 3).Select(i => NewPerson($"Episode Director {i}")).ToList();
         var lead = NewPerson("Lead Actor");
         await using (var db = fixture.CreateContext(new AccountContext()))

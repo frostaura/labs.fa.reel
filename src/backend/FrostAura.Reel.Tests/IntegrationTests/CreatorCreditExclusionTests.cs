@@ -23,8 +23,28 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// </para>
 /// </summary>
 [Collection("postgres")]
-public class CreatorCreditExclusionTests(PostgresFixture fixture)
+public class CreatorCreditExclusionTests(PostgresFixture fixture) : IAsyncLifetime
 {
+    private readonly List<Guid> _people = [];
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// Creator credits are taken back out after each test: the creator back-fill's watermark is the
+    /// oldest refresh among shows holding ANY Creator credit, so one left in the shared catalogue moves
+    /// TitleCreatorCreditsTests' watermark (the integrator's round-3 full suite caught exactly that).
+    /// </summary>
+    public async Task DisposeAsync()
+    {
+        if (!fixture.Available || _people.Count == 0)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        await db.TitleCredits.Where(c => c.Role == CreditRole.Creator && _people.Contains(c.PersonId)).ExecuteDeleteAsync();
+    }
+
     /// <summary>
     /// The creator of an unrated show, at every top-billed order, both as someone the user's taste
     /// already reaches as a director and as someone it reaches ONLY through creator credits: the
@@ -186,6 +206,7 @@ public class CreatorCreditExclusionTests(PostgresFixture fixture)
         };
         db.Add(person);
         await db.SaveChangesAsync();
+        _people.Add(person.Id);
         return person.Id;
     }
 
