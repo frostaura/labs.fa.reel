@@ -6,9 +6,8 @@ import CrossReferenceStats from "../components/lab/CrossReferenceStats";
 import LoadFailed from "../components/ui/load-failed";
 import { Button } from "../components/ui/button";
 import { COARSE_TAP } from "../lib/tapTarget";
-import type { CounterfactualWindow } from "../store/api";
 import ScrollRegion from "../components/lab/ScrollRegion";
-import { counterfactualMatchLine } from "../lib/trackRecordCopy";
+import { counterfactualMatchLine, distinctCounterfactualWindows } from "../lib/trackRecordCopy";
 
 function pct(value: number | null | undefined, digits = 0): string {
   return value == null ? "—" : `${(value * 100).toFixed(digits)}%`;
@@ -22,10 +21,6 @@ function num(value: number | null | undefined, digits = 2): string {
 /** Signed, so an over-promise reads as "+1.03" and never hides behind an absolute value. */
 function signed(value: number | null | undefined, digits = 2): string {
   return value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
-}
-
-function windowLabel(w: CounterfactualWindow): string {
-  return w.days == null ? "all time" : `last ${w.days} days`;
 }
 
 /** A section with nothing to show yet: its heading and one sentence, so it keeps its place. */
@@ -279,9 +274,9 @@ export default function Lab() {
                 <div data-testid="counterfactual">
                   <h3 className="fa-overline text-3 mb-2">Because of Reel vs found yourself</h3>
                   <div className="space-y-1">
-                    {efficiency.counterfactual.map((w) => (
-                      <p key={w.window} className="fa-body">
-                        <span className="text-3">{windowLabel(w)}:</span>{" "}
+                    {distinctCounterfactualWindows(efficiency.counterfactual).map(({ window: w, label }) => (
+                      <p key={w.window} className="fa-body" data-testid="counterfactual-row">
+                        <span className="text-3">{label}:</span>{" "}
                         via Reel {num(w.viaReelMeanRating, 2)} ({w.viaReelCount}) · found yourself{" "}
                         {num(w.otherMeanRating, 2)} ({w.otherCount}) ·{" "}
                         <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>

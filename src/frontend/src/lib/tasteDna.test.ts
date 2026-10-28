@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  contrarianTile,
+  CROWD_BAND,
   divergingBars,
   driftChartLabel,
   genreBarGeometry,
@@ -188,5 +190,35 @@ describe("histogramChartLabel", () => {
 
   it("says when there is nothing to read", () => {
     expect(histogramChartLabel([], 0)).toBe("How you rate: no ratings yet.");
+  });
+});
+
+/**
+ * HREV5-DESK-07: the tile read "-0.2 · with the crowd" under a narrative saying "You rate below the
+ * crowd overall". The caption follows the sign it prints; only a score that prints as 0.0 is "with".
+ */
+describe("contrarianTile", () => {
+  it.each([
+    [-0.2, "-0.2", "slightly harsher than the crowd"],
+    [0.2, "+0.2", "slightly kinder than the crowd"],
+    [-0.3, "-0.3", "slightly harsher than the crowd"],
+    [0.3, "+0.3", "slightly kinder than the crowd"],
+    [-0.31, "-0.3", "harsher than the crowd"],
+    [0.31, "+0.3", "kinder than the crowd"],
+    [-1.25, "-1.3", "harsher than the crowd"],
+    [0.06, "+0.1", "slightly kinder than the crowd"],
+    [-0.04, "0.0", "with the crowd"],
+    [0.04, "0.0", "with the crowd"],
+    [0, "0.0", "with the crowd"],
+  ])("%s reads %s, %s", (score, value, caption) => {
+    expect(contrarianTile(score)).toEqual({ value, caption });
+  });
+
+  it("never prints a minus on a score that rounds to nothing", () => {
+    expect(contrarianTile(-0.049).value).toBe("0.0");
+  });
+
+  it("draws the band edge where the backend's crowd stance does", () => {
+    expect(CROWD_BAND).toBe(0.3);
   });
 });

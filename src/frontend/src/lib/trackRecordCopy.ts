@@ -150,6 +150,51 @@ export function calibrationChartLabel(bands: CalibrationBucket[]): string {
   return `Where the number lands, Reel's average prediction against your average rating in each band: ${parts.join("; ")}.`;
 }
 
+/** A counterfactual window's name as a row label: "last 365 days", or "all time" for the open window. */
+export function counterfactualWindowLabel(w: Pick<CounterfactualWindow, "days">): string {
+  return w.days == null ? "all time" : `last ${w.days} days`;
+}
+
+/** A counterfactual row to draw: the widest window holding these numbers, labelled with any narrower one it stands for. */
+export interface CounterfactualRow {
+  window: CounterfactualWindow;
+  label: string;
+}
+
+const sameNumbers = (a: CounterfactualWindow, b: CounterfactualWindow): boolean =>
+  a.viaReelCount === b.viaReelCount &&
+  a.otherCount === b.otherCount &&
+  a.viaReelUnmatchedCount === b.viaReelUnmatchedCount &&
+  a.matchDays === b.matchDays &&
+  a.viaReelMeanRating === b.viaReelMeanRating &&
+  a.otherMeanRating === b.otherMeanRating &&
+  a.delta === b.delta;
+
+/**
+ * The counterfactual windows worth drawing (G-9, HREV5-DESK-04): a wider window whose counts and
+ * means match a narrower one holds the same ratings — the narrower set is a subset of it, and the
+ * counts are equal — so the two print once, under the widest window's name, with the narrowest
+ * window it covers said beside it. On live "last 365 days" and "all time" printed the same figures
+ * twice. Windows are drawn narrowest first, whatever order they arrive in.
+ */
+export function distinctCounterfactualWindows(windows: CounterfactualWindow[]): CounterfactualRow[] {
+  const width = (w: CounterfactualWindow) => w.days ?? Number.POSITIVE_INFINITY;
+  const sorted = [...windows].sort((a, b) => width(a) - width(b));
+  const groups: { narrowest: CounterfactualWindow; widest: CounterfactualWindow }[] = [];
+  for (const w of sorted) {
+    const last = groups[groups.length - 1];
+    if (last && sameNumbers(last.widest, w)) last.widest = w;
+    else groups.push({ narrowest: w, widest: w });
+  }
+  return groups.map(({ narrowest, widest }) => ({
+    window: widest,
+    label:
+      narrowest === widest
+        ? counterfactualWindowLabel(widest)
+        : `${counterfactualWindowLabel(widest)} (the same ratings as the ${counterfactualWindowLabel(narrowest)})`,
+  }));
+}
+
 /**
  * How a counterfactual row was matched: each via-Reel rating is compared with the user's own
  * ratings from the same weeks, and one with nothing else rated near it is left out of both means.

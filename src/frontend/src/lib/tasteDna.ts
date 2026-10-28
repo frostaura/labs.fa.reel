@@ -173,3 +173,25 @@ export function histogramChartLabel(histogram: { rating: number; count: number }
     .map((bar) => `${bar.rating}, ${bar.count} ${bar.count === 1 ? "rating" : "ratings"}`);
   return `How you rate, ratings given at each score: ${bars.join("; ")}. Your mean is ${userMean.toFixed(1)}.`;
 }
+
+/**
+ * Where the crowd band ends (HREV5-DESK-07): beyond ±0.3 rating points the account is kinder or
+ * harsher than the crowd. The same band as the backend's ContrarianFact.StanceOf, which the
+ * narrative prompt, the why-line clause and the staleness check read.
+ */
+export const CROWD_BAND = 0.3;
+
+/**
+ * The contrarian tile, value and caption, from one rounding so the two always agree. Inside the
+ * band the caption still follows the sign it prints: "-0.2 · with the crowd" sat under a narrative
+ * saying "You rate below the crowd overall" — both true, read as a contradiction. Only a score that
+ * prints as 0.0 is with the crowd, and it prints without a stray minus.
+ */
+export function contrarianTile(score: number): { value: string; caption: string } {
+  // Half away from zero, as toFixed and the share card round: Math.round would read -1.25 as -1.2.
+  const shown = (Math.sign(score) * Math.round(Math.abs(score) * 10)) / 10;
+  if (shown === 0) return { value: "0.0", caption: "with the crowd" };
+  const value = `${shown > 0 ? "+" : ""}${shown.toFixed(1)}`;
+  const direction = shown > 0 ? "kinder" : "harsher";
+  return { value, caption: Math.abs(score) > CROWD_BAND ? `${direction} than the crowd` : `slightly ${direction} than the crowd` };
+}
