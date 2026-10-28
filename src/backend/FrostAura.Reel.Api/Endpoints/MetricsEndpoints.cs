@@ -384,6 +384,10 @@ public static class MetricsEndpoints
             otherCount = w.OtherCount,
             otherMeanRating = Round(w.OtherMeanRating, 2),
             delta = Round(w.Delta, 2),
+            // Via-Reel ratings with nothing else rated inside their band, and the band itself:
+            // the means above are same-period comparisons, and the page owes the reader both.
+            viaReelUnmatchedCount = w.ViaReelUnmatchedCount,
+            matchDays = w.MatchDays,
         }),
     };
 

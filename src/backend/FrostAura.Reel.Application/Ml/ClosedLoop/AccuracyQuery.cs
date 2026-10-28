@@ -299,7 +299,7 @@ public sealed class AccuracyQuery(
                     p.RatedAt,
                     p.ShownAt is { } shown ? (int)Math.Round((p.RatedAt - shown).TotalDays, MidpointRounding.AwayFromZero) : null))
                 .ToList(),
-            await ConversionAsync(from, ct),
+            await ConversionAsync(from, EarliestPerTitle(exposureRows, from).Count, ct),
             report.Counterfactual,
             await learned.GetAsync(accountContext.AccountId.Value, ct),
             await CrossReferenceAsync(from, ct),
@@ -337,9 +337,10 @@ public sealed class AccuracyQuery(
                 "You picked which of the shown titles to watch, so these lean towards the ones that looked best to you; "
                 + "titles you passed over never get a rating and are not counted."),
         new PopulationNote(
-            "Your ratings of titles that reached you through Reel, beside everything else you rated in the same weeks",
-            "Both groups are titles you chose to watch. The comparison says whether Reel's picks fared better than your own, "
-            + "not how Reel would do on a random title."),
+            $"Your ratings of titles that reached you through Reel, each beside what else you rated within {RetroLoopQuery.MatchBandDays} days of it",
+            "Both groups are titles you chose to watch. The comparison says whether Reel's picks fared better than your own "
+            + "finds from the same weeks, not how Reel would do on a random title; a Reel rating with nothing else rated "
+            + "near it is left out, so a change in how you rate over the years cannot pass for Reel's effect."),
         new PopulationNote(
             "Cards Reel logged as shown to you",
             "Counts only what the exposure log recorded since it began; saves, watches and ratings made elsewhere "
@@ -475,14 +476,21 @@ public sealed class AccuracyQuery(
     /// The funnel, in the honest direction: shown → saved → watched, plus shown → rated, and the
     /// median days a save waits before it is watched.
     ///
+    /// <para><b>Every step after "shown" must come after a showing.</b> A save counts only when the
+    /// same title has an exposure inside the window strictly before the save was made, and watched
+    /// is read only from those saves. A save of a title Reel never showed, or one made before Reel
+    /// first showed it, is the account's own find and was never a step of this funnel: counting it
+    /// put 137 saves over 1,883 shown titles on the founder's track record when only 49 had been
+    /// shown first (HREV4-DESK-01). Shown → rated is <paramref name="headlineRated"/> — the
+    /// headline's own causal join, a first rating that postdates an in-window exposure — so the
+    /// page cannot score n titles in its headline and claim a different n were rated beside it.</para>
+    ///
     /// <para>The denominator is DISTINCT titles exposed, not exposure rows — a page reloaded ten
     /// times has shown one title, and dividing by rows would report a conversion rate an order of
-    /// magnitude too low. When the exposure log is empty the funnel falls back to the managed list,
-    /// which is exactly the saved→watched loop the retro query already measures, and
-    /// <see cref="ConversionStats.Shown"/> is then zero because nothing can honestly be claimed as
-    /// shown.</para>
+    /// magnitude too low. With no exposure log in the window every count is zero and every rate is
+    /// null: nothing was shown, so no save can honestly be called a step after a showing.</para>
     /// </summary>
-    private async Task<ConversionStats> ConversionAsync(DateTime? since, CancellationToken ct)
+    private async Task<ConversionStats> ConversionAsync(DateTime? since, int headlineRated, CancellationToken ct)
     {
         var exposed = await db.ExposureEvents
             .Where(e => since == null || e.OccurredAt >= since)
@@ -492,18 +500,16 @@ public sealed class AccuracyQuery(
 
         var saves = await db.ManagedListItems
             .Where(m => since == null || m.AddedAt >= since)
+            .Where(m => db.ExposureEvents.Any(e =>
+                e.TitleId == m.TitleId
+                && e.OccurredAt < m.AddedAt
+                && (since == null || e.OccurredAt >= since)))
             .Select(m => new { m.TitleId, m.AddedAt, m.RemovedAt, m.RemovalReason })
             .ToListAsync(ct);
 
-        var savedTitleIds = saves.Select(s => s.TitleId).Distinct().ToList();
+        var savedTitles = saves.Select(s => s.TitleId).Distinct().Count();
         var watchedSaves = saves.Where(s => s.RemovalReason == ListRemovalReason.Watched && s.RemovedAt != null).ToList();
-
-        var ratedAfterSave = await db.UserRatings
-            .Where(r => savedTitleIds.Contains(r.TitleId))
-            .Where(r => r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
-            .Select(r => r.TitleId)
-            .Distinct()
-            .CountAsync(ct);
+        var watchedTitles = watchedSaves.Select(s => s.TitleId).Distinct().Count();
 
         var daysToWatch = watchedSaves
             .Select(s => (s.RemovedAt!.Value - s.AddedAt).TotalDays)
@@ -513,12 +519,12 @@ public sealed class AccuracyQuery(
 
         return new ConversionStats(
             exposed,
-            savedTitleIds.Count,
-            watchedSaves.Select(s => s.TitleId).Distinct().Count(),
-            ratedAfterSave,
-            Rate(savedTitleIds.Count, exposed),
-            Rate(watchedSaves.Select(s => s.TitleId).Distinct().Count(), savedTitleIds.Count),
-            Rate(ratedAfterSave, exposed),
+            savedTitles,
+            watchedTitles,
+            headlineRated,
+            Rate(savedTitles, exposed),
+            Rate(watchedTitles, savedTitles),
+            Rate(headlineRated, exposed),
             Median(daysToWatch));
     }
 
