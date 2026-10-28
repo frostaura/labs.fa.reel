@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Search;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -178,13 +179,8 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
         await AddTurnAsync(stranger, now.AddMinutes(-10), 99_000, """{"interpret":99000}""", flags: "plan");
         await AddTurnAsync(accountId, now.AddDays(-3), 99_000, """{"interpret":99000}""", flags: "plan");
 
-        // Model calls are counted per purpose across the process, by WS-1's one tally (the DI
-        // singleton every chat adapter records into); a purpose of this test's own.
-        var purpose = $"probe-metrics-{Guid.NewGuid():N}";
-        var calls = api.Services.GetRequiredService<FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics>();
-        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Truncated, lengthFinishes: 2, attempts: 2);
-        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.ProviderError, lengthFinishes: 0, attempts: 3);
-        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
+        // Another account's model calls, in WS-1's one process-wide tally: a Free caller must not see them.
+        var purpose = RecordProbeCalls();
 
         using (client)
         {
@@ -207,7 +203,44 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
             Assert.Equal(800, stages[0].GetProperty("latency").GetProperty("p95").GetInt64());
             Assert.Equal(2, stages[2].GetProperty("latency").GetProperty("samples").GetInt32());
 
-            var llm = report.GetProperty("llm").EnumerateArray().Single(p => p.GetProperty("purpose").GetString() == purpose);
+            // The model-call tally is every account's, so it is the operator's (HREV2-PLAT-2): this caller is Free.
+            Assert.Equal(0, report.GetProperty("llm").GetArrayLength());
+            Assert.DoesNotContain(purpose, report.GetRawText(), StringComparison.Ordinal);
+
+            // Operator alerts are the Founder tier's; this caller is Free.
+            Assert.Equal(0, report.GetProperty("alerts").GetArrayLength());
+        }
+    }
+
+    [Fact]
+    public async Task The_process_wide_model_call_tally_is_reported_to_the_founder_only_and_follows_a_tier_change()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The model calls are another account's (the tally carries no account), recorded before any
+        // caller reads the report — the leak HREV2-PLAT-2 reported on a Free probe account.
+        var purpose = RecordProbeCalls();
+        var (founderId, founder) = await api.CreateSignedInAccountAsync($"llm-metrics-founder-{Guid.NewGuid():N}");
+        var (_, free) = await api.CreateSignedInAccountAsync($"llm-metrics-free-{Guid.NewGuid():N}");
+        await SetTierAsync(founderId, AccountTier.Founder);
+
+        using (free)
+        {
+            var report = await GetMetricsAsync(free);
+            Assert.Equal(0, report.GetProperty("llm").GetArrayLength());
+            Assert.DoesNotContain(purpose, report.GetRawText(), StringComparison.Ordinal);
+
+            // The same rule as the status API's llmHealth, so the two surfaces cannot disagree.
+            Assert.Equal(0, (await GetStatusAsync(free)).GetProperty("llmHealth").GetArrayLength());
+        }
+
+        using (founder)
+        {
+            var llm = (await GetMetricsAsync(founder)).GetProperty("llm").EnumerateArray()
+                .Single(p => p.GetProperty("purpose").GetString() == purpose);
             Assert.Equal(3, llm.GetProperty("calls").GetInt64());
             Assert.Equal(1, llm.GetProperty("lengthCalls").GetInt64());
             Assert.Equal(2, llm.GetProperty("fallbacks").GetInt64());
@@ -215,8 +248,13 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
             Assert.Equal(3, llm.GetProperty("windowCalls").GetInt32());
             Assert.False(llm.GetProperty("alarming").GetBoolean());
 
-            // Operator alerts are the Founder tier's; this caller is Free.
-            Assert.Equal(0, report.GetProperty("alerts").GetArrayLength());
+            Assert.Contains(
+                (await GetStatusAsync(founder)).GetProperty("llmHealth").EnumerateArray(),
+                p => p.GetProperty("purpose").GetString() == purpose);
+
+            // The tier is read on every request, not remembered: a demoted Founder sees nothing.
+            await SetTierAsync(founderId, AccountTier.Free);
+            Assert.Equal(0, (await GetMetricsAsync(founder)).GetProperty("llm").GetArrayLength());
         }
     }
 
@@ -234,6 +272,31 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
             "idle_in_transaction_session_timeout=60000",
             new Npgsql.NpgsqlConnectionStringBuilder(connectionString).Options,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>Records three calls under a purpose of the calling test's own into WS-1's DI-singleton tally.</summary>
+    private string RecordProbeCalls()
+    {
+        var purpose = $"probe-metrics-{Guid.NewGuid():N}";
+        var calls = api.Services.GetRequiredService<FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics>();
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Truncated, lengthFinishes: 2, attempts: 2);
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.ProviderError, lengthFinishes: 0, attempts: 3);
+        calls.Record(purpose, FrostAura.Reel.Application.Llm.LlmCallOutcome.Answered, lengthFinishes: 0, attempts: 1);
+        return purpose;
+    }
+
+    private async Task SetTierAsync(Guid accountId, AccountTier tier)
+    {
+        using var scope = api.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+        await db.Accounts.Where(a => a.Id == accountId).ExecuteUpdateAsync(s => s.SetProperty(a => a.Tier, tier));
+    }
+
+    private static async Task<JsonElement> GetStatusAsync(HttpClient client)
+    {
+        using var response = await client.GetAsync("/api/sync/status");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return await response.Content.ReadFromJsonAsync<JsonElement>();
     }
 
     private static async Task<JsonElement> GetMetricsAsync(HttpClient client, int? hours = null)
