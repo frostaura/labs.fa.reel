@@ -117,11 +117,15 @@ export NO_PROXY="openrouter.ai,api.themoviedb.org,image.tmdb.org,localhost,127.0
 # Eval-only allowances (never the live stack). The rerank family ceiling is the one an eval run exhausts.
 export LLM_RERANK_DAILY_CALLS="${EVAL_RERANK_DAILY_CALLS:-100000}"
 export LLM_RERANK_DAILY_TOKENS="${EVAL_RERANK_DAILY_TOKENS:-200000000}"
+# The per-account Ask turn limit per minute (6 on the live stack) refuses the 7th turn of a run that asks
+# back to back, so a golden or latency run on a slot was answered 429 ask_rate_minute from its 7th turn
+# (integrator round 3). Turns per hour stay whatever the env file sets.
+export ASK_TURNS_PER_MINUTE="${EVAL_ASK_TURNS_PER_MINUTE:-120}"
 
 # Exactly these variables reach the API, from an empty environment.
 pass=(HOME PATH TMPDIR USER LANG ${names[@]+"${names[@]}"} "${credentials[@]}" ConnectionStrings__Postgres ASPNETCORE_ENVIRONMENT QA_HELPERS_ENABLED
   TRAKT_DEV_PROFILE TRAKT_CLIENT_ID Database__AutoMigrateOnStartup BACKUP_REQUEST_DIR Background__DataRepairs Background__TrustPurge
-  Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS)
+  Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS ASK_TURNS_PER_MINUTE)
 for s in OutboxDispatcher TokenRefresh DeltaPoll Digest CatalogGrowth NightlyReconcile CatalogFollowThrough LanguageBackfill; do pass+=("Background__$s"); done
 [ "$jobs" = true ] && pass+=(LLM_XREF_DAILY_CALLS LLM_XREF_DAILY_TOKENS EXTRACT_DAILY_TOKENS EMBED_DAILY_TOKENS HYDRATE_MAX_TITLES_PER_DAY)
 envv=()
@@ -142,7 +146,7 @@ if [ "$dryrun" = true ]; then
   for kv in "${envv[@]}"; do
     n="${kv%%=*}"
     case "$n" in
-      Background__*|Database__*|BACKUP_REQUEST_DIR|TRAKT_CLIENT_ID|TRAKT_DEV_PROFILE|ASPNETCORE_ENVIRONMENT|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|LLM_RERANK_DAILY_*) echo "$kv" ;;
+      Background__*|Database__*|BACKUP_REQUEST_DIR|TRAKT_CLIENT_ID|TRAKT_DEV_PROFILE|ASPNETCORE_ENVIRONMENT|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|LLM_RERANK_DAILY_*|ASK_TURNS_PER_MINUTE) echo "$kv" ;;
       *) if [ -n "${kv#*=}" ]; then echo "$n"; else echo "$n (empty)"; fi ;;
     esac
   done

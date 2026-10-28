@@ -57,6 +57,7 @@ test("run-api.sh gives the API an empty environment: a key exported by the calle
     assert.ok(!names.some((n) => n.startsWith("SOME_OTHER_SECRET")), "nothing the env file and the script do not name is passed");
     assert.ok(names.includes("TMDB_READ_ACCESS_TOKEN") && names.includes("OPENROUTER_MODEL"));
     assert.ok(names.includes("Background__TokenRefresh=false") && names.includes("HTTPS_PROXY=http://127.0.0.1:9"));
+    assert.ok(names.includes("ASK_TURNS_PER_MINUTE=120"), "a back-to-back eval run is never refused by the live per-minute Ask limit");
     assert.equal(r.stdout.includes("sk-"), false, "dry-run prints names, never values");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
