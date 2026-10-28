@@ -14,17 +14,19 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 ///
 /// <para>The rules, each chosen so a count quoted to the user is defensible:</para>
 /// <list type="bullet">
-/// <item>A concept matches by a TMDB keyword that CONTAINS the label from a word start
-/// (<c>\mninja</c>: "ninja", "female ninja", "ninja warrior"), by a label standing as a whole word in
-/// the title's NAME (plural allowed), or by genre slug. A genre slug is matched only as an exclusion of
+/// <item>A concept matches by a TMDB keyword that CONTAINS the label from a word start to a word end
+/// or an inflection (<see cref="Concepts.KeywordVocabulary.Reaches"/>: "ninja", "female ninja",
+/// "ninja warrior", never "alienation" for alien), by one of the USER'S OWN words standing as a whole
+/// word in the title's NAME (plural allowed; <see cref="NameLabelsOf"/> — a synonym never matches a
+/// name), or by genre slug. A genre slug is matched only as an exclusion of
 /// it reads (<see cref="FilterBreaches.ExcludedGenre"/>); a label that restates the concept's genres is
 /// dropped, so no keyword or name containing the genre word satisfies a genre. Keywords are stored lower-cased by ingest, so
 /// the labels are lower-cased here and the keyword column is not; the name is matched
 /// case-insensitively.</item>
 /// <item>The keyword match starts at a word boundary because bare containment counted mid-word hits:
 /// "heist" matched the keyword "atheist", putting Stigmata and Religulous in the founder's heist
-/// supply (13 titles over the eval truth). It stays open at the end, so "heists", "zombies" and
-/// "time traveler" still match.</item>
+/// supply (13 titles over the eval truth). It ends at a word end or an inflection, so "heists",
+/// "zombies" and "time traveler" still match and "alienation" and "assassination" do not.</item>
 /// <item>The name arm exists because TMDB's keyword tags are incomplete: "3 Ninjas", "Alien vs.
 /// Ninja" and "Batman Ninja vs. Yakuza League" carry no ninja keyword at all, so a keyword-only
 /// count told the founder 63 ninja films when the catalogue holds 70. It is a whole-word match, not
@@ -58,6 +60,60 @@ public static class HardConstraintFilter
         return genres.Count == 0
             ? Clean(labels)
             : Clean(labels).Where(label => !RestatesGenres(label, genres)).ToList();
+    }
+
+    /// <summary>A label shorter than this is never matched in a name (see <see cref="NameLabelsOf"/>).</summary>
+    public const int MinNameLabelLength = 3;
+
+    /// <summary>
+    /// The labels the NAME arm matches for <paramref name="concept"/>: those of <see cref="LabelsOf"/>
+    /// the user actually said — standing in their words as a whole word or phrase, a plural or a
+    /// singular of one ("ninjas" says "ninja", "robberies" says "robbery") — and of at least
+    /// <see cref="MinNameLabelLength"/> letters. A synonym answers a request only as a keyword: it is a
+    /// curated claim about TMDB's tags, not about titles' prose, and in names "ronin" counted Ronin
+    /// (1998) as a samurai film the founder had seen, "trial" Maze Runner: The Scorch Trials as a
+    /// courtroom drama, "volcano" Joe Versus the Volcano as a disaster film and "ai" the Italian
+    /// preposition in Vacanze ai Caraibi (HREV3-RET-A). The user's own two-letter "AI" fails the same way,
+    /// so it too is matched by keyword only. A word of the user's phrase is their word too ("alien
+    /// invasion movies" says "alien"; "ai robot" says "robot").
+    /// </summary>
+    public static IReadOnlyList<string> NameLabelsOf(ConceptTerm concept)
+    {
+        ArgumentNullException.ThrowIfNull(concept);
+        var said = SaidForms(concept.UserWords);
+        if (said.Count == 0)
+        {
+            return [];
+        }
+
+        return LabelsOf(concept)
+            .Where(label => Concepts.ConceptResolver.Normalise(label) is { Length: >= MinNameLabelLength } normal
+                && said.Any(form => NameMatches(form, normal)))
+            .ToList();
+    }
+
+    /// <summary>The user's words normalised, and the same with any one word read as its singular.</summary>
+    private static List<string> SaidForms(string? words)
+    {
+        var normal = Concepts.ConceptResolver.Normalise(words);
+        if (normal.Length == 0)
+        {
+            return [];
+        }
+
+        var tokens = normal.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var forms = new List<string> { normal };
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            foreach (var singular in Concepts.ConceptSynonyms.Singulars(tokens[i]))
+            {
+                var copy = (string[])tokens.Clone();
+                copy[i] = singular;
+                forms.Add(string.Join(' ', copy));
+            }
+        }
+
+        return forms;
     }
 
     /// <summary>True when <paramref name="label"/> is made only of genre words and names at least one of <paramref name="genres"/>.</summary>
@@ -147,7 +203,7 @@ public static class HardConstraintFilter
                 }
             }
 
-            foreach (var label in labels)
+            foreach (var label in NameLabelsOf(concept))
             {
                 if (NameMatches(title.Name, label))
                 {
@@ -184,20 +240,36 @@ public static class HardConstraintFilter
 
     /// <summary>
     /// The Postgres (ARE) pattern the keyword arm matches <paramref name="label"/> with: the label
-    /// starting at a word boundary, open at the end (<c>\mheist</c> matches "heist" and "heists", not
-    /// "atheist"), metacharacters escaped.
+    /// starting at a word boundary and ending at one, directly or after an inflection — a plural only
+    /// for a short label (<c>\mheist(e?s|e?rs?|ings?|e?d)?\M</c> matches "heist", "heists" and "heist gone
+    /// wrong", not "atheist"; <c>\malien…\M</c> not "alienation") — metacharacters escaped. A label
+    /// ending in punctuation keeps only its word start: <c>\M</c> needs a word character before it.
     /// </summary>
-    internal static string KeywordPattern(string label) => $@"\m{EscapeLiteral(label)}";
+    internal static string KeywordPattern(string label)
+    {
+        if (label.Length == 0 || !char.IsLetterOrDigit(label[^1]) && label[^1] != '_')
+        {
+            return $@"\m{EscapeLiteral(label)}";
+        }
 
-    /// <summary>The in-memory twin of <see cref="KeywordPattern"/>, for evidence.</summary>
+        var ending = label.Length <= Concepts.KeywordVocabulary.WholeWordStemLength
+            ? Concepts.KeywordVocabulary.PluralPattern
+            : Concepts.KeywordVocabulary.InflectionPattern;
+
+        // A very short label is no word of a hyphenated compound ("shoujo-ai"): a lookbehind instead of \m.
+        var start = label.Length <= Concepts.KeywordVocabulary.CompoundBlindStemLength ? "(?<![[:alnum:]_-])" : @"\m";
+        return $@"{start}{EscapeLiteral(label)}{ending}\M";
+    }
+
+    /// <summary>
+    /// The in-memory twin of <see cref="KeywordPattern"/>, for evidence — the vocabulary's own reach
+    /// (<see cref="Concepts.KeywordVocabulary.Reaches"/>), so the regex fallback, the exact labels and
+    /// the evidence read one rule.
+    /// </summary>
     internal static bool KeywordMatches(string? keyword, string label) =>
         !string.IsNullOrEmpty(keyword)
         && label.Length > 0
-        && Regex.IsMatch(
-            keyword,
-            $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(label)}",
-            RegexOptions.CultureInvariant,
-            TimeSpan.FromMilliseconds(100));
+        && Concepts.KeywordVocabulary.Reaches(keyword, label, label.Length <= Concepts.KeywordVocabulary.WholeWordStemLength);
 
     /// <summary>
     /// The in-memory twin of <see cref="NamePattern"/>, for evidence: true when <paramref name="label"/>
@@ -228,24 +300,25 @@ public static class HardConstraintFilter
             }
         }
 
-        foreach (var label in LabelsOf(concept))
+        // Translated by Npgsql to k ~ @keywordPattern over unnest("Keywords"), and "Name" ~* @namePattern
+        // (see the class remarks for why each arm is bounded where it is). Each regex sits behind a
+        // plain strpos guard that implies nothing new (the label is a substring of any match) but
+        // lets Postgres skip the regex engine for almost every row: unguarded, the three heist
+        // labels cost ~440 ms over the 38k-title catalogue; guarded, ~70 ms, as containment did.
+        if (concept.ExactLabels is null)
         {
-            if (concept.ExactLabels is not null)
+            foreach (var label in LabelsOf(concept))
             {
-                var resolvedName = label;
-                var resolvedNamePattern = NamePattern(label);
-                arms.Add(t => t.Name.ToLower().Contains(resolvedName) && Regex.IsMatch(t.Name, resolvedNamePattern, RegexOptions.IgnoreCase));
-                continue;
+                var value = label;
+                var keywordPattern = KeywordPattern(label);
+                arms.Add(t => t.Keywords.Any(k => k.Contains(value) && Regex.IsMatch(k, keywordPattern)));
             }
+        }
 
-            // Translated by Npgsql to k ~ @keywordPattern over unnest("Keywords"), and "Name" ~* @namePattern
-            // (see the class remarks for why each arm is bounded where it is). Each regex sits behind a
-            // plain strpos guard that implies nothing new (the label is a substring of any match) but
-            // lets Postgres skip the regex engine for almost every row: unguarded, the three heist
-            // labels cost ~440 ms over the 38k-title catalogue; guarded, ~70 ms, as containment did.
+        // The name arm reads only the user's own words: a synonym is a keyword claim (NameLabelsOf).
+        foreach (var label in NameLabelsOf(concept))
+        {
             var value = label;
-            var keywordPattern = KeywordPattern(label);
-            arms.Add(t => t.Keywords.Any(k => k.Contains(value) && Regex.IsMatch(k, keywordPattern)));
             var namePattern = NamePattern(label);
             arms.Add(t => t.Name.ToLower().Contains(value) && Regex.IsMatch(t.Name, namePattern, RegexOptions.IgnoreCase));
         }

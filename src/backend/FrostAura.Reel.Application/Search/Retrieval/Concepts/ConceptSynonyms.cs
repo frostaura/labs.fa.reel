@@ -11,6 +11,12 @@ namespace FrostAura.Reel.Application.Search.Retrieval.Concepts;
 /// loop" is not "time travel"; "spy" is not "thriller"). Every member is matched through
 /// <see cref="KeywordVocabulary.Expand"/>, so each stem reaches its labels the usual way ("lawyer"
 /// reaches "lawyers" and "defense lawyer").</para>
+///
+/// <para><b>Keywords only.</b> A synonym is a claim about TMDB's tags, never about titles' names: the
+/// name arm reads only the user's own words (<see cref="HardConstraintFilter.NameLabelsOf"/>), so
+/// "ronin" finds the masterless-samurai tag and never Ronin (1998). A stem stops at a word end or an
+/// inflection (<see cref="KeywordVocabulary.Reaches"/>), so a compound the stem no longer reaches
+/// ("spacecraft", "witchcraft") is listed here when it names the same concept.</para>
 /// </summary>
 public static class ConceptSynonyms
 {
@@ -32,7 +38,8 @@ public static class ConceptSynonyms
         ["alien", "extraterrestrial", "alien invasion"],
         ["pandemic", "epidemic", "virus outbreak"],
         ["natural disaster", "disaster", "volcano", "earthquake", "tornado", "tsunami"],
-        ["space", "outer space", "astronaut", "space station", "space travel", "spaceship", "space mission"],
+        ["space", "outer space", "astronaut", "space station", "space travel", "spaceship", "spacecraft", "space mission"],
+        ["witch", "witchcraft"],
         ["superhero", "superpower", "super power"],
         ["ghost", "haunting", "haunted"],
         ["hacker", "hacking"],
