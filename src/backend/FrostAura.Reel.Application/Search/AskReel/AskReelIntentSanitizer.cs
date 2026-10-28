@@ -69,6 +69,9 @@ public static class AskReelIntentSanitizer
         "thing", "things", "kind", "sort", "type", "lot", "lots", "bit", "just", "really", "very", "so",
         "too", "also", "then", "than", "now", "here", "there", "what", "which", "who", "how", "why", "when",
         "where", "let", "lets", "let's", "ok", "okay", "yes", "yeah", "maybe", "earlier", "before", "after",
+        // When the user means to watch, never what: "something funny tonight" searched the topic
+        // "tonight" and replied "There are no tonight titles left for you" (HREV5 keyless e2e).
+        "tonight", "tonite", "today", "tomorrow", "evening", "afternoon",
     };
 
     /// <summary>

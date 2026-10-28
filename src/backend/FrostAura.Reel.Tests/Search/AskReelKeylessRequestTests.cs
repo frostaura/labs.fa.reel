@@ -196,6 +196,24 @@ public class AskReelKeylessRequestTests
         Assert.Equal(List(genres), reading.Genres);
     }
 
+    /// <summary>
+    /// When the user wants to watch is never what they want to watch: with no model, "something funny
+    /// tonight" searched the topic "tonight" and replied "There are no tonight titles left for you".
+    /// </summary>
+    [Theory]
+    [InlineData("something funny tonight", "")]
+    [InlineData("a heist movie for tonight", "heist")]
+    [InlineData("zombie films to watch this evening", "zombie")]
+    [InlineData("something for today", "")]
+    [InlineData("a samurai film for tomorrow", "samurai")]
+    public void A_when_word_is_never_a_topic(string message, string concepts)
+    {
+        static string[] List(string text) => text.Split('|', StringSplitOptions.RemoveEmptyEntries);
+
+        Assert.Equal(List(concepts), FallbackReader.Read(message, ConversationState.Empty, Now).Concepts);
+        Assert.Equal(List(concepts), AskReelIntentSanitizer.ReadKeylessRequest(message, Now).Phrases);
+    }
+
     /// <summary>A first-turn carried-forward plan keeps its topics hard, exactly as the keyless one does.</summary>
     [Theory]
     [InlineData("spy thrillers", "spy", "thriller")]

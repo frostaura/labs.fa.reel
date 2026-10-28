@@ -537,7 +537,8 @@ uses it only to know which frames to expect.
    "the other one" and "the rest" stay pointers; an unfound name is searched without the article;
    HREV5-RET-02). A new request that names a found title and no medium searches that title's medium
    ("like John Wick" after "heist movies" stays on movies); **comparisons** ("funnier", "darker") as attribute steers; connectives,
-   concessions and generic nouns ("instead", "older", "fine", "stories") never as topics, so "what
+   concessions, generic nouns and when-words ("instead", "older", "fine", "stories", "tonight")
+   never as topics, so "what
    about movies instead" is a media switch that carries the topic; "love stories" as the romance
    genre; a **genre word ending a topic phrase** as that phrase's genre ("spy thrillers" is spy in
    thriller), except a curated concept phrase ("second world war" is World War II); an **ordinal
