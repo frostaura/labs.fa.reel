@@ -11,14 +11,20 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// <summary>
 /// The tap-through payload behind the title page's contribution bars, on real Postgres: person
 /// features list ONLY taste-verified people (rated on ≥ 2 titles, same VerifiedPeople data the
-/// why-sentences cite) with their shrunken average; the decade feature carries the honest
-/// "you average X for YYYYs titles" note; and a person below the verification bar never appears.
+/// why-sentences cite) with the plain mean of the user's own ratings of their titles; the decade
+/// feature carries the honest "you average X for YYYYs titles" note, the plain mean too; and a
+/// person below the verification bar never appears (HREV2-D-01). The account also rates titles
+/// outside both pools, so its mean is not the pools' and a shrunken mean would print a different
+/// number: with only the two pooled ratings the shrunken and plain means coincide and the test
+/// could not tell them apart.
 /// </summary>
 [Collection("postgres")]
 public class ContributionDetailsTests(PostgresFixture fixture)
 {
-    [Fact]
-    public async Task Person_features_list_verified_people_and_the_decade_note_rides_along()
+    [Theory]
+    [InlineData(new short[] { 3 })]
+    [InlineData(new short[] { 10, 2, 4 })]
+    public async Task Person_features_list_verified_people_and_the_decade_note_rides_along(short[] offPoolRatings)
     {
         if (!fixture.Available)
         {
@@ -48,6 +54,14 @@ public class ContributionDetailsTests(PostgresFixture fixture)
             db.TitleCredits.Add(new TitleCredit { Id = Guid.NewGuid(), TitleId = targetId, PersonId = directorId, Role = CreditRole.Director });
             db.UserRatings.Add(NewRating(accountId, ratedA, 9));
             db.UserRatings.Add(NewRating(accountId, ratedB, 8));
+            for (var i = 0; i < offPoolRatings.Length; i++)
+            {
+                // 1990s and uncredited: in neither the actor's pool nor the 1980s pool.
+                var offPool = Guid.NewGuid();
+                db.Add(NewTitle(offPool, $"Off pool {i}", 1992 + i));
+                db.UserRatings.Add(NewRating(accountId, offPool, offPoolRatings[i]));
+            }
+
             await db.SaveChangesAsync();
         }
 
@@ -59,13 +73,16 @@ public class ContributionDetailsTests(PostgresFixture fixture)
 
         var details = await ContributionDetails.BuildAsync(scopedDb, taste, target!, CancellationToken.None);
 
-        // castAffinity: the verified actor, with the shrunken average over their two ratings.
+        // The fixture must separate the two rules, or the asserts below pin nothing.
+        Assert.NotEqual(8.5m, decimal.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1, MidpointRounding.AwayFromZero));
+
+        // castAffinity: the verified actor, with the plain mean of the two ratings: (9 + 8) / 2.
         var cast = Assert.Single(details, d => d.Feature == "castAffinity");
         var person = Assert.Single(cast.People!);
         Assert.Equal(actorId, person.PersonId);
         Assert.Equal("Verified Actor", person.Name);
         Assert.Equal(2, person.TitleCount);
-        Assert.Equal(decimal.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1, MidpointRounding.AwayFromZero), person.YourAverage);
+        Assert.Equal(8.5m, person.YourAverage);
 
         // directorAffinity: one rating is below the verification bar — the feature is absent, not empty.
         Assert.DoesNotContain(details, d => d.Feature == "directorAffinity");
@@ -74,9 +91,8 @@ public class ContributionDetailsTests(PostgresFixture fixture)
         // note. Invariant culture on the expectation too — the note is built invariant on purpose
         // (the dev machine's en_ZA locale would render "8,5"), and the test must not undo that.
         var decade = Assert.Single(details, d => d.Feature == "decadeAffinity");
-        var expected = decimal.Round(TasteMath.ShrunkenMean(new short[] { 9, 8 }, taste.UserMean), 1, MidpointRounding.AwayFromZero);
         Assert.Equal(
-            string.Create(CultureInfo.InvariantCulture, $"you average {expected:0.0} for 1980s titles"),
+            string.Create(CultureInfo.InvariantCulture, $"you average {8.5m:0.0} for 1980s titles"),
             decade.Note);
     }
 

@@ -149,8 +149,11 @@ public class TrainJobHandler(
                     + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}");
         }
 
-        var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
-        var vectors = await featureBuilder.BuildAsync(taste, labels.Select(l => l.TitleId).ToList(), now, ct);
+        // The current recipe's pools, not the outgoing artifact's (TrainingRecipe): this fit is the
+        // artifact the next taste states will be built for.
+        var trainingFeatures = featureBuilder.ForTraining();
+        var taste = await trainingFeatures.BuildTasteStateAsync(accountId, now, ct);
+        var vectors = await trainingFeatures.BuildAsync(taste, labels.Select(l => l.TitleId).ToList(), now, ct);
         var rows = labels.Where(l => vectors.ContainsKey(l.TitleId)).ToList();
         if (rows.Count < MinTrainingRows)
         {
@@ -207,6 +210,8 @@ public class TrainJobHandler(
                 stats = standardizer.ToPayload(),
                 // What this artifact learned from, for the next retrain's same-inputs check. In the
                 // existing document for the same reason the standardizer stats are: no column.
+                // How the training rows' user-side pools were built; serving follows it (TrainingRecipe).
+                pools = TrainingRecipe.Current,
                 hashVersion = TrainingInputHash.FormulaVersion,
                 labelHash = inputHashes.Labels,
                 inputHash = inputHashes.Inputs,
@@ -296,6 +301,13 @@ public class TrainJobHandler(
             .OrderByDescending(a => a.Version)
             .FirstOrDefaultAsync(ct);
         if (active is null)
+        {
+            return null;
+        }
+
+        // An artifact trained with an older recipe is retrained even inside the drift debounce: its
+        // labels may be unchanged, but what it learned from them was not (HREV2-RET-02).
+        if (!TrainingRecipe.IsCurrent(active.FeatureSchemaJson))
         {
             return null;
         }

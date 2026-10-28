@@ -338,6 +338,40 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.DoesNotContain(items, i => without.Contains(i.Title.Id));
     }
 
+    /// <summary>
+    /// HREV2-RET-05: a "more like this" page the gate emptied says so. Every neighbour above the bar
+    /// that shared nothing with the anchor is counted as held back by the gate, so the rail's copy
+    /// can stop blaming the account's conditions; an un-anchored page carries no such count.
+    /// </summary>
+    [Theory]
+    [InlineData(FeedRowContext.Similar)]
+    [InlineData(FeedRowContext.BecauseYouLoved)]
+    public async Task An_anchored_page_the_gate_emptied_counts_what_it_held_back(FeedRowContext context)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"trust-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        var axis = Random.Shared.Next(300, 590);
+        var anchor = await SeedTitlesAsync(1, genre, keywords: ["heist"], axis: axis);
+        var neighbours = await SeedTitlesAsync(10, genre, keywords: ["courtroom"], axis: axis);
+        await SeedActiveArtifactAsync(accountId);
+
+        var page = await MorePageAsync(accountId, new MoreFeedRequest(context, anchor[0], null, [], 12), new UnavailableSearchAgent());
+
+        Assert.Empty(page.Items);
+        var window = Assert.IsType<FeedPaginator.AnchoredWindow>(page.Anchored);
+        Assert.True(window.GateHeldBack > 0, "the gate refused every neighbour above the bar");
+        Assert.Equal(neighbours.Count, window.GateHeldBack + window.BelowBar);
+
+        var genrePage = await MorePageAsync(accountId, Genre(genre), new UnavailableSearchAgent());
+        Assert.NotEmpty(genrePage.Items);
+        Assert.Null(genrePage.Anchored);
+    }
+
     [Fact]
     public async Task A_cold_page_serves_model_order_now_and_its_curation_lands_for_the_next_view()
     {
@@ -473,6 +507,11 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
 
     private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(
         Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null, bool offRequestCuration = false,
+        bool keywordNeighbours = false) =>
+        (await MorePageAsync(accountId, request, agent, sharedCache, offRequestCuration, keywordNeighbours)).Items;
+
+    private async Task<FeedPaginator.MorePage> MorePageAsync(
+        Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null, bool offRequestCuration = false,
         bool keywordNeighbours = false)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
@@ -495,7 +534,7 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
                 ? new FrostAura.Reel.Application.Search.Retrieval.KeywordNeighbours(
                     db, eligibility, new FrostAura.Reel.Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache))
                 : null);
-        return await paginator.MoreAsync(account, request, CancellationToken.None);
+        return await paginator.MorePageAsync(account, request, CancellationToken.None);
     }
 
     /// <summary>The DI scope the off-request curation pass resolves its agent and context from.</summary>

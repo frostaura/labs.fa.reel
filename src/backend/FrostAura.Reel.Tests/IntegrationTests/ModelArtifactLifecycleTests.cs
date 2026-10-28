@@ -410,6 +410,43 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         Assert.Equal(PipelineStage.Evaluated, (await verify.Accounts.SingleAsync(a => a.Id == accountId)).PipelineStage);
     }
 
+    [Fact]
+    public async Task A_model_trained_with_an_older_recipe_retrains_once_however_recent_and_is_stamped()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV2-RET-02: leave-one-out pools let the trees read a row's label back out of its decade
+        // pool, so an artifact trained that way must be replaced even when no rating changed and it
+        // is minutes old — the drift debounce is for catalogue noise, not for a model that learned
+        // the wrong thing from the same labels.
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.True(TrainingRecipe.IsCurrent((await ActiveAsync(accountId)).FeatureSchemaJson));
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+            var doc = System.Text.Json.Nodes.JsonNode.Parse(artifact.FeatureSchemaJson)!.AsObject();
+            doc.Remove(TrainingRecipe.Property);
+            artifact.FeatureSchemaJson = doc.ToJsonString();
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        var retrained = await ActiveAsync(accountId);
+        Assert.Equal(2, retrained.Version);
+        Assert.True(TrainingRecipe.IsCurrent(retrained.FeatureSchemaJson));
+
+        // Once, not on every run: the stamped model is the ordinary same-inputs case again.
+        var job = NewTrainJob(accountId);
+        await RunTrainAsync(accountId, job);
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+        Assert.Contains("Nothing new to learn from", job.ProgressMessage, StringComparison.Ordinal);
+    }
+
     private static SyncJob NewTrainJob(Guid accountId) =>
         new() { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow };
 

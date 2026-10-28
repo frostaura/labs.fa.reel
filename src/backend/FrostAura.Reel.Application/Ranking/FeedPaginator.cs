@@ -200,7 +200,40 @@ public sealed class FeedPaginator(
     // until its page resolves, so the cap costs latency, never correctness.
     private static readonly SemaphoreSlim CurationGate = new(4);
 
-    public async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(Account account, MoreFeedRequest req, CancellationToken ct)
+    public async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(Account account, MoreFeedRequest req, CancellationToken ct) =>
+        (await MorePageAsync(account, req, ct)).Items;
+
+    /// <summary>
+    /// What an anchored page's window lost before it could be served, for the copy under a short or
+    /// empty "more like this" rail (HREV2-RET-05): an empty rail used to blame the user's conditions
+    /// when the anchored gate had held back titles it could have shown.
+    /// </summary>
+    /// <param name="GateHeldBack">Candidates above the for-you bar the anchored gate refused (no shared
+    /// evidence, or too far from the anchor).</param>
+    /// <param name="BelowBar">Candidates in the window under the account's for-you bar.</param>
+    public sealed record AnchoredWindow(int GateHeldBack, int BelowBar);
+
+    /// <summary>One page, and — on an anchored row — what its window lost to the bar and to the gate.</summary>
+    public sealed record MorePage(IReadOnlyList<ScoredFeedItem> Items, AnchoredWindow? Anchored);
+
+    /// <summary><see cref="MoreAsync"/>, with the anchored window's accounting.</summary>
+    public async Task<MorePage> MorePageAsync(Account account, MoreFeedRequest req, CancellationToken ct)
+    {
+        var report = new WindowReport();
+        var items = await MoreCoreAsync(account, req, report, ct);
+        return new MorePage(items, IsAnchored(req) ? new AnchoredWindow(report.GateHeldBack, report.BelowBar) : null);
+    }
+
+    /// <summary>Filled in by <see cref="MoreCoreAsync"/> as the window is cut.</summary>
+    private sealed class WindowReport
+    {
+        public int GateHeldBack { get; set; }
+
+        public int BelowBar { get; set; }
+    }
+
+    private async Task<IReadOnlyList<ScoredFeedItem>> MoreCoreAsync(
+        Account account, MoreFeedRequest req, WindowReport report, CancellationToken ct)
     {
         // Phase timings for the one log line at the end: /feed/more's p95 is an acceptance number,
         // and "which phase was slow" is the first question every miss raises.
@@ -330,6 +363,7 @@ public sealed class FeedPaginator(
         // the best of the lane when nothing cleared it, which served "load more" cards under the bar
         // on every rail the build itself had held to it. A lane with nothing above the bar has
         // genuinely run out of what the user asked to see; it was already deepened above.
+        report.BelowBar = all.Count - scored.Count;
         if (scored.Count == 0)
         {
             return [];
@@ -346,17 +380,20 @@ public sealed class FeedPaginator(
 
         // ── The anchored-row gate ───────────────────────────────────────────────────────
         // A because-you-loved or more-like-this page admits a card only when it sits inside the
-        // anchor's own 50-neighbour radius AND shares a person, a keyword or a theme with it
-        // (AnchorRowGate). The evidence that admitted it travels to the card as its chips. A page
-        // that comes up empty after the gate is honest: the anchor has nothing else to give here.
+        // anchor's own 50-comparable-neighbour radius (or two shared items carry it in above chance)
+        // AND it shares a person, a keyword or a theme with it (AnchorRowGate). The evidence that
+        // admitted it travels to the card as its chips. A page that comes up empty after the gate
+        // says so: the count it held back reaches the rail's copy (MorePage.Anchored).
         var evidence = new Dictionary<Guid, IReadOnlyList<SharedEvidence>>();
         if (IsAnchored(req) && req.AnchorTitleId is { } gateAnchorId)
         {
             var admissions = await AnchorRowGate.AdmitAsync(
                 db, cache, gateAnchorId, ranked.Select(r => r.Title.Id).ToList(), ct);
+            var beforeGate = ranked.Count;
             ranked = ranked
                 .Where(r => admissions.TryGetValue(r.Title.Id, out var admission) && admission.Admitted)
                 .ToList();
+            report.GateHeldBack = beforeGate - ranked.Count;
             foreach (var r in ranked)
             {
                 evidence[r.Title.Id] = admissions[r.Title.Id].Evidence;

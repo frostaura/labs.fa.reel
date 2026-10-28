@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Ml;
@@ -23,16 +24,75 @@ namespace FrostAura.Reel.Application.Ml;
 /// train/serve skew. Every feature below therefore subtracts the title's own contribution from the
 /// pool that describes it. For an unrated candidate there is nothing to subtract and the code path is
 /// identical — one path, no divergence between train and serve.
+///
+/// <para><b>For the rating-mean pools the subtraction is a whole fold, not one rating.</b> Taking
+/// only a row's own rating out of a large pool leaves a value that orders the pool's rows exactly
+/// opposite to their labels, which the trees learned to read back (HREV2-RET-02). See
+/// <see cref="FoldPools"/>. The embedding features keep the per-title exclusion. An artifact trained
+/// before that recipe learned from leave-one-out rows, and is served its rated titles that way until
+/// it is retrained (<see cref="OutOfFoldPools"/>).</para>
 /// </remarks>
 public class FeatureVectorBuilder(IReelDbContext db)
 {
     /// <summary>
     /// Whether shows rated only season by season or episode by episode join the taste pools at their
-    /// rolled-up rating (task 12, N-8). Always on in the app; DI never sets it. It exists so the
-    /// offline ablation (<c>scripts/ml/show-rollup-ablation.sh</c>) can measure the rollup against
-    /// the same data and code with it off, instead of against a reverted commit nobody can re-run.
+    /// rolled-up rating (task 12, N-8).
+    /// <list type="bullet">
+    /// <item><b>Null (DI's default) — follow the account's Active artifact.</b> A serving taste state
+    /// describes the user the way the model scoring it was trained to read one: with rollups only if
+    /// that artifact's <see cref="TrainingRecipe"/> had them, and as the current recipe has them when
+    /// there is no artifact yet (its first one will be). HREV2-RET-02: serving rollups to an artifact
+    /// trained without them moved every 2020s prediction from about 6 to about 3.</item>
+    /// <item><b>Training</b> (<see cref="ForTraining"/>) — the current recipe's
+    /// <see cref="TrainingRecipe.ShowRollups"/>: a new artifact learns the current recipe.</item>
+    /// <item><b>Explicit either way</b> — the offline ablation (<c>scripts/ml/show-rollup-ablation.sh</c>),
+    /// which measures the rollup against the same data and code with it off.</item>
+    /// </list>
     /// </summary>
-    public bool IncludeShowRollups { get; init; } = true;
+    public bool? IncludeShowRollups { get; init; }
+
+    /// <summary>
+    /// Whether a rated title's rating-mean pools exclude its whole fold (<see cref="FoldPools"/>) or
+    /// only its own rating (leave-one-out). An unrated candidate excludes nothing either way.
+    /// <list type="bullet">
+    /// <item><b>Null (DI's default) — follow the account's Active artifact</b>, exactly as
+    /// <see cref="IncludeShowRollups"/> does: out-of-fold only if its <see cref="TrainingRecipe"/>
+    /// trained that way (<see cref="TrainingRecipe.UsesOutOfFoldPools"/>), and as the current recipe
+    /// when there is no artifact yet. HREV2-RET-02: an unstamped artifact trained on leave-one-out
+    /// rows and handed out-of-fold ones put Boss Level, rated 7, at 2.0.</item>
+    /// <item><b>Training</b> (<see cref="ForTraining"/>) — <see cref="TrainingRecipe.OutOfFoldPools"/>.</item>
+    /// <item><b>Explicit either way</b> — the offline ablation, which measures out-of-fold pools against
+    /// the leave-one-out they replaced on the same data and code.</item>
+    /// </list>
+    /// </summary>
+    public bool? OutOfFoldPools { get; init; }
+
+    /// <summary>
+    /// This builder as training must use it: the current <see cref="TrainingRecipe"/> — its rollups
+    /// and its pools — rather than whatever the soon-to-be-replaced Active artifact was trained with.
+    /// An explicit setting (the ablation's) is kept.
+    /// </summary>
+    public FeatureVectorBuilder ForTraining() =>
+        IncludeShowRollups is not null && OutOfFoldPools is not null
+            ? this
+            : new FeatureVectorBuilder(db)
+            {
+                IncludeShowRollups = IncludeShowRollups ?? TrainingRecipe.ShowRollups,
+                OutOfFoldPools = OutOfFoldPools ?? TrainingRecipe.OutOfFoldPools,
+            };
+
+    /// <summary>
+    /// How many folds the rating-mean pools are split into for a RATED title's own vector
+    /// (<see cref="TrainingFold"/>). See <see cref="FoldPools"/> for why leave-one-out alone was not
+    /// enough.
+    /// </summary>
+    public const int TrainingFolds = 5;
+
+    /// <summary>
+    /// The fold a rated title's own label sits in: a pure function of its id, so a training matrix is
+    /// reproducible from its inputs and two runs over the same ratings agree row for row.
+    /// </summary>
+    public static int TrainingFold(Guid titleId) => TasteMath.StableBucket(titleId.ToString("N"), TrainingFolds);
 
     private const decimal LovedThreshold = 8m;
     private const int TopLovedCount = 10;
@@ -93,21 +153,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
             0,
             0m,
             new Dictionary<string, (int, decimal)>());
-
-        /// <summary>
-        /// The user's overall mean rating with <paramref name="self"/>'s own rating removed — the prior
-        /// every shrunken affinity below is pulled toward. Leaving the label in the prior is a small
-        /// leak (1/N) but it is still a leak, and it costs one subtraction to remove.
-        /// </summary>
-        public decimal MeanExcluding(SelfRating? self, decimal fallback)
-        {
-            if (self is not { } own)
-            {
-                return RatingCount > 0 ? RatingSum / RatingCount : fallback;
-            }
-
-            return RatingCount > 1 ? (RatingSum - own.Rating) / (RatingCount - 1) : fallback;
-        }
     }
 
     /// <summary>Everything user-side the features need, derived strictly from events ≤ asOf.</summary>
@@ -142,7 +187,50 @@ public class FeatureVectorBuilder(IReelDbContext db)
         /// An explicit person rating is a statement about the person, so it seeds every role.
         /// Null only where a caller built a state by hand; readers treat null as "no pools".
         /// </summary>
-        IReadOnlyDictionary<(Guid PersonId, CreditRole Role), List<short>>? PersonRoleRatings = null);
+        IReadOnlyDictionary<(Guid PersonId, CreditRole Role), List<short>>? PersonRoleRatings = null,
+        /// <summary>
+        /// The rating-mean pools split by <see cref="TrainingFold"/>, so a rated title's vector can
+        /// take its WHOLE fold out of every pool rather than its own rating alone. Null when the
+        /// recipe is leave-one-out (<see cref="OutOfFoldPools"/>: an Active artifact trained that way,
+        /// or the ablation's other arm) or a caller built the state by hand; <see cref="Build"/> then
+        /// takes out the row's own rating alone.
+        /// </summary>
+        FoldPools? Folds = null,
+        /// <summary>
+        /// The user's OWN rating of each title a person was credited on, per capacity: title → rating,
+        /// one entry per title, with no explicit person rating folded in. What every printed "you rate
+        /// X N on average" is computed from (<see cref="Ranking.VerifiedPeople.OwnRatings(TasteState, Guid, CreditRole)"/>),
+        /// because <see cref="PersonRoleRatings"/> is a model input: an explicit person rating replaces
+        /// it with pseudo-observations. Null only where a caller built a state by hand.
+        /// </summary>
+        IReadOnlyDictionary<(Guid PersonId, CreditRole Role), IReadOnlyDictionary<Guid, short>>? PersonRoleTitleRatings = null);
+
+    /// <summary>
+    /// The rating-mean pools (the overall mean the shrinkage pulls toward, genre, decade, person and
+    /// contrarian) per <see cref="TrainingFold"/>, so a training row is described by the OTHER folds.
+    ///
+    /// <para><b>Why leave-one-out leaked.</b> Training builds one taste state and describes every rated
+    /// title from it with its own rating subtracted, so in a pool of N ratings summing to S a row
+    /// rated r reads (S − r)/(N − 1): one pool, one value per rating, ordered exactly opposite to the
+    /// label. FastTree found it. On the founder's copy (867 ratings of 2020s titles) a retrained model
+    /// moved its 2020s mean prediction from 8.8 to 3.1 across ±0.004 of <c>decadeAffinity</c>, and a
+    /// candidate — which reads S/N, the value of a row rated at the pool's mean — sat on that cliff:
+    /// twelve rolled-up shows shifted the pool by 0.005 and every 2020s title fell from 6.1 to 3.0
+    /// (HREV2-RET-02). A single new rating moves a decade pool by up to 0.004, so any rating could do
+    /// the same until the next retrain.</para>
+    ///
+    /// <para><b>Out-of-fold instead.</b> A rated title's pools exclude every rating in its fold. Rows
+    /// that share a fold and a pool share one value whatever their labels, so the value no longer
+    /// orders labels within a pool; what is left is five fold means, which differ by sampling noise.
+    /// An unrated candidate is in no fold's way and reads the full pool, exactly as before.</para>
+    /// </summary>
+    public sealed record FoldPools(
+        IReadOnlyDictionary<int, (int Count, decimal Sum)> Overall,
+        IReadOnlyDictionary<(string Genre, int Fold), List<(short Rating, DateTime RatedAt)>> Genre,
+        IReadOnlyDictionary<(int Decade, int Fold), (int Count, decimal Sum)> Decade,
+        IReadOnlyDictionary<(Guid PersonId, int Fold), (int Count, decimal Sum)> Person,
+        IReadOnlyDictionary<int, (int Count, decimal Sum)> Contrarian,
+        IReadOnlyDictionary<(string Genre, int Fold), (int Count, decimal Sum)> GenreContrarian);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -160,7 +248,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // media share read it; the loved anchors below do not (an anchor is a title rated whole).
         var wholeRated = titleRatings.Select(r => r.TitleId).ToHashSet();
         var explicitMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
-        if (IncludeShowRollups)
+        var (includeShowRollups, outOfFoldPools) = await RecipeAsync(accountId, ct);
+        if (includeShowRollups)
         {
             titleRatings.AddRange(ShowRatingRollup
                 .Roll(await ShowRatingRollup.PartsAsync(db, accountId, asOf, ct), wholeRated, explicitMean)
@@ -194,12 +283,28 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // movie/show-level rating row per title, but keep the highest defensively.
         var selfRatings = new Dictionary<Guid, SelfRating>();
 
+        // The same pools again, per fold (see FoldPools). Built in the same pass, from the same rows.
+        var foldOverall = new Dictionary<int, (int Count, decimal Sum)>();
+        var foldGenre = new Dictionary<(string, int), List<(short, DateTime)>>();
+        var foldDecade = new Dictionary<(int, int), (int Count, decimal Sum)>();
+        var foldContrarian = new Dictionary<int, (int Count, decimal Sum)>();
+        var foldGenreContrarian = new Dictionary<(string, int), (int Count, decimal Sum)>();
+
+        // The overall pool is every movie/show-level row, whether or not its title row is loaded —
+        // SelfExclusion.RatingSum/RatingCount below count them all, so the folds must too.
+        foreach (var rating in titleRatings)
+        {
+            Add(foldOverall, TrainingFold(rating.TitleId), rating.Rating);
+        }
+
         foreach (var rating in titleRatings)
         {
             if (!ratedTitles.TryGetValue(rating.TitleId, out var title))
             {
                 continue;
             }
+
+            var fold = TrainingFold(rating.TitleId);
 
             if (!selfRatings.TryGetValue(rating.TitleId, out var seen) || rating.Rating > seen.Rating)
             {
@@ -209,20 +314,24 @@ public class FeatureVectorBuilder(IReelDbContext db)
             foreach (var genre in title.Genres)
             {
                 (genreRatings.TryGetValue(genre, out var list) ? list : genreRatings[genre] = []).Add((rating.Rating, rating.RatedAt));
+                (foldGenre.TryGetValue((genre, fold), out var fList) ? fList : foldGenre[(genre, fold)] = []).Add((rating.Rating, rating.RatedAt));
             }
 
             if (title.Year is { } year)
             {
                 var decade = (year / 10) * 10;
                 (decadeRatings.TryGetValue(decade, out var dList) ? dList : decadeRatings[decade] = []).Add(rating.Rating);
+                Add(foldDecade, (decade, fold), rating.Rating);
             }
 
             if (title.TraktRating is { } globalRating)
             {
                 contrarianPairs.Add((rating.Rating, globalRating));
+                Add(foldContrarian, fold, rating.Rating - globalRating);
                 foreach (var genre in title.Genres)
                 {
                     (genrePairs.TryGetValue(genre, out var gList) ? gList : genrePairs[genre] = []).Add((rating.Rating, globalRating));
+                    Add(foldGenreContrarian, (genre, fold), rating.Rating - globalRating);
                 }
             }
         }
@@ -241,11 +350,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // One title can credit the same person twice in one role (two writing credits); the
         // role-blind pool has always counted each credit, the per-role pool counts each TITLE once.
         var personRoleTitles = new Dictionary<(Guid PersonId, CreditRole Role), Dictionary<Guid, short>>();
+        var foldPerson = new Dictionary<(Guid, int), (int Count, decimal Sum)>();
         foreach (var credit in credits)
         {
             if (ratingByTitle.TryGetValue(credit.TitleId, out var rating))
             {
                 (personRatings.TryGetValue(credit.PersonId, out var list) ? list : personRatings[credit.PersonId] = []).Add(rating);
+                // One entry per credit ROW, exactly as the role-blind pool above counts them.
+                Add(foldPerson, (credit.PersonId, TrainingFold(credit.TitleId)), rating);
                 var key = (credit.PersonId, credit.Role);
                 (personRoleTitles.TryGetValue(key, out var titles) ? titles : personRoleTitles[key] = [])[credit.TitleId] = rating;
             }
@@ -442,7 +554,39 @@ public class FeatureVectorBuilder(IReelDbContext db)
             dislikedGenreWeights,
             notInterestedCentroid,
             movieRatedShare,
-            personRoleRatings);
+            personRoleRatings,
+            outOfFoldPools ? new FoldPools(foldOverall, foldGenre, foldDecade, foldPerson, foldContrarian, foldGenreContrarian) : null,
+            personRoleTitles.ToDictionary(kv => kv.Key, kv => (IReadOnlyDictionary<Guid, short>)kv.Value));
+
+        static void Add<TKey>(Dictionary<TKey, (int Count, decimal Sum)> pool, TKey key, decimal value)
+            where TKey : notnull
+        {
+            var (count, sum) = pool.GetValueOrDefault(key);
+            pool[key] = (count + 1, sum + value);
+        }
+    }
+
+    /// <summary>
+    /// The recipe this taste state is built with: each explicit setting as set, and each null one as
+    /// the account's Active artifact was trained — with no artifact at all, as the current recipe,
+    /// because the first one will be trained on it (see <see cref="IncludeShowRollups"/> and
+    /// <see cref="OutOfFoldPools"/>). The artifact is read once, and only when something follows it.
+    /// </summary>
+    private async Task<(bool ShowRollups, bool OutOfFoldPools)> RecipeAsync(Guid accountId, CancellationToken ct)
+    {
+        if (IncludeShowRollups is { } rollups && OutOfFoldPools is { } outOfFold)
+        {
+            return (rollups, outOfFold);
+        }
+
+        var active = await db.ModelArtifacts
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            .OrderByDescending(a => a.Version)
+            .Select(a => new { a.FeatureSchemaJson })
+            .FirstOrDefaultAsync(ct);
+        return (
+            IncludeShowRollups ?? (active is null ? TrainingRecipe.ShowRollups : TrainingRecipe.UsesShowRollups(active.FeatureSchemaJson)),
+            OutOfFoldPools ?? (active is null ? TrainingRecipe.OutOfFoldPools : TrainingRecipe.UsesOutOfFoldPools(active.FeatureSchemaJson)));
     }
 
     /// <summary>
@@ -528,23 +672,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // ── Leave-one-out aggregates ───────────────────────────────────────────────────────
         // Rolled up ONCE per batch, not once per title: subtracting a title's own contribution is
         // then arithmetic on (count, sum) rather than a rebuild of the whole taste state.
-        var genreStats = new Dictionary<string, GenreStat>(taste.GenreRatings.Count);
-        foreach (var (genre, ratings) in taste.GenreRatings)
-        {
-            decimal sum = 0m, weightTotal = 0m, weightedSum = 0m;
-            foreach (var (rating, ratedAt) in ratings)
-            {
-                var weight = (decimal)TasteMath.RecencyWeight(ratedAt, asOf);
-                sum += rating;
-                weightTotal += weight;
-                weightedSum += weight * rating;
-            }
-
-            genreStats[genre] = new GenreStat(ratings.Count, sum, weightTotal, weightedSum);
-        }
+        var genreStats = taste.GenreRatings.ToDictionary(kv => kv.Key, kv => GenreStatOf(kv.Value, asOf));
 
         var decadeStats = taste.DecadeRatings.ToDictionary(
             kv => kv.Key, kv => new Stat(kv.Value.Count, kv.Value.Sum(r => (decimal)r)));
+
+        // The per-fold genre pools need the same recency weights at the same asOf as the full pools.
+        var foldGenreStats = taste.Folds is { } folds
+            ? folds.Genre.ToDictionary(kv => kv.Key, kv => GenreStatOf(kv.Value, asOf))
+            : [];
         var personStats = taste.PersonRatings.ToDictionary(
             kv => kv.Key, kv => new Stat(kv.Value.Count, kv.Value.Sum(r => (decimal)r)));
 
@@ -562,8 +698,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
             // This title's own label, if the user has already rated it (training rows always have
             // one; scored candidates never do). Everything below subtracts it back out.
             SelfRating? self = taste.Self.Ratings.TryGetValue(id, out var own) ? own : null;
-            var prior = taste.Self.MeanExcluding(self, NeutralUserMean);
-            var selfWeight = self is { } weighted ? (decimal)TasteMath.RecencyWeight(weighted.RatedAt, asOf) : 0m;
+            // What this row takes back out of the rating-mean pools: its whole fold where the state
+            // carries folds (see FoldPools), its own rating where a hand-built state does not, and
+            // nothing for an unrated candidate.
+            var excluded = self is not { } rated
+                ? Exclusion.None
+                : taste.Folds is { } rowFolds
+                    ? Exclusion.OutOfFold(rowFolds, foldGenreStats, TrainingFold(id))
+                    : Exclusion.LeaveOneOut(rated, (decimal)TasteMath.RecencyWeight(rated.RatedAt, asOf), title.Genres);
+            var prior = excluded.Prior(taste.Self, NeutralUserMean);
 
             // ── Title scalars ──────────────────────────────────────────────────────────
             var released = title.ReleasedAt ?? title.FirstAiredAt;
@@ -580,14 +723,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = TasteMath.CertificationOrdinal(title.Certification);
 
             // ── User-genre interaction ─────────────────────────────────────────────────
-            var (genreAllTime, genreRecent) = GenreAffinities(genreStats, title.Genres, prior, self, selfWeight);
+            var (genreAllTime, genreRecent) = GenreAffinities(genreStats, title.Genres, prior, excluded);
             vector[s++] = (float)genreAllTime;
             vector[s++] = (float)(genreRecent - genreAllTime);
-            vector[s++] = (float)DecadeAffinity(decadeStats, title.Year, prior, self);
+            vector[s++] = (float)DecadeAffinity(decadeStats, title.Year, prior, excluded);
 
             // ── Cast & crew affinities ─────────────────────────────────────────────────
             var credits = creditsByTitle.GetValueOrDefault(id);
-            var creditFeatures = CreditAffinities(taste, personStats, credits, prior, self);
+            var creditFeatures = CreditAffinities(taste, personStats, credits, prior, excluded);
             vector[s++] = (float)creditFeatures.Director;
             vector[s++] = (float)creditFeatures.Cast;
             vector[s++] = (float)creditFeatures.Writer;
@@ -596,7 +739,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = creditFeatures.HasCredits;
 
             // ── Contrarian calibration ─────────────────────────────────────────────────
-            vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
+            vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, excluded));
 
             // NOTE: v1-v3 wrote a `showEngagement` slot here, pinned to 0 on both paths. It was the
             // mean of the user's own episode/season ratings for THIS show, so it could only ever be
@@ -775,19 +918,35 @@ public class FeatureVectorBuilder(IReelDbContext db)
     /// <summary>As <see cref="Stat"/>, plus the recency-weighted totals the drift feature needs.</summary>
     private readonly record struct GenreStat(int Count, decimal Sum, decimal WeightTotal, decimal WeightedSum);
 
+    /// <summary>The (count, sum, weight) totals of one genre pool at <paramref name="asOf"/>.</summary>
+    private static GenreStat GenreStatOf(IEnumerable<(short Rating, DateTime RatedAt)> ratings, DateTime asOf)
+    {
+        int count = 0;
+        decimal sum = 0m, weightTotal = 0m, weightedSum = 0m;
+        foreach (var (rating, ratedAt) in ratings)
+        {
+            var weight = (decimal)TasteMath.RecencyWeight(ratedAt, asOf);
+            count++;
+            sum += rating;
+            weightTotal += weight;
+            weightedSum += weight * rating;
+        }
+
+        return new GenreStat(count, sum, weightTotal, weightedSum);
+    }
+
     /// <summary>
-    /// All-time and recency-weighted genre affinity over the title's genres, with the title's own
-    /// rating removed from each. BOTH sides are shrunken with the same k against the same prior, so
-    /// their difference measures change over time — previously the all-time side was shrunken and the
-    /// recent side was not, and a genre with a single rating reported a large "drift" that was
-    /// nothing but the gap between two formulas.
+    /// All-time and recency-weighted genre affinity over the title's genres, with the row's
+    /// <see cref="Exclusion"/> taken out of each. BOTH sides are shrunken with the same k against the
+    /// same prior, so their difference measures change over time — previously the all-time side was
+    /// shrunken and the recent side was not, and a genre with a single rating reported a large "drift"
+    /// that was nothing but the gap between two formulas.
     /// </summary>
     private static (decimal AllTime, decimal Recent) GenreAffinities(
         IReadOnlyDictionary<string, GenreStat> genreStats,
         string[] genres,
         decimal prior,
-        SelfRating? self,
-        decimal selfWeight)
+        Exclusion excluded)
     {
         if (genres.Length == 0)
         {
@@ -804,28 +963,19 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 continue;
             }
 
-            var count = stat.Count;
-            var sum = stat.Sum;
-            var weightTotal = stat.WeightTotal;
-            var weightedSum = stat.WeightedSum;
-            if (self is { } own)
-            {
-                // A rated title contributed its rating to every one of its OWN genres, exactly once.
-                count -= 1;
-                sum -= own.Rating;
-                weightTotal -= selfWeight;
-                weightedSum -= selfWeight * own.Rating;
-            }
-
-            allTimeTotal += TasteMath.ShrunkenMean(sum, count, prior);
-            recentTotal += TasteMath.ShrunkenWeightedMean(weightedSum, weightTotal, prior);
+            var own = excluded.Genre(genre);
+            var count = stat.Count - own.Count;
+            allTimeTotal += TasteMath.ShrunkenMean(stat.Sum - own.Sum, count, prior);
+            recentTotal += count <= 0
+                ? prior
+                : TasteMath.ShrunkenWeightedMean(stat.WeightedSum - own.WeightedSum, stat.WeightTotal - own.WeightTotal, prior);
         }
 
         return (allTimeTotal / genres.Length, recentTotal / genres.Length);
     }
 
     private static decimal DecadeAffinity(
-        IReadOnlyDictionary<int, Stat> decadeStats, int? year, decimal prior, SelfRating? self)
+        IReadOnlyDictionary<int, Stat> decadeStats, int? year, decimal prior, Exclusion excluded)
     {
         if (year is null)
         {
@@ -838,15 +988,104 @@ public class FeatureVectorBuilder(IReelDbContext db)
             return prior;
         }
 
-        var count = stat.Count;
-        var sum = stat.Sum;
-        if (self is { } own)
+        var own = excluded.Decade(decade);
+        return TasteMath.ShrunkenMean(stat.Sum - own.Sum, stat.Count - own.Count, prior);
+    }
+
+    /// <summary>
+    /// What one row takes back out of the rating-mean pools before they describe it: nothing for an
+    /// unrated candidate, its whole fold for a rated title (<see cref="FoldPools"/>), or — for a taste
+    /// state built by hand without folds — its own rating alone, the leave-one-out it replaced. The
+    /// embedding features keep their own self-exclusion: a title's similarity to the OTHER loved
+    /// titles does not encode its label, only its similarity to itself does.
+    /// </summary>
+    private sealed class Exclusion
+    {
+        private readonly FoldPools? _folds;
+        private readonly IReadOnlyDictionary<(string Genre, int Fold), GenreStat>? _foldGenres;
+        private readonly int _fold;
+        private readonly SelfRating? _self;
+        private readonly decimal _selfWeight;
+        private readonly string[] _selfGenres = [];
+
+        private Exclusion(
+            FoldPools? folds,
+            IReadOnlyDictionary<(string, int), GenreStat>? foldGenres,
+            int fold,
+            SelfRating? self,
+            decimal selfWeight,
+            string[] selfGenres)
         {
-            count -= 1;
-            sum -= own.Rating;
+            _folds = folds;
+            _foldGenres = foldGenres;
+            _fold = fold;
+            _self = self;
+            _selfWeight = selfWeight;
+            _selfGenres = selfGenres;
         }
 
-        return TasteMath.ShrunkenMean(sum, count, prior);
+        /// <summary>An unrated candidate: every pool is read whole.</summary>
+        public static Exclusion None { get; } = new(null, null, 0, null, 0m, []);
+
+        public static Exclusion OutOfFold(
+            FoldPools folds, IReadOnlyDictionary<(string, int), GenreStat> foldGenres, int fold) =>
+            new(folds, foldGenres, fold, null, 0m, []);
+
+        public static Exclusion LeaveOneOut(SelfRating self, decimal selfWeight, string[] genres) =>
+            new(null, null, 0, self, selfWeight, genres);
+
+        /// <summary>True for a rated title — whether by fold or by its own rating.</summary>
+        public bool Excludes => _folds is not null || _self is not null;
+
+        /// <summary>
+        /// The overall mean every shrunken affinity is pulled toward, with this row's exclusion
+        /// removed. Leaving the label in the prior is a small leak, and it costs one subtraction.
+        /// </summary>
+        public decimal Prior(SelfExclusion pool, decimal fallback)
+        {
+            var (count, sum) = _folds is { } folds
+                ? folds.Overall.GetValueOrDefault(_fold)
+                : _self is { } own ? (1, (decimal)own.Rating) : (0, 0m);
+            var remaining = pool.RatingCount - count;
+            return remaining > 0 ? (pool.RatingSum - sum) / remaining : fallback;
+        }
+
+        /// <summary>This row's share of one genre pool. A rated title sat in each of its OWN genres once.</summary>
+        public GenreStat Genre(string genre) =>
+            _foldGenres is { } foldGenres
+                ? foldGenres.GetValueOrDefault((genre, _fold))
+                : _self is { } own && _selfGenres.Contains(genre)
+                    ? new GenreStat(1, own.Rating, _selfWeight, _selfWeight * own.Rating)
+                    : default;
+
+        public Stat Decade(int decade) =>
+            _folds is { } folds
+                ? Of(folds.Decade.GetValueOrDefault((decade, _fold)))
+                : _self is { } own ? new Stat(1, own.Rating) : default;
+
+        /// <summary>
+        /// This row's share of one person's pool. A person credited on the title in two roles was
+        /// handed its rating twice, so leave-one-out removes one copy per credit row
+        /// (<paramref name="ownCredits"/>); a fold's pool already counted every one of them.
+        /// </summary>
+        public Stat Person(Guid personId, int ownCredits) =>
+            _folds is { } folds
+                ? Of(folds.Person.GetValueOrDefault((personId, _fold)))
+                : _self is { } own ? new Stat(ownCredits, ownCredits * own.Rating) : default;
+
+        /// <summary>This row's share of the overall (user − crowd) pool.</summary>
+        public Stat Contrarian() =>
+            _folds is { } folds
+                ? Of(folds.Contrarian.GetValueOrDefault(_fold))
+                : _self is { GlobalRating: { } global } own ? new Stat(1, own.Rating - global) : default;
+
+        /// <summary>This row's share of one genre's (user − crowd) pool.</summary>
+        public Stat GenreContrarian(string genre) =>
+            _folds is { } folds
+                ? Of(folds.GenreContrarian.GetValueOrDefault((genre, _fold)))
+                : Contrarian();
+
+        private static Stat Of((int Count, decimal Sum) pool) => new(pool.Count, pool.Sum);
     }
 
     internal sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
@@ -890,7 +1129,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlyDictionary<Guid, Stat> personStats,
         IReadOnlyList<CreditRow>? credits,
         decimal prior,
-        SelfRating? self)
+        Exclusion excluded)
     {
         if (credits is null || credits.Count == 0)
         {
@@ -898,10 +1137,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
             return new CreditFeatures(unknown, unknown, unknown, 0f, 0f, 0f, 0f);
         }
 
-        // A person credited on this title in two roles was handed this title's rating twice, so the
-        // subtraction removes one copy per CREDIT ROW, not one per person.
+        // A person credited on this title in two roles was handed this title's rating twice, so a
+        // leave-one-out subtraction removes one copy per CREDIT ROW, not one per person.
         var selfCredits = new Dictionary<Guid, int>();
-        if (self is not null)
+        if (excluded.Excludes)
         {
             foreach (var credit in credits)
             {
@@ -929,11 +1168,11 @@ public class FeatureVectorBuilder(IReelDbContext db)
             var sum = stat.Sum;
             // An EXPLICIT person rating replaced the derived pool with k pseudo-observations, so this
             // title never contributed to it and there is nothing to take out.
-            if (self is { } own && !taste.Self.ExplicitPersonIds.Contains(credit.PersonId))
+            if (excluded.Excludes && !taste.Self.ExplicitPersonIds.Contains(credit.PersonId))
             {
-                var copies = selfCredits.GetValueOrDefault(credit.PersonId);
-                count -= copies;
-                sum -= copies * own.Rating;
+                var own = excluded.Person(credit.PersonId, selfCredits.GetValueOrDefault(credit.PersonId));
+                count -= own.Count;
+                sum -= own.Sum;
             }
 
             if (count <= 0)
@@ -1004,16 +1243,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
         float KnownDirectorOrWriter);
 
     /// <summary>
-    /// The user's genre-level contrarian offset for this title, with the title's own (user, crowd)
-    /// pair removed — otherwise <c>contrarianAdjustedRating</c> for a once-rated genre is a rearranged
-    /// copy of the label.
+    /// The user's genre-level contrarian offset for this title, with the row's <see cref="Exclusion"/>
+    /// (its fold's (user, crowd) pairs, or its own) removed — otherwise <c>contrarianAdjustedRating</c>
+    /// for a once-rated genre is a rearranged copy of the label.
     /// </summary>
-    private static decimal ContrarianOffset(TasteState taste, string[] genres, SelfRating? self)
+    private static decimal ContrarianOffset(TasteState taste, string[] genres, Exclusion excluded)
     {
-        decimal? selfPair = self is { GlobalRating: { } global } own ? own.Rating - global : null;
-
-        var overallCount = taste.Self.ContrarianCount - (selfPair is null ? 0 : 1);
-        var overallSum = taste.Self.ContrarianSum - (selfPair ?? 0m);
+        var ownOverall = excluded.Contrarian();
+        var overallCount = taste.Self.ContrarianCount - ownOverall.Count;
+        var overallSum = taste.Self.ContrarianSum - ownOverall.Sum;
         var overall = overallCount > 0 ? overallSum / overallCount : 0m;
 
         if (genres.Length == 0)
@@ -1026,10 +1264,11 @@ public class FeatureVectorBuilder(IReelDbContext db)
         {
             if (taste.Self.GenreContrarian.TryGetValue(genre, out var stat))
             {
-                var count = stat.Count - (selfPair is null ? 0 : 1);
+                var own = excluded.GenreContrarian(genre);
+                var count = stat.Count - own.Count;
                 if (count > 0)
                 {
-                    total += (stat.Sum - (selfPair ?? 0m)) / count;
+                    total += (stat.Sum - own.Sum) / count;
                     continue;
                 }
             }

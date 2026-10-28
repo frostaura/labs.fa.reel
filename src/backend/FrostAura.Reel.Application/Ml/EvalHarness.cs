@@ -70,6 +70,13 @@ public class EvalHarness(
     ILogger<EvalHarness> logger)
 {
     /// <summary>
+    /// The builder every evaluated row is described with: the current <see cref="TrainingRecipe"/>,
+    /// whatever the Active artifact was trained with, because the harness measures the model the
+    /// serving fit is about to train.
+    /// </summary>
+    private readonly FeatureVectorBuilder trainingFeatures = featureBuilder.ForTraining();
+
+    /// <summary>
     /// The caveat persisted with every evaluation. It used to claim the present-day-popularity
     /// problem hit "model features and baseline symmetrically", which is false by construction:
     /// popularity is 100% of the baseline's ranking signal and one slot of the model's, so
@@ -207,7 +214,7 @@ public class EvalHarness(
         // The title side (catalogue rows, attributes, embeddings, credits) is read ONCE and every
         // origin builds from it, so a metadata refresh landing mid-run cannot hand two origins
         // different title features, and FeatureSetHash fingerprints exactly what was measured.
-        var titleSide = await featureBuilder.LoadTitleSideAsync([.. labels.Select(l => l.TitleId).Distinct()], ct);
+        var titleSide = await trainingFeatures.LoadTitleSideAsync([.. labels.Select(l => l.TitleId).Distinct()], ct);
 
         var origins = new List<OriginOutcome>();
         foreach (var fraction in SplitOrigins)
@@ -459,12 +466,12 @@ public class EvalHarness(
             return null;
         }
 
-        var taste = await featureBuilder.BuildTasteStateAsync(accountId, splitAt, ct);
+        var taste = await trainingFeatures.BuildTasteStateAsync(accountId, splitAt, ct);
         var trainLabelByTitle = train
             .GroupBy(t => t.TitleId)
             .ToDictionary(g => g.Key, g => (float)g.Max(x => x.Rating));
-        var trainVectors = featureBuilder.Build(taste, trainLabelByTitle.Keys.ToList(), splitAt, titleSide);
-        var holdoutVectors = featureBuilder.Build(taste, holdout.Select(h => h.TitleId).ToList(), splitAt, titleSide);
+        var trainVectors = trainingFeatures.Build(taste, trainLabelByTitle.Keys.ToList(), splitAt, titleSide);
+        var holdoutVectors = trainingFeatures.Build(taste, holdout.Select(h => h.TitleId).ToList(), splitAt, titleSide);
 
         var matrixRows = trainVectors.Where(kv => trainLabelByTitle.ContainsKey(kv.Key)).ToList();
         if (matrixRows.Count == 0)

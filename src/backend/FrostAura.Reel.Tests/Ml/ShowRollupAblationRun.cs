@@ -25,6 +25,10 @@ namespace FrostAura.Reel.Tests.Ml;
 /// artifact. Same data, same code, same seeds: the only difference between the arms is the rollup,
 /// and equal feature-set hashes give equal NDCG, so a re-run reproduces the file byte for byte.
 ///
+/// <para>A second run measures out-of-fold taste pools (HREV2-RET-02) against the leave-one-out pools
+/// they replaced, the same way: <see cref="FeatureVectorBuilder.OutOfFoldPools"/> on and off, rollups as
+/// <see cref="TrainingRecipe.ShowRollups"/> in both, written to <c>eval/model/out-of-fold-ablation.json</c>.</para>
+///
 /// <para>Opt-in, never part of a normal run: it does nothing unless
 /// <c>REEL_ABLATION_CONNECTION_STRING</c> is set. Run it with <c>scripts/ml/show-rollup-ablation.sh</c>,
 /// which clones the source database, points this class at the clone and drops the clone afterwards.
@@ -40,10 +44,53 @@ public class ShowRollupAblationRun
     [Trait("Category", "OfflineEval")]
     public async Task Measure_the_show_rollup_against_the_same_data_without_it()
     {
+        if (await PrepareAsync() is not { } connection)
+        {
+            return;
+        }
+
+        var accountId = await AccountAsync(connection);
+        var with = await RunArmAsync(connection, accountId, includeRollups: true, outOfFold: true);
+        var without = await RunArmAsync(connection, accountId, includeRollups: false, outOfFold: true);
+        await WriteAsync(
+            connection,
+            accountId,
+            "Offline A/B of WS-5 task 12 (ShowRatingRollup in the taste pools): the real EvalHarness on one account, rollups on vs off, same data and code (out-of-fold pools in both).",
+            "show-rollup-ablation.json",
+            ("withRollups", with),
+            ("withoutRollups", without),
+            "rollupMinusNone");
+    }
+
+    [Fact]
+    [Trait("Category", "OfflineEval")]
+    public async Task Measure_out_of_fold_pools_against_leave_one_out()
+    {
+        if (await PrepareAsync() is not { } connection)
+        {
+            return;
+        }
+
+        var accountId = await AccountAsync(connection);
+        var outOfFold = await RunArmAsync(connection, accountId, includeRollups: TrainingRecipe.ShowRollups, outOfFold: true);
+        var leaveOneOut = await RunArmAsync(connection, accountId, includeRollups: TrainingRecipe.ShowRollups, outOfFold: false);
+        await WriteAsync(
+            connection,
+            accountId,
+            "Offline A/B of HREV2-RET-02 (out-of-fold taste pools for training rows): the real EvalHarness on one account, out-of-fold vs leave-one-out, same data and code (show rollups as the current recipe has them, in both arms).",
+            "out-of-fold-ablation.json",
+            ("outOfFold", outOfFold),
+            ("leaveOneOut", leaveOneOut),
+            "outOfFoldMinusLeaveOneOut");
+    }
+
+    /// <summary>The clone's connection string, migrated, or null when the run is not opted into.</summary>
+    private static async Task<string?> PrepareAsync()
+    {
         var connection = Environment.GetEnvironmentVariable(ConnectionVariable);
         if (string.IsNullOrWhiteSpace(connection))
         {
-            return;
+            return null;
         }
 
         if (PostgresFixtureGate.LiveTargetRefusal(connection) is { } refusal)
@@ -62,37 +109,48 @@ public class ShowRollupAblationRun
             await migrate.Database.MigrateAsync();
         }
 
-        var accountId = await AccountAsync(connection);
-        var with = await RunArmAsync(connection, accountId, includeRollups: true);
-        var without = await RunArmAsync(connection, accountId, includeRollups: false);
-        Assert.NotNull(with);
-        Assert.NotNull(without);
+        return connection;
+    }
 
+    private static async Task WriteAsync(
+        string connection,
+        Guid accountId,
+        string purpose,
+        string fileName,
+        (string Name, EvalHarness.HarnessOutcome? Outcome) treatment,
+        (string Name, EvalHarness.HarnessOutcome? Outcome) control,
+        string deltaName)
+    {
+        Assert.NotNull(treatment.Outcome);
+        Assert.NotNull(control.Outcome);
+        var a = treatment.Outcome!.Result;
+        var b = control.Outcome!.Result;
+        var database = new NpgsqlConnectionStringBuilder(connection).Database ?? string.Empty;
         var artifact = new JsonObject
         {
-            ["purpose"] = "Offline A/B of WS-5 task 12 (ShowRatingRollup in the taste pools): the real EvalHarness on one account, rollups on vs off, same data and code.",
-            ["command"] = "scripts/ml/show-rollup-ablation.sh [source-db] [out.json]",
+            ["purpose"] = purpose,
+            ["command"] = "scripts/ml/show-rollup-ablation.sh [source-db] [out.json] [rollup|folds]",
             ["source"] = Environment.GetEnvironmentVariable("REEL_ABLATION_SOURCE") ?? database,
             ["commit"] = Environment.GetEnvironmentVariable("REEL_ABLATION_COMMIT"),
             ["account"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(accountId.ToString())))[..12],
             ["hyperparams"] = JsonNode.Parse(TrainJobHandler.DefaultHyperparams),
             ["primaryOrigin"] = EvalHarness.PrimaryOrigin,
-            ["withRollups"] = Arm(with!.Result),
-            ["withoutRollups"] = Arm(without!.Result),
-            ["rollupMinusNone"] = new JsonObject
+            [treatment.Name] = Arm(a),
+            [control.Name] = Arm(b),
+            [deltaName] = new JsonObject
             {
-                ["ndcgAt10Model"] = Delta(with.Result.NdcgAt10Model, without.Result.NdcgAt10Model),
-                ["meanOriginNdcgModel"] = Delta(MeanOriginNdcg(with.Result), MeanOriginNdcg(without.Result)),
-                ["ece"] = Delta(with.Result.Ece, without.Result.Ece),
-                ["mae"] = Delta(with.Result.Mae, without.Result.Mae),
-                ["calibrationBias"] = Delta(with.Result.CalibrationBias, without.Result.CalibrationBias),
-                ["spearmanRho"] = Delta(with.Result.SpearmanRho, without.Result.SpearmanRho),
+                ["ndcgAt10Model"] = Delta(a.NdcgAt10Model, b.NdcgAt10Model),
+                ["meanOriginNdcgModel"] = Delta(MeanOriginNdcg(a), MeanOriginNdcg(b)),
+                ["ece"] = Delta(a.Ece, b.Ece),
+                ["mae"] = Delta(a.Mae, b.Mae),
+                ["calibrationBias"] = Delta(a.CalibrationBias, b.CalibrationBias),
+                ["spearmanRho"] = Delta(a.SpearmanRho, b.SpearmanRho),
             },
         };
 
         var path = Environment.GetEnvironmentVariable("REEL_ABLATION_OUT") is { Length: > 0 } outPath
             ? outPath
-            : Path.Combine(RepoRoot(), "eval", "model", "show-rollup-ablation.json");
+            : Path.Combine(RepoRoot(), "eval", "model", fileName);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(
             path,
@@ -135,14 +193,14 @@ public class ShowRollupAblationRun
     private static decimal? Delta(decimal? with, decimal? without) =>
         with is { } a && without is { } b ? a - b : null;
 
-    private static async Task<EvalHarness.HarnessOutcome?> RunArmAsync(string connection, Guid accountId, bool includeRollups)
+    private static async Task<EvalHarness.HarnessOutcome?> RunArmAsync(string connection, Guid accountId, bool includeRollups, bool outOfFold)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         await using var db = CreateContext(connection, scoped);
         var harness = new EvalHarness(
             db,
-            new FeatureVectorBuilder(db) { IncludeShowRollups = includeRollups },
+            new FeatureVectorBuilder(db) { IncludeShowRollups = includeRollups, OutOfFoldPools = outOfFold },
             new FastTreeModelEngine(),
             new EligibilityQueryBuilder(db),
             new SilentEventHub(),

@@ -121,7 +121,11 @@ public static class ContributionDetails
     /// </summary>
     public static decimal OneDecimal(decimal average) => decimal.Round(average, 1, MidpointRounding.AwayFromZero);
 
-    /// <summary>One verified person behind a person-affinity bar. Averages are 1dp at the response edge.</summary>
+    /// <summary>
+    /// One verified person behind a person-affinity bar: <paramref name="YourAverage"/> is the plain
+    /// mean of the user's own ratings of <paramref name="TitleCount"/> of their titles (HREV2-D-01),
+    /// 1dp at the response edge.
+    /// </summary>
     public sealed record PersonDetail(Guid PersonId, string Name, decimal YourAverage, int TitleCount);
 
     /// <summary>One expandable feature: person features carry People, era features carry Note.</summary>
@@ -137,14 +141,15 @@ public static class ContributionDetails
         AddPeople("writerAffinity", CreditRole.Writer);
 
         // The decade note rides the taste-state the endpoint already has — "you average 7.8 for
-        // 1980s titles". Omitted when the user has no ratings in the title's decade: shrinkage
-        // toward the user mean would otherwise print a number that describes nothing they did.
+        // 1980s titles". The plain mean of what they gave that decade, never the shrunken model
+        // value (one 1930s film rated 9 is "you average 9.0", not a 7.3 pulled toward their mean).
+        // Omitted when the user has no ratings in the title's decade.
         if (title.Year is { } year)
         {
             var decade = year / 10 * 10;
             if (taste.DecadeRatings.TryGetValue(decade, out var ratings) && ratings.Count > 0)
             {
-                var average = OneDecimal(TasteMath.ShrunkenMean(ratings, taste.UserMean));
+                var average = OneDecimal(VerifiedPeople.PlainMean(ratings));
                 details.Add(new Detail(
                     "decadeAffinity",
                     Note: string.Create(CultureInfo.InvariantCulture, $"you average {average:0.0} for {decade}s titles")));
@@ -163,7 +168,7 @@ public static class ContributionDetails
                 .OrderByDescending(e => e.Average)
                 .ThenBy(e => e.Name, StringComparer.Ordinal)
                 .Take(MaxPeoplePerFeature)
-                .Select(e => new PersonDetail(e.PersonId, e.Name, OneDecimal(e.Average), e.TitleCount))
+                .Select(e => new PersonDetail(e.PersonId, e.Name, OneDecimal(e.YourAverage), e.TitleCount))
                 .ToList();
             if (people.Count > 0)
             {

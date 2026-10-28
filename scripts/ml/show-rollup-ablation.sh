@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Offline A/B of WS-5 task 12 (show rating rollups in the taste pools): the real EvalHarness on the
-# founder's eval data, rollups on vs off, same code and same data. Clones the source database, runs
-# ShowRollupAblationRun against the clone, writes the artifact, and drops the clone.
+# Offline A/Bs of the taste pools on the founder's eval data, same code and same data per arm:
+#   rollup  WS-5 task 12 — show rating rollups in the pools, on vs off
+#   folds   HREV2-RET-02 — out-of-fold pools for training rows vs the leave-one-out they replaced
+# Clones the source database, runs ShowRollupAblationRun against the clone, writes the artifact, and
+# drops the clone.
 #
-#   PGPASSWORD=<eval password> scripts/ml/show-rollup-ablation.sh [source-db] [out.json]
+#   PGPASSWORD=<eval password> scripts/ml/show-rollup-ablation.sh [source-db] [out.json] [rollup|folds]
 #
 #   source-db  default reel_eval_template (read only: it is the TEMPLATE of the clone, never written)
-#   out.json   default eval/model/show-rollup-ablation.json
+#   out.json   default eval/model/show-rollup-ablation.json (rollup) or out-of-fold-ablation.json (folds);
+#              pass "" to take the default with a kind
+#   kind       default rollup
 #   env        REEL_ABLATION_HOST (127.0.0.1), REEL_ABLATION_PORT (5434), REEL_ABLATION_USER (reel),
 #              REEL_ABLATION_ACCOUNT (default: the account with the most movie/show ratings),
 #              DOTNET (default dotnet). The password is read from PGPASSWORD and never printed.
@@ -16,7 +20,13 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 source_db=${1:-reel_eval_template}
-out=${2:-$repo/eval/model/show-rollup-ablation.json}
+kind=${3:-rollup}
+case "$kind" in
+  rollup) fact=Measure_the_show_rollup_against_the_same_data_without_it; default_out=show-rollup-ablation.json ;;
+  folds) fact=Measure_out_of_fold_pools_against_leave_one_out; default_out=out-of-fold-ablation.json ;;
+  *) echo "kind must be rollup or folds" >&2; exit 2 ;;
+esac
+out=${2:-$repo/eval/model/$default_out}
 host=${REEL_ABLATION_HOST:-127.0.0.1}
 port=${REEL_ABLATION_PORT:-5434}
 user=${REEL_ABLATION_USER:-reel}
@@ -41,5 +51,5 @@ export MSBuildEnableWorkloadResolver=false
 unset OPENROUTER_API_KEY
 
 "${DOTNET:-dotnet}" test "$repo/src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj" \
-  --filter "FullyQualifiedName~ShowRollupAblationRun" --logger "console;verbosity=minimal"
+  --filter "FullyQualifiedName~ShowRollupAblationRun.$fact" --logger "console;verbosity=minimal"
 echo "wrote $out"

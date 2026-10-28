@@ -2,13 +2,15 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Tenancy;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
 /// <summary>
 /// WS-5 task 12 on real Postgres: a show rated only episode by episode reaches the taste pools at its
-/// rolled-up rating, and is not offered as a "because you loved" anchor.
+/// rolled-up rating when the pools take rollups, and is not offered as a "because you loved" anchor.
+/// Whether they do is the artifact's <see cref="TrainingRecipe"/> (the current one does not).
 /// </summary>
 [Collection("postgres")]
 public class ShowRollupTasteTests(PostgresFixture fixture)
@@ -63,7 +65,8 @@ public class ShowRollupTasteTests(PostgresFixture fixture)
 
         await db.SaveChangesAsync();
 
-        var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(account.Id, now, CancellationToken.None);
+        var taste = await new FeatureVectorBuilder(db) { IncludeShowRollups = true }
+            .BuildTasteStateAsync(account.Id, now, CancellationToken.None);
 
         // Six 10s against the neutral 7.0 (no whole-title ratings): (60 + 21) / 9 = 9.
         var pooled = Assert.Single(taste.GenreRatings[genre]);
@@ -141,5 +144,86 @@ public class ShowRollupTasteTests(PostgresFixture fixture)
             Assert.False(taste.GenreRatings.ContainsKey(genre));
             Assert.Equal(7m, taste.UserMean); // nothing rated whole and no rollup: the neutral mean
         }
+    }
+
+    /// <summary>
+    /// HREV2-RET-02: a serving taste state describes the user the way the Active artifact was trained
+    /// to read one. Rollups reached the pools of an artifact trained without them, shifted the
+    /// founder's 2020s decade pool by 0.005, and every 2020s prediction fell from about 6 to about 3.
+    /// The training builder always uses the current recipe, whatever the outgoing artifact had.
+    /// </summary>
+    [Theory]
+    [InlineData(null, false, TrainingRecipe.ShowRollups)] // no artifact yet: its first one is the current recipe
+    [InlineData("""{"version": 5}""", false, false)] // trained before the recipe stamp: no rollups
+    [InlineData("""{"version": 5, "pools": "leave-one-out"}""", false, false)] // an unknown recipe
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5"}""", false, false)]
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5+show-rollups"}""", false, true)] // a recipe that had them
+    [InlineData("""{"version": 5, "pools": "out-of-fold-5+show-rollups"}""", true, TrainingRecipe.ShowRollups)] // training: the current recipe
+    public async Task A_serving_taste_state_follows_the_active_artifacts_recipe(
+        string? activeSchemaJson, bool forTraining, bool expectRollup)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"rollup-recipe-{Guid.NewGuid():N}";
+        var now = DateTime.UtcNow;
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"rollup-recipe-{Guid.NewGuid():N}",
+            CreatedAt = now,
+            LastSeenAt = now,
+            PipelineStageChangedAt = now,
+        };
+        var show = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Show,
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TraktSlug = string.Empty,
+            Name = $"Recipe show {genre}",
+            Genres = [genre],
+            Year = 2022,
+            CreatedAt = now,
+        };
+        db.AddRange(account, show);
+        db.UserRatings.Add(new UserRating
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            TitleId = show.Id,
+            SubjectType = RatingSubjectType.Season,
+            SeasonNumber = 1,
+            Rating = 8,
+            RatedAt = now.AddDays(-2),
+            FirstRatedAt = now.AddDays(-2),
+            SyncedAt = now,
+        });
+        if (activeSchemaJson is not null)
+        {
+            db.ModelArtifacts.Add(new ModelArtifact
+            {
+                Id = Guid.NewGuid(),
+                AccountId = account.Id,
+                Version = 1,
+                ArtifactBytes = [1],
+                FeatureSchemaJson = activeSchemaJson,
+                TrainingRunId = Guid.NewGuid(),
+                Status = ArtifactStatus.Active,
+                TrainedAt = now,
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        var serving = new FeatureVectorBuilder(db);
+        var taste = await (forTraining ? serving.ForTraining() : serving)
+            .BuildTasteStateAsync(account.Id, now, CancellationToken.None);
+
+        Assert.Equal(expectRollup, taste.GenreRatings.ContainsKey(genre));
+        Assert.Equal(expectRollup, taste.DecadeRatings.ContainsKey(2020));
     }
 }

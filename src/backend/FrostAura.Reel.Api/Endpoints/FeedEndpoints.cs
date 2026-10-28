@@ -725,11 +725,12 @@ public static class FeedEndpoints
                 .Select(s => Guid.TryParse(s, out var g) ? g : (Guid?)null)
                 .Where(g => g is not null).Select(g => g!.Value).ToList();
 
-            var items = await paginator.MoreAsync(
+            var page = await paginator.MorePageAsync(
                 account,
                 new MoreFeedRequest(
                     context, anchor, body.Genre, excludeIds, limit, body.MediaType, pageExcludeIds, body.PageToken),
                 ct);
+            var items = page.Items;
 
             var nowUtc = DateTime.UtcNow;
             var providers = await ProvidersForAsync(db, account.Region, items.Select(i => i.Title.Id).ToList(), nowUtc, ct);
@@ -821,7 +822,14 @@ public static class FeedEndpoints
             var railSupply = railIsShort && context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(body.Genre)
                 ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, [.. cards.Select(c => c.TitleId)], ct)
                 : null;
-            return Results.Ok(new { items = cards, exhausted = cards.Count == 0, supply = railSupply });
+            // An anchored rail (more like this, because you loved) that came up short says what its
+            // window lost to the anchored gate and to the for-you bar (HREV2-RET-05), so its empty
+            // copy names the real cause instead of the account's conditions. Null on every other row
+            // and on a full page.
+            var anchoredSupply = railIsShort && page.Anchored is { } window
+                ? new AnchoredSupply(window.GateHeldBack, window.BelowBar)
+                : null;
+            return Results.Ok(new { items = cards, exhausted = cards.Count == 0, supply = railSupply, anchoredSupply });
         });
 
         // The genre rails the home page renders beneath the personalised rows: the user's top
@@ -920,6 +928,14 @@ public static class FeedEndpoints
 
     /// <summary>What a short rail's supply looks like. <c>HiddenByConditions</c> is the N in "your conditions hide N".</summary>
     public sealed record RailSupply(int HiddenByConditions, int AlreadySeen, int ClearingFloor);
+
+    /// <summary>
+    /// What a short anchored rail's window lost: <c>GateHeldBack</c> titles above the for-you bar the
+    /// anchored gate refused (nothing checkable shared with the anchor, or too far from it), and
+    /// <c>BelowBar</c> titles under the bar. Neither is the account's conditions, which the window had
+    /// already applied.
+    /// </summary>
+    public sealed record AnchoredSupply(int GateHeldBack, int BelowBar);
 
     public record MoreRequestDto(
         string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null,
