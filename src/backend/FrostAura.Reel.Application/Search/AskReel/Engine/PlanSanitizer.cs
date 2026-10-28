@@ -10,7 +10,9 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// message is dropped, and so is one that merely restates a standing condition (those are applied by
 /// eligibility and never stored in the state).</item>
 /// <item><b>Concepts and genres</b> never a standing condition copied from the planner's input
-/// (an excluded genre, an avoided keyword, the allowed language) unless the user's words name it.</item>
+/// (an excluded genre, an avoided keyword, the allowed language) unless the user's words ask for it —
+/// by name, by a genre word, or by a phrase the conflict detector or the model-less reader reads as
+/// that genre ("funny", "love story").</item>
 /// <item><b>Concepts</b> never a negation cue, never the whole message echoed back, never filler or a
 /// pointer ("the second one"), never a person or a title the plan names elsewhere, and never words that
 /// only restate a genre the plan already requires ("romantic" beside the romance genre).</item>
@@ -50,13 +52,23 @@ public static class PlanSanitizer
         // "excludes: animation") counted "samurai animation movies", and "zombie movies" planned with
         // concept "english" (from "language en") replied "no zombie english movies" (HREV4-ASK-02).
         // The user's own words still win: "a comedy tonight" against an excluded comedy is a
-        // collision the conflict frame names, not a copy.
+        // collision the conflict frame names, not a copy. Their words ask for a value whenever any
+        // reading of them does — its name, a genre word ("sci-fi"), the conflict detector's synonyms
+        // ("funny" is comedy) or the model-less reader's genre phrases ("love story" is romance).
+        // Reading only the name threw those away: "a good love story" planned as romance lost the
+        // genre, the conflict frame and the supply, and replied "Nothing I found matches" (HREV5-ASK-02).
         var standingAsked = StandingRequirementValues(standing);
         var genresSaid = GenresSaid(words);
+        genresSaid.UnionWith(FallbackReader.GenresOfPhrases(words));
+        var askedInWords = AskReelStandingFilters.AskedForInWords(message);
+        bool AskedByWords(string term) =>
+            askedInWords.Any(a => NegationTerms.EqualsAnyForm(term, a) || NegationTerms.EqualsAnyForm(a, term))
+            || genresSaid.Contains(term.Trim())
+            || (Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(term)) is { Count: > 0 } slugs
+                && slugs.Any(genresSaid.Contains));
         bool CopiedStanding(string term) =>
             !Said(term)
-            && !(Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(term)) is { Count: > 0 } slugs
-                && slugs.Any(genresSaid.Contains))
+            && !AskedByWords(term)
             && standingAsked.Any(rule => NegationTerms.EqualsAnyForm(term, rule) || NegationTerms.EqualsAnyForm(rule, term));
         var genres = delta.Genres.Where(g => !CopiedStanding(g)).ToList();
         var concepts = delta.Concepts

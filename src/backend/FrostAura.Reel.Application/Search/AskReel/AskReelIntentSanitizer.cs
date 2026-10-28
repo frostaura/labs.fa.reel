@@ -351,7 +351,10 @@ public static class AskReelIntentSanitizer
             var (word, negated) = stream[index];
             if (word is not null && !negated && !consumed[index] && positive.Contains(word))
             {
-                if (run.Count == 0 && lead is not null)
+                // An ordinal leads a topic word, never a genre word: "first contact", "second world
+                // war", but "my first horror film" is horror.
+                if (run.Count == 0 && lead is not null
+                    && (PhraseLeads.Contains(lead) || Retrieval.Concepts.ConceptSynonyms.GenreSlugsOf(word) is null))
                 {
                     run.Add(lead);
                 }
@@ -362,11 +365,17 @@ public static class AskReelIntentSanitizer
             }
 
             Flush();
-            lead = word is not null && !negated && !consumed[index] && PhraseLeads.Contains(word) ? word : null;
+            lead = word is not null && !negated && !consumed[index]
+                && (PhraseLeads.Contains(word) || (TopicOrdinals.Contains(word) && !BeforeCardNoun(index)))
+                ? word
+                : null;
         }
 
         Flush();
         return new KeylessRequest(phrases, moods.Distinct(StringComparer.Ordinal).ToList(), years, yearWords);
+
+        bool BeforeCardNoun(int index) =>
+            index + 1 < stream.Count && stream[index + 1].Word is { } next && AskReelPointer.IsCardNoun(next);
 
         void Flush()
         {
@@ -586,6 +595,18 @@ public static class AskReelIntentSanitizer
     private static readonly IReadOnlySet<string> PhraseLeads = new HashSet<string>(StringComparer.Ordinal)
     {
         "time", "found",
+    };
+
+    /// <summary>
+    /// Ordinals, which point at a card only before a card noun ("the second one", "the third film"
+    /// — <see cref="AskReelPointer.Ordinal"/>) and otherwise belong to the topic they lead: the
+    /// model-less reader dropped them everywhere, so "is there a first contact movie?" counted
+    /// "contact movies" and "good second world war films" counted "world war" (HREV5-ASK-04).
+    /// "last" is left out: it opens a year window ("the last ten years") far more often than a topic.
+    /// </summary>
+    private static readonly IReadOnlySet<string> TopicOrdinals = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
     };
 
     /// <summary>

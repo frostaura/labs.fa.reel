@@ -452,10 +452,34 @@ public sealed class AskReelEngine(
         }
 
         var found = new List<string>();
+        var foundIds = new List<Guid>();
         var unfound = new List<string>();
         foreach (var name in plan.Delta.ReferenceNames)
         {
-            (await FindByNameAsync(name, ct) is not null ? found : unfound).Add(name);
+            if (await FindByNameAsync(name, ct) is { } id)
+            {
+                found.Add(name);
+                foundIds.Add(id);
+            }
+            else
+            {
+                // "movies like the zxqwv": the article was read as part of a name the catalogue lacks.
+                unfound.Add(FallbackReader.WithoutArticle(name));
+            }
+        }
+
+        // A new request that names a title and no medium searches the title's medium: after "heist
+        // movies", a model-less "like John Wick but funnier" reset the conversation to every medium and
+        // showed TV shows (HREV5-RET-02). The user's own media word, when there is one, already decided.
+        if (plan.Act == TurnAct.NewRequest && plan.Delta.Media is null && foundIds.Count > 0
+            && AskReelCarry.MediaIn(AskReelIntentSanitizer.Words(AskReelCarry.WithoutShowVerb(turn.Input.Message))).Count == 0)
+        {
+            var types = await db.Titles.AsNoTracking()
+                .Where(t => foundIds.Contains(t.Id))
+                .Select(t => t.MediaType)
+                .Distinct()
+                .ToListAsync(ct);
+            plan = plan with { Delta = plan.Delta with { Media = MediaScopes.From(types) } };
         }
 
         if (unfound.Count == 0)

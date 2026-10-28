@@ -198,6 +198,66 @@ public class AskReelV2UnitTests
         Assert.Equal(List(expectedGenres), clean.Delta.Genres);
     }
 
+    /// <summary>
+    /// HREV5-ASK-02 (regression of the HREV4-ASK-02 fix): a standing genre survived only when the user
+    /// wrote its NAME, so a correct reading by another name was thrown away — "a good love story"
+    /// planned as romance and "something funny tonight" planned as comedy lost the genre, the conflict
+    /// frame and the supply went with it, and the reply said "Nothing I found matches". The user's words
+    /// ask for a standing value whenever the conflict detector (<see cref="AskReelStandingFilters.AskedFor"/>)
+    /// or the model-less reader's genre phrases read them as asking for it; a copy is still dropped.
+    /// </summary>
+    [Theory]
+    [InlineData("a good love story", "", "romance", "", "romance")]
+    [InlineData("love stories please", "", "romance", "", "romance")]
+    [InlineData("something funny tonight", "", "comedy", "", "comedy")]
+    [InlineData("the funniest films you have", "", "comedy", "", "comedy")]
+    [InlineData("something romantic", "", "romance", "", "romance")]
+    [InlineData("a good love story", "romance", "", "romance", "")]
+    [InlineData("something funny tonight", "comedy", "", "comedy", "")]
+    // A copy is still a copy: nothing in these words asks for either genre.
+    [InlineData("samurai films", "samurai", "romance,comedy", "samurai", "")]
+    [InlineData("a good story tonight", "", "romance", "", "")]
+    [InlineData("something tonight", "", "comedy", "", "")]
+    [InlineData("a good love story", "", "comedy", "", "")]
+    public void A_standing_genre_the_users_words_ask_for_by_another_name_is_kept(
+        string message, string modelConcepts, string modelGenres, string expectedConcepts, string expectedGenres)
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "romance" },
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "comedy" },
+        ]);
+        static string[] List(string csv) => csv.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = List(modelConcepts), Genres = List(modelGenres) });
+
+        var clean = PlanSanitizer.Clean(plan, message, ConversationState.Empty, standing);
+
+        Assert.Equal(List(expectedConcepts), clean.Delta.Concepts);
+        Assert.Equal(List(expectedGenres), clean.Delta.Genres);
+    }
+
+    /// <summary>
+    /// HREV5-ASK-02, the keyless half: the model-less reader reads "love stories" as romance, and the
+    /// sanitiser then dropped it on an account that excludes romance — the state was empty and the turn
+    /// showed sixteen unrelated shows with no conflict frame.
+    /// </summary>
+    [Theory]
+    [InlineData("love stories", "romance")]
+    [InlineData("a good love story", "romance")]
+    [InlineData("spy thrillers", "thriller")]
+    public void A_keyless_genre_reading_survives_a_standing_exclusion_of_that_genre(string message, string genre)
+    {
+        var standing = FilterRuleSet.FromRows(
+        [
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "romance" },
+            new ContentFilter { Kind = FilterKind.ExcludeGenre, Value = "thriller" },
+        ]);
+
+        var clean = PlanSanitizer.Clean(FallbackPlans.Keyless(message, ConversationState.Empty, 2026), message, ConversationState.Empty, standing);
+
+        Assert.Contains(genre, clean.Delta.Genres);
+    }
+
     /// <summary>An account that allows every language has no language condition to copy: "english" is then the user's.</summary>
     [Fact]
     public void A_language_is_a_standing_value_only_when_the_account_restricts_language()

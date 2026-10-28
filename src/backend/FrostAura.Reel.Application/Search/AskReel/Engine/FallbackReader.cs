@@ -148,6 +148,22 @@ public static class FallbackReader
         "fifth", "last", "previous", "above", "before", "earlier", "a", "an", "some", "any", "what", "you",
     };
 
+    /// <summary>Words after "the" that point at what is on screen or in the list rather than start a title.</summary>
+    private static readonly IReadOnlySet<string> NotATheName = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "rest", "others", "other", "same", "latter", "former", "next", "lot", "ones", "sort", "kind", "type",
+        "kinds", "types", "sorts", "way", "vibe", "vibes", "feel", "tone", "style", "mood", "result", "results",
+        "below", "more", "less", "movie", "movies", "film", "films", "show", "shows", "series", "title", "titles",
+        "stuff", "things", "list", "pick", "picks", "suggestion", "suggestions", "option", "options", "card", "cards",
+    };
+
+    /// <summary>
+    /// The reference name without a leading "the" — the words a name the catalogue does not hold is
+    /// searched by ("movies like the zxqwv" searches "zxqwv").
+    /// </summary>
+    public static string WithoutArticle(string name) =>
+        name.StartsWith("the ", StringComparison.OrdinalIgnoreCase) ? name[4..].TrimStart() : name;
+
     /// <summary>The media words, which end a title's name and never form a topic.</summary>
     private static readonly IReadOnlySet<string> MediaWords = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -171,14 +187,7 @@ public static class FallbackReader
         var reference = ReferenceName(message);
         var referenceWords = reference is null ? [] : AskReelIntentSanitizer.Words(reference);
 
-        var genres = new List<string>();
-        for (var i = 0; i + 1 < words.Count; i++)
-        {
-            if (GenrePhrases.TryGetValue($"{words[i]} {words[i + 1]}", out var genre) && !genres.Contains(genre))
-            {
-                genres.Add(genre);
-            }
-        }
+        var genres = GenresOfPhrases(words).ToList();
 
         var directions = words
             .Where(Comparisons.ContainsKey)
@@ -221,6 +230,25 @@ public static class FallbackReader
             request.Years,
             request.YearWords,
             media);
+    }
+
+    /// <summary>
+    /// The genres <paramref name="words"/> name by a phrase that is no genre word on its own ("love
+    /// story" is romance), in the order they appear. The sanitiser reads the user's words through this
+    /// too, so a genre this reader found is never then dropped as a copied standing value (HREV5-ASK-02).
+    /// </summary>
+    internal static IReadOnlyList<string> GenresOfPhrases(IReadOnlyList<string> words)
+    {
+        var genres = new List<string>();
+        for (var i = 0; i + 1 < words.Count; i++)
+        {
+            if (GenrePhrases.TryGetValue($"{words[i]} {words[i + 1]}", out var genre) && !genres.Contains(genre))
+            {
+                genres.Add(genre);
+            }
+        }
+
+        return genres;
     }
 
     /// <summary>
@@ -268,7 +296,21 @@ public static class FallbackReader
                 start = i + 2;
             }
 
-            if (start < 0 || start >= tokens.Count || NotAName.Contains(tokens[start].Word))
+            if (start < 0 || start >= tokens.Count)
+            {
+                continue;
+            }
+
+            // "the" opens a title as often as a pointer: "like the matrix" is a name, "like the second
+            // one" is not. It joins the name when a name follows it — never a pointer or filler word
+            // ("the other one", "the same", "the rest") — and a name the catalogue does not hold is
+            // searched without it (HREV5-RET-02).
+            if (tokens[start].Word == "the" && !tokens[start].Closes && start + 1 < tokens.Count
+                && !NotAName.Contains(tokens[start + 1].Word) && !NotATheName.Contains(tokens[start + 1].Word))
+            {
+                // The article stays in the name; the loop below reads the rest.
+            }
+            else if (NotAName.Contains(tokens[start].Word))
             {
                 continue;
             }
@@ -289,7 +331,8 @@ public static class FallbackReader
                 }
             }
 
-            if (name.Count > 0 && name.Any(w => !AskReelIntentSanitizer.IsFiller(w)))
+            // A name after "the" may be made of words that are filler elsewhere: "The Thing".
+            if ((name.Count > 1 && name[0] == "the") || (name.Count > 0 && name[0] != "the" && name.Any(w => !AskReelIntentSanitizer.IsFiller(w))))
             {
                 return string.Join(' ', name);
             }
@@ -328,12 +371,15 @@ public static class FallbackReader
     /// "spy thrillers" is the topic "spy" inside the thriller genre: the genre word that ENDS a phrase
     /// is its genre, split off once ("true crime documentaries" is "true crime" in documentary). A
     /// phrase made only of genre words stays whole — "romantic comedies" is already read as its genres
-    /// downstream.
+    /// downstream — and so does a curated concept phrase ("second world war").
     /// </summary>
     private static (string? Topic, IReadOnlyList<string> Genres) SplitGenres(IReadOnlyList<string> run)
     {
         var joined = string.Join(' ', run);
+        // A curated concept phrase stays whole too: "second world war" is the World War II concept,
+        // never "second world" in the war genre.
         if (run.Count < 2 || ConceptSynonyms.GenresNamedBy(joined) is { Count: > 0 }
+            || ConceptSynonyms.GroupOfAnyForm(joined).Skip(1).Any()
             || ConceptSynonyms.GenreSlugsOf(run[^1]) is not { Count: > 0 } slugs)
         {
             return (joined, []);

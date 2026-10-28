@@ -224,6 +224,17 @@ public static class AskReelStandingFilters
                 .Distinct(StringComparer.OrdinalIgnoreCase));
 
     /// <summary>
+    /// What the user's own WORDS ask for, read exactly as the conflict detector reads them
+    /// (<see cref="AskedFor"/> with no intent): the raw tokens and the genres their synonyms name
+    /// ("funny" is comedy, "romantic" is romance). The sanitiser keeps a standing value the planner
+    /// returned only when these words ask for it (HREV5-ASK-02), so the plan and the conflict frame can
+    /// never disagree about whether the user asked for an excluded genre.
+    /// </summary>
+    public static IReadOnlyList<string> AskedForInWords(string? rawQuery) => AskedFor(rawQuery, NoIntent, null);
+
+    private static readonly SearchIntent NoIntent = new([], [], [], string.Empty, null, null);
+
+    /// <summary>
     /// The intersection of one standing exclusion list with <see cref="AskedFor"/>. Whole-token,
     /// case-insensitive; a multi-word rule ("true crime") is matched as a phrase against the joined
     /// vocabulary instead, because no single token can carry it.

@@ -533,11 +533,17 @@ uses it only to know which frames to expect.
    name) as `ItemQuestion`, answered from the title's facts with the search and its media left as
    they were; **"like &lt;title&gt;"** / "similar to &lt;title&gt;" as a reference — searched near when the
    catalogue holds a title by that name, otherwise the words searched as a topic and the reading
-   marked a **guess**; **comparisons** ("funnier", "darker") as attribute steers; connectives,
+   marked a **guess** (a name may start with "The" — "like the matrix" — while "the second one",
+   "the other one" and "the rest" stay pointers; an unfound name is searched without the article;
+   HREV5-RET-02). A new request that names a found title and no medium searches that title's medium
+   ("like John Wick" after "heist movies" stays on movies); **comparisons** ("funnier", "darker") as attribute steers; connectives,
    concessions and generic nouns ("instead", "older", "fine", "stories") never as topics, so "what
    about movies instead" is a media switch that carries the topic; "love stories" as the romance
    genre; a **genre word ending a topic phrase** as that phrase's genre ("spy thrillers" is spy in
-   thriller); and a **negation as the whole phrase** written ("no walking dead", never "dead").
+   thriller), except a curated concept phrase ("second world war" is World War II); an **ordinal
+   inside a topic** as part of it ("a first contact movie", never "contact") — an ordinal is a
+   pointer only before a card noun ("the second one", "the third film"); and a **negation as the
+   whole phrase** written ("no walking dead", never "dead").
    A guessed reading's none-found reply leads with what it searched, never says "there are no X
    left", and offers no relaxation. v1's degraded reading (the interpreter's heuristic) has its
    keywords widened back to the user's phrase the same way ("time travel", never "travel";
@@ -692,7 +698,10 @@ record and never accepted from the client.
 Negations come only from the user's words; standing conditions are never written into the state —
 nor into what the user asked for: a standing value a plan copies into its concepts or genres (an
 excluded or only-these genre, an avoided keyword, the restricted language by code or name) is dropped
-unless the user's own words name it (HREV4-ASK-02).
+unless the user's own words ask for it (HREV4-ASK-02) — by name, by a genre word, or by a phrase the
+conflict detector (`AskReelStandingFilters.AskedForInWords`: "funny" is comedy) or the model-less
+reader ("love story" is romance) reads as it. Reading only the name dropped correct readings: "a good
+love story" against an excluded romance lost the genre, the conflict frame and the supply (HREV5-ASK-02).
 **People and seen titles (FD-3, lock-compliant default):** a person request returns only titles the
 account has not seen; the reply counts the seen ones and never names them. A person's credits are
 their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to

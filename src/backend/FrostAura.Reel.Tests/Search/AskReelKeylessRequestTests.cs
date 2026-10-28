@@ -100,6 +100,13 @@ public class AskReelKeylessRequestTests
     [InlineData("true crime documentaries", TurnAct.NewRequest, "true crime", "documentary", "", "", "", null)]
     [InlineData("romantic comedies", TurnAct.NewRequest, "romantic comedies", "", "", "", "", null)]
     [InlineData("time travel movies", TurnAct.NewRequest, "time travel", "", "", "", "", MediaScope.Movies)]
+    // HREV5-RET-02: a title that starts with "The" is a name, never the pointer "the …".
+    [InlineData("movies like the matrix", TurnAct.NewRequest, "", "", "", "the matrix", "", MediaScope.Movies)]
+    [InlineData("shows like the office", TurnAct.NewRequest, "", "", "", "the office", "", MediaScope.Shows)]
+    [InlineData("something like The Godfather but darker", TurnAct.NewRequest, "", "", "", "the godfather", "darkness:More", null)]
+    // HREV5-ASK-04 residual: an ordinal inside a topic is part of the topic.
+    [InlineData("is there a first contact movie?", TurnAct.NewRequest, "first contact", "", "", "", "", MediaScope.Movies)]
+    [InlineData("are there any good second world war films?", TurnAct.NewRequest, "second world war", "", "", "", "", MediaScope.Movies)]
     public void The_model_less_reader_reads_follow_ups_references_comparisons_and_negations_as_what_they_are(
         string message, TurnAct act, string concepts, string genres, string negations, string references, string directions, MediaScope? media)
     {
@@ -143,6 +150,52 @@ public class AskReelKeylessRequestTests
         }
     }
 
+    /// <summary>
+    /// HREV5-RET-02: "the" opened the pointer words that stop "like the second one" being read as a
+    /// title, and so it also stopped every title that starts with "The" — "movies like the matrix"
+    /// replied "There are no matrix movies left for you". A "the" followed by a name is part of the
+    /// name; followed by a pointer or filler ("the second one", "the other one", "the rest") it is not.
+    /// </summary>
+    [Theory]
+    [InlineData("movies like the matrix", "the matrix")]
+    [InlineData("like The Office but darker", "the office")]
+    [InlineData("something similar to the thing", "the thing")]
+    [InlineData("shows like the wire, no cops", "the wire")]
+    [InlineData("like Heat", "heat")]
+    [InlineData("more like the second one", null)]
+    [InlineData("something like the last one", null)]
+    [InlineData("like the other one", null)]
+    [InlineData("more like the same", null)]
+    [InlineData("something like the rest", null)]
+    [InlineData("like the one before", null)]
+    [InlineData("like the others", null)]
+    [InlineData("more like the first film", null)]
+    public void A_title_that_starts_with_the_is_a_name_and_a_pointer_is_not(string message, string? expected) =>
+        Assert.Equal(expected, FallbackReader.ReferenceName(message));
+
+    /// <summary>
+    /// The keyless reader dropped every ordinal as a pointer word, so "is there a first contact movie?"
+    /// counted "contact movies" and "good second world war films" counted "world war movies". An ordinal
+    /// is a pointer only before a card noun ("the second one", "the third film"); before a topic word it
+    /// is part of the topic — never before a genre word ("my first horror film" is horror).
+    /// </summary>
+    [Theory]
+    [InlineData("is there a first contact movie?", "first contact", "")]
+    [InlineData("are there any good second world war films?", "second world war", "")]
+    [InlineData("third reich documentaries", "third reich", "documentary")]
+    [InlineData("first time travel movie you have", "time travel", "")]
+    [InlineData("my first horror film", "horror", "")]
+    [InlineData("more like the first one", "", "")]
+    [InlineData("the second movie you showed", "", "")]
+    public void An_ordinal_inside_a_topic_is_part_of_the_topic(string message, string concepts, string genres)
+    {
+        static string[] List(string text) => text.Split('|', StringSplitOptions.RemoveEmptyEntries);
+        var reading = FallbackReader.Read(message, ConversationState.Empty, Now);
+
+        Assert.Equal(List(concepts), reading.Concepts);
+        Assert.Equal(List(genres), reading.Genres);
+    }
+
     /// <summary>A first-turn carried-forward plan keeps its topics hard, exactly as the keyless one does.</summary>
     [Theory]
     [InlineData("spy thrillers", "spy", "thriller")]
@@ -173,6 +226,7 @@ public class AskReelKeylessRequestTests
     [InlineData("Liam Neeson movies", "liam|neeson", "liam neeson")]
     [InlineData("heist movies", "heist", "heist")]
     [InlineData("ninja movies", "samurai", "samurai")]
+    [InlineData("is there a first contact movie?", "contact", "first contact")]
     public void A_degraded_v1_topic_is_the_users_whole_phrase(string message, string heuristic, string expected) =>
         Assert.Equal(
             expected.Split('|'),
