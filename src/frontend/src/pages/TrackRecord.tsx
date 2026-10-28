@@ -31,6 +31,7 @@ import {
   PROVENANCE_NOTE,
   WINDOW_LABELS,
   biasNote,
+  calibrationChartLabel,
   headlineSentence,
   learnedSentence,
   num,
@@ -279,17 +280,21 @@ export default function TrackRecord() {
             No bands to draw yet — nothing Reel has scored has come back with a rating.
           </p>
         ) : (
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={calibration} barCategoryGap="25%">
-              <CartesianGrid stroke={GRID} vertical={false} />
-              <XAxis dataKey="band" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
-              <YAxis domain={[0, 10]} tick={{ fill: FROST_DIM, fontSize: 11 }} width={28} />
-              <Tooltip content={<ChartTip />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
-              <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
-              <Bar dataKey="predicted" fill={FROST} radius={[4, 4, 0, 0]} name="Reel said" />
-              <Bar dataKey="actual" fill={AMBER} radius={[4, 4, 0, 0]} name="you said" />
-            </BarChart>
-          </ResponsiveContainer>
+          // One named image, not Recharts' unnamed role="application" tab stop (PH2-02): the
+          // accessibility layer is off, and the name reads every band the chart draws.
+          <div role="img" aria-label={calibrationChartLabel(data.calibration)} data-testid="calibration-chart">
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={calibration} barCategoryGap="25%" accessibilityLayer={false}>
+                <CartesianGrid stroke={GRID} vertical={false} />
+                <XAxis dataKey="band" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
+                <YAxis domain={[0, 10]} tick={{ fill: FROST_DIM, fontSize: 11 }} width={28} />
+                <Tooltip content={<ChartTip />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
+                <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
+                <Bar dataKey="predicted" fill={FROST} radius={[4, 4, 0, 0]} name="Reel said" />
+                <Bar dataKey="actual" fill={AMBER} radius={[4, 4, 0, 0]} name="you said" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         )}
       </section>
 

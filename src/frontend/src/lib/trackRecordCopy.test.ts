@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  calibrationChartLabel,
   offeredWindows,
   singleWindowNote,
   biasNote,
@@ -207,5 +208,39 @@ describe("what the page claims about its numbers (R1-47)", () => {
   it("the no-model note promises the page fills in, not that every scored title lands here", () => {
     expect(NO_MODEL_SOURCE_NOTE).not.toMatch(/\bevery\b/);
     expect(NO_MODEL_SOURCE_NOTE).toMatch(/rate titles after it has scored them/);
+  });
+});
+
+/**
+ * PH2-02: the calibration chart is SVG, so its numbers reach a screen reader only through the name
+ * of the `role="img"` that wraps it. The sentence reads every band the chart draws — and only those.
+ */
+describe("calibrationChartLabel", () => {
+  const band = (low: number, n: number, meanPredicted: number | null, meanActual: number | null) => ({
+    bucket: low, low, high: low + 1, n, meanPredicted, meanActual,
+  });
+
+  it("reads each drawn band as what Reel said against what you said", () => {
+    expect(
+      calibrationChartLabel([band(5, 12, 5.6, 6.4), band(8, 1, 8.64, 4.4), band(9, 0, null, null)])
+    ).toBe(
+      "Where the number lands, Reel's average prediction against your average rating in each band: " +
+        "5 to 6, Reel said 5.6, you said 6.4, from 12 ratings; " +
+        "8 to 9, Reel said 8.6, you said 4.4, from 1 rating."
+    );
+  });
+
+  it("leaves out a band the chart does not draw, wherever it sits", () => {
+    const label = calibrationChartLabel([band(4, 0, null, null), band(6, 61, 6.7, 5.9)]);
+    expect(label).toContain("6 to 7, Reel said 6.7, you said 5.9, from 61 ratings.");
+    expect(label).not.toContain("4 to 5");
+  });
+
+  it("never prints a fabricated number for a band with no mean", () => {
+    expect(calibrationChartLabel([band(7, 3, null, 5)])).toContain("7 to 8, Reel said —, you said 5.0, from 3 ratings.");
+  });
+
+  it("says when there is nothing to draw", () => {
+    expect(calibrationChartLabel([band(5, 0, null, null)])).toBe("Where the number lands: no bands yet.");
   });
 });

@@ -34,6 +34,7 @@ import LoadFailed from "../components/ui/load-failed";
 import { CHART_CHROME, CHART_SERIES, seriesColour } from "../design/chartPalette";
 import { Button } from "../components/ui/button";
 import { COARSE_TAP } from "../lib/tapTarget";
+import { driftChartLabel, histogramChartLabel } from "../lib/tasteDna";
 
 // From the chart palette (WS-9): every series holds 3:1 on every ink surface, and the axis colour is
 // the AA tertiary text the rest of the page uses.
@@ -260,25 +261,29 @@ export default function TasteDna() {
           <section className="fa-card p-5">
             <h2 className="fa-section-title mb-2">Taste drift</h2>
             <p className="fa-caption text-fa-frost-dim mb-3">share of your loved ratings per genre, year by year</p>
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={driftData}>
-                <CartesianGrid stroke={GRID} vertical={false} />
-                <XAxis dataKey="year" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
-                <YAxis tickFormatter={(v) => `${Math.round(v * 100)}%`} tick={{ fill: FROST_DIM, fontSize: 11 }} width={40} />
-                <Tooltip content={<ChartTip format={asShare} />} />
-                <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
-                {driftGenres.map((genre, index) => (
-                  <Line
-                    key={genre}
-                    dataKey={genre}
-                    stroke={seriesColour(index)}
-                    strokeWidth={2}
-                    dot={false}
-                    name={genre.replace("-", " ")}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
+            {/* One named image, not Recharts' unnamed role="application" tab stop (PH2-02): the
+                accessibility layer is off, and the name reads the chart's own numbers. */}
+            <div role="img" aria-label={driftChartLabel(data.drift, driftGenres)} data-testid="drift-chart">
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={driftData} accessibilityLayer={false}>
+                  <CartesianGrid stroke={GRID} vertical={false} />
+                  <XAxis dataKey="year" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
+                  <YAxis tickFormatter={(v) => `${Math.round(v * 100)}%`} tick={{ fill: FROST_DIM, fontSize: 11 }} width={40} />
+                  <Tooltip content={<ChartTip format={asShare} />} />
+                  <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
+                  {driftGenres.map((genre, index) => (
+                    <Line
+                      key={genre}
+                      dataKey={genre}
+                      stroke={seriesColour(index)}
+                      strokeWidth={2}
+                      dot={false}
+                      name={genre.replace("-", " ")}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </section>
         )}
 
@@ -350,15 +355,17 @@ export default function TasteDna() {
           {/* Ratings histogram */}
           <section className="fa-card p-5">
             <h2 className="fa-section-title mb-2">How you rate</h2>
-            <ResponsiveContainer width="100%" height={240}>
-              <BarChart data={data.histogram}>
-                <CartesianGrid stroke={GRID} vertical={false} />
-                <XAxis dataKey="rating" tick={{ fill: FROST_DIM, fontSize: 11 }} />
-                <YAxis tick={{ fill: FROST_DIM, fontSize: 11 }} width={36} />
-                <Tooltip content={<ChartTip format={asCount} />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
-                <Bar dataKey="count" fill={FROST} radius={[4, 4, 0, 0]} name="ratings" />
-              </BarChart>
-            </ResponsiveContainer>
+            <div role="img" aria-label={histogramChartLabel(data.histogram, data.userMean)} data-testid="rating-histogram-chart">
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={data.histogram} accessibilityLayer={false}>
+                  <CartesianGrid stroke={GRID} vertical={false} />
+                  <XAxis dataKey="rating" tick={{ fill: FROST_DIM, fontSize: 11 }} />
+                  <YAxis tick={{ fill: FROST_DIM, fontSize: 11 }} width={36} />
+                  <Tooltip content={<ChartTip format={asCount} />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
+                  <Bar dataKey="count" fill={FROST} radius={[4, 4, 0, 0]} name="ratings" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
             <p className="fa-caption text-fa-frost-dim text-center">your mean: {data.userMean.toFixed(1)}</p>
           </section>
         </div>
