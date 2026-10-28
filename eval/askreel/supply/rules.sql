@@ -20,7 +20,9 @@ SELECT DISTINCT t."Id", x."Kind", x."Value"
         SELECT 'ExcludeGenre' AS "Kind", lower(btrim(f."Value")) AS "Value"
           FROM "ContentFilters" f
          WHERE f."AccountId" = :'account' AND f."Kind" = 'ExcludeGenre'
-           AND (f."Value" = ANY (t."Genres")
+           -- A title with no genres breaks every genre exclusion: it cannot prove it is outside one (HREV2-RET-04).
+           AND (cardinality(t."Genres") = 0
+                OR f."Value" = ANY (t."Genres")
                 OR EXISTS (SELECT 1 FROM (
                            -- BEGIN GENERATED genre-aliases
                            VALUES ('family', ARRAY['children']::text[]),

@@ -1403,7 +1403,7 @@
       "owner": "WS-5",
       "verdict": "true",
       "assertion": "The 'cast & crew you know' contribution counts people the user knows from their own ratings.",
-      "evidence": "FeatureVectorBuilder's KnownPeopleFraction is the share of a title's credited people who appear in titles the user has rated (leave-one-out, so a rated title does not count itself); a title whose people appear in nothing rated reads 0.",
+      "evidence": "FeatureVectorBuilder's KnownPeopleFraction is the share of a title's credited people who appear in titles the user has rated. On a training row the row's own contribution is taken out: its fold under the current out-of-fold recipe (the row's fold is taken out), the title itself under a leave-one-out artifact, so a rated title never counts itself; a title whose people appear in nothing rated reads 0.",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeatureVectorLeakageTests.cs::An_all_unknown_cast_is_no_longer_imputed_as_a_solidly_average_one",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/FeatureVectorLeakageTests.cs::Known_people_fraction_obeys_leave_one_out",
@@ -1839,6 +1839,11 @@
       "file": "src/backend/FrostAura.Reel.Api/Endpoints/SearchEndpoints.cs",
       "text": "Your conditions permanently exclude",
       "reason": "LegacyPermanentNotice: the pre-R1-29 opening of a stored conflict notice, matched only to rewrite it to 'Your conditions exclude' before a resume returns it; never shown (AskReelReplayContractTests)"
+    },
+    {
+      "file": "src/frontend/src/lib/trackRecordCopy.ts",
+      "text": "Where the number lands, Reel's average prediction against your average rating in each band",
+      "reason": "accessible name of the calibration chart (PH2-02): it reads out the drawn bands' own numbers, pinned by the calibrationChartLabel tests"
     }
   ]
 }

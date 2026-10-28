@@ -98,6 +98,10 @@ SELECT t."Id"
                                       ) o (slug, media, phrases)
                                        WHERE o.slug = f."Value" AND t."MediaType" = ANY (o.media)
                                          AND t."Overview" ~* ('(^|[^a-z])(' || array_to_string(o.phrases, '|') || ')([^a-z]|$)'))))
+   -- A title with no genres cannot prove it is outside an excluded genre, so under any ExcludeGenre it fails
+   -- closed, as an unknown language does (HREV2-RET-04). It never matches a genre concept for that reason.
+   AND NOT (cardinality(t."Genres") = 0
+            AND EXISTS (SELECT 1 FROM "ContentFilters" f WHERE f."AccountId" = :'account' AND f."Kind" = 'ExcludeGenre'))
    -- ExcludeKeyword: not in the name, the overview or any TMDB keyword phrase.
    AND NOT EXISTS (SELECT 1 FROM "ContentFilters" f
                     WHERE f."AccountId" = :'account' AND f."Kind" = 'ExcludeKeyword'

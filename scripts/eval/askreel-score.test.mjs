@@ -368,6 +368,25 @@ test("runner: a v2 turn without `done` ends on its terminal frame; a stream that
   assert.equal(compactTurn(frames([["conversation", { id: "c", turnId: "t" }], ["candidate", {}]])).failed, true, "v1 with no done");
 });
 
+test("runner: a v2 tray is counted once although its done repeats it; v1's trays come from done", () => {
+  const frames = (list) => ({ status: 200, totalMs: 10, firstByteMs: 1, firstCardMs: 5, frames: list.map(([ev, data], i) => ({ at: i, ev, data })) });
+  const fix = { titleId: A, name: "The Fix" };
+  const mongoose = { titleId: B, name: "The Mongoose" };
+  const v2 = compactTurn(frames([
+    ["conversation", { id: "c", turnId: "t", engine: "v2" }], ["plan", { act: "NewRequest" }],
+    ["picks", { cards: [{ titleId: A, name: "Alpha" }] }],
+    ["tray", { kind: "belowFloor", cards: [fix, mongoose] }],
+    ["done", { results: [], belowFloor: [fix, mongoose], nearMiss: [], engine: "v2" }],
+  ]));
+  assert.deepEqual(v2.belowFloor.map((c) => c.name), ["The Fix", "The Mongoose"]);
+  assert.deepEqual(v2.belowFloor.map((c) => c.rank), [1, 2]);
+  assert.deepEqual(v2.nearMiss, []);
+  // A kind v2 never streamed falls back to done (an older build), and v1 only ever has done.
+  const v1 = compactTurn(frames([["conversation", { id: "c", turnId: "t", engine: "v1" }], ["done", { results: [], belowFloor: [fix], nearMiss: [mongoose] }]]));
+  assert.deepEqual(v1.belowFloor.map((c) => c.name), ["The Fix"]);
+  assert.deepEqual(v1.nearMiss.map((c) => c.name), ["The Mongoose"]);
+});
+
 // A v1 transcript as the API streams it today (LiveSearchExpansionService): `conversation`, an
 // `assistant-message`, then one `done` carrying the trays, the mode, the supply report and `degraded`.
 const v1Frames = (done, assistant = { text: "Nothing I could check against your request.", conflict: false, degraded: false }) => ({

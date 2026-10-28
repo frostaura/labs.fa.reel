@@ -92,11 +92,11 @@ export interface TitleDetailPayload {
   directors: CreditPerson[];
   writers: CreditPerson[];
   /**
-   * A show's creators (TMDB `created_by`) — for TV the people who made it, where `directors` is
-   * per-episode and usually empty (F-24). Optional until the catalogue ingests them (change request
-   * to WS-3/WS-5); the page lists them whenever they arrive.
+   * A show's creators (TMDB `created_by`) in TMDB's order — for TV the people who made it, where
+   * `directors` is per-episode (F-24, HREV2-D-02). Always present; empty for a film and for a show
+   * hydrated before creators were stored, until the creator back-fill reaches it.
    */
-  creators?: CreditPerson[] | null;
+  creators: CreditPerson[];
   prediction: {
     predictedRating: number;
     contributions: { feature: string; value: number }[];

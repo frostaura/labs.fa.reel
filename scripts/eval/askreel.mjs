@@ -293,11 +293,15 @@ export function compactTurn(raw) {
   const clarify = f("clarify").at(-1)?.data?.question ?? null;
   const assistant = f("assistant-message").at(-1)?.data ?? null;
   const cards = (v2Picks.length > 0 ? v2Picks : done?.results ?? []).map((c, i) => cardOf(c, i + 1));
-  // Every tray the user sees, from v1's `done` (belowFloor, nearMiss, unchecked) and v2's `tray` frames.
-  // The unchecked tray holds cards no model checked against the request — still on screen, so a leak or
-  // a ruled-out title there counts exactly as it would among the picks.
-  const tray = (kind) => [...(Array.isArray(done?.[kind]) ? done[kind] : []), ...trays.filter((t) => t.data?.kind === kind).flatMap((t) => t.data.cards ?? [])]
-    .map((c, i) => cardOf(c, i + 1));
+  // Every tray the user sees, from v2's `tray` frames when the turn streamed one of that kind, else from
+  // v1's `done` (belowFloor, nearMiss, unchecked). v2's `done` repeats the trays it streamed, so reading
+  // both counted every v2 tray card twice. The unchecked tray holds cards no model checked against the
+  // request — still on screen, so a leak or a ruled-out title there counts exactly as it would among the picks.
+  const tray = (kind) => {
+    const streamed = trays.filter((t) => t.data?.kind === kind);
+    const source = streamed.length > 0 ? streamed.flatMap((t) => t.data.cards ?? []) : Array.isArray(done?.[kind]) ? done[kind] : [];
+    return source.map((c, i) => cardOf(c, i + 1));
+  };
   const belowFloor = tray("belowFloor");
   const nearMiss = tray("nearMiss");
   const unchecked = tray("unchecked");

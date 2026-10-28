@@ -379,6 +379,7 @@ export const TITLE: TitleDetailPayload = {
     role: "Actor",
     castOrder: n,
   })),
+  creators: [],
   directors: [{ personId: id("dd", 1), name: "Ana Director", profilePath: "/dir.jpg", userRating: null }],
   writers: [{ personId: id("ww", 1), name: "Wen Writer", profilePath: null, userRating: null }],
   prediction: {

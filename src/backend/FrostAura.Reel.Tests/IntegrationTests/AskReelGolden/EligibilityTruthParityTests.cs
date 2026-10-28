@@ -47,6 +47,8 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
         {
             ["clean"] = await SeedTitleAsync(),
             ["excluded-genre"] = await SeedTitleAsync(genres: ["drama", "horror"]),
+            // HREV2-RET-04: a title with no genres cannot prove it is not horror, so it fails closed.
+            ["no-genres"] = await SeedTitleAsync(genres: []),
             ["keyword-phrase"] = await SeedTitleAsync(keywords: ["female ninja assassin"]),
             ["keyword-in-name"] = await SeedTitleAsync(name: "Way of the Ninja"),
             ["keyword-in-overview"] = await SeedTitleAsync(overview: "A retired NINJA returns."),
@@ -101,11 +103,13 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
         var english = await SeedTitleAsync(language: "en");
         var korean = await SeedTitleAsync(language: "ko");
         var unknown = await SeedTitleAsync(language: null);
-        var mine = new[] { english, korean, unknown };
+        // With no genre exclusion a title with no genres is eligible: only an ExcludeGenre fails it closed.
+        var untagged = await SeedTitleAsync(genres: []);
+        var mine = new[] { english, korean, unknown, untagged };
 
         var (defaultBuilder, defaultTruth) = await BothAsync(englishByDefault, mine);
         Assert.Equal(defaultBuilder, defaultTruth);
-        Assert.Equal([english], defaultTruth);
+        Assert.Equal(new[] { english, untagged }.ToHashSet(), defaultTruth);
 
         var (starBuilder, starTruth) = await BothAsync(everyLanguage, mine);
         Assert.Equal(starBuilder, starTruth);

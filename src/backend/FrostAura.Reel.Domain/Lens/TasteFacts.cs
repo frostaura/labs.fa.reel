@@ -36,7 +36,10 @@ public sealed record LovedFact(
     [property: JsonPropertyName("year")] int? Year,
     [property: JsonPropertyName("rating")] short Rating);
 
-/// <summary>A credited person the account's taste is VERIFIED on — ≥2 rated titles, shrunken average.</summary>
+/// <summary>
+/// A credited person the account's taste is VERIFIED on — ≥2 rated titles. <c>Average</c> is the plain
+/// mean of the account's own ratings, each title once (HREV2-D-01); people are ranked by shrunken affinity.
+/// </summary>
 public sealed record PersonFact(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("role")] string Role,

@@ -547,7 +547,7 @@ export default function TitleDetail() {
                   {((title.creators?.length ?? 0) > 0 || title.directors.length > 0 || title.writers.length > 0 || title.cast.length > 0) && (
                     <section className="space-y-4">
                       {/* A show is made by its creators; its directors are per-episode and usually
-                          absent (F-24). Listed whenever the API sends them. */}
+                          absent (F-24). Read defensively: a payload from an older image has no creators. */}
                       {title.mediaType === "Show" && (
                         <CreditRow label={(title.creators?.length ?? 0) === 1 ? "Creator" : "Creators"} people={title.creators ?? []} />
                       )}

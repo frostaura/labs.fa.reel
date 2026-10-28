@@ -207,8 +207,10 @@ public static class PersonEndpoints
     }
 
     /// <summary>Director first, then writer, then cast; an unknown role last.</summary>
+    // A show's creator leads: it is the credit a show is "by" (HREV2-D-02).
     private static int RoleOrder(CreditRole role) => role switch
     {
+        CreditRole.Creator => -1,
         CreditRole.Director => 0,
         CreditRole.Writer => 1,
         CreditRole.Actor => 2,
