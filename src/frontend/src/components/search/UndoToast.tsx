@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type FocusEvent } from "react";
+import { useEffect, useRef } from "react";
 import { Undo2, X } from "lucide-react";
 import { Button } from "../ui/button";
 import { ToastPortal } from "../ui/toast-stack";
+import { useToastHold } from "../ui/use-toast-hold";
 
 /** Long enough to notice a thing has happened and change your mind; short enough not to camp. */
 export const UNDO_WINDOW_MS = 6000;
@@ -31,7 +32,8 @@ export const UNDO_WINDOW_MS = 6000;
  * keyboard focus is inside it or a pointer rests on it, nothing commits. A keyboard or screen-reader
  * user who has just reached "Undo" must not lose it to a timer they cannot see, and a person reading
  * the message with the cursor on it is plainly still deciding. Leaving restarts a fresh full window
- * rather than resuming the remainder, so letting go never leaves a few milliseconds to act in.
+ * rather than resuming the remainder, so letting go never leaves a few milliseconds to act in. The
+ * rule lives in {@link useToastHold}, shared with the verdict toast.
  */
 export default function UndoToast({
   id,
@@ -52,9 +54,7 @@ export default function UndoToast({
   undoLabel?: string;
   ms?: number;
 }) {
-  const [pointerOn, setPointerOn] = useState(false);
-  const [focusIn, setFocusIn] = useState(false);
-  const held = pointerOn || focusIn;
+  const { held, holdProps } = useToastHold();
 
   // The newest closure, so a window that outlives a re-render commits what the caller means now,
   // without the closure itself being a key: callers pass a fresh one on every render, and keying on
@@ -71,11 +71,6 @@ export default function UndoToast({
     return () => window.clearTimeout(timer);
   }, [id, ms, held]);
 
-  // Moving between Undo and Dismiss is still "on the toast"; only focus going elsewhere lets go.
-  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusIn(false);
-  };
-
   // Into the shared toast column (ui/toast-stack), so a second toast stacks above this one instead
   // of covering it.
   return (
@@ -84,10 +79,7 @@ export default function UndoToast({
         role="status"
         aria-live="polite"
         data-testid={testId}
-        onFocus={() => setFocusIn(true)}
-        onBlur={onBlur}
-        onPointerEnter={() => setPointerOn(true)}
-        onPointerLeave={() => setPointerOn(false)}
+        {...holdProps}
         className="flex items-center gap-3 rounded-xl border border-fa-edge bg-fa-ink/95 px-4 py-3 shadow-lg backdrop-blur-md"
       >
         <p className="fa-body flex-1 text-fa-frost-bright">{message}</p>

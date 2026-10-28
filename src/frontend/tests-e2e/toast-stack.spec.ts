@@ -146,3 +146,59 @@ test("a pointer resting on the card undo holds the window until it leaves", asyn
   await page.clock.runFor(1000);
   await expect(toast).toHaveCount(0);
 });
+
+/**
+ * The verdict toast follows the same rule (HREV5 follow-up to HREV4-PH-02). It holds two focusable
+ * controls — Dismiss and "See the track record" — and rises with the card undo on every rating, so
+ * a keyboard user passing through the toast column must not have it vanish on its nine-second clock.
+ */
+const VERDICT_WINDOW_MS = 9000; // VerdictToast's DISMISS_AFTER_MS; a change there turns the expiry checks below red.
+
+async function rateNine(page: Page) {
+  const target = page.getByTestId("rec-card").filter({ hasText: "Pick 9" });
+  await target.hover();
+  await target.getByTestId("quick-rate").click();
+  await page.getByTestId("quick-rate-picker").getByTestId("quick-rate-3").click();
+  const verdict = page.getByTestId("verdict-toast");
+  await expect(verdict).toBeVisible();
+  return verdict;
+}
+
+test("with nobody on it, the verdict goes on its own clock", async ({ page }) => {
+  await bootHome(page, { clock: true });
+  const verdict = await rateNine(page);
+  await page.mouse.move(5, 5);
+  await page.clock.runFor(VERDICT_WINDOW_MS - 500);
+  await expect(verdict).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(verdict).toHaveCount(0);
+});
+
+test("a keyboard user on the verdict keeps it, Tab between its controls holds, tabbing out gives a fresh full window", async ({ page, browserName }) => {
+  await bootHome(page, { clock: true });
+  const verdict = await rateNine(page);
+  await page.mouse.move(5, 5);
+  await verdict.getByRole("button", { name: "Dismiss" }).focus();
+  await page.keyboard.press(browserName === "webkit" ? "Alt+Tab" : "Tab");
+  await expect(verdict.getByRole("link", { name: "See the track record" })).toBeFocused();
+  await page.clock.runFor(VERDICT_WINDOW_MS * 3);
+  await expect(verdict).toBeVisible();
+  await page.getByTestId("rec-card").first().getByTestId("quick-not-interested").focus();
+  await page.clock.runFor(VERDICT_WINDOW_MS - 500);
+  await expect(verdict).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(verdict).toHaveCount(0);
+});
+
+test("a pointer resting on the verdict holds it until it leaves", async ({ page }) => {
+  await bootHome(page, { clock: true });
+  const verdict = await rateNine(page);
+  await verdict.hover();
+  await page.clock.runFor(VERDICT_WINDOW_MS * 3);
+  await expect(verdict).toBeVisible();
+  await page.mouse.move(5, 5);
+  await page.clock.runFor(VERDICT_WINDOW_MS - 500);
+  await expect(verdict).toBeVisible();
+  await page.clock.runFor(1000);
+  await expect(verdict).toHaveCount(0);
+});
