@@ -1844,6 +1844,11 @@
       "file": "src/frontend/src/lib/trackRecordCopy.ts",
       "text": "Where the number lands, Reel's average prediction against your average rating in each band",
       "reason": "accessible name of the calibration chart (PH2-02): it reads out the drawn bands' own numbers, pinned by the calibrationChartLabel tests"
+    },
+    {
+      "file": "src/backend/FrostAura.Reel.Application/Search/AskReel/Engine/AskReelEngine.cs",
+      "text": "Prefers (never required): {string.Join(",
+      "reason": "a label in the judge's request (model input, never shown to a user; HREV3-RET-01)"
     }
   ]
 }
