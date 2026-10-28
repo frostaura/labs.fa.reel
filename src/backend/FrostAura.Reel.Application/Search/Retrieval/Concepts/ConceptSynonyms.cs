@@ -33,7 +33,7 @@ public static class ConceptSynonyms
         ["courtroom", "court case", "legal drama", "trial", "lawyer"],
         ["survival at sea", "lost at sea", "stranded at sea", "shipwreck", "castaway", "life raft", "adrift"],
         ["martial arts", "kung fu"],
-        ["mafia", "gangster", "mob", "organized crime"],
+        ["mafia", "gangster", "mob", "mobster", "organized crime"],
         ["hitman", "assassin", "contract killer"],
         ["con artist", "con man", "grifter", "swindle"],
         ["kaiju", "giant monster"],

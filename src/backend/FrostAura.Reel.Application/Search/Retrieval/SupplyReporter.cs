@@ -130,7 +130,7 @@ public sealed class SupplyReporter(
         // containment cannot use an index (yet), so re-evaluating it inside each of a dozen counts
         // made the founder's ninja report cost ~0.55 s; by id it is ~0.06 s. The vote floor is applied
         // here in memory through the badge's own resolution, and in SQL by the same rule below.
-        var topical = await HardConstraintFilter.Apply(WithoutRejected(db.Titles, rejected), db, hard)
+        var topical = await HardConstraintFilter.Apply(WithoutRejected(db.Titles, rejected, hard), db, hard)
             .Select(t => new Title
             {
                 Id = t.Id,
@@ -149,7 +149,7 @@ public sealed class SupplyReporter(
         IQueryable<Title> Population(IQueryable<Title> source) =>
             narrowById
                 ? source.Where(t => ids.Contains(t.Id))
-                : CrowdVotes.AtLeast(HardConstraintFilter.Apply(WithoutRejected(source, rejected), db, hard), minVotes);
+                : CrowdVotes.AtLeast(HardConstraintFilter.Apply(WithoutRejected(source, rejected, hard), db, hard), minVotes);
 
         var matching = ids.Count;
         if (narrowById)
@@ -333,9 +333,10 @@ public sealed class SupplyReporter(
     /// <paramref name="source"/> without the titles the turn's own rejections rule out, by the very
     /// predicates retrieval applies them with (<see cref="FilterRuleSet.WithExclusions"/> →
     /// <see cref="FilterBreaches.Breaks"/>): a keyword in the name, the overview or a tag; a genre with
-    /// its aliases and stand-ins, and an untagged title failing closed under it.
+    /// its aliases and stand-ins, and an untagged title failing closed under it; and a rejected word's
+    /// synonym tags (<see cref="NegatedConcepts"/>).
     /// </summary>
-    private static IQueryable<Title> WithoutRejected(IQueryable<Title> source, TurnExclusions rejected)
+    private static IQueryable<Title> WithoutRejected(IQueryable<Title> source, TurnExclusions rejected, HardConstraints hard)
     {
         if (rejected.IsEmpty)
         {
@@ -348,7 +349,11 @@ public sealed class SupplyReporter(
             source = source.Where(FilterBreaches.Not(FilterBreaches.Breaks(rules, rule)));
         }
 
-        return source;
+        // A rejected word reaches what the same word asked for would (HREV5-ASK-04): "no mafia" also
+        // rules out the organized-crime, gangster and mobster tags, exactly as retrieval reads it.
+        return HardConstraintFilter.NegatedConceptPredicate(NegatedConcepts.Stems(rejected.Keywords, hard.Concepts)) is { } widened
+            ? source.Where(FilterBreaches.Not(widened))
+            : source;
     }
 
     /// <summary>One population title, as the single pass projects it.</summary>

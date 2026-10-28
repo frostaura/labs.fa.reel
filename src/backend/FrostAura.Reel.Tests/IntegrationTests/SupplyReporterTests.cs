@@ -255,9 +255,10 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         Assert.Equal(7, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Movies })).MatchingInCatalogue);
         Assert.Equal(1, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Shows })).MatchingInCatalogue);
 
-        // An inclusive year window lets the undated title through, as the standing year rule does.
+        // An inclusive year window needs a known date: the undated title is not a 90s title
+        // (HREV5-ASK-03), whatever the standing year rule lets through.
         var window = Concept(topic) with { Years = new YearRange(1990, 1999) };
-        Assert.Equal(2, (await ReportAsync(accountId, window)).MatchingInCatalogue);
+        Assert.Equal(1, (await ReportAsync(accountId, window)).MatchingInCatalogue);
 
         // A runtime ceiling needs a known runtime.
         var shortOnes = Concept(topic) with { MaxRuntimeMinutes = 120 };

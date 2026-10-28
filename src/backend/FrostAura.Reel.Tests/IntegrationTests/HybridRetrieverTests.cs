@@ -77,6 +77,189 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     [Fact]
+    public async Task A_year_window_the_user_asked_for_needs_a_known_date()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // HREV5-ASK-03: "horror movies" then "only from the 90s" showed Glenville 2, Doppelgänger and
+        // Glenville 3 — no year, no release date, no air date — as 90s horror. A date the title does
+        // not have cannot satisfy a window the user asked for; each fallback date still does.
+        var topic = $"decade{Guid.NewGuid():N}"[..18];
+        var accountId = await SeedAccountAsync();
+        var byYear = await SeedTitleAsync(t => { t.Keywords = [topic]; t.Year = 1995; });
+        var byRelease = await SeedTitleAsync(t => { t.Keywords = [topic]; t.Year = null; t.ReleasedAt = new DateTime(1996, 5, 1, 0, 0, 0, DateTimeKind.Utc); });
+        var byAirDate = await SeedTitleAsync(t =>
+        {
+            t.Keywords = [topic];
+            t.MediaType = MediaType.Show;
+            t.Year = null;
+            t.FirstAiredAt = new DateTime(1999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+        });
+        var undated = await SeedTitleAsync(t => { t.Keywords = [topic]; t.Year = null; t.ReleasedAt = null; t.FirstAiredAt = null; });
+        var undatedFewVotes = await SeedTitleAsync(t =>
+        {
+            t.Keywords = [topic];
+            t.Year = null;
+            t.ReleasedAt = null;
+            t.FirstAiredAt = null;
+            t.TmdbVoteCount = 1;
+        });
+        var tooLate = await SeedTitleAsync(t => { t.Keywords = [topic]; t.Year = 2000; });
+
+        var decade = new HardConstraints([new ConceptTerm(topic, [], [])], [], new YearRange(1990, 1999), null, MediaScope.Any);
+        var result = await RetrieveAsync(new RetrievalQuery(accountId, decade, SoftPreferences.None, [], 50) { Arms = RetrievalArms.Catalogue });
+        var ids = result.Candidates.Select(c => c.TitleId).ToList();
+
+        Assert.Contains(byYear, ids);
+        Assert.Contains(byRelease, ids);
+        Assert.Contains(byAirDate, ids);
+        Assert.DoesNotContain(undated, ids);
+        Assert.DoesNotContain(undatedFewVotes, ids);
+        Assert.DoesNotContain(tooLate, ids);
+        Assert.Equal(3, result.Supply.MatchingInCatalogue);
+
+        // An open-ended window ("before 2000") is a window too.
+        var before = decade with { Years = new YearRange(null, 1999) };
+        var open = await RetrieveAsync(new RetrievalQuery(accountId, before, SoftPreferences.None, [], 50) { Arms = RetrievalArms.Catalogue });
+        Assert.DoesNotContain(undated, open.Candidates.Select(c => c.TitleId));
+
+        // The STANDING year rule keeps letting an undated title through: it is a condition on what to
+        // hide, and the truth SQL reads an absent date as no breach.
+        var standing = await SeedAccountAsync();
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.ContentFilters.Add(new ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = standing,
+                Kind = FilterKind.MinYear,
+                Value = "1990",
+                CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var anyYear = decade with { Years = null };
+        var kept = await RetrieveAsync(new RetrievalQuery(standing, anyYear, SoftPreferences.None, [], 50) { Arms = RetrievalArms.Catalogue });
+        Assert.Contains(undated, kept.Candidates.Select(c => c.TitleId));
+        Assert.Contains(tooLate, kept.Candidates.Select(c => c.TitleId));
+    }
+
+    [Fact]
+    public async Task Without_a_judge_an_overview_only_hit_is_admitted_only_when_nothing_tagged_was_found()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // HREV5-RET-04: keyless "shark movies" showed Sarah's Oil ("greedy oil sharks") and Below (the
+        // submarine USS Tiger Shark) as unchecked shark films beside the tagged ones. The overview is a
+        // lead for a judge, not a match on its own.
+        var topic = $"fin{Guid.NewGuid():N}"[..14];
+        var accountId = await SeedAccountAsync();
+        var tagged = await SeedTitleAsync(t => t.Keywords = [topic]);
+        var named = await SeedTitleAsync(t => t.Name = $"Night of the {topic}");
+        var prose = await SeedTitleAsync(t => t.Overview = $"Greedy oil {topic} barons circle a small Oklahoma town.");
+        var hard = new HardConstraints([new ConceptTerm(topic, [], [])], [], null, null, MediaScope.Any);
+        RetrievalQuery Query(HardConstraints h) => new(accountId, h, SoftPreferences.None, [], 50) { Arms = RetrievalArms.Catalogue };
+
+        var unjudged = (await RetrieveAsync(Query(hard), judge: new StubJudgeModel(available: false))).Candidates.Select(c => c.TitleId).ToList();
+        Assert.Contains(tagged, unjudged);
+        Assert.Contains(named, unjudged);
+        Assert.DoesNotContain(prose, unjudged);
+
+        // A judge confirms or drops it, so it is a candidate as before — and with no judge registered.
+        var judged = await RetrieveAsync(Query(hard), judge: new StubJudgeModel(available: true));
+        Assert.Contains(prose, judged.Candidates.Select(c => c.TitleId));
+        Assert.Equal(["fts:overview"], judged.Candidates.Single(c => c.TitleId == prose).Evidence);
+        Assert.Contains(prose, (await RetrieveAsync(Query(hard))).Candidates.Select(c => c.TitleId));
+
+        // Nothing tagged at all: the overview is all the catalogue has, so it still answers.
+        var untagged = $"fin{Guid.NewGuid():N}"[..14];
+        var onlyProse = await SeedTitleAsync(t => t.Overview = $"A lone {untagged} hunts the reef at night.");
+        var proseOnlyHard = hard with { Concepts = [new ConceptTerm(untagged, [], [])] };
+        var fallback = await RetrieveAsync(Query(proseOnlyHard), judge: new StubJudgeModel(available: false));
+        Assert.Equal([onlyProse], fallback.Candidates.Select(c => c.TitleId));
+    }
+
+    [Fact]
+    public async Task A_rejection_reaches_every_tag_the_same_word_asked_for_would()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // HREV5-ASK-04: "how many mafia titles are left?" counted the organized-crime, gangster and
+        // mobster tags, yet "crime titles, no mafia" still showed The Wire, Snowfall and Godfather of
+        // Harlem. A rejection now excludes every tag of the word's synonym group — tags only, never
+        // prose, and never a label the group's short stem merely starts ("mobile phone").
+        var topic = $"crimes{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        var organized = await SeedTitleAsync(t => t.Keywords = [topic, "organized crime"]);
+        var gangster = await SeedTitleAsync(t => t.Keywords = [topic, "gangster"]);
+        var mobster = await SeedTitleAsync(t => t.Keywords = [topic, "mobster", "crime boss"]);
+        var mobBoss = await SeedTitleAsync(t => t.Keywords = [topic, "mob boss"]);
+        var mafia = await SeedTitleAsync(t => t.Keywords = [topic, "italian mafia"]);
+        var crimeBoss = await SeedTitleAsync(t => t.Keywords = [topic, "crime boss"]);
+        var angryMob = await SeedTitleAsync(t => { t.Keywords = [topic]; t.Overview = "An angry mob gathers at the mill."; });
+        var phone = await SeedTitleAsync(t => t.Keywords = [topic, "mobile phone"]);
+        var hard = new HardConstraints([new ConceptTerm(topic, [], [])], [], null, null, MediaScope.Any);
+
+        foreach (var rejected in new[] { "mafia", "mafias", "mafia stuff", "gangsters", "organized crime" })
+        {
+            var result = await RetrieveAsync(new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 50)
+            {
+                Arms = RetrievalArms.Catalogue,
+                ExcludeKeywords = [rejected],
+            });
+            var ids = result.Candidates.Select(c => c.TitleId).ToList();
+
+            Assert.DoesNotContain(organized, ids);
+            Assert.DoesNotContain(gangster, ids);
+            Assert.DoesNotContain(mobster, ids);
+            Assert.DoesNotContain(mobBoss, ids);
+            Assert.DoesNotContain(mafia, ids);
+            Assert.Contains(crimeBoss, ids);
+            Assert.Contains(angryMob, ids);
+            Assert.Contains(phone, ids);
+
+            // The supply counts with the same reading, so the reply and the cards agree.
+            Assert.Equal(3, result.Supply.MatchingInCatalogue);
+        }
+
+        // A word outside every synonym group is rejected exactly as before: by itself.
+        var narrow = await RetrieveAsync(new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 50)
+        {
+            Arms = RetrievalArms.Catalogue,
+            ExcludeKeywords = ["crime boss"],
+        });
+        var narrowIds = narrow.Candidates.Select(c => c.TitleId).ToList();
+        Assert.DoesNotContain(crimeBoss, narrowIds);
+        Assert.DoesNotContain(mobster, narrowIds);
+        Assert.Contains(organized, narrowIds);
+        Assert.Contains(gangster, narrowIds);
+        Assert.Equal(6, narrow.Supply.MatchingInCatalogue);
+
+        // "Gangster films, no mafia": the request asks for the very group it rejects a word of, so
+        // the rejection keeps its literal reading instead of emptying the answer.
+        var gangsters = hard with { Concepts = [new ConceptTerm(topic, [], []), new ConceptTerm("gangster films", [], [])] };
+        var both = await RetrieveAsync(new RetrievalQuery(accountId, gangsters, SoftPreferences.None, [], 50)
+        {
+            Arms = RetrievalArms.Catalogue,
+            ExcludeKeywords = ["mafia"],
+        });
+        var bothIds = both.Candidates.Select(c => c.TitleId).ToList();
+        Assert.All(new[] { organized, gangster, mobster, mobBoss }, id => Assert.Contains(id, bothIds));
+        Assert.DoesNotContain(mafia, bothIds);
+        Assert.Equal(4, both.Supply.MatchingInCatalogue);
+    }
+
+    [Fact]
     public async Task The_facet_arm_ranks_by_the_vote_shrunk_crowd_score()
     {
         if (!Fixture.Available)
@@ -1064,7 +1247,24 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             throw new InvalidOperationException("No embedding provider.");
     }
 
-    private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query, Domain.Ports.IEmbeddingProvider? provider = null)
+    /// <summary>A judge model that is or is not configured; it is never asked to judge here.</summary>
+    private sealed class StubJudgeModel(bool available) : Application.Search.AskReel.Engine.IRequestJudgeModel
+    {
+        public bool IsAvailable => available;
+
+        public string ModelId => "stub-judge";
+
+        public string CacheSalt => "stub-judge";
+
+        public Task<Application.Search.AskReel.Engine.JudgeBatchResult> JudgeBatchAsync(
+            Application.Search.AskReel.Engine.JudgeInput input, CancellationToken ct) =>
+            throw new InvalidOperationException("Retrieval never judges.");
+    }
+
+    private async Task<RetrievalResult> RetrieveAsync(
+        RetrievalQuery query,
+        Domain.Ports.IEmbeddingProvider? provider = null,
+        Application.Search.AskReel.Engine.IRequestJudgeModel? judge = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var cache = new MemoryCache(new MemoryCacheOptions());
@@ -1079,7 +1279,8 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             embeddings,
             new KeywordNeighbours(db, eligibility, new KeywordVocabulary(db, cache)),
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
-            NullLogger<HybridRetriever>.Instance);
+            NullLogger<HybridRetriever>.Instance,
+            judge);
         return await retriever.RetrieveAsync(query, default);
     }
 

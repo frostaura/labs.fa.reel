@@ -20,6 +20,14 @@ public sealed class FullTextHit
 
     public bool InOverview { get; init; }
 
+    /// <summary>
+    /// True when the only field that matched is the overview: prose, where a word is not a subject —
+    /// "greedy oil sharks" in Sarah's Oil, the submarine USS Tiger Shark in Below (HREV5-RET-04). The
+    /// name, the keywords and the extracted themes are claims about what the title IS; a sentence of
+    /// its synopsis is not.
+    /// </summary>
+    public bool ProseOnly => InOverview && !InName && !InKeywords && !InThemes;
+
     /// <summary>The evidence strings this hit carries (<c>fts:name</c>, <c>fts:keywords</c>, <c>fts:themes</c>, <c>fts:overview</c>).</summary>
     public IReadOnlyList<string> Evidence()
     {
