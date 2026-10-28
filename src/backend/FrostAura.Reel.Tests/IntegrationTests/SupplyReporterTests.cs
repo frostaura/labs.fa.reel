@@ -895,6 +895,55 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         }
     }
 
+    /// <summary>
+    /// HREV4-ASK-01: the turn's own rejections come OUT OF THE TOPIC. A title the user ruled out —
+    /// by a tag, by its name or overview, or by a genre — is in no bucket, no knockout counts it and no
+    /// sample names it, on the id path and the predicate path alike. No rejection counts exactly as the
+    /// overload without one.
+    /// </summary>
+    [Fact]
+    public async Task The_turns_own_rejections_leave_every_bucket_and_every_knockout()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var topic = UniqueTopic();
+        var turtle = $"turtq{Guid.NewGuid():N}"[..12];
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "animation");
+
+        var keptSeen = await SeedTitleAsync(topic);
+        var keptHeld = await SeedTitleAsync(topic, t => t.Genres = ["drama", "animation"]);
+        _ = await SeedTitleAsync(topic);
+        var taggedSeen = await SeedTitleAsync(topic, t => t.Keywords = [topic, turtle]);
+        _ = await SeedTitleAsync(topic, t => { t.Name = $"{turtle} Forever"; t.Genres = ["drama", "animation"]; });
+        _ = await SeedTitleAsync(topic, t => t.Overview = $"Four {turtle} brothers.");
+        var comedySeen = await SeedTitleAsync(topic, t => t.Genres = ["comedy"]);
+        _ = await SeedTitleAsync(topic, t => t.Genres = ["comedy", "animation"]);
+        await SeedWatchAsync(accountId, keptSeen);
+        await SeedWatchAsync(accountId, taggedSeen);
+        await SeedWatchAsync(accountId, comedySeen);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        ISupplyReporter port = new SupplyReporter(db, new EligibilityQueryBuilder(db));
+        var plain = await port.ReportAsync(accountId, Concept(topic), [], CancellationToken.None);
+        var none = await port.ReportAsync(accountId, Concept(topic), [], TurnExclusions.None, CancellationToken.None);
+        var rejected = new TurnExclusions(["comedy"], [turtle]);
+        var report = await port.ReportAsync(accountId, Concept(topic), [], rejected, CancellationToken.None);
+        var byPredicate = await new SupplyReporter(db, new EligibilityQueryBuilder(db)).ReportAsync(
+            accountId, Concept(topic), CrowdVotes.MinRelaxVotes, 0, [], IncludeGenreRules.Applied, CancellationToken.None, rejected);
+
+        Assert.Equal(Shape(plain), Shape(none));
+        Assert.Equal((8, 3, 3), (plain.MatchingInCatalogue, plain.AlreadySeen, plain.ExcludedByConditions));
+        Assert.Equal((3, 1, 1, 1), (report.MatchingInCatalogue, report.AlreadySeen, report.ExcludedByConditions, report.Eligible));
+        var animation = Single(report, FilterKind.ExcludeGenre);
+        Assert.Equal(1, animation.WouldUnlock);
+        Assert.Equal([keptHeld], animation.Sample.Select(t => t.TitleId));
+        Assert.Equal(Shape(report), Shape(byPredicate));
+    }
+
     private static ConditionKnockout Single(SupplyReport report, FilterKind kind) =>
         Assert.Single(report.Knockouts, k => k.Kind == kind);
 

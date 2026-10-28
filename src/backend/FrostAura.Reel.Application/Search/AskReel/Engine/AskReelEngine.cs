@@ -574,12 +574,14 @@ public sealed class AskReelEngine(
         {
             // The shelf the question names ("how many ninja movies…"), read as a request of its own;
             // a question that names none ("how many are left?") counts the conversation's current one.
+            // Its negations count too ("how many ninja movies without turtles are left?", HREV4-ASK-01).
             var delta = plan.Delta;
-            var hard = delta.Concepts.Count > 0 || delta.Genres.Count > 0 || delta.People.Count > 0
-                ? ConversationStateReducer.Apply(state, plan with { Act = TurnAct.NewRequest }, turn.MediaFilter).Hard
-                : state.Hard;
+            var asked = delta.Concepts.Count > 0 || delta.Genres.Count > 0 || delta.People.Count > 0
+                ? ConversationStateReducer.Apply(state, plan with { Act = TurnAct.NewRequest }, turn.MediaFilter)
+                : state;
+            var hard = asked.Hard;
             await PhaseAsync(turn, "searching", "Counting what's left");
-            var report = await supplyReporter.ReportAsync(turn.AccountId, hard, turn.Input.ShownTitleIds, ct);
+            var report = await supplyReporter.ReportAsync(turn.AccountId, hard, turn.Input.ShownTitleIds, Rejected(asked), ct);
             return await AnswerAsync(turn, plan, next, SupplyAnswer(report, hard), null, ct);
         }
 
@@ -923,7 +925,7 @@ public sealed class AskReelEngine(
             var countable = hard.HasConcepts || hard.People.Count > 0;
             if (countable && !(personOnly && retrieval.Supply.MatchingInCatalogue == 0))
             {
-                supply = await RecountAsync(turn, hard, retrieval.Supply, ct);
+                supply = await RecountAsync(turn, hard, Rejected(next), retrieval.Supply, ct);
             }
 
             await turn.Emit("none-found", new { supply = LiveSearchExpansionService.SupplyWire(supply) });
@@ -934,7 +936,7 @@ public sealed class AskReelEngine(
         // named as shown, never as "checked" (the v1 rules of D4 and IREV2-SYS-01, carried to v2).
         var judgedCount = turn.Verdicts.Count;
         var checkedOfTagged = supply is { ClearingFloor: > 0 } counted
-            ? await CheckedOfTaggedAsync(turn, hard, counted, ct)
+            ? await CheckedOfTaggedAsync(turn, hard, Rejected(next), counted, ct)
             : 0;
 
         var judgeFailed = SearchTurnDegraded.JudgeFailed(string.Join(',', turn.Degraded));
@@ -1956,7 +1958,24 @@ public sealed class AskReelEngine(
         }
     }
 
-    private async Task<SupplyReport> RecountAsync(Turn turn, HardConstraints hard, SupplyReport discovered, CancellationToken ct)
+    /// <summary>
+    /// The user's own negations in the form retrieval applies them (<see cref="QueryFor"/>), for every
+    /// count that must describe the same shelf retrieval searched (HREV4-ASK-01).
+    /// </summary>
+    private static TurnExclusions Rejected(ConversationState state)
+    {
+        var (genres, keywords) = NegationRules(state.UserNegations);
+        return new TurnExclusions(genres, keywords);
+    }
+
+    /// <summary>
+    /// The supply re-counted after this turn's scoring, over the resolved constraints and WITHOUT what
+    /// the user ruled out (HREV4-ASK-01): "ninja movies but no turtles" was counted as the plain ninja
+    /// shelf, so the reply's seen, held-out and unlock counts — and a knockout's sample naming Turtles
+    /// Forever — described titles retrieval and the judge had both excluded.
+    /// </summary>
+    private async Task<SupplyReport> RecountAsync(
+        Turn turn, HardConstraints hard, TurnExclusions rejected, SupplyReport discovered, CancellationToken ct)
     {
         if (!hard.HasConcepts && hard.People.Count == 0)
         {
@@ -1965,7 +1984,8 @@ public sealed class AskReelEngine(
 
         try
         {
-            return await supplyReporter.ReportAsync(turn.AccountId, await ResolvedAsync(turn, hard, ct), turn.Input.ShownTitleIds, ct);
+            return await supplyReporter.ReportAsync(
+                turn.AccountId, await ResolvedAsync(turn, hard, ct), turn.Input.ShownTitleIds, rejected, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1980,7 +2000,8 @@ public sealed class AskReelEngine(
     /// account's eligibility, at the supply's vote floor and maturity ceiling, clearing the bar. A
     /// count that cannot be made is 0 — the reply then claims no check rather than one it cannot back.
     /// </summary>
-    private async Task<int> CheckedOfTaggedAsync(Turn turn, HardConstraints hard, SupplyReport supply, CancellationToken ct)
+    private async Task<int> CheckedOfTaggedAsync(
+        Turn turn, HardConstraints hard, TurnExclusions rejected, SupplyReport supply, CancellationToken ct)
     {
         var ids = turn.Verdicts.Where(v => AskReelGate.Clears(v.Value, turn.Floor)).Select(v => v.Key).ToList();
         if (ids.Count == 0)
@@ -1992,7 +2013,12 @@ public sealed class AskReelEngine(
         {
             var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
             var resolved = await ResolvedAsync(turn, hard, ct);
-            return (await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId), db, resolved)
+            // Eligible as retrieval reads it this turn: the standing conditions and the user's own
+            // rejections, so the checked count is taken over the same shelf as the supply's.
+            var pool = rejected.IsEmpty
+                ? eligibility.EligibleTitles(turn.AccountId)
+                : eligibility.EligibleTitles(turn.AccountId, turn.Standing.WithExclusions(rejected.Genres, rejected.Keywords));
+            return (await HardConstraintFilter.Apply(pool, db, resolved)
                     .Where(t => ids.Contains(t.Id))
                     .AsNoTracking()
                     .ToListAsync(ct))

@@ -351,6 +351,43 @@ public interface ISupplyReporter
         IReadOnlyCollection<Guid> alreadyShown,
         IncludeGenreRules includeGenre,
         CancellationToken ct);
+
+    /// <summary>
+    /// The supply behind <paramref name="hard"/> with the turn's own rejections taken OUT OF THE
+    /// TOPIC (HREV4-ASK-01): a title the user ruled out is not one they asked for, so it is in no
+    /// bucket — not matching, not seen, not held out — and no knockout counts or names it. "Ninja movies
+    /// but no turtles" was counted as the plain ninja shelf, and offered a relaxation whose sample
+    /// was Turtles Forever. Matched exactly as retrieval matches them (name, overview or tag for a
+    /// keyword; the genre, its aliases and stand-ins for a genre).
+    /// </summary>
+    Task<SupplyReport> ReportAsync(
+        Guid accountId,
+        HardConstraints hard,
+        IReadOnlyCollection<Guid> alreadyShown,
+        TurnExclusions exclusions,
+        CancellationToken ct);
+}
+
+/// <summary>
+/// The user's own rejections for one turn, in catalogue form ("no turtles" → keyword "turtles", "no
+/// comedy" → genre "comedy"): the same extra exclusions <see cref="RetrievalQuery.ExcludeGenres"/> and
+/// <see cref="RetrievalQuery.ExcludeKeywords"/> carry into retrieval. Never a standing rule, never a
+/// relaxation.
+/// </summary>
+public sealed record TurnExclusions(IReadOnlyList<string> Genres, IReadOnlyList<string> Keywords)
+{
+    /// <summary>No rejection this turn.</summary>
+    public static TurnExclusions None { get; } = new([], []);
+
+    /// <summary>True when the turn rejected nothing.</summary>
+    public bool IsEmpty => Genres.Count == 0 && Keywords.Count == 0;
+
+    /// <summary>The rejections a retrieval query carries.</summary>
+    public static TurnExclusions Of(RetrievalQuery q)
+    {
+        ArgumentNullException.ThrowIfNull(q);
+        return new TurnExclusions(q.ExcludeGenres, q.ExcludeKeywords);
+    }
 }
 
 /// <summary>

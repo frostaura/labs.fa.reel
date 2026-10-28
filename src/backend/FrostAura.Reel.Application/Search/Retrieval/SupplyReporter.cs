@@ -72,6 +72,15 @@ public sealed class SupplyReporter(
         CancellationToken ct) =>
         ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, includeGenre, ct);
 
+    /// <inheritdoc />
+    public Task<SupplyReport> ReportAsync(
+        Guid accountId,
+        HardConstraints hard,
+        IReadOnlyCollection<Guid> alreadyShown,
+        TurnExclusions exclusions,
+        CancellationToken ct) =>
+        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, IncludeGenreRules.Applied, ct, exclusions);
+
     /// <summary>The report counted with an explicit vote floor (<c>0</c> counts every title).</summary>
     public Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, int minVotes, CancellationToken ct) =>
         ReportAsync(accountId, hard, minVotes, IdNarrowingLimit, [], IncludeGenreRules.Applied, ct);
@@ -103,9 +112,11 @@ public sealed class SupplyReporter(
         int idNarrowingLimit,
         IReadOnlyCollection<Guid> alreadyShown,
         IncludeGenreRules includeGenre,
-        CancellationToken ct)
+        CancellationToken ct,
+        TurnExclusions? exclusions = null)
     {
         ArgumentNullException.ThrowIfNull(alreadyShown);
+        var rejected = exclusions ?? TurnExclusions.None;
         if (resolver is not null)
         {
             hard = await resolver.ResolveAsync(hard, ct);
@@ -119,7 +130,7 @@ public sealed class SupplyReporter(
         // containment cannot use an index (yet), so re-evaluating it inside each of a dozen counts
         // made the founder's ninja report cost ~0.55 s; by id it is ~0.06 s. The vote floor is applied
         // here in memory through the badge's own resolution, and in SQL by the same rule below.
-        var topical = await HardConstraintFilter.Apply(db.Titles, db, hard)
+        var topical = await HardConstraintFilter.Apply(WithoutRejected(db.Titles, rejected), db, hard)
             .Select(t => new Title
             {
                 Id = t.Id,
@@ -138,7 +149,7 @@ public sealed class SupplyReporter(
         IQueryable<Title> Population(IQueryable<Title> source) =>
             narrowById
                 ? source.Where(t => ids.Contains(t.Id))
-                : CrowdVotes.AtLeast(HardConstraintFilter.Apply(source, db, hard), minVotes);
+                : CrowdVotes.AtLeast(HardConstraintFilter.Apply(WithoutRejected(source, rejected), db, hard), minVotes);
 
         var matching = ids.Count;
         if (narrowById)
@@ -316,6 +327,28 @@ public sealed class SupplyReporter(
             PredictedFloor: floor,
             KnockoutsMeasured: true,
             AlreadyShown: shownClearing);
+    }
+
+    /// <summary>
+    /// <paramref name="source"/> without the titles the turn's own rejections rule out, by the very
+    /// predicates retrieval applies them with (<see cref="FilterRuleSet.WithExclusions"/> →
+    /// <see cref="FilterBreaches.Breaks"/>): a keyword in the name, the overview or a tag; a genre with
+    /// its aliases and stand-ins, and an untagged title failing closed under it.
+    /// </summary>
+    private static IQueryable<Title> WithoutRejected(IQueryable<Title> source, TurnExclusions rejected)
+    {
+        if (rejected.IsEmpty)
+        {
+            return source;
+        }
+
+        var rules = FilterRuleSet.Create(rejected.Genres, null, rejected.Keywords, [FilterRuleSet.AllLanguages], null, null, null);
+        foreach (var rule in rules.Rules().Where(r => r.Kind is FilterKind.ExcludeGenre or FilterKind.ExcludeKeyword))
+        {
+            source = source.Where(FilterBreaches.Not(FilterBreaches.Breaks(rules, rule)));
+        }
+
+        return source;
     }
 
     /// <summary>One population title, as the single pass projects it.</summary>

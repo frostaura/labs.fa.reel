@@ -715,7 +715,7 @@ public sealed class HybridRetriever(
             using (scope)
             {
                 var clock = Stopwatch.StartNew();
-                var report = await scoped.ReportAsync(q.AccountId, hard, q.Exclude, ct);
+                var report = await scoped.ReportAsync(q.AccountId, hard, q.Exclude, TurnExclusions.Of(q), ct);
                 return (report, clock.ElapsedMilliseconds);
             }
         }
@@ -747,7 +747,7 @@ public sealed class HybridRetriever(
         }
 
         var clock = Stopwatch.StartNew();
-        var counted = await supply.ReportAsync(q.AccountId, hard, q.Exclude, ct);
+        var counted = await supply.ReportAsync(q.AccountId, hard, q.Exclude, TurnExclusions.Of(q), ct);
         timings["supply"] = clock.ElapsedMilliseconds;
         return counted;
     }

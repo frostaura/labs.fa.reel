@@ -163,7 +163,9 @@ previous answer's), the bar's verdict on every card and counted in the reply —
 
 **`mode: "NoneFound"`** when no card was judged `yes` (unjudged cards then sit in `unchecked`). The reply is then composed deterministically
 from the `supply` report (seen, saved or dismissed, held out by conditions, under the bar, unscored,
-and the drop-one relaxations that would unlock something — "already seen" is never one of them);
+and the drop-one relaxations that would unlock something — "already seen" is never one of them),
+counted **without what the user ruled out** — a title tripping the user's own negation is in no
+bucket and in no relaxation's count or sample, exactly as retrieval excludes it (HREV4-ASK-01);
 `supply` rides `done` on that turn only and is `null` on every other. `degraded` lists what did not
 run as designed: `plan`; `judge:{failed}/{batches}` (batches that ruled on nothing);
 `judge-missing:{missing}/{judged}` (every title sent to the judge that came back without a request

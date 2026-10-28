@@ -1373,6 +1373,88 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV4-ASK-01: the user's own negations reach the counts the founder reads. "ninja movies but no
+    /// turtles" ended NoneFound with "Of the 70 ninja movies … you've seen 18 and your conditions hold
+    /// out 52 … turning off 'excluded genre: animation' would unlock 3" — and that knockout's sample
+    /// held Turtles Forever: the recount was the plain ninja shelf, while retrieval and the judge both
+    /// applied the negation. A title the user ruled out is not one they asked for: it is in no bucket,
+    /// no knockout counts it and no sample names it. Varied over a keyword-and-name negation and a
+    /// genre negation, each with negated titles in every bucket (seen, held out, unlocked).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_none_found_counts_and_knockouts_leave_out_what_the_user_ruled_out(bool genreNegation)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var negation = genreNegation ? "comedy" : $"turtq{Guid.NewGuid():N}"[..12];
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "animation");
+
+        // Asked for and kept: three seen, one held out by the animation rule (the knockout's whole unlock).
+        var seen = await SeedTopicalAsync(topic, ("V2 Yes Seen", 3));
+        await MarkSeenAsync(accountId, seen);
+        var heldOut = await SeedTopicalAsync(topic, ("V2 Yes Held", 1));
+        await SetGenresAsync(heldOut, ["action", "animation"]);
+
+        // Ruled out by the user, in every bucket: seen ones, and ones the animation rule also holds out.
+        var negatedSeen = await SeedTopicalAsync(topic, ("V2 Yes NegSeen", 2));
+        await MarkSeenAsync(accountId, negatedSeen);
+        var negatedHeld = await SeedTopicalAsync(topic, ("V2 Yes NegHeld", 2));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            foreach (var title in await db.Titles.Where(t => negatedSeen.Contains(t.Id) || negatedHeld.Contains(t.Id)).ToListAsync())
+            {
+                var held = negatedHeld.Contains(title.Id);
+                if (genreNegation)
+                {
+                    title.Genres = held ? ["comedy", "animation"] : ["action", "comedy"];
+                }
+                else if (held)
+                {
+                    // Named, not tagged: "Turtles Forever" carried no turtle keyword.
+                    title.Name = $"{negation} Forever {title.Name[^4..]}";
+                    title.Genres = ["action", "animation"];
+                }
+                else
+                {
+                    title.Keywords = [topic, negation];
+                }
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+        {
+            Concepts = [topic],
+            Negations = [negation],
+            Media = MediaScope.Movies,
+        }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies but no {negation}"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        var supply = Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply");
+        Assert.Equal(4, supply.GetProperty("matchingInCatalogue").GetInt32());
+        Assert.Equal(3, supply.GetProperty("alreadySeen").GetInt32());
+        Assert.Equal(1, supply.GetProperty("excludedByConditions").GetInt32());
+        var knockout = Assert.Single(supply.GetProperty("knockouts").EnumerateArray());
+        Assert.Equal(1, knockout.GetProperty("wouldUnlock").GetInt32());
+        Assert.Equal([heldOut[0]], knockout.GetProperty("sample").EnumerateArray().Select(t => t.GetProperty("titleId").GetGuid()));
+        Assert.Contains(
+            $"Of the 4 {topic} movies in the catalogue with at least 50 votes, you've seen 3 and your conditions hold out 1.",
+            outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Contains("would unlock 1.", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// HREV4-ASK-05: with no model at all, "is the first one violent?" was planned as a new request
     /// with no topic — the conversation's Movies scope reset to any medium and 16 unchecked titles,
     /// mostly shows, came back instead of an answer. A question about a card is answered from its
