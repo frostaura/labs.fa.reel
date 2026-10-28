@@ -2157,7 +2157,7 @@ public sealed class AskReelEngine(
             .ThenBy(t => t.Id)
             .Select(t => (Guid?)t.Id)
             .FirstOrDefaultAsync(ct);
-        return exact ?? await MentionedTitleAsync(name, ct);
+        return exact ?? await MentionedTitleAsync(AskReelTitleMention.NameSpans(name), name, ct);
     }
 
     /// <summary>
@@ -2165,9 +2165,11 @@ public sealed class AskReelEngine(
     /// run of its words equal to a stored name, then the title of a year the text mentions, then the
     /// most voted. One equality scan over the lower-cased names, bounded by the runs a short message has.
     /// </summary>
-    private async Task<Guid?> MentionedTitleAsync(string? text, CancellationToken ct)
+    private Task<Guid?> MentionedTitleAsync(string? text, CancellationToken ct) =>
+        MentionedTitleAsync(AskReelTitleMention.Spans(text), text, ct);
+
+    private async Task<Guid?> MentionedTitleAsync(IReadOnlyList<AskReelTitleMention.Span> spans, string? text, CancellationToken ct)
     {
-        var spans = AskReelTitleMention.Spans(text);
         if (spans.Count == 0)
         {
             return null;

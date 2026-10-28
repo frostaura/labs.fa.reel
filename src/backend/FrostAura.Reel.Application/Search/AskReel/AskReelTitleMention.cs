@@ -20,6 +20,18 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// single word only when the user capitalised it: "is it violent?" must not answer about It (2017),
 /// while "is Heat violent?" names Heat. The engine prefers the LONGEST run that names a title, then
 /// the most-voted title under that name.</para>
+///
+/// <para><b>The user's own signal, at any length (HREV4, refuter round 4).</b> A run of several
+/// lower-cased words is a common phrase far more often than a name: "is it based on a true story?"
+/// answered about Based on a True Story (2017), "does it have a happy ending?" about Happy Ending
+/// (2023), "is it a love story?" about Love Story (2026) and "is the dog okay at the end?" about The
+/// End? (2017) — each an item question with nothing on screen that should have been asked back. So a
+/// run read from a MESSAGE names a title only when it carries the user's own signal: a word that is
+/// not filler and is capitalised or digit-led as typed, or quotes around the run. A capital the
+/// sentence imposes (the message's first word, a word after a full stop) is not that signal in a run
+/// of several words — "Based on a true story, is it?" is asked back — but still is for a single word,
+/// so "Heat, is it violent?" keeps naming Heat. A name the PLANNER wrote is read without that bar
+/// (<see cref="NameSpans"/>): the model already said it is a name.</para>
 /// </summary>
 public static partial class AskReelTitleMention
 {
@@ -34,8 +46,17 @@ public static partial class AskReelTitleMention
     /// <param name="Words">How many words it spans: the longer run wins.</param>
     public readonly record struct Span(string Text, int Words);
 
-    /// <summary>Every candidate run in <paramref name="message"/>, longest first, each text once.</summary>
-    public static IReadOnlyList<Span> Spans(string? message)
+    /// <summary>Every candidate run in the user's <paramref name="message"/>, longest first, each text once.</summary>
+    public static IReadOnlyList<Span> Spans(string? message) => Read(message, userTyped: true);
+
+    /// <summary>
+    /// Every candidate run in a name the planner wrote, longest first: the same runs without the bar on
+    /// the user's own signal, since the planner already called the text a name (a single word still
+    /// needs its capital, as before).
+    /// </summary>
+    public static IReadOnlyList<Span> NameSpans(string? name) => Read(name, userTyped: false);
+
+    private static IReadOnlyList<Span> Read(string? message, bool userTyped)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -50,7 +71,7 @@ public static partial class AskReelTitleMention
             for (var start = 0; start + length <= tokens.Length; start++)
             {
                 var run = tokens.AsSpan(start, length).ToArray();
-                if (!Plausible(run))
+                if (!Plausible(run) || (userTyped && length > 1 && !Signalled(tokens, start, length)))
                 {
                     continue;
                 }
@@ -116,6 +137,50 @@ public static partial class AskReelTitleMention
         return char.IsUpper(first) || char.IsDigit(first);
     }
 
+    /// <summary>
+    /// Whether the user marked a run of several words as a name: quotes around it, or a word in it that
+    /// is not filler and is capitalised or digit-led as typed — a capital counting only where the
+    /// sentence did not impose it (the message's first word, or a word after a full stop, a "!" or a "?").
+    /// </summary>
+    private static bool Signalled(string[] tokens, int start, int length)
+    {
+        var first = tokens[start];
+        var last = tokens[start + length - 1].TrimEnd(SentencePunctuation);
+        if (first.Length > 0 && Quotes.Contains(first[0]) && last.Length > 1 && Quotes.Contains(last[^1]))
+        {
+            return true;
+        }
+
+        for (var i = start; i < start + length; i++)
+        {
+            var token = tokens[i];
+            if (AskReelIntentSanitizer.Words(token).All(AskReelIntentSanitizer.IsFiller))
+            {
+                continue;
+            }
+
+            var lead = token.TrimStart(Edges).FirstOrDefault();
+            if (char.IsDigit(lead) || (char.IsUpper(lead) && !SentenceInitial(tokens, i)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether the token at <paramref name="index"/> opens a sentence, so its capital is the sentence's, not the user's.</summary>
+    private static bool SentenceInitial(string[] tokens, int index)
+    {
+        if (index == 0)
+        {
+            return true;
+        }
+
+        var previous = tokens[index - 1].TrimEnd(Closers);
+        return previous.Length > 0 && previous[^1] is '.' or '!' or '?';
+    }
+
     /// <summary>The run as typed, then unquoted, then trimmed of surrounding punctuation, then of a trailing possessive.</summary>
     private static IEnumerable<string> Variants(string run)
     {
@@ -145,6 +210,12 @@ public static partial class AskReelTitleMention
 
     /// <summary>Punctuation that bounds a name in a sentence and is never part of the stored name's edge.</summary>
     private static readonly char[] Edges = ['?', '!', ',', '.', ';', ':', '"', '\'', '“', '”', '‘', '’', '(', ')', '[', ']', '*', '_'];
+
+    /// <summary>Punctuation a sentence puts after a closing quote ("does it have a “happy ending”?").</summary>
+    private static readonly char[] SentencePunctuation = ['?', '!', ',', '.', ';', ':'];
+
+    /// <summary>What may close a sentence-ending token after its full stop ('…the end." Is…').</summary>
+    private static readonly char[] Closers = ['"', '\'', '”', '’', ')', ']', '»', '*', '_'];
 
     private static readonly char[] Quotes = ['"', '\'', '“', '”', '‘', '’', '«', '»', '*', '_'];
 

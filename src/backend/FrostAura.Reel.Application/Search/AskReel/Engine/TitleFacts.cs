@@ -97,15 +97,57 @@ public sealed class TitleFacts(IReelDbContext db) : ITitleFacts
     /// only the raw genres, so for "spy thrillers" it ruled Alias, Nikita, Covert Affairs and Killing Eve
     /// "partial" because "its listed genres omit thriller": no series could ever be a pick for a
     /// thriller request. The judge now reads the genre the way the rest of the system does.</para>
+    ///
+    /// <para><b>Espionage reads as thriller on TV (HREV4, refuter round 4).</b> The stand-in vocabulary
+    /// has no espionage words, so a spy series tagged only "spy", "espionage", "double agent" or "mi5"
+    /// was still ruled partial: in one stored "spy thrillers" conversation, Alias, Nikita, Restless and
+    /// Burn Notice ("no thriller evidence is given") and Spooks ("the listed genres omit thriller"). A
+    /// spy series is a thriller series, so on TV — and only on TV, whose taxonomy cannot tag one — an
+    /// espionage keyword infers thriller FOR THE JUDGE (<see cref="CarriesEspionage"/>), unless the show
+    /// is a comedy, an animation or a family or kids' show: Archer, Chuck and Get Smart are spy comedies,
+    /// and the judge may still call them a partial match. Eligibility is not widened here: the shared
+    /// stand-ins are WS-3's, and an exclusion of thriller is theirs to extend.</para>
     /// </summary>
     internal static IReadOnlyList<string> JudgeGenres(Title title)
     {
         var inferred = Retrieval.GenreStandIns.Slugs
             .Where(slug => !title.Genres.Contains(slug, StringComparer.Ordinal) && Retrieval.GenreStandIns.ExcludedBy(title, slug))
-            .Select(slug => slug + InferredMarker)
             .ToList();
-        return inferred.Count == 0 ? title.Genres : [.. title.Genres, .. inferred];
+        if (title.MediaType == MediaType.Show
+            && !title.Genres.Contains(ThrillerSlug, StringComparer.Ordinal)
+            && !inferred.Contains(ThrillerSlug, StringComparer.Ordinal)
+            && !title.Genres.Any(g => NotThrillerGenres.Contains(g))
+            && CarriesEspionage(title.Keywords))
+        {
+            inferred.Add(ThrillerSlug);
+            inferred.Sort(StringComparer.Ordinal);
+        }
+
+        return inferred.Count == 0 ? title.Genres : [.. title.Genres, .. inferred.Select(slug => slug + InferredMarker)];
     }
+
+    /// <summary>
+    /// Whether a keyword names espionage: a word "spy", "spies", "espionage", "cia", "mi5", "mi6" or
+    /// "kgb" in it ("female spy", "central intelligence agency (cia)"), or the phrase "double agent",
+    /// "secret agent", "intelligence agency", "secret service" or "british intelligence".
+    /// </summary>
+    internal static bool CarriesEspionage(IEnumerable<string> keywords) =>
+        keywords.Any(keyword =>
+        {
+            var lower = keyword.ToLowerInvariant();
+            return EspionagePhrases.Any(phrase => lower.Contains(phrase, StringComparison.Ordinal))
+                || lower.Split(KeywordSeparators, StringSplitOptions.RemoveEmptyEntries).Any(EspionageWords.Contains);
+        });
+
+    private const string ThrillerSlug = "thriller";
+
+    private static readonly HashSet<string> EspionageWords = new(StringComparer.Ordinal) { "spy", "spies", "espionage", "cia", "mi5", "mi6", "kgb" };
+
+    private static readonly string[] EspionagePhrases = ["double agent", "secret agent", "intelligence agency", "secret service", "british intelligence"];
+
+    private static readonly HashSet<string> NotThrillerGenres = new(StringComparer.Ordinal) { "comedy", "animation", "family", "kids", "children" };
+
+    private static readonly char[] KeywordSeparators = [' ', '(', ')', ',', '-', '/', '.', ':', ';', '\'', '"'];
 
     /// <summary>
     /// Attributes only where extraction finished and its output is trusted; a pending or failed

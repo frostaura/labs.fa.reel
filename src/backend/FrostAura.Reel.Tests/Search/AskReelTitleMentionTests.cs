@@ -21,6 +21,19 @@ public class AskReelTitleMentionTests
     [InlineData("is John Wick: Chapter 4 too long?", "john wick: chapter 4", true)]
     [InlineData("is \"Airplane!\" still funny?", "airplane!", true)]
     [InlineData("who directed 1917?", "1917", true)]
+    [InlineData("is it based on a true story?", "based on a true story", false)]
+    [InlineData("does it have a happy ending?", "happy ending", false)]
+    [InlineData("is it a love story?", "love story", false)]
+    [InlineData("is the dog okay at the end?", "the end?", false)]
+    [InlineData("is the dog okay at the end?", "the end", false)]
+    [InlineData("Based on a true story, is it?", "based on a true story", false)]
+    [InlineData("Happy ending or a sad one?", "happy ending", false)]
+    [InlineData("is it based on a True Story?", "based on a true story", true)]
+    [InlineData("is it “based on a true story”?", "based on a true story", true)]
+    [InlineData("is The Dark Knight too long?", "the dark knight", true)]
+    [InlineData("is the dark knight too long?", "the dark knight", false)]
+    [InlineData("is blade of the 47 ronin a ninja film?", "blade of the 47 ronin", true)]
+    [InlineData("Heat, is it violent?", "heat", true)]
     public void A_run_of_the_messages_words_is_a_candidate_name_only_when_it_could_be_one(string message, string name, bool candidate)
     {
         var spans = AskReelTitleMention.Spans(message);

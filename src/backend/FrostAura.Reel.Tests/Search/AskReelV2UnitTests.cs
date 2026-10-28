@@ -337,7 +337,8 @@ public class AskReelV2UnitTests
     [InlineData(MediaType.Show, new[] { "crime", "drama" }, new[] { "spy", "suspenseful" }, new[] { "crime", "drama", "thriller (inferred)" })]
     [InlineData(MediaType.Movie, new[] { "crime", "drama" }, new[] { "spy", "suspenseful" }, new[] { "crime", "drama" })]
     [InlineData(MediaType.Show, new[] { "drama", "suspense" }, new[] { "spy" }, new[] { "drama", "suspense", "thriller (inferred)" })]
-    [InlineData(MediaType.Show, new[] { "drama" }, new[] { "spy", "cia" }, new[] { "drama" })]
+    [InlineData(MediaType.Show, new[] { "drama" }, new[] { "spy", "cia" }, new[] { "drama", "thriller (inferred)" })]
+    [InlineData(MediaType.Show, new[] { "drama" }, new[] { "family", "small town" }, new[] { "drama" })]
     [InlineData(MediaType.Show, new[] { "drama" }, new[] { "spy thriller", "love triangle" }, new[] { "drama", "romance (inferred)", "thriller (inferred)" })]
     public void The_judge_reads_a_genre_the_tv_taxonomy_cannot_tag_from_its_keywords(
         MediaType media, string[] genres, string[] keywords, string[] expected)
@@ -356,6 +357,46 @@ public class AskReelV2UnitTests
         Assert.Equal(expected, TitleFacts.JudgeGenres(title));
         Assert.Contains("A genre marked \"(inferred)\"", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
         Assert.Contains("A title's medium (film or series) is never a reason", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HREV4 (refuter, round 4, the HREV3-ASK-D residual): a TV spy series whose keywords carry no
+    /// thriller stand-in was still ruled partial for "spy thrillers" — Alias, Nikita, Restless and Burn
+    /// Notice ("no thriller evidence is given"), Spooks ("the listed genres omit thriller"). Espionage
+    /// now infers thriller for the judge on TV. The rows are the snapshot's own genres and keywords
+    /// (reel-2026-10-23). Varied: the same keywords on a film infer nothing (its taxonomy tags
+    /// thriller), and a spy COMEDY or animation (Archer, Chuck, Get Smart) is not inferred a thriller.
+    /// </summary>
+    [Theory]
+    [InlineData("Alias", MediaType.Show, new[] { "action", "adventure", "drama" }, new[] { "central intelligence agency (cia)", "martial arts", "double agent", "undercover agent", "female spy" }, true)]
+    [InlineData("Nikita", MediaType.Show, new[] { "drama", "action", "adventure" }, new[] { "spy", "strong woman", "secret government organization", "female spy" }, true)]
+    [InlineData("Restless", MediaType.Show, new[] { "drama", "war" }, new[] { "spy", "based on novel or book", "miniseries", "british secret service" }, true)]
+    [InlineData("Burn Notice", MediaType.Show, new[] { "action", "adventure", "drama", "crime" }, new[] { "miami, florida", "espionage", "caper", "private investigator", "ex spy" }, true)]
+    [InlineData("Spooks", MediaType.Show, new[] { "drama", "action", "adventure", "crime" }, new[] { "england", "spy", "mi5" }, true)]
+    [InlineData("Spooks", MediaType.Movie, new[] { "drama", "action", "crime" }, new[] { "england", "spy", "mi5" }, false)]
+    [InlineData("Archer", MediaType.Show, new[] { "comedy", "action", "adventure", "animation" }, new[] { "spy", "central intelligence agency (cia)", "secret agent" }, false)]
+    [InlineData("Chuck", MediaType.Show, new[] { "action", "adventure", "comedy", "drama" }, new[] { "central intelligence agency (cia)", "secret agent", "nerd" }, false)]
+    [InlineData("Get Smart", MediaType.Show, new[] { "comedy", "crime", "mystery" }, new[] { "spy", "secret agent", "sitcom" }, false)]
+    [InlineData("Ciao", MediaType.Show, new[] { "drama" }, new[] { "special agent", "spyglass", "mission" }, false)]
+    public void A_tv_spy_series_reads_as_a_thriller_to_the_judge_unless_it_is_a_comedy(
+        string name, MediaType media, string[] genres, string[] keywords, bool inferred)
+    {
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = media,
+            Name = name,
+            TraktSlug = string.Empty,
+            Genres = [.. genres],
+            Keywords = [.. keywords],
+            CreatedAt = DateTime.UtcNow,
+        };
+
+        var read = TitleFacts.JudgeGenres(title);
+
+        Assert.Equal(inferred, read.Contains("thriller (inferred)"));
+        Assert.Equal(genres, read.Take(genres.Length));
+        Assert.Equal(inferred ? 1 : 0, read.Count(g => g.StartsWith("thriller", StringComparison.Ordinal)));
     }
 
     /// <summary>HREV3-ASK-A: the planner is shown a question about a title it NAMES, with the name as a reference name.</summary>

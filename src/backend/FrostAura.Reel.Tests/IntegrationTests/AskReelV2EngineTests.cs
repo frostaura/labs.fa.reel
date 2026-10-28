@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -342,6 +343,53 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         Assert.Equal(capitalised ? SearchTurnMode.Answer : SearchTurnMode.Clarify, outcome.Mode);
         Assert.Equal(capitalised ? id : null, answerer.AskedAbout);
+    }
+
+    /// <summary>
+    /// HREV4 (refuter, round 4): the same bar at ANY length. A lower-cased common phrase of several
+    /// words is not a name the user gave: "is it based on a true story?" must not answer about Based on
+    /// a True Story (2017), nor "does it have a happy ending?" about Happy Ending (2023), when nothing is
+    /// on screen and the planner named nothing. The question is asked back, as it was before the
+    /// fallback. The user's own signal (a capitalised or digit-led word that is not the sentence's
+    /// first, or quotes) names the title. Varied: lower-cased, capitalised only by the sentence, title
+    /// case, quoted.
+    /// </summary>
+    [Theory]
+    [InlineData("is it based on a {0} story?", "Based on a {1} Story", false)]
+    [InlineData("does it have a {0} ending?", "{1} Ending", false)]
+    [InlineData("Based on a {0} story, is it?", "Based on a {1} Story", false)]
+    [InlineData("is it based on a {1} Story?", "Based on a {1} Story", true)]
+    [InlineData("does it have a \"{0} ending\"?", "{1} Ending", true)]
+    public async Task A_lower_cased_phrase_of_several_words_names_a_title_only_with_the_users_own_signal(
+        string message, string stored, bool named)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var token = $"zq{Guid.NewGuid():N}"[..10];
+        var capital = "Z" + token[1..];
+        var accountId = await SeedAccountAsync();
+        Guid id;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var title = NewTitle(string.Format(CultureInfo.InvariantCulture, stored, token, capital), 1_000);
+            db.Titles.Add(title);
+            await db.SaveChangesAsync();
+            id = title.Id;
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.ItemQuestion) with { Tools = [new ToolRequest(AskTool.TitleFacts)] });
+        var answerer = new ScriptedAnswerer("It is based on a novel.");
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge(), answerer);
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(CultureInfo.InvariantCulture, message, token, capital)), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(named ? SearchTurnMode.Answer : SearchTurnMode.Clarify, outcome.Mode);
+        Assert.Equal(named ? id : null, answerer.AskedAbout);
+        Assert.Equal(!named, events.Any(e => e.Event == "clarify"));
     }
 
     /// <summary>

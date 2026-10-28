@@ -393,9 +393,25 @@ public static class AskReelIntentSanitizer
     /// <summary>Number words a relative year window may use ("the last ten years").</summary>
     private static readonly IReadOnlyDictionary<string, int> NumberWords = new Dictionary<string, int>(StringComparer.Ordinal)
     {
-        ["one"] = 1, ["two"] = 2, ["three"] = 3, ["four"] = 4, ["five"] = 5, ["six"] = 6, ["seven"] = 7, ["eight"] = 8,
-        ["nine"] = 9, ["ten"] = 10, ["eleven"] = 11, ["twelve"] = 12, ["fifteen"] = 15, ["twenty"] = 20, ["thirty"] = 30,
-        ["forty"] = 40, ["fifty"] = 50, ["couple"] = 2, ["few"] = 3,
+        ["one"] = 1,
+        ["two"] = 2,
+        ["three"] = 3,
+        ["four"] = 4,
+        ["five"] = 5,
+        ["six"] = 6,
+        ["seven"] = 7,
+        ["eight"] = 8,
+        ["nine"] = 9,
+        ["ten"] = 10,
+        ["eleven"] = 11,
+        ["twelve"] = 12,
+        ["fifteen"] = 15,
+        ["twenty"] = 20,
+        ["thirty"] = 30,
+        ["forty"] = 40,
+        ["fifty"] = 50,
+        ["couple"] = 2,
+        ["few"] = 3,
     };
 
     /// <summary>True when <paramref name="words"/> is a mood the lexicon reads and not a genre word ("romantic").</summary>
