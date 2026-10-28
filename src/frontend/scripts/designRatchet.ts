@@ -21,7 +21,7 @@ export const RULES: Record<Rule, string> = {
   nativeSelect: "a native <select> — use the Select primitive",
   hexColour: "a hex colour outside the token and chart modules — use a token class or src/design/chartPalette",
   lowTextOpacity: "text below 80% opacity (text-x/NN) — use text-2 or text-3",
-  outlineWithoutFocus: "outline-none with no focus or focus-visible style beside it",
+  outlineWithoutFocus: "outline-none (or a CSS outline: none) with no focus or focus-visible style for it",
 };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -40,22 +40,62 @@ function count(text: string, pattern: RegExp): number {
   return text.match(pattern)?.length ?? 0;
 }
 
+const OUTLINE_NONE_CLASS = (s: string) => /(?<![\w:-])outline-none\b/.test(s) && !/\bfocus(?:-visible)?:/.test(s);
+const FOCUS_PSEUDO = /:focus(?:-visible|-within)?(?![\w-])/;
+
+/**
+ * Stylesheet rules that remove the outline with nothing to show focus instead (PH2-03: `.fa-range`
+ * set `outline: none` and the Settings sliders looked the same focused as not). A rule counts when
+ * it declares `outline: none` / `outline: 0`, or @applies a bare `outline-none`, and no rule in the
+ * same file restyles one of its selectors under :focus or :focus-visible. A focus rule that itself
+ * only removes the outline counts too: it hides focus rather than showing it.
+ */
+function cssOutlineWithoutFocus(text: string): number {
+  const css = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...css.matchAll(/([^{};]+)\{([^{}]*)\}/g)].map((m) => ({
+    selectors: m[1].split(",").map((s) => s.trim()).filter(Boolean),
+    body: m[2],
+  }));
+  const removesOutline = (body: string) =>
+    /(?:^|[;\s])outline\s*:\s*(?:none|0)\s*(?:!important\s*)?(?:;|$)/.test(body) ||
+    (body.match(/@apply\s[^;]*/g) ?? []).some(OUTLINE_NONE_CLASS);
+  const showsSomething = (body: string) =>
+    body
+      .split(";")
+      .map((d) => d.trim())
+      .some((d) => d !== "" && !/^outline(?:-[\w-]+)?\s*:/.test(d) && !/^@apply\b/.test(d));
+  const focusStyled = rules
+    .filter((r) => showsSomething(r.body))
+    .flatMap((r) => r.selectors.filter((s) => FOCUS_PSEUDO.test(s)));
+  return rules.filter(
+    (r) =>
+      removesOutline(r.body) &&
+      !r.selectors.some((sel) => {
+        if (FOCUS_PSEUDO.test(sel)) return showsSomething(r.body);
+        return focusStyled.some((f) => f.startsWith(sel) && /^:focus/.test(f.slice(sel.length)));
+      }),
+  ).length;
+}
+
 /** The ratchet's counts for one file's text. `file` is relative to the frontend root, with `/`. */
 export function scan(file: string, text: string): Partial<Record<Rule, number>> {
   const counts: Partial<Record<Rule, number>> = {};
   const set = (rule: Rule, n: number) => {
     if (n > 0) counts[rule] = n;
   };
+  // Stylesheets: the outline rule only. Their hex values and @apply opacities are the token layer
+  // itself (tokens.test.ts holds those), not the literals this ratchet retires.
+  if (file.endsWith(".css")) {
+    set("outlineWithoutFocus", cssOutlineWithoutFocus(text));
+    return counts;
+  }
   const isTsx = file.endsWith(".tsx");
   if (isTsx && !file.startsWith("src/components/ui/")) set("rawButton", count(text, /<button\b/g));
   if (isTsx) set("nativeSelect", count(text, /<select\b/g));
   if (!HEX_ALLOWED.has(file)) set("hexColour", count(text, HEX));
   set("lowTextOpacity", count(text, LOW_TEXT_OPACITY));
   const literals = text.match(STRING_LITERAL) ?? [];
-  set(
-    "outlineWithoutFocus",
-    literals.filter((s) => /(?<![\w:-])outline-none\b/.test(s) && !/\bfocus(?:-visible)?:/.test(s)).length,
-  );
+  set("outlineWithoutFocus", literals.filter(OUTLINE_NONE_CLASS).length);
   return counts;
 }
 
@@ -63,9 +103,16 @@ function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) return entry.name === "generated" ? [] : sourceFiles(full);
-    if (!/\.(ts|tsx)$/.test(entry.name) || /\.(test|spec)\.(ts|tsx)$/.test(entry.name)) return [];
+    if (!/\.(ts|tsx|css)$/.test(entry.name) || /\.(test|spec)\.(ts|tsx)$/.test(entry.name)) return [];
     return [full];
   });
+}
+
+const relative = (full: string) => path.relative(FRONTEND, full).split(path.sep).join("/");
+
+/** Every file the ratchet reads, relative to the frontend root: TS, TSX and the stylesheets. */
+export function scannedFiles(): string[] {
+  return sourceFiles(SRC).sort().map(relative);
 }
 
 export type Counts = Record<string, Partial<Record<Rule, number>>>;
@@ -73,9 +120,8 @@ export type Counts = Record<string, Partial<Record<Rule, number>>>;
 /** Every source file's counts, files with nothing to count left out. */
 export function scanTree(): Counts {
   const result: Counts = {};
-  for (const full of sourceFiles(SRC).sort()) {
-    const rel = path.relative(FRONTEND, full).split(path.sep).join("/");
-    const counts = scan(rel, readFileSync(full, "utf8"));
+  for (const rel of scannedFiles()) {
+    const counts = scan(rel, readFileSync(path.join(FRONTEND, rel), "utf8"));
     if (Object.keys(counts).length > 0) result[rel] = counts;
   }
   return result;

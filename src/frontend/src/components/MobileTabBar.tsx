@@ -10,6 +10,8 @@ import { Button } from "./ui/button";
  *
  * Its height is a contract: 3.5rem plus the safe-area inset. Layout pads the shell by that much
  * below md so the footer (and its TMDB licence line) is never under the bar; mobile-nav.spec pins it.
+ * index.css gives `html` a scroll-padding-bottom of the same height (plus room for a focus ring) so a
+ * Tab onto a control near the bottom scrolls it clear of the bar; a11y.spec's slider cases pin that.
  */
 export default function MobileTabBar({
   searchOpen,
