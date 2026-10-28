@@ -828,7 +828,8 @@
       "evidence": "AccuracyQuery builds the pairs from the exposure log, or from scores written before the rating (labelled retro), and corroborates the offline backtest without gating anything. The per-line statements (the 2% share, PostWatchStrip's 'only learns when you tell it', the Lab's band reading) were not traced to their code in this sweep. R1-47 retired 'the same numbers the engine is judged on internally' (promotion reads NDCG@10, which the page does not show).",
       "tests": [
         "src/frontend/src/lib/trackRecordCopy.test.ts::claims the card was on screen only when the exposure log says so",
-        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RetroLoopQueryTests.cs::The_counterfactual_compares_reel_picks_with_the_users_own_finds_from_the_same_weeks"
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/RetroLoopQueryTests.cs::The_counterfactual_compares_reel_picks_with_the_users_own_finds_from_the_same_weeks",
+        "src/frontend/src/lib/trackRecordCopy.test.ts::states the matching band, and the via-Reel ratings left out only when there are any"
       ],
       "claims": [
         {
@@ -850,6 +851,10 @@
         {
           "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
           "text": "a Reel rating with nothing else rated"
+        },
+        {
+          "file": "src/frontend/src/lib/trackRecordCopy.ts",
+          "text": "matched within … …"
         },
         {
           "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
