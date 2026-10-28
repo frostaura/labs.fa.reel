@@ -73,8 +73,8 @@ const ACCURACY_EXPOSURES = {
     medianDaysToWatch: 11,
   },
   counterfactual: [
-    { window: "last365Days", days: 365, viaReelCount: 73, viaReelMeanRating: 5.78, otherCount: 900, otherMeanRating: 6.74, delta: -0.96 },
-    { window: "allTime", days: null, viaReelCount: 73, viaReelMeanRating: 5.78, otherCount: 1971, otherMeanRating: 6.74, delta: -0.96 },
+    { window: "last365Days", days: 365, viaReelCount: 73, viaReelMeanRating: 5.78, otherCount: 900, otherMeanRating: 6.74, delta: -0.96, viaReelUnmatchedCount: 2, matchDays: 14 },
+    { window: "allTime", days: null, viaReelCount: 73, viaReelMeanRating: 5.78, otherCount: 1971, otherMeanRating: 6.74, delta: -0.96, viaReelUnmatchedCount: 2, matchDays: 14 },
   ],
   learnedThisWeek: {
     trainedAt: "2026-09-05T03:00:00Z",
@@ -99,7 +99,7 @@ const POPULATIONS = {
     selectionNote: "You picked which of the shown titles to watch, so these lean towards the ones that looked best to you.",
   },
   counterfactual: {
-    name: "Your ratings of titles that reached you through Reel, beside everything else you rated in the same weeks",
+    name: "Your ratings of titles that reached you through Reel, each beside what else you rated within 14 days of it",
     selectionNote: "Both groups are titles you chose to watch.",
   },
   conversion: {
@@ -236,6 +236,8 @@ test.describe("track record", () => {
     await expect(counterfactual).toContainText("-0.96");
     await expect(counterfactual).toContainText("5.78");
     await expect(counterfactual).toContainText("6.74");
+    await expect(counterfactual.getByTestId("counterfactual-match").first()).toHaveText("· matched within 14 days · 2 unmatched");
+    await expect(counterfactual).toContainText("found on your own in the same weeks");
   });
 
   test("the retrain line claims nothing the server no longer measures (R1-56)", async ({ page }) => {

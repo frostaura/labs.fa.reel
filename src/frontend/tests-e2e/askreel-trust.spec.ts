@@ -80,6 +80,7 @@ test.describe("Ask Reel — WS-2 review round 1", () => {
     const noneFound = page.getByTestId("askreel-none-found");
     await expect(noneFound).toBeVisible();
     await expect(noneFound).toContainText("Reel couldn’t check what it found");
+    await expect(page.getByTestId("askreel-status")).toHaveText("Reel couldn’t check what it found — 1 unchecked title shown.");
     const offers = page.getByTestId("askreel-none-found-relaxations").locator("li");
     await expect(offers).toHaveText(["Without “released 2000 or later”: +19"]);
 

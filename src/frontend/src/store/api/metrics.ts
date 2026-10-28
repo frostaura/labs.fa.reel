@@ -95,6 +95,10 @@ export interface CounterfactualWindow {
   otherCount: number;
   otherMeanRating: number | null;
   delta: number | null;
+  /** Via-Reel ratings with no other rating within `matchDays` of them — left out of both means. */
+  viaReelUnmatchedCount: number;
+  /** The matching band: each via-Reel rating is compared with the user's own ratings within ± this many days. */
+  matchDays: number;
 }
 
 /**

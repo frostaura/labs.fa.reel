@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Auth;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Infrastructure.Persistence;
@@ -23,8 +24,8 @@ public sealed record RetentionPurgeResult(int SyncJobs, int TitleScores, int Ref
 /// than the event; and every score for a title the account has rated or removed as watched, because
 /// the closed-loop accuracy, the calibrator and the retro loop all read "the score before the
 /// event" for those titles, and deleting it would silently drop a pair from the track record.</item>
-/// <item><b>RefreshSessions</b> — expired sessions. A session issued by the QA sign-in
-/// (<see cref="DevLinkSessionMarker"/>) is kept: FD-18 excludes QA traffic from the founder's data
+/// <item><b>RefreshSessions</b> — expired sessions. A QA session — one issued by the QA sign-in,
+/// or rotated from one (<see cref="DevLinkSessionMarker"/>) — is kept: FD-18 excludes QA traffic from the founder's data
 /// by those rows' identity, not by clock.</item>
 /// </list>
 ///
@@ -39,11 +40,10 @@ public static class RetentionPurge
     public static readonly TimeSpan SupersededScoreRetention = TimeSpan.FromDays(14);
 
     /// <summary>
-    /// The user-agent prefix the QA sign-in writes on its sessions. The same string as
-    /// <c>DevEndpoints.DevLinkSessionMarker</c> (a test holds the two equal; the API layer cannot be
-    /// referenced from here).
+    /// The user-agent prefix every QA session carries: <see cref="SessionService.QaSessionMarker"/>,
+    /// which the QA sign-in writes and every refresh of a QA session carries forward.
     /// </summary>
-    public const string DevLinkSessionMarker = "reel-dev-link";
+    public const string DevLinkSessionMarker = SessionService.QaSessionMarker;
 
     private const int BatchSize = 5_000;
 

@@ -247,7 +247,7 @@ export const MODEL_METRICS: ModelMetrics = {
       accuracy: { count: 116, meanPredicted: 6.81, meanActual: 5.78, meanAbsoluteError: 1.94, bias: 0.37, withinOnePointRate: 0.26, pearsonCorrelation: 0.12 },
       worstMisses: [{ titleId: id("m", 2), name: "Cult Comedy", year: 1999, predicted: 5.1, actual: 9, gap: -3.9 }],
     },
-    counterfactual: [{ window: "90d", days: 90, viaReelCount: 9, viaReelMeanRating: 6.4, otherCount: 40, otherMeanRating: 6.1, delta: 0.3 }],
+    counterfactual: [{ window: "90d", days: 90, viaReelCount: 9, viaReelMeanRating: 6.4, otherCount: 40, otherMeanRating: 6.1, delta: 0.3, viaReelUnmatchedCount: 0, matchDays: 14 }],
   },
   activeArtifact: { version: 3, algo: "lightgbm-lambdarank", trainedAt: "2026-10-13T06:00:00Z" },
   runs: [3, 2, 1].map(run),
@@ -327,7 +327,7 @@ export const ACCURACY: AccuracyPayload = {
     { titleId: id("o", 2), name: "Wrong Call", year: 2020, posterPath: null, mediaType: "Show", tmdbId: 8002, predicted: 7.9, actual: 4, surface: null, shownAt: null, ratedAt: "2026-09-10T22:00:00Z", daysToOutcome: null },
   ],
   conversion: { shown: 40, saved: 6, watched: 3, rated: 3, shownToSaved: 0.15, savedToWatched: 0.5, shownToRated: 0.075, medianDaysToWatch: 4 },
-  counterfactual: [{ window: "90d", days: 90, viaReelCount: 9, viaReelMeanRating: 6.4, otherCount: 40, otherMeanRating: 6.1, delta: 0.3 }],
+  counterfactual: [{ window: "90d", days: 90, viaReelCount: 9, viaReelMeanRating: 6.4, otherCount: 40, otherMeanRating: 6.1, delta: 0.3, viaReelUnmatchedCount: 0, matchDays: 14 }],
   learnedThisWeek: { trainedAt: "2026-10-20T06:00:00Z", newRatings: 14, calibrationBias: 0.3, calibrationMae: 1.4, spearman: 0.22, picksChanged: 5 },
   windows: [
     { key: "30d", pairs: 40, sameAs: null },

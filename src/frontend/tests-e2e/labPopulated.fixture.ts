@@ -155,7 +155,9 @@ export const LAB_MODEL_METRICS = {
     "viaReelMeanRating": 6.07,
     "otherCount": 442,
     "otherMeanRating": 6.1,
-    "delta": -0.03
+    "delta": -0.03,
+    "viaReelUnmatchedCount": 0,
+    "matchDays": 14
    },
    {
     "window": "allTime",
@@ -164,7 +166,9 @@ export const LAB_MODEL_METRICS = {
     "viaReelMeanRating": 6.07,
     "otherCount": 2022,
     "otherMeanRating": 6.77,
-    "delta": -0.71
+    "delta": -0.71,
+    "viaReelUnmatchedCount": 0,
+    "matchDays": 14
    }
   ]
  },

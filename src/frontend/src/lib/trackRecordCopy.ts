@@ -1,4 +1,4 @@
-import type { AccuracyPayload, CalibrationBucket } from "../store/api";
+import type { AccuracyPayload, CalibrationBucket, CounterfactualWindow } from "../store/api";
 
 /**
  * The words on the track record. Pure, so they can be tested without a DOM — the repo has no
@@ -148,4 +148,14 @@ export function calibrationChartLabel(bands: CalibrationBucket[]): string {
       `from ${b.n} ${b.n === 1 ? "rating" : "ratings"}`
   );
   return `Where the number lands, Reel's average prediction against your average rating in each band: ${parts.join("; ")}.`;
+}
+
+/**
+ * How a counterfactual row was matched: each via-Reel rating is compared with the user's own
+ * ratings from the same weeks, and one with nothing else rated near it is left out of both means.
+ * The count of those is stated, never folded in silently (HREV4-DESK-02).
+ */
+export function counterfactualMatchLine(w: Pick<CounterfactualWindow, "matchDays" | "viaReelUnmatchedCount">): string {
+  const band = `matched within ${w.matchDays} ${w.matchDays === 1 ? "day" : "days"}`;
+  return w.viaReelUnmatchedCount > 0 ? `${band} · ${w.viaReelUnmatchedCount} unmatched` : band;
 }

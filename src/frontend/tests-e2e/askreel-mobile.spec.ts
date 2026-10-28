@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { SESSION_FOUNDER, mockJson, stubAskReel, stubEventSource } from "./helpers";
+import { SESSION_FOUNDER, askEnd, askPush, mockJson, stubAskReel, stubEventSource, waitForAsk } from "./helpers";
 
 /**
  * Ask Reel on a phone.
@@ -342,6 +342,43 @@ test.describe("Ask Reel on a phone", () => {
       Math.max(...actions.map((a) => a.x + a.width)),
       "an action spills off the right edge of the poster",
     ).toBeLessThanOrEqual(poster.x + poster.width + 0.5);
+  });
+
+  test("a none-found answer with unchecked and held-back titles is announced as what is on screen", async ({ page }) => {
+    // HREV4-PH-01 at 390×844. The status region said "Nothing left that matches" while the card
+    // showed unchecked titles and a tray held back by the bar; both now read the same trays.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockJson(page, "**/api/settings/filters", {
+      excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+      minPredictedRating: 6, languages: [], minCrowdRating: null, minYear: null, maxYear: null,
+    });
+    await bootSearch(page);
+    await page.getByTestId("askreel-composer").fill("samurai films");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "assistant-message", {
+      text: "I couldn't check what I found against what you asked this time.",
+      conflict: false,
+      degraded: false,
+    });
+    await askPush(page, "done", {
+      results: [], streamed: 0, kept: 0, droppedByFloor: 3,
+      belowFloor: [3, 4, 5].map((n) => ({ ...answerCard(n), predictedRating: 5.1 })),
+      nearMiss: [],
+      unchecked: [answerCard(1), answerCard(2)],
+      mode: "NoneFound",
+      supply: null,
+      degraded: ["judge:2/2"],
+      reason: "2 not checked against what you asked — shown below",
+      timingsMs: null,
+      debug: null,
+    });
+    await askEnd(page);
+
+    await expect(page.getByTestId("askreel-none-found")).toContainText("Reel couldn’t check what it found");
+    const status = page.getByTestId("askreel-status");
+    await expect(status).toHaveText("Reel couldn’t check what it found — 2 unchecked titles shown, 3 held back by your 6.0 bar.");
+    await expect(status).not.toContainText("Nothing left");
   });
 
   test("transcript is a log landmark with speaker labels", async ({ page }) => {

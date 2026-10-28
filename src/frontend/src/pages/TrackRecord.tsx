@@ -32,6 +32,7 @@ import {
   WINDOW_LABELS,
   biasNote,
   calibrationChartLabel,
+  counterfactualMatchLine,
   headlineSentence,
   learnedSentence,
   num,
@@ -358,7 +359,7 @@ export default function TrackRecord() {
           <h2 className="fa-section-title mb-1">Because of Reel, vs found yourself</h2>
           <p className="fa-caption text-3 mb-3">
             Your own ratings, split by how the title reached you. A negative gap means Reel steered
-            you toward films you liked less than the ones you found on your own.
+            you toward films you liked less than the ones you found on your own in the same weeks.
           </p>
           <Population note={data.populations?.counterfactual} testId="counterfactual-population" />
           <div className="mb-3" />
@@ -372,6 +373,9 @@ export default function TrackRecord() {
                 {num(w.otherMeanRating)} ({w.otherCount}) ·{" "}
                 <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>
                   {signed(w.delta)}
+                </span>
+                <span className="text-3" data-testid="counterfactual-match">
+                  {" "}· {counterfactualMatchLine(w)}
                 </span>
               </p>
             ))}

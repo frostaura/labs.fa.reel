@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  counterfactualMatchLine,
   calibrationChartLabel,
   offeredWindows,
   singleWindowNote,
@@ -242,5 +243,13 @@ describe("calibrationChartLabel", () => {
 
   it("says when there is nothing to draw", () => {
     expect(calibrationChartLabel([band(5, 0, null, null)])).toBe("Where the number lands: no bands yet.");
+  });
+});
+
+describe("counterfactualMatchLine", () => {
+  it("states the matching band, and the via-Reel ratings left out only when there are any", () => {
+    expect(counterfactualMatchLine({ matchDays: 14, viaReelUnmatchedCount: 0 })).toBe("matched within 14 days");
+    expect(counterfactualMatchLine({ matchDays: 14, viaReelUnmatchedCount: 3 })).toBe("matched within 14 days · 3 unmatched");
+    expect(counterfactualMatchLine({ matchDays: 1, viaReelUnmatchedCount: 1 })).toBe("matched within 1 day · 1 unmatched");
   });
 });

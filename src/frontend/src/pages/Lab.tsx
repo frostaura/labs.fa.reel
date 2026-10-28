@@ -8,6 +8,7 @@ import { Button } from "../components/ui/button";
 import { COARSE_TAP } from "../lib/tapTarget";
 import type { CounterfactualWindow } from "../store/api";
 import ScrollRegion from "../components/lab/ScrollRegion";
+import { counterfactualMatchLine } from "../lib/trackRecordCopy";
 
 function pct(value: number | null | undefined, digits = 0): string {
   return value == null ? "—" : `${(value * 100).toFixed(digits)}%`;
@@ -285,6 +286,9 @@ export default function Lab() {
                         {num(w.otherMeanRating, 2)} ({w.otherCount}) ·{" "}
                         <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>
                           {signed(w.delta, 2)}
+                        </span>
+                        <span className="text-3" data-testid="counterfactual-match">
+                          {" "}· {counterfactualMatchLine(w)}
                         </span>
                       </p>
                     ))}
