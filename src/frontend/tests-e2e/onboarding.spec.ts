@@ -49,6 +49,37 @@ test.describe("onboarding build-up", () => {
     await expect(page.getByTestId("enter-app")).toBeVisible();
   });
 
+  // REV7-A11Y-01 (WCAG 4.1.3): the page renders outside the shell, so the stage line is its own
+  // live region. It must be ONE node that exists before the text changes — a region inserted with
+  // its content is not announced — so the node is tagged on load and must still be the region at
+  // the reveal.
+  test("stage changes land in one persistent polite status region, beside a named progress bar", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, onboarded: false, pipelineStage: "Ingesting" });
+    await mockJson(page, "**/api/sync/status", EMPTY_SYNC);
+    await mockJson(page, "**/api/feed", { generatedAt: null, hero: [], rows: [], lockedRowCount: 0 });
+
+    await page.goto("/onboarding");
+    await waitForStream(page);
+    const region = page.getByRole("status");
+    await expect(region).toHaveCount(1);
+    await expect(region).toHaveAttribute("aria-live", "polite");
+    await expect(region).toHaveAttribute("aria-atomic", "true");
+    await region.evaluate((node) => node.setAttribute("data-first-render", "1"));
+    const bar = page.getByRole("progressbar", { name: "Building your profile" });
+    await expect(bar).toBeVisible();
+    await expect(bar).not.toHaveAttribute("aria-valuenow", /.*/);
+
+    await emit(page, "ingest-progress", { kind: "movies", found: 2842 });
+    await expect(region).toContainText("Pulling in everything");
+    await emit(page, "model-progress", { phase: "Teaching your model", processed: 1400, total: 1782 });
+    await expect(region).toContainText("Teaching your model");
+    await emit(page, "feed-ready", {});
+    await expect(region).toContainText("Your taste DNA is ready.");
+    await expect(region).toHaveAttribute("data-first-render", "1");
+    await expect(page.getByRole("progressbar")).toHaveCount(0);
+  });
+
   test("a late ingest event never regresses the stage", async ({ page }) => {
     await stubEventSource(page);
     await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, onboarded: false, pipelineStage: "Ingesting" });
