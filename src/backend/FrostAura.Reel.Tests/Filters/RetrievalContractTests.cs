@@ -190,6 +190,12 @@ public class RetrievalContractTests
     [InlineData("Switchblade", "witch", false)]
     [InlineData("Lost at Sea Again", "lost at sea", true)]
     [InlineData("Lost at Seaside", "lost at sea", false)]
+    // A space and a hyphen between two words are one separator (the founder's "Scooby doo").
+    [InlineData("Scooby-Doo! Mystery Incorporated", "scooby doo", true)]
+    [InlineData("Scooby Doo and the Ghoul School", "scooby-doo", true)]
+    [InlineData("Spider-Man: Homecoming", "spider man", true)]
+    [InlineData("Scoobydoo", "scooby doo", false)]
+    [InlineData("Doo Wop Shop", "scooby doo", false)]
     [InlineData("Rocky 2.0", "2.0", true)]
     [InlineData("Rocky 210", "2.0", false)]
     [InlineData("", "ninja", false)]
@@ -275,12 +281,23 @@ public class RetrievalContractTests
     public void The_name_arm_pattern_matches_the_label_literally_in_postgres()
     {
         Assert.Equal(@"\mninja(e?s)?\M", HardConstraintFilter.NamePattern("ninja"));
-        Assert.Equal(@"\mlost at sea(e?s)?\M", HardConstraintFilter.NamePattern("lost at sea"));
+        // Between words, a space and a hyphen are one separator: "scooby doo" names Scooby-Doo.
+        Assert.Equal(@"\mlost[- ]at[- ]sea(e?s)?\M", HardConstraintFilter.NamePattern("lost at sea"));
+        Assert.Equal(@"\mscooby[- ]doo(e?s)?\M", HardConstraintFilter.NamePattern("scooby-doo"));
         // Every ARE metacharacter is escaped; letters and digits never are (a backslash before one
         // would start an ARE escape such as \d).
-        Assert.Equal(@"\mc\+\+ \(2\.0\) \[a\|b\] \{x\} \^\$\?\*\\(e?s)?\M", HardConstraintFilter.NamePattern(@"c++ (2.0) [a|b] {x} ^$?*\"));
-        Assert.Equal(@"\mdéjà vu(e?s)?\M", HardConstraintFilter.NamePattern("déjà vu"));
+        Assert.Equal(@"\mc\+\+[- ]\(2\.0\)[- ]\[a\|b\][- ]\{x\}[- ]\^\$\?\*\\(e?s)?\M", HardConstraintFilter.NamePattern(@"c++ (2.0) [a|b] {x} ^$?*\"));
+        Assert.Equal(@"\mdéjà[- ]vu(e?s)?\M", HardConstraintFilter.NamePattern("déjà vu"));
     }
+
+    /// <summary>The name arm's strpos guard is a word every match contains, whichever separator the name uses.</summary>
+    [Theory]
+    [InlineData("scooby doo", "scooby")]
+    [InlineData("scooby-doo", "scooby")]
+    [InlineData("ninja", "ninja")]
+    [InlineData("lost at sea", "lost")]
+    public void The_name_guard_is_the_longest_word_of_the_label(string label, string guard) =>
+        Assert.Equal(guard, HardConstraintFilter.NameGuard(label));
 
     [Fact]
     public void Evidence_names_a_label_found_only_in_the_title_name()

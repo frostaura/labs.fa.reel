@@ -281,6 +281,8 @@ The resume payload:
     "excludedGenres":   ["comedy"],
     "excludedKeywords": ["anime"],
     "minYear": 2000, "maxYear": null,
+    "languages": null,       // v2: asked languages the language rule does not allow, e.g. ["Korean"]
+    "minCrowdRating": null,  // v2: the crowd floor, only when the turn asked for titles rated under it
     "message": "Your conditions exclude comedy and anime, …"
   },
   "removed": 0,          // stored cards the eligibility re-filter dropped, across BOTH lists
@@ -651,11 +653,11 @@ uses it only to know which frames to expect.
 | `conversation` | first, always | `{ id, turnId, sequence, engine: "v2" }` |
 | `phase` | at every stage, and repeated with `heartbeat: true` after 5 s of silence | `{ stage, label }` — `stage` is `planning` · `searching` · `judging` · `answering` · `composing`; `label` is a plain sentence a narration line can show as-is ("Checking 16 titles against your request") |
 | `plan` | once, after planning | `{ act, concepts: ["ninja"], people: [{ name, role: "Director" \| "Cast" \| "Any" }], references: ["T2.3"], media: "Any" \| "Movies" \| "Shows", source: "Llm" \| "LlmRetry" \| "CarriedForward" }` |
-| `conflict` | when the request collides with a standing condition | the v1 shape, unchanged |
+| `conflict` | when the request collides with a standing condition — a genre, keyword or year window it names, a language the account's language rule does not allow ("korean thrillers" under English only), a crowd rating under the account's floor ("rated under 5"), or, after an empty answer, conditions that hold out every unseen title matching it ("Scooby doo" against excluded animation and comedy) | the v1 shape plus `languages` (the asked languages the rule does not allow, by name, or null) and `minCrowdRating` (the floor, only when it collided, else null) |
 | `picks` | once per judge batch that produced at least one pick | `{ batch, cards: [card] }` — append in arrival order; never re-sort. `batch` is the batch's ordinal within its judge pass (a turn that judges TMDB-only titles runs a second pass, numbered from 0 again): informational, never a key |
 | `tray` | once per non-empty tray, after judging | `{ kind: "nearMiss" \| "belowFloor" \| "unchecked", cards: [card] }` — the whole tray in one frame |
 | `none-found` | a search act with no pick | `{ supply }` — the `done.supply` shape |
-| `degraded` | when anything the client is told about did not run as designed: before `answer` / `clarify`, else before `assistant-message` | `{ what: [flag] }` — the `done.degraded` tokens (`plan`, `plan-cause:{code}`, `judge:n/m`, `judge-missing:n/m`, `no-model`, `answer`); never `arm:` notes |
+| `degraded` | when anything the client is told about did not run as designed: before `answer` / `clarify`, else before `assistant-message` | `{ what: [flag] }` — the `done.degraded` tokens (`plan`, `plan-cause:{code}`, `judge:n/m`, `judge-missing:n/m`, `no-model`, `answer`); never `arm:` or `relaxed:` notes (a `relaxed:<words>` note on the row says the request had nothing offerable as asked and was retrieved one rung wider — `ConceptLadder` — with the judge still reading the whole request) |
 | `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — **the turn's reply**: no `assistant-message` follows it. `handle` and `titleId` are null when the answer is about no single title |
 | `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation), an item question names no title, or a pointer ("the third one") resolves to no card — before planning when no answer on screen has that many cards (then no `plan` frame precedes it) | `{ question, options: [string] }` — **the turn's reply**: no `assistant-message` follows it |
 | `assistant-message` | search and refused turns only, once, after the trays and just before `done` | `{ text, degraded }` — the composed reply. A client must accept it before or after the turn's `picks` (the chat UI's own fixtures send it first) |

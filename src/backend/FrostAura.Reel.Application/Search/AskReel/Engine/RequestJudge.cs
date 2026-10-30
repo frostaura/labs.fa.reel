@@ -346,10 +346,32 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
                     "Ask Reel v2 judge batch {Batch} passed {HedgeAfter} s; sending it once more and taking the first answer.",
                     index, HedgeAfter.TotalSeconds),
                 bounded.Token);
-            foreach (var verdict in result.Verdicts.Where(v => v.Judged && titles.Any(u => u.TitleId == v.TitleId)))
+            Keep(result);
+
+            // A model that answered the batch but skipped a title is asked about that title once more
+            // (only the skipped ones, inside the same deadline): one skipped title made a whole turn a
+            // fallback ("Three Billboards…", judge-missing 1/16), and a re-ask costs a sixth of a batch.
+            var skipped = result.Failed ? [] : titles.Where(t => !verdicts.ContainsKey(t.TitleId)).ToList();
+            if (skipped.Count > 0 && deadlineAt - DateTime.UtcNow > TimeSpan.Zero)
             {
-                verdicts[verdict.TitleId] = verdict;
-                cache.Set(Key(input.AccountId, verdict.TitleId, request), verdict, VerdictTtl);
+                logger.LogInformation("Ask Reel v2 judge batch {Batch} skipped {Count} titles; asking about them once more.", index, skipped.Count);
+                try
+                {
+                    Keep(await model.JudgeBatchAsync(input with { Titles = Shuffle(skipped, request) }, bounded.Token));
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // The deadline passed during the re-ask: what the first answer ruled on stands.
+                }
+            }
+
+            void Keep(JudgeBatchResult answer)
+            {
+                foreach (var verdict in answer.Verdicts.Where(v => v.Judged && titles.Any(u => u.TitleId == v.TitleId)))
+                {
+                    verdicts[verdict.TitleId] = verdict;
+                    cache.Set(Key(input.AccountId, verdict.TitleId, request), verdict, VerdictTtl);
+                }
             }
 
             if (result.Failed)

@@ -90,6 +90,65 @@ public class ConceptTruthParityTests(PostgresFixture fixture)
         Assert.Equal(wanted, Names(truth));
     }
 
+    /// <summary>
+    /// Final golden eval, residual 2: the conflict-anime truth was the Trakt tag alone (2 titles), while
+    /// the app reads "anime" as the founder's exclusion of it reads — the tag, animation in Japanese, or
+    /// the stand-in keyword — and counted the 1,700 that rule holds out. The eval's own rules file reads
+    /// anime the same way; the concept truth now does too, held here to the app's reading on every edge.
+    /// </summary>
+    [Fact]
+    public async Task The_anime_truth_is_the_anime_genre_exactly_as_the_app_and_the_exclusion_read_it()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (query, concept, _) = Scenario("conflict-anime");
+        var expected = new Dictionary<string, bool>(StringComparer.Ordinal)
+        {
+            ["tagged anime"] = true,
+            ["animation in Japanese"] = true,
+            ["animated show in Japanese"] = true,
+            ["keyword anime, English"] = true,
+            ["animation in English"] = false,
+            ["Japanese live action"] = false,
+            ["keyword anime girl"] = false,
+            ["no genres, Japanese"] = false,
+        };
+
+        var seeded = new Dictionary<Guid, string>();
+        async Task Seed(string name, MediaType media, string[] genres, string language, string[]? keywords = null)
+        {
+            var id = await SeedTitleAsync(media, genres, keywords ?? [], null);
+            await using var db = fixture.CreateContext(new AccountContext());
+            (await db.Titles.SingleAsync(t => t.Id == id)).Language = language;
+            await db.SaveChangesAsync();
+            seeded[id] = name;
+        }
+
+        await Seed("tagged anime", MediaType.Show, ["anime"], "en");
+        await Seed("animation in Japanese", MediaType.Movie, ["animation", "fantasy"], "ja");
+        await Seed("animated show in Japanese", MediaType.Show, ["animation"], "ja");
+        await Seed("keyword anime, English", MediaType.Movie, ["action"], "en", ["anime"]);
+        await Seed("animation in English", MediaType.Movie, ["animation"], "en");
+        await Seed("Japanese live action", MediaType.Movie, ["drama"], "ja");
+        await Seed("keyword anime girl", MediaType.Movie, ["drama"], "en", ["anime girl"]);
+        await Seed("no genres, Japanese", MediaType.Movie, [], "ja");
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), seeded.Values.Order(StringComparer.Ordinal));
+
+        var ids = seeded.Keys.ToList();
+        var hard = HardConstraints.None with { Concepts = [new ConceptTerm(query, [], [])] };
+        await using var read = fixture.CreateContext(new AccountContext());
+        var app = await HardConstraintFilter.Apply(read.Titles.Where(t => ids.Contains(t.Id)), read, hard).Select(t => t.Id).ToListAsync();
+        var truth = await TruthAsync(concept, ids);
+
+        string Names(IEnumerable<Guid> set) => string.Join(" | ", set.Select(id => seeded[id]).Order(StringComparer.Ordinal));
+        var wanted = string.Join(" | ", expected.Where(e => e.Value).Select(e => e.Key).Order(StringComparer.Ordinal));
+        Assert.Equal(wanted, Names(app));
+        Assert.Equal(wanted, Names(truth));
+    }
+
     /// <summary>The ids of <paramref name="ids"/> the truth file <c>eval/askreel/truth/&lt;key&gt;.sql</c> returns.</summary>
     private async Task<List<Guid>> TruthAsync(string key, IReadOnlyList<Guid> ids)
     {

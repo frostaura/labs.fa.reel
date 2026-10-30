@@ -518,7 +518,6 @@ public class AskReelKeylessRequestTests
     /// conflict frame — instead of searching an unknown topic.
     /// </summary>
     [Theory]
-    [InlineData("sitcoms", "comedy")]
     [InlineData("a good docuseries", "documentary")]
     [InlineData("chick flicks", "romance")]
     [InlineData("nature docs", "documentary")]
@@ -528,6 +527,20 @@ public class AskReelKeylessRequestTests
 
         Assert.Contains(genre, plan.Delta.Genres);
         Assert.DoesNotContain(plan.Delta.Concepts, c => c.Contains(message.Split(' ')[^1], StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// "Sitcoms" is now a genre word of the concept vocabulary itself (a sitcom is a comedy series), so
+    /// the keyless reading keeps it as a topic and the topic READS as the comedy genre — the same
+    /// requirement the conflict detector names, now counted over the comedy shelf too.
+    /// </summary>
+    [Fact]
+    public void Sitcoms_is_a_topic_that_reads_as_the_comedy_genre_with_no_model()
+    {
+        var plan = FallbackPlans.Keyless("sitcoms", ConversationState.Empty, Now);
+        var concepts = plan.Delta.Concepts.Select(c => new ConceptTerm(c, [], [])).Concat(plan.Delta.Genres.Select(g => new ConceptTerm(g, [], [g])));
+
+        Assert.Equal(["comedy"], HardConstraintFilter.Read([.. concepts]).SelectMany(HardConstraintFilter.GenresOf).Distinct());
     }
 
     /// <summary>The credit a model-less person request means (HREV5-RET-02): directing or acting only when its words say so.</summary>

@@ -91,19 +91,41 @@ public sealed record YearRange(int? From, int? To);
 /// conditions never live here: they are the account's <c>ContentFilters</c>, applied by
 /// <see cref="EligibilityQueryBuilder"/> inside every retrieval and every count.
 /// </summary>
+/// <param name="Languages">
+/// Original languages the request requires ("korean thrillers" → Korean), set only by
+/// <see cref="Concepts.ConceptResolver"/> from a concept whose words name a language
+/// (<see cref="Concepts.LanguageWords"/>). A title satisfies it when its original language is one of
+/// them — the same column the standing language rule reads, so a count and its relaxation describe
+/// one shelf. Null (the stored, unresolved state) means none.
+/// </param>
 public sealed record HardConstraints(
     IReadOnlyList<ConceptTerm> Concepts,
     IReadOnlyList<PersonConstraint> People,
     YearRange? Years,
     int? MaxRuntimeMinutes,
-    MediaScope Media)
+    MediaScope Media,
+    IReadOnlyList<LanguageTerm>? Languages = null)
 {
     /// <summary>No requirement at all beyond the standing conditions.</summary>
     public static HardConstraints None { get; } = new([], [], null, null, MediaScope.Any);
 
     /// <summary>True when the request names at least one concept — the case where a candidate needs topical evidence.</summary>
     public bool HasConcepts => Concepts.Count > 0;
+
+    /// <summary>The required languages, never null.</summary>
+    public IReadOnlyList<LanguageTerm> LanguageTerms => Languages ?? [];
+
+    /// <summary>
+    /// True when the request names something countable — a concept, a person or a language — as opposed
+    /// to a mood or an open request, whose "supply" would be the whole catalogue.
+    /// </summary>
+    public bool HasTopic => HasConcepts || People.Count > 0 || LanguageTerms.Count > 0;
 }
+
+/// <summary>A language the request requires, in the user's words, with its ISO 639-1 code as TMDB stores it.</summary>
+/// <param name="UserWords">What the user said ("korean").</param>
+/// <param name="Code">The original-language code a title carries ("ko").</param>
+public sealed record LanguageTerm(string UserWords, string Code);
 
 /// <summary>Which way the user wants an attribute pushed ("funnier", "less violent").</summary>
 public enum AttributeTrend

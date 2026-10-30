@@ -9,6 +9,7 @@ using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -1091,6 +1092,142 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
 
         var path = Path.Combine(dir?.FullName ?? throw new InvalidOperationException("fa.reel.slnx not found above the test assembly."), "eval", "askreel", "truth", "romantic-comedy.sql");
         return string.Join('\n', File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal))).TrimEnd().TrimEnd(';');
+    }
+
+    private static Application.Search.Retrieval.Concepts.ConceptResolver Resolver(
+        Infrastructure.Persistence.ReelDbContext db, params string[] labels)
+    {
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        cache.Set(
+            Application.Search.Retrieval.Concepts.KeywordVocabulary.CacheKey,
+            (IReadOnlyList<Application.Search.Retrieval.Concepts.VocabularyLabel>)[.. labels.Select(l => new Application.Search.Retrieval.Concepts.VocabularyLabel(l, 10))]);
+        return new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+    }
+
+    /// <summary>
+    /// Final golden eval, residual 2: "korean thrillers" was read as a keyword "korean" (tags such as
+    /// "korean war"), so the founder heard 38 titles and "dropping English only unlocks 25" where the
+    /// catalogue holds 1,008 Korean-language titles and the relaxation unlocks 407. A language word is a
+    /// requirement on the title's original language — the column his own rule reads — and only the rest
+    /// of the phrase is a topic; a phrase the catalogue tags as a topic ("korean war") stays one.
+    /// </summary>
+    [Theory]
+    [InlineData("korean thrillers", "ko", "thriller")]
+    [InlineData("korean", "ko", null)]
+    [InlineData("French films", "fr", null)]
+    [InlineData("a japanese horror", "ja", "horror")]
+    public async Task A_language_word_is_read_as_the_titles_language_and_the_rest_as_the_topic(string words, string code, string? genre)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var resolved = await Resolver(db, "korean war").ResolveAsync(HardConstraints.None with { Concepts = [new ConceptTerm(words, [], [])] }, CancellationToken.None);
+
+        Assert.Equal(code, Assert.Single(resolved.LanguageTerms).Code);
+        if (genre is null)
+        {
+            Assert.Empty(resolved.Concepts);
+        }
+        else
+        {
+            Assert.Equal([genre], Assert.Single(resolved.Concepts).Genres);
+        }
+
+        // The topic the catalogue tags is a topic, not a language.
+        var war = await Resolver(db, "korean war").ResolveAsync(HardConstraints.None with { Concepts = [new ConceptTerm("korean war", [], [])] }, CancellationToken.None);
+        Assert.Empty(war.LanguageTerms);
+        Assert.Contains("korean war", Assert.Single(war.Concepts).ExactLabels ?? []);
+    }
+
+    /// <summary>
+    /// The language shelf, counted and relaxed by the account's own rule: Korean titles under English
+    /// only are held out by the language rule alone (its knockout unlocks them), a seen one is seen, and
+    /// an English title carrying the same topic is no part of the shelf. Varied over an account that
+    /// allows every language, where the same titles are simply eligible.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_language_shelf_is_counted_by_the_language_and_relaxed_by_the_language_rule(bool allLanguages)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var topic = UniqueTopic();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.Language, allLanguages ? FilterRuleSet.AllLanguages : "en");
+        var korean = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            korean.Add(await SeedTitleAsync(topic, t => t.Language = "ko"));
+        }
+
+        await SeedTitleAsync(topic);
+        await SeedWatchAsync(accountId, korean[0]);
+        var hard = Concept(topic) with { Languages = [new LanguageTerm("korean", "ko")] };
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var report = await new SupplyReporter(db, new EligibilityQueryBuilder(db)).ReportAsync(accountId, hard, 0, CancellationToken.None);
+
+        Assert.Equal(3, report.MatchingInCatalogue);
+        Assert.Equal(1, report.AlreadySeen);
+        Assert.Equal(allLanguages ? 0 : 2, report.ExcludedByConditions);
+        Assert.Equal(allLanguages ? 2 : 0, report.Eligible);
+        if (allLanguages)
+        {
+            Assert.Empty(report.Knockouts);
+        }
+        else
+        {
+            var knockout = Assert.Single(report.Knockouts);
+            Assert.Equal(FilterKind.Language, knockout.Kind);
+            Assert.Equal(2, knockout.WouldUnlock);
+        }
+    }
+
+    /// <summary>
+    /// Final golden eval, residual 2: "Scooby doo" found no label (TMDB tags no "scooby-doo"), fell back
+    /// to its words one at a time, and counted "doo wop" and "chun doo-hwan" titles: 62 where the
+    /// catalogue names 56. A phrase that stands whole in titles' names — whichever separator the name
+    /// uses — is a title lookup, matched by those names. Varied over the user's spelling.
+    /// </summary>
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("-")]
+    public async Task A_phrase_that_names_titles_is_matched_by_their_names_never_by_its_words_alone(string separator)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var first = $"zq{Guid.NewGuid():N}"[..10];
+        var second = $"dw{Guid.NewGuid():N}"[..10];
+        var named = new[]
+        {
+            await SeedTitleAsync("unrelated", t => { t.Name = $"{first}-{second}! Mystery Inc"; t.Keywords = []; }),
+            await SeedTitleAsync("unrelated", t => { t.Name = $"{first} {second} and the Ghoul School"; t.Keywords = []; }),
+        };
+        var stray = await SeedTitleAsync($"{second} wop");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var resolver = Resolver(db, $"{second} wop");
+        var hard = await resolver.ResolveAsync(
+            HardConstraints.None with { Concepts = [new ConceptTerm($"{first}{separator}{second}", [], [])] }, CancellationToken.None);
+        var matched = await HardConstraintFilter.Apply(db.Titles, db, hard).Select(t => t.Id).ToListAsync();
+
+        Assert.Equal(named.Order(), matched.Order());
+        Assert.DoesNotContain(stray, matched);
     }
 
     private static string UniqueTopic() => $"supplytopic{Guid.NewGuid():N}";

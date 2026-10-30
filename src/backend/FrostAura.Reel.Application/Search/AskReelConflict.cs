@@ -30,6 +30,13 @@ namespace FrostAura.Reel.Application.Search;
 /// a screen whose collision was purely a genre.
 /// </param>
 /// <param name="MaxYear">The standing upper bound, on the same terms as <paramref name="MinYear"/>.</param>
+/// <param name="Languages">
+/// The languages the turn asked for that the account's language rule does not allow ("Korean"), by
+/// name — present only when the language is what collided.
+/// </param>
+/// <param name="MinCrowdRating">
+/// The account's crowd-rating floor — present only when the turn asked for titles rated under it.
+/// </param>
 /// <param name="Message">
 /// The prose the user was shown, verbatim. Every number a client renders travels beside it as raw
 /// JSON so the copy stays the client's to shape — the two year bounds inside this sentence are the
@@ -41,4 +48,6 @@ public sealed record AskReelConflict(
     IReadOnlyList<string> ExcludedKeywords,
     int? MinYear,
     int? MaxYear,
-    string Message);
+    string Message,
+    IReadOnlyList<string>? Languages = null,
+    decimal? MinCrowdRating = null);

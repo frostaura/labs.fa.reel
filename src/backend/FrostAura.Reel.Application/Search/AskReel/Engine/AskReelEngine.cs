@@ -960,6 +960,7 @@ public sealed class AskReelEngine(
     private async Task<TurnOutcome> SearchAsync(Turn turn, PlanResult plan, ConversationState next, CancellationToken ct)
     {
         var accountId = turn.AccountId;
+        next = WithNamedExcludedGenres(turn, next);
         var hard = next.Hard;
         var soft = next.Soft;
 
@@ -977,10 +978,21 @@ public sealed class AskReelEngine(
         next = next with { Soft = soft };
         turn.Like = await LikeFactsAsync(referenceIds, ct);
 
-        await ConflictAsync(turn, hard, ct);
+        var resolved = await ResolvedAsync(turn, hard, ct);
+        await ConflictAsync(turn, hard, resolved, ct);
 
         var query = QueryFor(turn, next);
         var exclude = query.Exclude.ToHashSet();
+
+        // A request with nothing offerable as asked is searched one rung wider, and an empty answer is
+        // reported at the rung where it runs dry (ConceptLadder). The judge still reads the whole message.
+        var (searchHard, reportHard) = await LadderAsync(turn, next, resolved, exclude, ct);
+        var relaxed = !ReferenceEquals(searchHard, resolved);
+        if (relaxed)
+        {
+            query = QueryFor(turn, next with { Hard = searchHard });
+            turn.Note(SearchTurnDegraded.RelaxedPrefix + string.Join('+', ConceptLadder.Dropped(resolved, searchHard)));
+        }
         // Named by every constraint the supply intersects, so a count and its label describe one shelf (HREV2-ASK-01).
         var topic = AskReelTopic.Shelf(hard);
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
@@ -1008,11 +1020,20 @@ public sealed class AskReelEngine(
         }
 
         var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
-        var candidates = await JudgeOrderAsync(
-            turn, db, () => scorer, () => ResolvedAsync(turn, hard, ct), next, Judgeable(retrieval, titles, exclude, next), titles, exclude,
-            turn.Timings, ct);
+        var judgeable = Judgeable(retrieval, titles, exclude, next);
+        if (!resolved.HasTopic)
+        {
+            judgeable = await WithoutUnengagedGenresAsync(turn, judgeable, titles, ct);
+        }
 
-        var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
+        var candidates = await JudgeOrderAsync(
+            turn, db, () => scorer, () => relaxed ? Task.FromResult(searchHard) : ResolvedAsync(turn, hard, ct), next,
+            judgeable, titles, exclude, turn.Timings, ct);
+
+        // A person's credits are listed unjudged only when the person IS the request. A rung relaxed down
+        // to the person is judged like any other: listing those credits would answer "Nolan heist films"
+        // with every unseen Nolan film, the always-fill rung under another name.
+        var personOnly = !relaxed && hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
 
         // TMDB found titles the catalogue does not hold yet (WS-3 CR-2b). They are admitted only where
@@ -1099,10 +1120,18 @@ public sealed class AskReelEngine(
             // (IREV3-SYS-01). Only a request with something to count — a topic or a person — has a
             // supply: a mood request's "supply" would be the whole catalogue, and a reply built on it
             // said "270 unseen titles tagged that way" about a request that named no tag.
-            var countable = hard.HasConcepts || hard.People.Count > 0;
+            var countable = reportHard.HasTopic;
             if (countable && !(personOnly && retrieval.Supply.MatchingInCatalogue == 0))
             {
-                supply = await RecountAsync(turn, hard, Rejected(next), retrieval.Supply, ct);
+                supply = await RecountAsync(turn, reportHard, Rejected(next), retrieval.Supply, ct);
+            }
+
+            // Nothing unseen survives the conditions, and dropping one would bring something back: the
+            // conditions are why the screen is empty, which is a collision even when no word of the
+            // request names a condition ("Scooby doo" against excluded animation and comedy).
+            if (turn.ConflictJson is null && supply is { Eligible: 0, ExcludedByConditions: > 0, Knockouts.Count: > 0 })
+            {
+                await SupplyConflictAsync(turn, supply, ct);
             }
 
             await turn.Emit("none-found", new { supply = LiveSearchExpansionService.SupplyWire(supply) });
@@ -1113,7 +1142,7 @@ public sealed class AskReelEngine(
         // named as shown, never as "checked" (the v1 rules of D4 and IREV2-SYS-01, carried to v2).
         var judgedCount = turn.Verdicts.Count;
         var checkedOfTagged = supply is { ClearingFloor: > 0 } counted
-            ? await CheckedOfTaggedAsync(turn, hard, Rejected(next), counted, ct)
+            ? await CheckedOfTaggedAsync(turn, reportHard, Rejected(next), counted, ct)
             : 0;
 
         var judgeFailed = SearchTurnDegraded.JudgeFailed(string.Join(',', turn.Degraded));
@@ -1126,7 +1155,7 @@ public sealed class AskReelEngine(
         {
             composed = composer.Compose(Context(turn, plan, finalMode) with
             {
-                Topic = topic,
+                Topic = ReferenceEquals(reportHard, resolved) ? topic : AskReelTopic.Shelf(reportHard),
                 Media = hard.Media,
                 Picks = picks.Count(p => p.Verdict.Judged || p.Verdict.FitSource == ResultSource.Facet),
                 UnjudgedPicks = picks.Count(p => !p.Verdict.Judged && p.Verdict.FitSource != ResultSource.Facet),
@@ -1338,6 +1367,60 @@ public sealed class AskReelEngine(
             .Where(c => titles.ContainsKey(c.TitleId) && !exclude.Contains(c.TitleId))
             .Where(c => JudgeableTitle(titles[c.TitleId], legacy, next))
             .ToList();
+    }
+
+    /// <summary>How many titles of a medium the account must have watched or rated before a genre it never touched there counts as unwanted.</summary>
+    internal const int EngagedGenresMinHistory = 50;
+
+    /// <summary>
+    /// <paramref name="candidates"/> without the titles every genre of which the account has never once
+    /// watched or rated on that medium — for a request that names no topic, only on a medium where the
+    /// account's history is deep enough (<see cref="EngagedGenresMinHistory"/>) for "never" to mean
+    /// something, and never a title with no genres.
+    ///
+    /// <para><b>Why.</b> An open request ("something easy to have on in the background") has no topic
+    /// to hold the cards to, so the For-you prediction is the whole taste signal — and on a genre with no
+    /// history at all it is an extrapolation, not evidence: the founder has watched 252 shows and not one
+    /// reality show, yet the model put Jersey Shore and Keeping Up with the Kardashians at 6.8 and they
+    /// filled half his picks. A request that names a topic, a genre or a person is held to what it
+    /// names instead, so this never touches it; it demotes (drops from the judged pool), as an opinion
+    /// must, and never reaches eligibility.</para>
+    /// </summary>
+    private async Task<List<Candidate>> WithoutUnengagedGenresAsync(
+        Turn turn, List<Candidate> candidates, IReadOnlyDictionary<Guid, Title> titles, CancellationToken ct)
+    {
+        var engaged = await EngagedGenresAsync(turn.AccountId, ct);
+        return candidates.Where(c => !titles.TryGetValue(c.TitleId, out var title) || Engaged(engaged, title)).ToList();
+    }
+
+    /// <summary>True unless every genre of <paramref name="title"/> is one the account never touched on its medium (see above).</summary>
+    internal static bool Engaged(IReadOnlyDictionary<MediaType, (int History, IReadOnlySet<string> Genres)> engaged, Title title) =>
+        title.Genres.Length == 0
+        || !engaged.TryGetValue(title.MediaType, out var footprint)
+        || footprint.History < EngagedGenresMinHistory
+        || title.Genres.Any(g => footprint.Genres.Contains(g.Trim().ToLowerInvariant()));
+
+    /// <summary>Per medium: how many titles the account watched or rated, and every genre among them. Cached briefly per account.</summary>
+    private async Task<IReadOnlyDictionary<MediaType, (int History, IReadOnlySet<string> Genres)>> EngagedGenresAsync(Guid accountId, CancellationToken ct)
+    {
+        var key = string.Create(CultureInfo.InvariantCulture, $"askreel:engaged-genres:{accountId:N}");
+        if (cache.TryGetValue<IReadOnlyDictionary<MediaType, (int, IReadOnlySet<string>)>>(key, out var hit) && hit is not null)
+        {
+            return hit;
+        }
+
+        var rows = await db.Titles.AsNoTracking()
+            .Where(t => db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
+                        || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id))
+            .Select(t => new { t.MediaType, t.Genres })
+            .ToListAsync(ct);
+        IReadOnlyDictionary<MediaType, (int, IReadOnlySet<string>)> engaged = rows
+            .GroupBy(r => r.MediaType)
+            .ToDictionary(
+                g => g.Key,
+                g => (g.Count(), (IReadOnlySet<string>)g.SelectMany(r => r.Genres).Select(x => x.Trim().ToLowerInvariant()).ToHashSet(StringComparer.Ordinal)));
+        cache.Set(key, engaged, PersonaTtl);
+        return engaged;
     }
 
     /// <summary>Not a legacy exclusion, and carrying none of the user's own negations as a keyword or a genre.</summary>
@@ -2152,17 +2235,16 @@ public sealed class AskReelEngine(
     /// Forever — described titles retrieval and the judge had both excluded.
     /// </summary>
     private async Task<SupplyReport> RecountAsync(
-        Turn turn, HardConstraints hard, TurnExclusions rejected, SupplyReport discovered, CancellationToken ct)
+        Turn turn, HardConstraints resolved, TurnExclusions rejected, SupplyReport discovered, CancellationToken ct)
     {
-        if (!hard.HasConcepts && hard.People.Count == 0)
+        if (!resolved.HasTopic)
         {
             return discovered;
         }
 
         try
         {
-            return await supplyReporter.ReportAsync(
-                turn.AccountId, await ResolvedAsync(turn, hard, ct), turn.Input.ShownTitleIds, rejected, ct);
+            return await supplyReporter.ReportAsync(turn.AccountId, resolved, turn.Input.ShownTitleIds, rejected, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2178,7 +2260,7 @@ public sealed class AskReelEngine(
     /// count that cannot be made is 0 — the reply then claims no check rather than one it cannot back.
     /// </summary>
     private async Task<int> CheckedOfTaggedAsync(
-        Turn turn, HardConstraints hard, TurnExclusions rejected, SupplyReport supply, CancellationToken ct)
+        Turn turn, HardConstraints resolved, TurnExclusions rejected, SupplyReport supply, CancellationToken ct)
     {
         var ids = turn.Verdicts.Where(v => AskReelGate.Clears(v.Value, turn.Floor)).Select(v => v.Key).ToList();
         if (ids.Count == 0)
@@ -2189,7 +2271,6 @@ public sealed class AskReelEngine(
         try
         {
             var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
-            var resolved = await ResolvedAsync(turn, hard, ct);
             // Eligible as retrieval reads it this turn: the standing conditions and the user's own
             // rejections, so the checked count is taken over the same shelf as the supply's.
             var pool = rejected.IsEmpty
@@ -2208,19 +2289,51 @@ public sealed class AskReelEngine(
         }
     }
 
-    private async Task ConflictAsync(Turn turn, HardConstraints hard, CancellationToken ct)
+    private async Task ConflictAsync(Turn turn, HardConstraints hard, HardConstraints resolved, CancellationToken ct)
     {
         var intent = IntentOf(hard);
         var genres = AskReelStandingFilters.Colliding(turn.Standing.ExcludeGenres, AskReelStandingFilters.AskedFor(turn.Input.Message, intent, null));
         var keywords = AskReelStandingFilters.Colliding(turn.Standing.ExcludeKeywords, AskReelStandingFilters.AskedFor(turn.Input.Message, intent, null));
         var years = AskReelStandingFilters.YearWindowCollides(turn.Standing, intent, null, turn.Input.Message);
-        if (genres.Count == 0 && keywords.Count == 0 && !years)
+        var languages = AskReelStandingFilters.CollidingLanguages(turn.Standing, resolved.LanguageTerms);
+        var crowd = AskReelStandingFilters.CrowdFloorCollides(turn.Standing, turn.Input.Message);
+        if (genres.Count == 0 && keywords.Count == 0 && !years && languages.Count == 0 && !crowd)
         {
             return;
         }
 
-        var message = AskReelStandingFilters.Message(genres, keywords, years, turn.Standing);
-        var conflict = new AskReelConflict(genres, keywords, turn.Standing.MinYear, turn.Standing.MaxYear, message);
+        var message = AskReelStandingFilters.Message(genres, keywords, years, turn.Standing, languages, crowd);
+        await EmitConflictAsync(
+            turn,
+            new AskReelConflict(
+                genres, keywords, turn.Standing.MinYear, turn.Standing.MaxYear, message,
+                languages.Count > 0 ? languages : null, crowd ? turn.Standing.MinCrowdRating : null),
+            ct);
+    }
+
+    /// <summary>
+    /// The collision an empty answer proves (see the call site): every unseen title matching the
+    /// request is held out by the conditions, named by the relaxations that would bring some back.
+    /// </summary>
+    private async Task SupplyConflictAsync(Turn turn, SupplyReport supply, CancellationToken ct)
+    {
+        var genres = supply.Knockouts.Where(k => k.Kind == FilterKind.ExcludeGenre).Select(k => k.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var keywords = supply.Knockouts.Where(k => k.Kind == FilterKind.ExcludeKeyword).Select(k => k.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var crowd = supply.Knockouts.Any(k => k.Kind == FilterKind.MinCrowdRating);
+        var languages = supply.Knockouts.Any(k => k.Kind == FilterKind.Language)
+            ? turn.Standing.EffectiveLanguages.Select(LanguageWords.NameOf).ToList()
+            : null;
+        var message = AskReelStandingFilters.HeldOutMessage([.. supply.Knockouts.Select(k => k.Label)]);
+        await EmitConflictAsync(
+            turn,
+            new AskReelConflict(
+                genres, keywords, turn.Standing.MinYear, turn.Standing.MaxYear, message,
+                languages, crowd ? turn.Standing.MinCrowdRating : null),
+            ct);
+    }
+
+    private async Task EmitConflictAsync(Turn turn, AskReelConflict conflict, CancellationToken ct)
+    {
         turn.ConflictJson = JsonSerializer.Serialize(conflict, WireJson);
         await turn.Emit("conflict", new
         {
@@ -2228,10 +2341,150 @@ public sealed class AskReelEngine(
             excludedKeywords = conflict.ExcludedKeywords,
             minYear = conflict.MinYear,
             maxYear = conflict.MaxYear,
+            languages = conflict.Languages,
+            minCrowdRating = conflict.MinCrowdRating,
             poolSize = await eligibility.EligibleTitles(turn.AccountId).CountAsync(ct),
             catalogueSize = await db.Titles.CountAsync(ct),
             message = conflict.Message,
         });
+    }
+
+    /// <summary>
+    /// <paramref name="next"/> with every genre the user NAMED in this message (a genre word —
+    /// "animated", "documentaries" — never a mood that merely suggests one, like "funny") that the
+    /// account excludes, and that the request does not already require, added as a requirement.
+    ///
+    /// <para><b>Why.</b> The planner is told never to copy a standing condition, and it reads that as
+    /// licence to drop the user's own genre: "animated movies for kids" was planned as kids' films, the
+    /// judge passed Storm Boy as a children's adventure, and an excluded genre's request was answered
+    /// with a pick instead of the honest none-found the conflict notice above it promised. A genre the
+    /// user named is what they asked for; the exclusion then empties it, airtight, and says why.</para>
+    /// </summary>
+    internal static ConversationState WithNamedExcludedGenres(FilterRuleSet standing, ConversationState next, string? message)
+    {
+        if (standing.ExcludeGenres.Count == 0 || string.IsNullOrWhiteSpace(message))
+        {
+            return next;
+        }
+
+        var excluded = standing.ExcludeGenres.Select(g => g.Trim().ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+        var negated = NegationRules(next.UserNegations).Genres.Select(g => g.Trim().ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+        var required = HardConstraintFilter.Read(next.Hard.Concepts).SelectMany(HardConstraintFilter.GenresOf).ToHashSet(StringComparer.Ordinal);
+        var added = new List<ConceptTerm>();
+        foreach (var (word, slugs) in NamedGenres(message))
+        {
+            // A genre word inside a topic the request already holds is that topic's word, not the genre:
+            // "stand-up comedy specials" asks for stand-up comedy, which the comedy exclusion empties anyway.
+            if (next.Hard.Concepts.Any(c => !string.Equals(c.UserWords.Trim(), word, StringComparison.OrdinalIgnoreCase)
+                                            && NegationTerms.MatchesPhrase(c.UserWords, word)))
+            {
+                continue;
+            }
+
+            foreach (var slug in slugs.Where(g => excluded.Contains(g) && !negated.Contains(g) && !required.Contains(g)))
+            {
+                if (next.UserNegations.Any(n => NegationTerms.EqualsAnyForm(n, word) || NegationTerms.EqualsAnyForm(word, n)))
+                {
+                    continue;
+                }
+
+                required.Add(slug);
+                added.Add(new ConceptTerm(word, [], [slug]));
+            }
+        }
+
+        return added.Count == 0 ? next : next with { Hard = next.Hard with { Concepts = [.. next.Hard.Concepts, .. added] } };
+    }
+
+    private static ConversationState WithNamedExcludedGenres(Turn turn, ConversationState next) =>
+        WithNamedExcludedGenres(turn.Standing, next, turn.Input.Message);
+
+    /// <summary>The genre words <paramref name="message"/> says, two-word names first, each with the slugs it names.</summary>
+    private static IEnumerable<(string Word, IReadOnlyList<string> Slugs)> NamedGenres(string message)
+    {
+        var tokens = ConceptResolver.Normalise(message).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (i + 1 < tokens.Length && ConceptSynonyms.GenreWords.TryGetValue($"{tokens[i]} {tokens[i + 1]}", out var pair))
+            {
+                yield return ($"{tokens[i]} {tokens[i + 1]}", pair);
+                i++;
+            }
+            else if (ConceptSynonyms.GenreSlugsOf(tokens[i]) is { } slugs)
+            {
+                yield return (tokens[i], slugs);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The rung to search and the rung an empty answer reports (<see cref="ConceptLadder"/>): each rung
+    /// probed for titles that can become a pick, until one has some.
+    /// </summary>
+    private async Task<(HardConstraints Search, HardConstraints Report)> LadderAsync(
+        Turn turn, ConversationState next, HardConstraints resolved, IReadOnlySet<Guid> exclude, CancellationToken ct)
+    {
+        var rungs = ConceptLadder.Rungs(resolved, turn.Input.Message);
+        if (rungs.Count == 1)
+        {
+            return (resolved, resolved);
+        }
+
+        var offerable = new List<bool>(rungs.Count);
+        using (turn.Timings.Stage(AskStageTimings.RetrieveLadder))
+        {
+            foreach (var rung in rungs)
+            {
+                var has = await OfferableAsync(turn, next, rung, exclude, ct);
+                offerable.Add(has);
+                if (has)
+                {
+                    break;
+                }
+            }
+        }
+
+        var (search, report) = ConceptLadder.Choose(offerable);
+        return (rungs[search], rungs[report]);
+    }
+
+    /// <summary>
+    /// True when <paramref name="rung"/> holds a title this turn could make a pick: inside the account's
+    /// eligibility and the user's own negations, not shown, rejected or referenced, and — with a bar —
+    /// carrying a stored prediction that clears it (the supply's own clearing set, <see cref="SupplyTopUpAsync"/>).
+    /// A probe that cannot be made says yes, so a failure never relaxes a request.
+    /// </summary>
+    private async Task<bool> OfferableAsync(
+        Turn turn, ConversationState next, HardConstraints rung, IReadOnlySet<Guid> exclude, CancellationToken ct)
+    {
+        try
+        {
+            if (turn.Floor > 0m)
+            {
+                var artifact = await db.ModelArtifacts
+                    .Where(a => a.AccountId == turn.AccountId && a.Status == ArtifactStatus.Active)
+                    .OrderByDescending(a => a.Version)
+                    .Select(a => (Guid?)a.Id)
+                    .FirstOrDefaultAsync(ct);
+                return artifact is not { } active
+                    || (await SupplyTopUpAsync(turn, db, next, rung, active, [], exclude, 1, [], ct)).Count > 0;
+            }
+
+            var excluded = exclude.ToList();
+            var ceiling = await eligibility.MaturityCeilingAsync(turn.AccountId, ct);
+            var legacy = (next.LegacyTmdbExclude ?? []).ToHashSet();
+            var sample = await HardConstraintFilter.Apply(eligibility.EligibleTitles(turn.AccountId), db, rung)
+                .Where(t => !excluded.Contains(t.Id))
+                .Take(RequestJudge.MaxJudged)
+                .AsNoTracking()
+                .ToListAsync(ct);
+            return sample.Any(t => EligibilityQueryBuilder.PassesMaturity(t, ceiling) && JudgeableTitle(t, legacy, next));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel v2: a relaxation probe failed; the request is searched as asked.");
+            return true;
+        }
     }
 
     // ── Frames and the outcome ──────────────────────────────────────────────────────────────

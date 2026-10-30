@@ -111,6 +111,13 @@ public sealed class AskStageTimings
     /// </summary>
     public const string RetrieveSpeculative = "retrieve.spec";
 
+    /// <summary>
+    /// Ask Reel v2: walking the relaxation ladder (<see cref="AskReel.Engine.ConceptLadder"/>) — one
+    /// supply probe per rung until a rung has titles that can become picks. Present only on a request
+    /// with something to relax.
+    /// </summary>
+    public const string RetrieveLadder = "retrieve.ladder";
+
     /// <summary>Ask Reel v2: loading the retrieved titles, after retrieval and before judging.</summary>
     public const string RetrieveTitles = "retrieve.titles";
 

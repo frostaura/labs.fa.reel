@@ -130,6 +130,14 @@ public static class AskReelTopic
             words.Add(said);
         }
 
+        // A required language leads the shelf's name, in the user's words: "korean thrillers".
+        var languages = hard.LanguageTerms
+            .Select(l => l.UserWords.Trim())
+            .Where(w => w.Length > 0 && !words.Any(kept => NegationTerms.MatchesPhrase(kept, w)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        words.InsertRange(0, languages);
+
         var people = hard.People.Select(p => p.Name.Trim()).Where(n => n.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var parts = new List<string>(2);
         if (people.Count > 0)

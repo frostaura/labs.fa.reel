@@ -18,7 +18,7 @@ namespace FrostAura.Reel.Application.Search;
 /// policy change. Whether a user may say "ignore my filters just this once" is the founder's call,
 /// not an engineer's — the PIN on the conditions editor exists for a reason.</para>
 /// </summary>
-public static class AskReelStandingFilters
+public static partial class AskReelStandingFilters
 {
     /// <summary>How many values of one kind are named before the summary stops listing them.</summary>
     private const int MaxListed = 8;
@@ -275,6 +275,99 @@ public static class AskReelStandingFilters
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    /// <summary>
+    /// The languages <paramref name="asked"/> names that the account's language rule does not allow,
+    /// by name ("Korean"), in the order asked. Empty when every language is allowed.
+    /// </summary>
+    public static IReadOnlyList<string> CollidingLanguages(FilterRuleSet rules, IReadOnlyList<Retrieval.LanguageTerm> asked)
+    {
+        ArgumentNullException.ThrowIfNull(rules);
+        ArgumentNullException.ThrowIfNull(asked);
+        if (asked.Count == 0 || rules.AllLanguagesAllowed)
+        {
+            return [];
+        }
+
+        var allowed = rules.EffectiveLanguages.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return asked
+            .Where(l => !allowed.Contains(l.Code))
+            .Select(l => Retrieval.Concepts.LanguageWords.NameOf(l.Code))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The crowd rating the raw sentence asks to stay under ("rated under 5", "a rating below 4.5",
+    /// "scored less than 6"), or null when it asks for none.
+    /// </summary>
+    internal static decimal? AskedCrowdCeiling(string? rawQuery)
+    {
+        if (string.IsNullOrWhiteSpace(rawQuery))
+        {
+            return null;
+        }
+
+        var match = CrowdCeiling().Match(rawQuery);
+        return match.Success && decimal.TryParse(match.Groups["n"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : null;
+    }
+
+    /// <summary>
+    /// True when the turn asks for titles rated under a number the account's crowd floor does not
+    /// reach below — "so-bad-it's-good movies rated under 5" against "crowd rating at least 6.0" can only
+    /// ever come back empty, and the user is owed the reason.
+    /// </summary>
+    public static bool CrowdFloorCollides(FilterRuleSet rules, string? rawQuery) =>
+        rules.MinCrowdRating is { } floor && AskedCrowdCeiling(rawQuery) is { } ceiling && ceiling <= floor;
+
+    [System.Text.RegularExpressions.GeneratedRegex(
+        @"\b(?:rated|rating|ratings|scored|scores?|scoring)\s+(?:of\s+)?(?:under|below|less\s+than|lower\s+than|<)\s*(?<n>\d+(?:\.\d+)?)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex CrowdCeiling();
+
+    /// <summary>
+    /// The collision message with the language and crowd-floor halves (<see cref="CollidingLanguages"/>,
+    /// <see cref="CrowdFloorCollides"/>) added to <see cref="Message(IReadOnlyList{string}, IReadOnlyList{string}, bool, FilterRuleSet)"/>'s.
+    /// </summary>
+    public static string Message(
+        IReadOnlyList<string> excludedGenres, IReadOnlyList<string> excludedKeywords, bool yearCollides,
+        FilterRuleSet rules, IReadOnlyList<string> languages, bool crowdCollides)
+    {
+        ArgumentNullException.ThrowIfNull(rules);
+        ArgumentNullException.ThrowIfNull(languages);
+        var parts = new List<string>(3);
+        if (languages.Count > 0)
+        {
+            var allowed = rules.EffectiveLanguages.Select(Retrieval.Concepts.LanguageWords.NameOf).ToList();
+            parts.Add($"Your conditions only allow titles in {Humanised(allowed)}, so nothing in {HumanisedOr([.. languages])} can appear.");
+        }
+
+        if (crowdCollides && rules.MinCrowdRating is { } floor)
+        {
+            parts.Add(FormattableString.Invariant($"Your conditions only allow titles with a crowd rating of at least {floor:0.0}, so nothing rated under that can appear."));
+        }
+
+        if (excludedGenres.Count + excludedKeywords.Count > 0 || yearCollides || parts.Count == 0)
+        {
+            var rest = Message(excludedGenres, excludedKeywords, yearCollides, rules);
+            return parts.Count == 0 ? rest : $"{string.Join(" ", parts)} {rest}";
+        }
+
+        parts.Add("You can change that under Conditions.");
+        return string.Join(" ", parts);
+    }
+
+    /// <summary>
+    /// The collision message when nothing the turn SAID names a condition, but the conditions hold out
+    /// every unseen title that matches it — named by the relaxations that would bring some back.
+    /// </summary>
+    public static string HeldOutMessage(IReadOnlyList<string> ruleLabels)
+    {
+        ArgumentNullException.ThrowIfNull(ruleLabels);
+        return $"Your conditions hold out every unseen title that matches ({Humanised(ruleLabels)}). You can change that under Conditions.";
     }
 
     /// <summary>Whole word tokens of a raw query, lowercased, punctuation-split, debris dropped.</summary>

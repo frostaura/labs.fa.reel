@@ -1449,6 +1449,55 @@
           "text": "Nothing else shares a person, keyword or theme with … closely enough (…)…"
         }
       ]
+    },
+    {
+      "id": "ask-reel-language-collision",
+      "owner": "WS-2",
+      "verdict": "true",
+      "assertion": "A request for a language the account's language rule does not allow is told which languages its conditions allow and that nothing in the asked language can appear.",
+      "evidence": "The language is read from the user's words into a requirement on Titles.Language (LanguageWords, ConceptResolver) and compared with FilterRuleSet.EffectiveLanguages, the rule eligibility applies; the supply truth's Language knockout counts the same shelf.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelV2AnswerQualityTests.cs::A_language_the_rule_does_not_allow_collides_and_is_named",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelV2EngineTests.cs::A_language_the_account_does_not_allow_is_a_named_collision_and_one_it_allows_is_searched"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions only allow titles in …, so nothing in … can appear."
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-crowd-floor-collision",
+      "owner": "WS-2",
+      "verdict": "true",
+      "assertion": "A request for titles rated under the account's crowd-rating floor is told the floor and that nothing rated under it can appear.",
+      "evidence": "AskReelStandingFilters.CrowdFloorCollides compares the number the user asked to stay under with FilterRuleSet.MinCrowdRating, the floor eligibility applies.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/Search/AskReelV2AnswerQualityTests.cs::Asking_for_titles_rated_under_the_crowd_floor_collides"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions only allow titles with a crowd rating of at least …, so nothing rated under that can appear."
+        }
+      ]
+    },
+    {
+      "id": "ask-reel-held-out-collision",
+      "owner": "WS-2",
+      "verdict": "true",
+      "assertion": "An empty answer whose every unseen match is held out by the account's conditions names the conditions whose relaxation would bring titles back.",
+      "evidence": "Emitted only when the turn's SupplyReport has Eligible 0, ExcludedByConditions > 0 and at least one knockout; the rules named are the report's knockouts, counted through EligibilityQueryBuilder and held to the SQL supply truth (SupplyTruthParityTests).",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/AskReelV2EngineTests.cs::Conditions_that_hold_out_every_unseen_match_are_a_named_collision"
+      ],
+      "claims": [
+        {
+          "file": "src/backend/FrostAura.Reel.Application/Search/AskReelStandingFilters.cs",
+          "text": "Your conditions hold out every unseen title that matches (…). You can change that under Conditions."
+        }
+      ]
     }
   ],
   "notClaims": [

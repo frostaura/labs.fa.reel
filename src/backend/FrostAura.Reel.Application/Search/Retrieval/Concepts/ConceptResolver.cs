@@ -122,6 +122,7 @@ public sealed partial class ConceptResolver(
         }
 
         var resolved = new List<ConceptTerm>(hard.Concepts.Count);
+        var languages = hard.LanguageTerms.ToList();
         foreach (var concept in hard.Concepts)
         {
             if (IsResolved(concept))
@@ -130,11 +131,66 @@ public sealed partial class ConceptResolver(
                 continue;
             }
 
-            var resolution = await ResolveCoreAsync(concept, ct);
+            // "korean thrillers" requires a Korean-language title that is a thriller: the language word
+            // is a requirement on the title's language, and only the rest is a topic (LanguageWords).
+            var current = concept;
+            if (await LanguageOfAsync(concept, ct) is { } language)
+            {
+                if (!languages.Any(l => l.Code == language.Language.Code))
+                {
+                    languages.Add(language.Language);
+                }
+
+                if (language.Rest is not { } rest)
+                {
+                    continue;
+                }
+
+                current = rest;
+            }
+
+            var resolution = await ResolveCoreAsync(current, ct);
             resolved.AddRange(Split(resolution).Select(Mark));
         }
 
-        return hard with { Concepts = Merge(resolved) };
+        return hard with { Concepts = Merge(resolved), Languages = languages.Count == 0 ? hard.Languages : languages };
+    }
+
+    /// <summary>
+    /// The language <paramref name="concept"/>'s words require, and the topic left beside it — or null
+    /// when they name no language. A single language word is the language ("korean", "french films");
+    /// a phrase is read as a language plus the rest only when the catalogue does not tag the phrase as a
+    /// topic of its own: "korean war" and "french revolution" are history, not languages.
+    /// </summary>
+    private async Task<LanguageSplit?> LanguageOfAsync(ConceptTerm concept, CancellationToken ct)
+    {
+        if (concept.Genres.Count > 0 || concept.StandInWords)
+        {
+            return null;
+        }
+
+        var words = Normalise(concept.UserWords);
+        var tokens = words.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var index = Array.FindIndex(tokens, t => LanguageWords.CodeOf(t) is not null);
+        if (index < 0)
+        {
+            return null;
+        }
+
+        var language = new LanguageTerm(tokens[index], LanguageWords.CodeOf(tokens[index])!);
+        if (tokens.Length == 1)
+        {
+            return new LanguageSplit(language, null);
+        }
+
+        var labels = await vocabulary.LabelsAsync(ct);
+        if (KeywordVocabulary.Expand(labels, words).Any())
+        {
+            return null;
+        }
+
+        var rest = string.Join(' ', tokens.Where((_, i) => i != index).Where(t => !PhraseFiller.Contains(t) && !LeadingFiller.Contains(t)));
+        return new LanguageSplit(language, rest.Length == 0 ? null : new ConceptTerm(rest, [], []));
     }
 
     /// <summary>
@@ -389,7 +445,19 @@ public sealed partial class ConceptResolver(
         // genre is the genre here too, never a stem — "romantic heist" is a heist that is a romance
         // (only exact genre words: "wars" in "star wars" is not the war genre).
         var lookFor = genres.Count == 0 ? words : string.Empty;
-        if (exact.Count == 0 && genres.Count == 0 && words.Contains(' ', StringComparison.Ordinal))
+
+        // A phrase that stands whole in titles' NAMES is a title lookup ("scooby doo" → Scooby-Doo,
+        // whichever separator the name uses): its matches are those names, never its words one at a
+        // time — split, "doo" reached "doo wop" and "chun doo-hwan" and counted six unrelated titles as
+        // Scooby-Doo — nor the labels nearest the phrase.
+        var namesTitles = exact.Count == 0 && genres.Count == 0 && words.IndexOfAny([' ', '-']) > 0
+            && await NamesTitlesAsync(words, ct);
+        if (namesTitles)
+        {
+            lookFor = string.Empty;
+        }
+
+        if (!namesTitles && exact.Count == 0 && genres.Count == 0 && words.Contains(' ', StringComparison.Ordinal))
         {
             var named = GenreWordsIn(words, pluralAware: false, out var rest);
             foreach (var word in rest.Where(w => (w.Length >= 3 || ConceptSynonyms.Groups.Any(g => g.Contains(w, StringComparer.Ordinal)))
@@ -443,7 +511,7 @@ public sealed partial class ConceptResolver(
         var pureGenre = genres.Count > 0 && (genreSeeds.Count == seeds.Count || (lookFor.Length == 0 && phraseGenres.Count > 0));
         var term = new ConceptTerm(
             concept.UserWords,
-            finalStems.Count > 0 ? finalStems : pureGenre ? [] : [lookFor.Length > 0 ? lookFor : words],
+            finalStems.Count > 0 ? finalStems : pureGenre ? [] : [namesTitles || lookFor.Length == 0 ? words : lookFor],
             [.. genres.Distinct(StringComparer.Ordinal)],
             exactLabels,
             concept.StandInWords);
@@ -505,6 +573,14 @@ public sealed partial class ConceptResolver(
         return string.Join(' ', tokens);
     }
 
+    /// <summary>True when some title's name carries <paramref name="phrase"/> as a whole phrase (<see cref="HardConstraintFilter.NamePattern"/>).</summary>
+    private async Task<bool> NamesTitlesAsync(string phrase, CancellationToken ct)
+    {
+        var guard = HardConstraintFilter.NameGuard(phrase);
+        var pattern = HardConstraintFilter.NamePattern(phrase);
+        return await db.Titles.AnyAsync(t => t.Name.ToLower().Contains(guard) && Regex.IsMatch(t.Name, pattern, RegexOptions.IgnoreCase), ct);
+    }
+
     private static List<string> ReachedOrSingular(IReadOnlyList<VocabularyLabel> labels, string stem, out string used)
     {
         used = stem;
@@ -555,6 +631,9 @@ public sealed partial class ConceptResolver(
 
     [GeneratedRegex(@"[^\p{L}\p{N}&'\-]+", RegexOptions.CultureInvariant)]
     private static partial Regex NonWord();
+
+    /// <summary>A language a concept's words require, and the topic left beside it (null: none).</summary>
+    private sealed record LanguageSplit(LanguageTerm Language, ConceptTerm? Rest);
 
     /// <summary>A word of a phrase that names genres ("romantic" → romance).</summary>
     private sealed record GenreWord(string Word, IReadOnlyList<string> Slugs);

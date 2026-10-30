@@ -221,6 +221,14 @@ public static class SearchTurnDegraded
     /// </summary>
     public const string ArmPrefix = "arm:";
 
+    /// <summary>
+    /// Prefix of a stored-only note (<c>relaxed:big action</c>): the request had nothing offerable as
+    /// asked, so it was searched without the words named — a rung of the relaxation ladder, with the
+    /// judge still reading the whole message. Stored on the row only, like <see cref="ArmPrefix"/>: the
+    /// cards are still exactly what the judge says of them, so it is not a degraded answer.
+    /// </summary>
+    public const string RelaxedPrefix = "relaxed:";
+
     /// <summary>The value of <see cref="SearchTurn.ReasoningEffort"/> when no effort parameter was sent.</summary>
     public const string ProviderDefaultEffort = "provider-default";
 

@@ -180,6 +180,12 @@ public static class HardConstraintFilter
             query = query.Where(ConceptPredicate(concept));
         }
 
+        // A required language reads the column the standing language rule reads (Concepts.LanguageWords).
+        if (LanguageCodes(hard) is { Length: > 0 } codes)
+        {
+            query = query.Where(t => t.Language != null && codes.Contains(t.Language));
+        }
+
         foreach (var person in hard.People)
         {
             query = query.Where(PersonPredicate(db, person));
@@ -242,6 +248,11 @@ public static class HardConstraintFilter
             }
         }
 
+        if (LanguageCodes(hard) is { Length: > 0 } codes && title.Language is { } language && codes.Contains(language))
+        {
+            evidence.Add($"language:{language}");
+        }
+
         // Only titles that passed the person predicate are ever passed in, so each credited person is
         // evidence by construction; the role is the one the request asked about.
         foreach (var person in hard.People)
@@ -256,9 +267,24 @@ public static class HardConstraintFilter
     /// The Postgres (ARE) pattern the name arm matches <paramref name="label"/> with: the label as a
     /// whole word or phrase, optionally pluralised (<c>\mninja(e?s)?\M</c> matches "3 Ninjas" and
     /// "Alien vs. Ninja", not "Ninjababy" or "Ninjago"). Regex metacharacters in the label are escaped,
-    /// so a label is always matched literally.
+    /// so a label is always matched literally — except that a space and a hyphen between two words read
+    /// as one separator: "scooby doo" names "Scooby-Doo" and "spider man" names "Spider-Man". Read
+    /// literally, the founder's "Scooby doo" found no title by its name, fell back to the words one at a
+    /// time and counted "doo wop" and "chun doo-hwan" titles as Scooby-Doo (62 where the catalogue has 56).
     /// </summary>
-    internal static string NamePattern(string label) => $@"\m{EscapeLiteral(label)}(e?s)?\M";
+    internal static string NamePattern(string label) =>
+        $@"\m{string.Join("[- ]", SeparatedWords(label).Select(EscapeLiteral))}(e?s)?\M";
+
+    /// <summary>
+    /// The longest word of <paramref name="label"/>: a literal every name match contains, whichever
+    /// separator the name uses, so it guards the name regex the way the whole label used to.
+    /// </summary>
+    internal static string NameGuard(string label) =>
+        SeparatedWords(label).OrderByDescending(w => w.Length).FirstOrDefault() ?? label;
+
+    /// <summary>The words of a label split on its spaces and hyphens.</summary>
+    private static string[] SeparatedWords(string label) =>
+        label.Split([' ', '-'], StringSplitOptions.RemoveEmptyEntries) is { Length: > 0 } words ? words : [label];
 
     /// <summary>
     /// The Postgres (ARE) pattern the keyword arm matches <paramref name="label"/> with: the label
@@ -303,7 +329,7 @@ public static class HardConstraintFilter
         && label.Length > 0
         && Regex.IsMatch(
             name,
-            $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(label)}(e?s)?(?![\p{{L}}\p{{N}}_])",
+            $@"(?<![\p{{L}}\p{{N}}_]){string.Join("[- ]", SeparatedWords(label).Select(Regex.Escape))}(e?s)?(?![\p{{L}}\p{{N}}_])",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
             TimeSpan.FromMilliseconds(100));
 
@@ -340,7 +366,7 @@ public static class HardConstraintFilter
         // The name arm reads only the user's own words: a synonym is a keyword claim (NameLabelsOf).
         foreach (var label in NameLabelsOf(concept))
         {
-            var value = label;
+            var value = NameGuard(label);
             var namePattern = NamePattern(label);
             arms.Add(t => t.Name.ToLower().Contains(value) && Regex.IsMatch(t.Name, namePattern, RegexOptions.IgnoreCase));
         }
@@ -445,6 +471,10 @@ public static class HardConstraintFilter
             && (anyRole || c.Role == role)
             && db.Persons.Any(p => p.Id == c.PersonId && p.Name.ToLower() == name));
     }
+
+    /// <summary>The distinct language codes <paramref name="hard"/> requires, lower case.</summary>
+    public static string[] LanguageCodes(HardConstraints hard) =>
+        [.. hard.LanguageTerms.Select(l => l.Code.Trim().ToLowerInvariant()).Where(c => c.Length > 0).Distinct(StringComparer.Ordinal)];
 
     /// <summary>
     /// Escapes the characters a Postgres advanced regular expression treats as special. Only ASCII

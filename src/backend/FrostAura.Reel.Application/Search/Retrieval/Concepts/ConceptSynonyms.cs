@@ -73,6 +73,10 @@ public static class ConceptSynonyms
             ["anime"] = ["anime"],
             ["comedy"] = ["comedy"],
             ["comedies"] = ["comedy"],
+            // A sitcom is a comedy series: read as a keyword stem, "sitcoms" counted the 312 shows TMDB
+            // happens to tag "sitcom" where the comedy shelf the founder's exclusion empties holds 2,302.
+            // The conflict detector already read it as comedy (SearchVocabulary); now the count does too.
+            ["sitcom"] = ["comedy"],
             ["crime"] = ["crime"],
             ["documentary"] = ["documentary"],
             ["documentaries"] = ["documentary"],

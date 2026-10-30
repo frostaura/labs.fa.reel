@@ -753,16 +753,71 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
-    /// HREV2-ASK-01: a request with two concepts is counted over BOTH, and the reply named only the
-    /// first — "Of the 145 romantic titles in the catalogue" about a romance-and-comedy count. Here
-    /// five titles carry the first concept and three of them the second too; the reply counts three
-    /// and names both. Varied over the order the plan lists the concepts in, which changed the
-    /// number the founder was told for the same question.
+    /// HREV2-ASK-01: a request with two concepts is counted over BOTH when that is where it runs dry,
+    /// and the reply names both — "Of the 145 romantic titles in the catalogue" once described a
+    /// romance-and-comedy count. Here five titles carry the first concept and three of them the second
+    /// too; the two not carrying the second are unseen but judged no, so the first concept alone is not
+    /// empty and the intersection is what the answer reports. Varied over the order the plan lists the
+    /// concepts in, which changed the number the founder was told for the same question.
     /// </summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task A_none_found_reply_over_two_concepts_names_both_and_counts_their_intersection(bool reversed)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var first = Topic();
+        var second = Topic();
+        var accountId = await SeedAccountAsync();
+        var both = await SeedTopicalAsync(first, ("V2 Yes", 3));
+        await SeedTopicalAsync(first, ("V2 No", 2));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            foreach (var title in await db.Titles.Where(t => both.Contains(t.Id)).ToListAsync())
+            {
+                title.Keywords = [first, second];
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await MarkSeenAsync(accountId, both);
+        string[] concepts = reversed ? [second, first] : [first, second];
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = concepts }));
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input($"{first} {second} movies"), accountId, emit, CancellationToken.None);
+
+        var shelf = string.Join(' ', concepts);
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(3, Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply").GetProperty("alreadySeen").GetInt32());
+        Assert.StartsWith(
+            $"There are no {shelf} movies left for you. Of the 3 {shelf} movies in the catalogue with at least ",
+            outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Contains("you've seen 3", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Contains(events, e => e.Event == "phase" && e.Data.ToString().Contains($"Searching the catalogue for {shelf}", StringComparison.Ordinal));
+
+        // The wider rung was searched (the first concept alone), and the judge still read BOTH words.
+        Assert.True(judge.Batches > 0);
+        Assert.All(judge.Requests, r => Assert.Contains($"Requires: {string.Join(", ", concepts)}", r, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Residual 1/2 of the final golden eval: a request is reported where it runs dry. When the first
+    /// concept the user said is ITSELF empty — every title carrying it seen — the answer counts that
+    /// shelf (five seen), not the narrower intersection (three), so the numbers describe the level at
+    /// which the request has nothing left, exactly as the SQL supply truth counts it. Varied over the
+    /// plan's order: the user's words decide which concept anchors the request, never the plan's list.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_none_found_reply_over_two_concepts_reports_the_first_when_it_is_empty_on_its_own(bool reversed)
     {
         if (!Fixture.Available)
         {
@@ -791,14 +846,11 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         var outcome = await engine.StreamAsync(Input($"{first} {second} movies"), accountId, emit, CancellationToken.None);
 
-        var shelf = string.Join(' ', concepts);
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
-        Assert.Equal(3, Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply").GetProperty("alreadySeen").GetInt32());
+        Assert.Equal(5, Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply").GetProperty("alreadySeen").GetInt32());
         Assert.StartsWith(
-            $"There are no {shelf} movies left for you. Of the 3 {shelf} movies in the catalogue with at least ",
+            $"There are no {first} movies left for you. Of the 5 {first} movies in the catalogue with at least ",
             outcome.AssistantText, StringComparison.Ordinal);
-        Assert.Contains("you've seen 3", outcome.AssistantText, StringComparison.Ordinal);
-        Assert.Contains(events, e => e.Event == "phase" && e.Data.ToString().Contains($"Searching the catalogue for {shelf}", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -1811,9 +1863,13 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         var conflict = Assert.Single(events, e => e.Event == "conflict").Data;
         Assert.Equal([genre], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        // Read as the predicate reads the stored state (HardConstraintFilter.Read): "sitcoms" is a word of
+        // the concept vocabulary's own genre table, so it may stand as a topic that READS as comedy.
         var query = Assert.Single(queries);
-        Assert.Contains(query.Hard.Concepts, c => c.Genres.Contains(genre, StringComparer.Ordinal));
-        Assert.Contains(ConversationStateJson.Read(outcome.ConversationStateJson)!.Hard.Concepts, c => c.Genres.Contains(genre, StringComparer.Ordinal));
+        Assert.Contains(HardConstraintFilter.Read(query.Hard.Concepts), c => c.Genres.Contains(genre, StringComparer.Ordinal));
+        Assert.Contains(
+            HardConstraintFilter.Read(ConversationStateJson.Read(outcome.ConversationStateJson)!.Hard.Concepts),
+            c => c.Genres.Contains(genre, StringComparer.Ordinal));
         Assert.DoesNotContain("Nothing I found matches", outcome.AssistantText, StringComparison.Ordinal);
     }
 
@@ -2573,6 +2629,251 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         {
             Assert.Equal(TurnComposer.ChitchatReply, outcome.AssistantText);
         }
+    }
+
+    // ── Final golden eval: answer quality ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Residual 1: a word the planner made a requirement it never was ("big action", "isolation and
+    /// silence") emptied the screen while the topic itself had titles clearing the bar. With nothing
+    /// offerable as asked, the request is searched one rung wider — and the judge still reads both
+    /// words. Varied over a catalogue where the request AS ASKED has a title: then nothing is relaxed.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_request_with_nothing_offerable_as_asked_is_searched_one_rung_wider_and_judged_as_asked(bool conjunctionExists)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var descriptor = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 4));
+        if (conjunctionExists)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            (await db.Titles.SingleAsync(t => t.Id == ids[0])).Keywords = [topic, descriptor];
+            await db.SaveChangesAsync();
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic, descriptor] }));
+        var judge = new NameJudge();
+        var (engine, _, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input($"{topic} movies about {descriptor}"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.Equal(conjunctionExists ? [ids[0]] : ids.Order().ToList(), outcome.Cards.Select(c => c.TitleId).Order().ToList());
+        Assert.All(judge.Requests, r => Assert.Contains($"Requires: {topic}, {descriptor}", r, StringComparison.Ordinal));
+        Assert.Equal(!conjunctionExists, (outcome.DegradedFlags ?? string.Empty).Contains($"relaxed:{descriptor}", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Residual 1 (a person's genre): "Jason Statham action movies" with every Statham film seen is
+    /// empty at Statham, and the answer counts his films — not only those also tagged action — as the
+    /// SQL truth does. The relaxed person rung is judged, never listed unjudged.
+    /// </summary>
+    [Fact]
+    public async Task A_person_request_that_runs_dry_at_the_person_reports_the_person()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var director = $"Director {Guid.NewGuid():N}"[..20];
+        var credited = await SeedCreditedAsync(director, 4);
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            foreach (var title in await db.Titles.Where(t => credited.Take(2).Contains(t.Id)).ToListAsync())
+            {
+                title.Keywords = [topic];
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await MarkSeenAsync(accountId, credited);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with
+        {
+            Concepts = [topic],
+            People = [new PersonConstraint(director, null, PersonRole.Director)],
+        }));
+        var (engine, _, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input($"{director} {topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.StartsWith(
+            $"There are no {director} movies left for you. Of the 4 {director} movies in the catalogue with at least ",
+            outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Residuals 2 and 3: "korean thrillers" under English only named no conflict and counted keyword
+    /// tags. The language is a requirement on the title's language, so the collision is named and the
+    /// answer is the honest none-found with the language relaxation. Varied over an account that allows
+    /// every language: the Korean titles are the picks, and the English one carrying the same topic is not.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_language_the_account_does_not_allow_is_a_named_collision_and_one_it_allows_is_searched(bool allLanguages)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.Language, allLanguages ? FilterRuleSet.AllLanguages : "en");
+        var korean = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        var english = await SeedTopicalAsync(topic, ("V2 Yes", 1));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            foreach (var title in await db.Titles.Where(t => korean.Contains(t.Id)).ToListAsync())
+            {
+                title.Language = "ko";
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await using var resolverDb = Fixture.CreateContext(new AccountContext());
+        var resolver = RealResolver(resolverDb, topic);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = ["korean", topic] }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge(), resolver: resolver, wrap: r => new ResolvingRetriever(r, resolver));
+
+        var outcome = await engine.StreamAsync(Input($"korean {topic} movies"), accountId, emit, CancellationToken.None);
+
+        if (allLanguages)
+        {
+            Assert.DoesNotContain(events, e => e.Event == "conflict");
+            Assert.Equal(korean.Order(), outcome.Cards.Select(c => c.TitleId).Order());
+            Assert.DoesNotContain(english[0], outcome.Cards.Select(c => c.TitleId));
+            return;
+        }
+
+        var conflict = Assert.Single(events, e => e.Event == "conflict").Data;
+        Assert.Equal(["Korean"], conflict.GetProperty("languages").EnumerateArray().Select(l => l.GetString()));
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        var knockouts = Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply").GetProperty("knockouts").EnumerateArray().ToList();
+        Assert.Contains(knockouts, k => k.GetProperty("kind").GetString() == "Language" && k.GetProperty("wouldUnlock").GetInt32() >= 3);
+        Assert.StartsWith("There are no korean ", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Residual 3: "Scooby doo" names no condition, but every unseen Scooby-Doo title is animated or a
+    /// comedy, both excluded — the conditions are why the screen is empty, and that is a collision the
+    /// user is told about. Varied over titles that are merely seen: an empty answer with no condition
+    /// behind it names none.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Conditions_that_hold_out_every_unseen_match_are_a_named_collision(bool heldOut)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "animation");
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        if (heldOut)
+        {
+            await SetGenresAsync(ids, ["animation"]);
+        }
+        else
+        {
+            await MarkSeenAsync(accountId, ids);
+        }
+
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(Input(topic), accountId, emit, CancellationToken.None);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        if (!heldOut)
+        {
+            Assert.DoesNotContain(events, e => e.Event == "conflict");
+            Assert.Null(outcome.ConflictJson);
+            return;
+        }
+
+        var conflict = Assert.Single(events, e => e.Event == "conflict").Data;
+        Assert.Equal(["animation"], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        Assert.StartsWith("Your conditions hold out every unseen title that matches", conflict.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.NotNull(outcome.ConflictJson);
+    }
+
+    /// <summary>
+    /// Residual 7: "animated movies for kids" was planned as kids' films (the planner is told never to
+    /// copy a standing condition), and the judge passed a live-action children's film as a pick under a
+    /// notice saying animation is excluded. The genre the user named is required, so the excluded shelf
+    /// is honestly empty. Varied over a request that names no excluded genre: the same titles are picks.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_excluded_genre_the_user_named_is_required_so_the_answer_is_honestly_empty(bool namesAnimation)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, Domain.Filters.FilterKind.ExcludeGenre, "animation");
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        await SetGenresAsync(ids, ["family"]);
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(
+            Input(namesAnimation ? $"animated {topic} movies" : $"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        if (namesAnimation)
+        {
+            Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+            Assert.DoesNotContain(outcome.Cards, c => c.Tier == SearchTurnCardTier.Pick);
+            Assert.Single(events, e => e.Event == "conflict");
+            Assert.Contains(ConversationStateJson.Read(outcome.ConversationStateJson)!.Hard.Concepts, c => c.Genres.Contains("animation"));
+        }
+        else
+        {
+            Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+            Assert.Equal(ids.Order(), outcome.Cards.Select(c => c.TitleId).Order());
+        }
+    }
+
+    private static ConceptResolver RealResolver(Infrastructure.Persistence.ReelDbContext db, params string[] labels)
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        cache.Set(KeywordVocabulary.CacheKey, (IReadOnlyList<VocabularyLabel>)[.. labels.Select(l => new VocabularyLabel(l, 10))]);
+        return new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+    }
+
+    /// <summary>Resolves the query's constraints before the facet arm reads them, as the hybrid retriever does.</summary>
+    private sealed class ResolvingRetriever(IAskReelRetriever inner, IConceptResolver resolver) : IAskReelRetriever
+    {
+        public async Task<Application.Search.Retrieval.RetrievalResult> RetrieveAsync(RetrievalQuery q, CancellationToken ct) =>
+            await inner.RetrieveAsync(q with { Hard = await resolver.ResolveAsync(q.Hard, ct) }, ct);
     }
 
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
