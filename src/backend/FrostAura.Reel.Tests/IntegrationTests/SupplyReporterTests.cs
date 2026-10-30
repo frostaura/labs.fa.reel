@@ -862,16 +862,20 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
     /// it unlocked any. A phrase made only of genre words is those genres AND-ed whichever list carries
     /// it: the supply is held to <c>eval/askreel/truth/romantic-comedy.sql</c> over the whole catalogue,
     /// no single exclusion is offered as a relaxation (lifting one alone unlocks nothing), and the shelf
-    /// keeps the user's words. "or" keeps the OR.
+    /// keeps the user's words. "or" keeps the OR. A genres-only intent with no topic label (the v1
+    /// interpreter's shape for "a 90s romantic comedy") takes the user's words from the genre phrase in
+    /// the turn as typed.
     /// </summary>
     [Theory]
-    [InlineData(new[] { "romantic comedies" }, new[] { "comedy" }, "romantic comedies", "romantic comedies")]
-    [InlineData(new[] { "romantic comedy" }, new string[0], "romantic comedy", "romantic comedy")]
-    [InlineData(new[] { "comedy romance" }, new[] { "romance" }, null, "comedy romance")]
-    [InlineData(new string[0], new[] { "romance", "comedy" }, "romantic comedies", "romantic comedies")]
-    [InlineData(new string[0], new[] { "comedy", "romance" }, "a romance comedy", "a romance comedy")]
+    [InlineData(new[] { "romantic comedies" }, new[] { "comedy" }, "romantic comedies", null, "romantic comedies")]
+    [InlineData(new[] { "romantic comedy" }, new string[0], "romantic comedy", null, "romantic comedy")]
+    [InlineData(new[] { "comedy romance" }, new[] { "romance" }, null, null, "comedy romance")]
+    [InlineData(new string[0], new[] { "romance", "comedy" }, "romantic comedies", null, "romantic comedies")]
+    [InlineData(new string[0], new[] { "comedy", "romance" }, "a romance comedy", null, "a romance comedy")]
+    [InlineData(new string[0], new[] { "romance", "comedy" }, null, "a 90s romantic comedy", "romantic comedy")]
+    [InlineData(new string[0], new[] { "comedy", "romance" }, null, "Romantic comedies, but nothing too long", "romantic comedies")]
     public async Task A_v1_genre_phrase_counts_its_genres_together_and_offers_no_single_genre_relaxation(
-        string[] keywords, string[] genres, string? userWords, string shelf)
+        string[] keywords, string[] genres, string? userWords, string? message, string shelf)
     {
         if (!fixture.Available)
         {
@@ -891,7 +895,8 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         await SeedWatchAsync(accountId, romcomFilm);
         var mine = new[] { romcomFilm, romcomShow, soapComedy, romanceOnly, comedyOnly, comedyFilmLoveTriangle };
 
-        var planned = IntentConstraints.FromIntent(new SearchIntent(genres, keywords, [], string.Empty, null, null), userWords: userWords);
+        var planned = IntentConstraints.FromIntent(
+            new SearchIntent(genres, keywords, [], string.Empty, null, null), userWords: userWords, message: message);
 
         await using var db = fixture.CreateContext(new AccountContext());
         await using var snapshot = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);

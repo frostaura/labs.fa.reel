@@ -63,6 +63,56 @@ public class RetrievalContractTests
         Assert.All(hard.Concepts, c => Assert.Equal(standIn, c.StandInWords));
     }
 
+    /// <summary>
+    /// HREV8-ASK-01 (genres-only path): the v1 interpreter answers "a 90s romantic comedy" with genres
+    /// [romance, comedy] and no keywords, so no topic label exists. The turn as typed carries the user's
+    /// words: the one genre phrase in it that names exactly the intent's genres is read as theirs, so a
+    /// romcom ANDs instead of counting every comedy and every romance. A phrase that names other genres,
+    /// two phrases that both match, an "or", or no genre words at all leave the flavour list OR-ed.
+    /// </summary>
+    [Theory]
+    [InlineData("a 90s romantic comedy", new[] { "romance", "comedy" }, "romantic comedy:romance|comedy:comedy", false)]
+    [InlineData("some romantic comedies please", new[] { "comedy", "romance" }, "romantic comedies:romance|comedies:comedy", false)]
+    [InlineData("Romantic Comedy movies from the 90s!", new[] { "romance", "comedy" }, "romantic comedy:romance|comedy:comedy", false)]
+    [InlineData("romantic comedies but no horror", new[] { "romance", "comedy" }, "romantic comedies:romance|comedies:comedy", false)]
+    [InlineData("comedy and romance from the 80s", new[] { "romance", "comedy" }, "comedy and romance:comedy|romance:romance", false)]
+    [InlineData("something romantic or funny", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData("a romance or a comedy", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData("a comedy with some romance", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData("scary films", new[] { "horror", "thriller" }, "horror or thriller:horror,thriller", true)]
+    [InlineData("horror thriller", new[] { "horror", "thriller" }, "horror thriller:horror|thriller:thriller", false)]
+    [InlineData("make it from the 90s", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData("", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData(null, new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    public void A_genres_only_intent_reads_the_genre_phrase_in_the_users_turn(
+        string? message, string[] genres, string expected, bool standIn)
+    {
+        var hard = IntentConstraints.FromIntent(Intent(genres: genres), message: message);
+
+        Assert.Equal(expected, string.Join('|', hard.Concepts.Select(c => $"{c.UserWords}:{string.Join(',', c.Genres)}")));
+        Assert.All(hard.Concepts, c => Assert.Empty(c.CatalogueLabels));
+        Assert.All(hard.Concepts, c => Assert.Equal(standIn, c.StandInWords));
+    }
+
+    /// <summary>
+    /// The turn is read only for a genres-only intent: with keywords the topic label names the concept
+    /// and the genres stay out of it, and an explicit topic label wins over the turn.
+    /// </summary>
+    [Fact]
+    public void The_turn_never_overrides_keywords_or_an_explicit_label()
+    {
+        var keyworded = IntentConstraints.FromIntent(
+            Intent(keywords: ["ninja"], genres: ["romance", "comedy"]), message: "romantic comedy with ninjas");
+        var concept = Assert.Single(keyworded.Concepts);
+        Assert.Equal("ninja", concept.UserWords);
+        Assert.Empty(concept.Genres);
+
+        var labelled = IntentConstraints.FromIntent(
+            Intent(genres: ["romance", "comedy"]), userWords: "romance or comedy", message: "a romantic comedy");
+        Assert.Equal("romance or comedy:romance,comedy", string.Join('|', labelled.Concepts.Select(c => $"{c.UserWords}:{string.Join(',', c.Genres)}")));
+        Assert.False(Assert.Single(labelled.Concepts).StandInWords);
+    }
+
     [Fact]
     public void Intent_with_no_topic_has_no_concepts_and_negations_are_never_constraints()
     {
