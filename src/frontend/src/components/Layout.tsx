@@ -50,6 +50,10 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  // The account menu renders inside the header's banner landmark, not loose in <body> (HREV5-PH-04):
+  // portalled to the body it was the one piece of the open page outside every landmark (axe
+  // `region`). A callback ref, so the menu re-renders with the element once it exists.
+  const [header, setHeader] = useState<HTMLElement | null>(null);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
   //
@@ -95,7 +99,7 @@ export default function Layout() {
         Skip to content
       </a>
       <RealtimeSync />
-      <header className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
+      <header ref={setHeader} className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
         <div className="mx-auto max-w-shell px-gutter h-14 flex items-center gap-4">
           <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition coarse:min-h-11">
             <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
@@ -115,7 +119,12 @@ export default function Layout() {
               <SearchBox />
             </div>
             <SyncStatusPill />
-            <DropdownMenu>
+            {/* Not modal (HREV5-PH-04): a modal Radix menu aria-hides everything outside itself —
+                the skip link, the header's links, <main> — while they stay focusable, which axe
+                fails as aria-hidden-focus and which leaves a screen reader with no page. A menu
+                button needs no modality: arrows still rove, Escape and an outside press still close
+                it and hand focus back to this button. It renders in the header (above). */}
+            <DropdownMenu modal={false}>
               <DropdownMenuTrigger
                 // The name comes from one sr-only span, not an aria-label: axe's
                 // label-content-name-mismatch fails an aria-label that does not contain the visible
@@ -134,7 +143,7 @@ export default function Layout() {
                 )}
                 <span aria-hidden className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+              <DropdownMenuContent align="end" container={header}>
                 {/* Blend stays routable at /blend but is off the menu (FD-16 default, WS-10B CR-5). */}
                 {/* Free for every tier, deliberately: a paid accuracy report reads as hiding the
                     scorecard. Sits above Settings because it is a thing to read, not a thing to
