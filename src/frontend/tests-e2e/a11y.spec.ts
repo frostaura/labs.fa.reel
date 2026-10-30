@@ -56,6 +56,9 @@ const FILTERS = {
   minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
 };
 
+/** Excluded genres on the conditions-editor case, each given a marginal by its cost fixture. */
+const CONDITION_EXCLUDES = ["animation", "comedy", "documentary", "romance"];
+
 const VIEWPORTS = {
   desktop: { viewport: { width: 1440, height: 900 } },
   phone: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true },
@@ -267,6 +270,33 @@ const OVERLAYS: AxeCase[] = [
       else await trigger.click();
       await expect(page.getByRole("menu")).toBeVisible();
       await expect(page.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
+    },
+  },
+  {
+    // HREV8-A11Y-01 (WS-10B change request): the conditions editor opened from a Home condition chip,
+    // with excluded genres each carrying a marginal count — the shape whose "+410" sat under AA on the
+    // dialog's surface while /settings passed. Held to the exact baseline like every other overlay;
+    // conditions-editor-a11y.spec.ts varies the chip annotations further.
+    name: "conditions-editor",
+    path: "/home",
+    mock: async (page) => {
+      await mockHome(page);
+      await mockJson(page, "**/api/settings/filters", { ...FILTERS, excludeGenres: CONDITION_EXCLUDES });
+      await mockJson(page, "**/api/settings/filters/cost", {
+        total: 5000,
+        eligible: 400,
+        byRule: CONDITION_EXCLUDES.map((slug, i) => ({ kind: "ExcludeGenre", value: slug, marginal: 410 + i * 37 })),
+        suggestions: [],
+      });
+    },
+    ready: homeReady,
+    open: async (page) => {
+      await page.getByTestId("condition-chip").first().click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      for (const slug of CONDITION_EXCLUDES) await expect(dialog.getByTestId(`genre-marginal-${slug}`)).toBeAttached();
+      // axe samples colours as painted: let the dialog's entry transition finish.
+      await expect(dialog).toHaveCSS("opacity", "1");
     },
   },
   {
