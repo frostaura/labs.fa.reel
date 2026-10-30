@@ -128,7 +128,7 @@ public static class FallbackReader
         "weirder", "fine", "okay", "alright", "sure", "cool", "instead", "else", "rather", "either", "whatever",
         "different", "another", "similar", "otherwise", "story", "stories", "tale", "tales", "flick", "flicks",
         "picture", "pictures", "options", "ideas", "recommendations", "suggestions", "content", "watching",
-        "actually", "honestly",
+        "actually", "honestly", "others", "rest",
         // The credit a person is named for ("starring", "directed by") — read as the role
         // (AskReelEngine.FallbackRole), never as a topic beside the person (HREV5-RET-02, round 7).
         "starring", "starred", "featuring", "featured", "directed", "director", "directors", "directing",
@@ -155,6 +155,7 @@ public static class FallbackReader
     {
         "but", "and", "with", "without", "except", "or", "only", "please", "though", "although", "yet", "that",
         "which", "who", "if", "for", "from", "in", "on", "minus", "no", "not", "nothing", "plus", "set",
+        "excluding", "sans", "barring", "apart", "aside",
     };
 
     /// <summary>Words that make "like …" a pointer at what is on screen, never a title to find.</summary>
@@ -723,7 +724,7 @@ public static class FallbackReader
         }
 
         if (MediaWords.Contains(lower) || NeverATopic.Contains(lower) || Comparisons.ContainsKey(lower)
-            || TalkPadding.Contains(lower) || lower is "hi" or "hey" or "hello" or "hiya" or "no" or "not" or "nothing" or "without"
+            || TalkPadding.Contains(lower) || lower is "hi" or "hey" or "hello" or "hiya" || AskReelIntentSanitizer.IsNegationCue(lower)
             || AskReelIntentSanitizer.IsMoodPhrase(lower) || AskReelIntentSanitizer.IsPraise(lower)
             || ConceptSynonyms.GenreSlugsOf(lower) is not null || SearchVocabulary.ResolveGenres(lower).Count > 0)
         {

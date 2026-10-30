@@ -236,7 +236,8 @@ public sealed class OpenRouterAskPlanner(
         "ACTS: NewRequest = a fresh request unrelated to what is on screen. Refine = narrows or adjusts the current " +
         "request (\"only movies\", \"no superheroes please\", \"older ones\", \"funnier\"). CritiqueSet = rejects what is " +
         "on screen as a whole (\"none of these are ninja movies\"). CritiqueItem = asks for a change relative to " +
-        "specific cards (\"more heart than T2.1\", \"less violent than the first one\"). ItemQuestion = a question " +
+        "specific cards (\"more heart than T2.1\", \"less violent than the first one\"), or rejects one (\"not the first one\", " +
+        "\"I didn't like the second one\"). ItemQuestion = a question " +
         "about one title or person, or about the supply or the conditions, that wants an answer, not new cards " +
         "(\"is the first one violent?\", \"who directed T1.3?\", \"how many ninja movies are left?\"). Chitchat = " +
         "greetings, thanks, anything with no request.\n" +
@@ -272,7 +273,8 @@ public sealed class OpenRouterAskPlanner(
         "above are ninja movies. I want ninja movies\" -> {act:CritiqueSet, concepts:[ninja], media:unchanged}. " +
         "\"more like the second one\" -> {act:Refine, references:[<rank-2 handle of the newest answer>], " +
         "tools:[similar_to]}. \"less dark than T2.1\" -> {act:CritiqueItem, references:[T2.1], " +
-        "directions:[{attribute:darkness, trend:less}]}. \"is the first one violent?\" -> {act:ItemQuestion, " +
+        "directions:[{attribute:darkness, trend:less}]}. \"not the first one\" -> {act:CritiqueItem, references:[<rank-1 handle>]} " +
+        "(rejects that card only: no directions, never similar_to). \"is the first one violent?\" -> {act:ItemQuestion, " +
         "references:[<rank-1 handle>], tools:[title_facts], question:\"is it violent?\"}. \"is Heat violent?\" -> " +
         "{act:ItemQuestion, referenceNames:[Heat], tools:[title_facts], question:\"is it violent?\"}. \"is Blade of the 47 " +
         "Ronin a ninja film or a samurai film?\" -> {act:ItemQuestion, referenceNames:[Blade of the 47 Ronin], " +

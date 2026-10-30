@@ -178,6 +178,11 @@ public sealed record PlanFailure(AgentFailureKind Kind, string? Code, bool Refus
 /// is empty, when no reading was produced; the engine then carries the state forward.
 /// </summary>
 /// <param name="Question">For an <see cref="TurnAct.ItemQuestion"/>: what is being asked, in the user's words.</param>
+/// <param name="RejectsReferences">
+/// The message rejects the cards <see cref="References"/> names ("not the first one", "I didn't like
+/// the second one"): they are rejected and never searched near (HREV6-ASK-02). Set by the sanitiser
+/// from the user's words, never by a model.
+/// </param>
 public sealed record PlanResult(
     TurnAct Act,
     ConversationStateDelta Delta,
@@ -188,7 +193,8 @@ public sealed record PlanResult(
     PlanSource Source,
     LlmCallMeta Meta,
     string? Question = null,
-    PlanFailure? Failure = null)
+    PlanFailure? Failure = null,
+    bool RejectsReferences = false)
 {
     /// <summary>A plan that failed with <paramref name="failure"/>.</summary>
     public static PlanResult Failed(PlanFailure failure, LlmCallMeta meta) =>

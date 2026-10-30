@@ -92,6 +92,38 @@ public class AskReelTopicAndPointerTests
     public void A_message_that_names_no_card_is_not_a_pointer(string message) =>
         Assert.Null(AskReelPointer.Ordinal(message));
 
+    /// <summary>
+    /// HREV6-ASK-02: a pointer the user rejects — a cue before it in its clause ("not", "skip",
+    /// "didn't like", "anything but", "not a fan of") or a verdict after it ("is terrible") — is a
+    /// rejection, never a card to search near. A pointer asked for, a cue in another clause, a cue
+    /// about something else, and a question about the card are not.
+    /// </summary>
+    [Theory]
+    [InlineData("not the first one", 1)]
+    [InlineData("Not the first one!", 1)]
+    [InlineData("I didn't like the second one", 2)]
+    [InlineData("i did not like the 2nd one", 2)]
+    [InlineData("anything but the third one", 3)]
+    [InlineData("skip the first one, show me others", 1)]
+    [InlineData("the second one is terrible", 2)]
+    [InlineData("the second one was kinda boring", 2)]
+    [InlineData("the first one isn't for me", 1)]
+    [InlineData("I hated the fourth one", 4)]
+    [InlineData("don't show me the last one again", AskReelPointer.Last)]
+    [InlineData("not a fan of the second one, something darker", 2)]
+    [InlineData("nothing like the first one", 1)]
+    [InlineData("drop the third film", 3)]
+    [InlineData("more like the first one", null)]
+    [InlineData("something like the second one but not too dark", null)]
+    [InlineData("no superheroes, more like the first one", null)]
+    [InlineData("I liked the third one, more like that", null)]
+    [InlineData("the second one sounds fun", null)]
+    [InlineData("is the first one not too violent?", null)]
+    [InlineData("isn't the second one terrible?", null)]
+    [InlineData("not superheroes", null)]
+    public void A_rejected_pointer_is_read_off_the_message(string message, int? position) =>
+        Assert.Equal(position, AskReelPointer.Rejected(message));
+
     [Fact]
     public void A_pointer_resolves_only_when_some_answer_shows_that_many_cards()
     {

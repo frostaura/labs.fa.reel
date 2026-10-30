@@ -110,6 +110,127 @@ public class AskReelV2UnitTests
         Assert.Single(next.Soft.Directions);
     }
 
+    /// <summary>
+    /// HREV6-ASK-02, the reducer's half: an item critique that steers nothing ("not the first one",
+    /// planned as CritiqueItem with the card and no direction) only rejects the card — it never becomes
+    /// the reference the search pivots on — and a plan marked as rejecting its references rejects them
+    /// whatever its act or its steer. A critique that steers ("funnier than the first one") still pivots.
+    /// </summary>
+    [Fact]
+    public void An_item_critique_that_steers_nothing_only_rejects_the_card()
+    {
+        var state = Shown((A, 2, 1), (B, 2, 2)) with
+        {
+            Soft = SoftPreferences.None with { ReferenceTitleIds = [A, C] },
+        };
+
+        var rejectOnly = ConversationStateReducer.Apply(state, Plan(TurnAct.CritiqueItem, null, new TurnHandle(2, 1)), MediaScope.Any);
+        Assert.Equal([A], rejectOnly.Rejected);
+        Assert.Equal([C], rejectOnly.Soft.ReferenceTitleIds);
+
+        var steered = Plan(TurnAct.CritiqueItem, ConversationStateDelta.None with { Directions = [new AttributeDirection("darkness", AttributeTrend.More)] }, new TurnHandle(2, 2));
+        var marked = ConversationStateReducer.Apply(state, steered with { RejectsReferences = true }, MediaScope.Any);
+        Assert.Equal([B], marked.Rejected);
+        Assert.DoesNotContain(B, marked.Soft.ReferenceTitleIds);
+        Assert.Single(marked.Soft.Directions);
+
+        var markedRefine = ConversationStateReducer.Apply(state, Plan(TurnAct.Refine, null, new TurnHandle(2, 2)) with { RejectsReferences = true }, MediaScope.Any);
+        Assert.Equal([B], markedRefine.Rejected);
+        Assert.Equal([A, C], markedRefine.Soft.ReferenceTitleIds);
+
+        var pivot = ConversationStateReducer.Apply(state, steered, MediaScope.Any);
+        Assert.Equal([B], pivot.Soft.ReferenceTitleIds);
+    }
+
+    /// <summary>
+    /// HREV6-ASK-02: rejecting one card by its place steered the search TOWARDS it. On every path —
+    /// no model, the planner failing, and a model plan with or without the handle, as Refine or as a
+    /// steer-less CritiqueItem — "not the first one" put Heat in the soft references, the reference
+    /// arm re-ranked towards Heat's labels and the judge read "Points at: Heat" and "Like: Heat". A
+    /// negated pointer is a rejection: the card is rejected, never a reference, and the conversation's
+    /// topic is kept. Varied over the cue (before the pointer, a verdict after it), the rank, a steer
+    /// beside it, and positive pointers that must still pivot.
+    /// </summary>
+    [Theory]
+    [InlineData("not the first one", 1, true)]
+    [InlineData("I didn't like the second one", 2, true)]
+    [InlineData("anything but the third one", 3, true)]
+    [InlineData("skip the first one, show me others", 1, true)]
+    [InlineData("the second one is terrible", 2, true)]
+    [InlineData("I hated the fourth one", 4, true)]
+    [InlineData("don't show me the last one again", 8, true)]
+    [InlineData("not a fan of the second one, something darker", 2, true)]
+    [InlineData("the first one looks boring", 1, true)]
+    [InlineData("more like the first one", 1, false)]
+    [InlineData("something like the second one but not too dark", 2, false)]
+    [InlineData("I liked the third one, more like that", 3, false)]
+    public void A_card_rejected_by_its_place_is_rejected_and_never_searched_near(string message, int rank, bool rejects)
+    {
+        string[] names = ["Heat", "Inside Man", "The Town", "Ronin", "Thief", "Baby Driver", "Logan Lucky", "Widows"];
+        var ids = names.Select(_ => Guid.NewGuid()).ToList();
+        var state = ConversationState.Empty with
+        {
+            Version = 1,
+            Hard = HardConstraints.None with { Concepts = [new ConceptTerm("heist", [], [])] },
+            LastPresented = names.Select((n, i) => new PresentedRef(ids[i], new TurnHandle(1, i + 1), n, 2000, MediaType.Movie)).ToList(),
+        };
+        var card = ids[rank - 1];
+        var handle = new TurnHandle(1, rank);
+        var standing = FilterRuleSet.FromRows([]);
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.TimedOut, null, false), LlmCallMeta.None);
+        var darker = ConversationStateDelta.None with { Directions = [new AttributeDirection("darkness", AttributeTrend.More)] };
+
+        var paths = new List<(string Path, PlanResult Plan)>
+        {
+            ("keyless", PlanSanitizer.Clean(FallbackPlans.Keyless(message, state), message, state, standing)),
+            ("carried", PlanSanitizer.PointFallback(FallbackPlans.CarriedForward(failed, message, state), message, state)),
+            ("refine, no handle", PlanSanitizer.Clean(Plan(TurnAct.Refine), message, state, standing)),
+            ("refine, handle", PlanSanitizer.Clean(Plan(TurnAct.Refine, null, handle), message, state, standing)),
+        };
+        if (rejects)
+        {
+            paths.Add(("critique, no steer", PlanSanitizer.Clean(Plan(TurnAct.CritiqueItem, null, handle), message, state, standing)));
+            paths.Add(("critique, steer", PlanSanitizer.Clean(Plan(TurnAct.CritiqueItem, darker, handle), message, state, standing)));
+            if (AskReelPointer.WithoutRejectedClause(message).Length == 0)
+            {
+                // A model that read the rejection's own words as a new request ("terrible", "one").
+                var echoed = ConversationStateDelta.None with { Concepts = [AskReelIntentSanitizer.Words(message)[^1]] };
+                paths.Add(("new request, echoed", PlanSanitizer.Clean(Plan(TurnAct.NewRequest, echoed), message, state, standing)));
+            }
+        }
+
+        foreach (var (path, plan) in paths)
+        {
+            Assert.True(TurnActs.Searches(plan.Act), path);
+            Assert.Null(PlanSanitizer.UnresolvedPointer(plan, message));
+            Assert.Equal([handle], plan.References);
+            var next = ConversationStateReducer.SimilarPivot(ConversationStateReducer.Apply(state, plan, MediaScope.Any), plan, message);
+            var judge = AskReelEngine.JudgeRequest(message, next);
+            if (rejects)
+            {
+                Assert.True(next.Rejected.Contains(card), path);
+                Assert.False(next.Soft.ReferenceTitleIds.Contains(card), path);
+                Assert.DoesNotContain("Points at", judge, StringComparison.Ordinal);
+                // The conversation's topic is kept: the rejection narrows it, never replaces it.
+                Assert.Equal(["heist"], next.Hard.Concepts.Select(c => c.UserWords));
+            }
+            else
+            {
+                Assert.False(next.Rejected.Contains(card), path);
+                Assert.True(next.Soft.ReferenceTitleIds.Contains(card), path);
+                Assert.Contains($"Points at: {names[rank - 1]}", judge, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>HREV6-ASK-02: the planner is shown a rejection of one card as a reject-only item critique.</summary>
+    [Fact]
+    public void The_planner_is_shown_a_card_rejected_by_its_place()
+    {
+        Assert.Contains("\"not the first one\" -> {act:CritiqueItem, references:[<rank-1 handle>]}", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("rejects that card only", OpenRouterAskPlanner.SystemPrompt, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void A_question_leaves_the_search_where_it_was()
     {

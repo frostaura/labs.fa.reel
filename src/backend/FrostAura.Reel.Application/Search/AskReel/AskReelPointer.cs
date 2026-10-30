@@ -96,6 +96,183 @@ public static class AskReelPointer
     }
 
     /// <summary>
+    /// The position <paramref name="message"/> points at when it REJECTS that card — "not the first
+    /// one", "I didn't like the second one", "anything but the third one", "skip the first one", "the
+    /// second one is terrible" — or null when it points at nothing, or at a card it asks for or asks
+    /// about. Only the card <see cref="Ordinal"/> reads is judged, so the rejection and the handle the
+    /// sanitiser resolves are always the same card.
+    ///
+    /// <para><b>Why (HREV6-ASK-02).</b> A pointer was only ever a reference to search NEAR. "Not the
+    /// first one" put Heat in the soft references on every path, the reference arm re-ranked towards
+    /// Heat's labels and the judge read "Points at: Heat" and "Like: Heat"; with no model, "I didn't
+    /// like the second one" searched the topic "didn't" and threw the conversation's topic away.</para>
+    ///
+    /// <para>A rejection is a cue in the pointer's own clause before it, with nothing between but the
+    /// words that carry it ("not a fan of the", "don't show me the", "nothing like the"), or a verdict
+    /// after it ("is terrible", "was kinda boring", "isn't for me"). A question about the card ("isn't
+    /// the second one terrible?", "is the first one not too violent?") rejects nothing.</para>
+    /// </summary>
+    public static int? Rejected(string? message)
+    {
+        if (Ordinal(message) is not { } position)
+        {
+            return null;
+        }
+
+        var tokens = Tokens(message);
+        if (tokens.Count == 0 || QuestionLeads.Contains(tokens[0].Word))
+        {
+            return null;
+        }
+
+        var at = PointerIndex(tokens);
+        if (at < 0 || Ordinals[tokens[at].Word] != position)
+        {
+            return null;
+        }
+
+        // Before it, in its clause: a cue, past only the words that carry one to the card.
+        for (var j = at - 1; j >= 0 && !tokens[j].Closes; j--)
+        {
+            var word = tokens[j].Word;
+            if (AskReelIntentSanitizer.IsNegationCue(word) || RejectVerbs.Contains(word)
+                || (word == "but" && j > 0 && tokens[j - 1].Word is "anything" or "everything" or "whatever"))
+            {
+                return position;
+            }
+
+            if (!CueBridges.Contains(word))
+            {
+                break;
+            }
+        }
+
+        // After it, in its clause: a verdict ("is terrible"), or a negated "for me"/"good"/"my thing".
+        var question = (message ?? string.Empty).TrimEnd().EndsWith('?');
+        var cardNoun = at + 1;
+        for (var j = cardNoun + 1; !question && !tokens[cardNoun].Closes && j < tokens.Count && j <= cardNoun + 5; j++)
+        {
+            var word = tokens[j].Word;
+            if (Verdicts.Contains(word)
+                || (AskReelIntentSanitizer.IsNegationCue(word) && j + 1 < tokens.Count && !tokens[j].Closes && VerdictObjects.Contains(tokens[j + 1].Word)))
+            {
+                return position;
+            }
+
+            if (tokens[j].Closes || !VerdictBridges.Contains(word))
+            {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// <paramref name="message"/> without the clause that rejects a card ("I didn't like the second
+    /// one, something darker" → "something darker"), so a reading with no model never takes the
+    /// rejection's own words — "didn't", "terrible", "fan" — as a topic or a negation (HREV6-ASK-02).
+    /// </summary>
+    public static string WithoutRejectedClause(string message)
+    {
+        var clauses = new List<string>();
+        var clause = new List<string>();
+        foreach (var token in (message ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            clause.Add(token);
+            if (token[^1] is ',' or '.' or ';' or '?' or '!')
+            {
+                clauses.Add(string.Join(' ', clause));
+                clause.Clear();
+            }
+        }
+
+        if (clause.Count > 0)
+        {
+            clauses.Add(string.Join(' ', clause));
+        }
+
+        return string.Join(' ', clauses.Where(c => Rejected(c) is null)).Trim();
+    }
+
+    /// <summary>Words that open a question about a card rather than a verdict on it.</summary>
+    private static readonly IReadOnlySet<string> QuestionLeads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "is", "isn't", "isnt", "was", "wasn't", "wasnt", "does", "doesn't", "doesnt", "are", "aren't", "can", "could",
+        "would", "will", "how", "what", "what's", "who", "who's", "which", "why", "where", "when", "has", "have",
+    };
+
+    /// <summary>Verbs that reject the card they govern ("skip the first one", "I hated the second one").</summary>
+    private static readonly IReadOnlySet<string> RejectVerbs = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "skip", "drop", "ditch", "remove", "lose", "scrap", "nix", "hated", "dislike", "disliked", "loathe",
+        "loathed", "ignore", "excluding", "except",
+    };
+
+    /// <summary>The words that may stand between a cue and the card it rejects ("not a fan of the", "don't show me the").</summary>
+    private static readonly IReadOnlySet<string> CueBridges = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "the", "that", "this", "a", "an", "of", "i", "i'm", "i've", "i'd", "we", "me", "us", "really", "much", "big",
+        "huge", "fan", "like", "liked", "love", "loved", "want", "wanted", "see", "seeing", "watch", "watching",
+        "show", "showing", "give", "care", "for", "keen", "on", "into", "interested", "in", "sold", "so", "too",
+        "at", "all", "anything", "everything", "more", "again", "do", "did", "about", "feeling", "feel",
+    };
+
+    /// <summary>Words that pass a verdict on a card ("the second one is terrible").</summary>
+    private static readonly IReadOnlySet<string> Verdicts = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "terrible", "awful", "bad", "boring", "rubbish", "crap", "crappy", "trash", "garbage", "meh", "lame", "dull",
+        "horrible", "dreadful", "overrated", "sucks", "sucked", "stinks", "stank", "naff", "worst", "weak", "poor",
+        "tedious", "dire", "pants",
+    };
+
+    /// <summary>What a negated verdict is about: "isn't for me", "wasn't good", "not my thing".</summary>
+    private static readonly IReadOnlySet<string> VerdictObjects = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "for", "good", "great", "my", "interesting", "fun", "it",
+    };
+
+    /// <summary>The words that may stand between the card and a verdict on it ("is kinda", "looks really").</summary>
+    private static readonly IReadOnlySet<string> VerdictBridges = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "is", "was", "'s", "looks", "looked", "seems", "seemed", "sounds", "sounded", "felt", "feels", "kinda",
+        "kind", "of", "sort", "really", "so", "pretty", "just", "too", "a", "bit", "totally", "very", "honestly",
+        "absolutely", "quite", "rather", "way", "seriously",
+    };
+
+    /// <summary>The index of the ordinal <see cref="Ordinal"/> reads (its card noun follows it), or -1.</summary>
+    private static int PointerIndex(IReadOnlyList<(string Word, bool Closes)> tokens)
+    {
+        for (var i = 0; i + 1 < tokens.Count; i++)
+        {
+            if (Ordinals.ContainsKey(tokens[i].Word) && !tokens[i].Closes && CardNouns.Contains(tokens[i + 1].Word)
+                && (i == 0 || tokens[i - 1].Word is "the" or "that" or "this"))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The message's words, each with whether punctuation closes its clause after it.</summary>
+    private static List<(string Word, bool Closes)> Tokens(string? message)
+    {
+        var tokens = new List<(string Word, bool Closes)>();
+        foreach (var token in (message ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var closes = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';') || token.EndsWith('?') || token.EndsWith('!');
+            var words = AskReelIntentSanitizer.Words(token);
+            for (var i = 0; i < words.Count; i++)
+            {
+                tokens.Add((words[i], closes && i == words.Count - 1));
+            }
+        }
+
+        return tokens;
+    }
+
+    /// <summary>
     /// Whether a pointer at <paramref name="position"/> can resolve against the cards on screen:
     /// some answer shows at least that many (any card at all, for <see cref="Last"/>).
     /// </summary>

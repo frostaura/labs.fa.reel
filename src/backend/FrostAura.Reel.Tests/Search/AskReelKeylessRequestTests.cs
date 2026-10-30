@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Search.Retrieval;
@@ -301,6 +302,24 @@ public class AskReelKeylessRequestTests
     [InlineData("heist films, nothing with zombies and with vampires", "heist", "", "zombies|vampires")]
     [InlineData("no gore and something about heists", "heists", "", "gore")]
     [InlineData("no zombies and no vampires", "", "", "zombies|vampires")]
+    // HREV6-ASK-01: the cues the list did not hold — "excluding", "apart from", "sans", "sick of" and
+    // a "no thanks" that refuses the clause BEFORE it. Varied over the cue's neighbours (a "with" after
+    // it, a clause after it), over the refusal's punctuation, and over the other words of each family.
+    [InlineData("heist movies excluding anything with guns", "heist", "", "guns")]
+    [InlineData("horror movies apart from slashers", "horror", "", "slashers")]
+    [InlineData("superhero movies? no thanks, give me westerns", "westerns", "", "superhero")]
+    [InlineData("I'm sick of superheroes, give me westerns", "westerns", "", "superheroes")]
+    [InlineData("action movies sans superheroes", "action", "", "superheroes")]
+    [InlineData("spy thrillers excluding James Bond", "spy", "thriller", "james bond")]
+    [InlineData("comedies aside from romcoms", "comedies", "", "romcoms")]
+    [InlineData("I'm tired of zombies, something with dragons", "dragons", "", "zombies")]
+    [InlineData("fed up with superheroes, westerns please", "westerns", "", "superheroes")]
+    [InlineData("I've had enough of vampires. heist films", "heist", "", "vampires")]
+    [InlineData("superhero movies no thanks", "", "", "superhero")]
+    [InlineData("superhero movies? no thank you. westerns", "westerns", "", "superhero")]
+    [InlineData("vampire shows? nah, westerns", "westerns", "", "vampire")]
+    [InlineData("superheroes? not that, westerns please", "westerns", "", "superheroes")]
+    [InlineData("heist films excluding Heat", "heist", "", "heat")]
     public void A_negated_word_is_lifted_into_the_negations_and_never_read_as_a_topic(
         string message, string concepts, string genres, string negations)
     {
@@ -331,6 +350,55 @@ public class AskReelKeylessRequestTests
                         && required.Split(' ').Any(w => NegationTerms.EqualsAnyForm(w, negated) || NegationTerms.EqualsAnyForm(negated, w)));
                 Assert.DoesNotContain(state.Hard.Concepts, c => Names(c.UserWords));
                 Assert.DoesNotContain(requires, Names);
+            }
+        }
+    }
+
+    /// <summary>
+    /// HREV6-ASK-01, through the engine's own chains: the keyless plan is cleaned by the sanitiser
+    /// (which dropped "spy thrillers excluding James Bond" whole as an echo, leaving a broad search with
+    /// no negation), and the carried-forward plan has its pointer resolved — then both are reduced into
+    /// the state the judge reads. On a first turn and on a follow-up, no word the user ruled out, and no
+    /// cue word, is ever a hard requirement or on the judge's "Requires" line, and each is ruled out.
+    /// </summary>
+    [Theory]
+    [InlineData("heist movies excluding anything with guns", "guns")]
+    [InlineData("horror movies apart from slashers", "slashers")]
+    [InlineData("superhero movies? no thanks, give me westerns", "superhero")]
+    [InlineData("I'm sick of superheroes, give me westerns", "superheroes")]
+    [InlineData("action movies sans superheroes", "superheroes")]
+    [InlineData("spy thrillers excluding James Bond", "james bond")]
+    [InlineData("tired of vampires, give me heists", "vampires")]
+    public void A_ruled_out_topic_never_reaches_the_requirements_on_either_fallback_chain(string message, string negated)
+    {
+        string[] cueWords = ["excluding", "apart", "from", "sans", "sick", "tired", "thanks", "no", "of"];
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.TimedOut, null, false), LlmCallMeta.None);
+        var later = ConversationState.Empty with
+        {
+            Version = 2,
+            Hard = HardConstraints.None with { Concepts = [new ConceptTerm("crime", [], [])] },
+        };
+        foreach (var start in new[] { ConversationState.Empty, later })
+        {
+            var keyless = PlanSanitizer.Clean(FallbackPlans.Keyless(message, start, Now), message, start, FilterRuleSet.FromRows([]));
+            var carried = PlanSanitizer.PointFallback(FallbackPlans.CarriedForward(failed, message, start, Now), message, start);
+            foreach (var plan in new[] { keyless, carried })
+            {
+                var state = ConversationStateReducer.Apply(start, plan, MediaScope.Any);
+                var requires = AskReelEngine.JudgeRequest(message, state).Split(". ")
+                    .Where(p => p.StartsWith("Requires: ", StringComparison.Ordinal))
+                    .SelectMany(p => p["Requires: ".Length..].Split(", "))
+                    .ToList();
+                bool Names(string required) => required.Split(' ').Any(w =>
+                    negated.Split(' ').Any(n => NegationTerms.EqualsAnyForm(w, n) || NegationTerms.EqualsAnyForm(n, w))
+                    || cueWords.Contains(w));
+
+                Assert.Contains(state.UserNegations, n => NegationTerms.EqualsAnyForm(n, negated) || NegationTerms.EqualsAnyForm(negated, n));
+                Assert.DoesNotContain(state.Hard.Concepts, c => Names(c.UserWords));
+                Assert.DoesNotContain(state.Soft.Moods, Names);
+                Assert.DoesNotContain(requires, Names);
+                // The user's request still stands: the turn is never a broad unchecked search.
+                Assert.NotEmpty(state.Hard.Concepts);
             }
         }
     }

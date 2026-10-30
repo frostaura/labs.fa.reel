@@ -90,12 +90,56 @@ public static class PlanSanitizer
         var media = UserMedia(delta.Media, message);
 
         var clarify = state.ClarifiedOnce ? null : plan.ClarifyQuestion;
+        return RejectPointed(
+            plan with
+            {
+                References = references,
+                Delta = delta with { Concepts = concepts, Genres = genres, Negations = negations, Media = media },
+                ClarifyQuestion = clarify,
+                ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
+            },
+            message,
+            state.LastPresented);
+    }
+
+    /// <summary>
+    /// A search whose message rejects the card it points at — "not the first one", "I didn't like the
+    /// second one", "the third one is terrible" (<see cref="AskReelPointer.Rejected"/>) — rejects that
+    /// card and never searches near it (HREV6-ASK-02). Live, every path put the rejected card in the
+    /// soft references: the reference arm re-ranked towards its labels and the judge was told "Points
+    /// at: Heat" and "Like: Heat". A refinement becomes the item critique it is; a new request keeps
+    /// its act, with the card rejected beside it. The card is the one at the rank the user named, by
+    /// the same rule as any pointer (<see cref="Pointed"/>).
+    /// </summary>
+    internal static PlanResult RejectPointed(PlanResult plan, string message, IReadOnlyList<PresentedRef> presented)
+    {
+        if (!TurnActs.Searches(plan.Act) || plan.Act == TurnAct.CritiqueSet || AskReelPointer.Rejected(message) is null)
+        {
+            return plan;
+        }
+
+        var shown = presented.Select(p => p.Handle).ToHashSet();
+        var references = Pointed(TurnAct.CritiqueItem, plan.References.Where(shown.Contains).ToList(), message, presented);
+
+        // A message that is ONLY the rejection asks for nothing new: whatever topic a model read off it
+        // ("the second one is terrible" planned as the new request "terrible") is the rejection's own
+        // words, and a new request on them threw the conversation's topic away.
+        if (AskReelIntentSanitizer.Words(AskReelPointer.WithoutRejectedClause(message)).Count == 0)
+        {
+            return plan with
+            {
+                Act = TurnAct.CritiqueItem,
+                Delta = plan.Delta with { Concepts = [], Genres = [], Negations = [], People = [], ReferenceNames = [] },
+                References = references,
+                RejectsReferences = true,
+            };
+        }
+
         return plan with
         {
+            Act = plan.Act == TurnAct.Refine ? TurnAct.CritiqueItem : plan.Act,
             References = references,
-            Delta = delta with { Concepts = concepts, Genres = genres, Negations = negations, Media = media },
-            ClarifyQuestion = clarify,
-            ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
+            RejectsReferences = true,
         };
     }
 
@@ -221,7 +265,10 @@ public static class PlanSanitizer
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(state);
         var shown = state.LastPresented.Select(p => p.Handle).ToHashSet();
-        return plan with { References = Pointed(plan.Act, plan.References.Where(shown.Contains).ToList(), message, state.LastPresented) };
+        return RejectPointed(
+            plan with { References = Pointed(plan.Act, plan.References.Where(shown.Contains).ToList(), message, state.LastPresented) },
+            message,
+            state.LastPresented);
     }
 
     /// <summary>

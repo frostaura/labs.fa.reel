@@ -34,7 +34,7 @@ public static class FallbackPlans
     {
         ArgumentNullException.ThrowIfNull(failed);
         ArgumentNullException.ThrowIfNull(state);
-        var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
+        var reading = FallbackReader.Read(Readable(message, state), state, currentYear ?? DateTime.UtcNow.Year);
         if (reading.ItemQuestion)
         {
             return ItemQuestion(reading.QuestionName, message, failed.Meta, failed.Failure);
@@ -80,7 +80,7 @@ public static class FallbackPlans
     public static PlanResult Keyless(string message, ConversationState state, int? currentYear = null)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
+        var reading = FallbackReader.Read(Readable(message, state), state, currentYear ?? DateTime.UtcNow.Year);
         if (reading.ItemQuestion)
         {
             return ItemQuestion(reading.QuestionName, message, LlmCallMeta.None, null);
@@ -111,6 +111,17 @@ public static class FallbackPlans
             PlanSource.CarriedForward,
             LlmCallMeta.None);
     }
+
+    /// <summary>
+    /// The words a fallback reads a request from: the message, less a clause that rejects a card on
+    /// screen. "I didn't like the second one" was the new request "didn't", and "the second one is
+    /// terrible" the topic "terrible" — each throwing the conversation's topic away (HREV6-ASK-02).
+    /// The rejection itself is the sanitiser's to apply (<see cref="PlanSanitizer.RejectPointed"/>).
+    /// </summary>
+    private static string Readable(string message, ConversationState state) =>
+        state.LastPresented.Count > 0 && AskReelPointer.Rejected(message) is not null
+            ? AskReelPointer.WithoutRejectedClause(message)
+            : message;
 
     /// <summary>
     /// A question about a card no model read: answered from the title's facts, the search left where it

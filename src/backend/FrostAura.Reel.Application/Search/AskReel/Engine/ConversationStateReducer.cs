@@ -77,12 +77,21 @@ public static class ConversationStateReducer
         var references = ResolveHandles(plan.References, state.LastPresented);
         var rejected = state.Rejected.ToList();
         var referenceIds = baseSoft.ReferenceTitleIds.ToList();
+        var steers = delta.Directions.Count > 0 || delta.Moods.Count > 0 || delta.Concepts.Count > 0 || delta.Genres.Count > 0;
         switch (plan.Act)
         {
             case TurnAct.CritiqueSet:
                 // "None of these are X": every card the newest answer showed is rejected, and X is a
                 // requirement from now on (it is in the concepts above, never in the negations).
                 rejected.AddRange(NewestAnswer(state.LastPresented).Select(p => p.TitleId));
+                break;
+            case TurnAct.CritiqueItem when plan.RejectsReferences || !steers:
+            case not TurnAct.CritiqueItem when plan.RejectsReferences:
+                // "Not the first one", "I didn't like the second one": the card is rejected and nothing
+                // is searched near it — as a reference it steered the search TOWARDS the card the user
+                // turned down, and the judge was told "Like: <that card>" (HREV6-ASK-02).
+                rejected.AddRange(references);
+                referenceIds.RemoveAll(references.Contains);
                 break;
             case TurnAct.CritiqueItem:
                 // "More heart than T2.1": the critiqued titles are not shown again, and the direction
