@@ -12,7 +12,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// labels OR together; AND-ing them would turn a synonym list into an impossible conjunction. Genres
 /// become that concept only when there are no keywords: next to a keyword they are the interpreter's
 /// guess at a flavour ("action" beside "ninja"), and requiring them would quietly drop the
-/// non-action ninja films. Negations are not constraints at all — they are handled as exclusions by
+/// non-action ninja films. Alone, they OR as a flavour list too, except where the user's own words are
+/// a genre phrase ("romantic comedies"), which ANDs its genres. Negations are not constraints at all — they are handled as exclusions by
 /// the chat layer — so <see cref="SearchIntent.ExcludeGenres"/> and
 /// <see cref="SearchIntent.ExcludeKeywords"/> are deliberately not read here.</para>
 /// </summary>
@@ -45,7 +46,7 @@ public static class IntentConstraints
         }
         else if (genres.Count > 0)
         {
-            concepts.Add(new ConceptTerm(said ?? string.Join(" ", genres), [], genres, StandInWords: said is null));
+            concepts.AddRange(GenreConcepts(genres, said));
         }
 
         var people = (intent.People ?? [])
@@ -62,6 +63,29 @@ public static class IntentConstraints
             : MediaScopes.From(intent.MediaTypes);
 
         return new HardConstraints(concepts, people, years, intent.MaxRuntimeMinutes, media);
+    }
+
+    /// <summary>
+    /// A genres-only intent. The interpreter's genres are a flavour list ("scary films" → horror,
+    /// thriller) that OR together, as v1 discovery reads them (TMDB's <c>with_genres</c> pipe) — unless
+    /// the user's own words are nothing but genre words naming two or more genres without an "or"
+    /// ("romantic comedies"): then each named genre is a concept of its own and they AND, the reading
+    /// <see cref="Concepts.ConceptResolver.GenreReading"/> gives the same words anywhere else
+    /// (HREV8-ASK-01). Without the user's words, the stand-in names the OR it counts ("romance or
+    /// comedy"), never a phrase that reads as both genres at once.
+    /// </summary>
+    private static IEnumerable<ConceptTerm> GenreConcepts(List<string> genres, string? said)
+    {
+        if (said is not null
+            && Concepts.ConceptResolver.GenreReading(new ConceptTerm(said, [], [])) is { Count: > 1 } together)
+        {
+            return together;
+        }
+
+        var standIn = genres.Count == 1
+            ? genres[0]
+            : $"{string.Join(", ", genres.Take(genres.Count - 1))} or {genres[^1]}";
+        return [new ConceptTerm(said ?? standIn, [], genres, StandInWords: said is null)];
     }
 
     private static List<string> Clean(IEnumerable<string>? values) =>

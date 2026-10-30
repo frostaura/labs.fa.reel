@@ -38,6 +38,31 @@ public class RetrievalContractTests
         Assert.Equal("scary films", concept.UserWords);
     }
 
+    /// <summary>
+    /// HREV8-ASK-01: a genres-only intent stays a flavour list OR-ed in one concept unless the user's own
+    /// words are a genre phrase without "or" — then each genre they named is its own concept and they AND.
+    /// With no words of the user's, the stand-in names the OR it counts.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic comedies", new[] { "romance", "comedy" }, "romantic comedies:romance|comedies:comedy", false)]
+    [InlineData("comedy romance", new[] { "romance", "comedy" }, "comedy romance:comedy|romance:romance", false)]
+    [InlineData("romantic comedies", new[] { "comedy", "drama" }, "romantic comedies:romance|comedies:comedy", false)]
+    [InlineData("romance or comedy", new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", false)]
+    [InlineData("scary films", new[] { "horror", "thriller" }, "scary films:horror,thriller", false)]
+    [InlineData("comedies", new[] { "comedy", "romance" }, "comedies:comedy,romance", false)]
+    [InlineData(null, new[] { "romance", "comedy" }, "romance or comedy:romance,comedy", true)]
+    [InlineData(null, new[] { "horror", "thriller", "mystery" }, "horror, thriller or mystery:horror,thriller,mystery", true)]
+    [InlineData(null, new[] { "comedy" }, "comedy:comedy", true)]
+    public void Intent_genres_alone_and_only_when_the_user_names_them_as_one_phrase(
+        string? userWords, string[] genres, string expected, bool standIn)
+    {
+        var hard = IntentConstraints.FromIntent(Intent(genres: genres), userWords: userWords);
+
+        Assert.Equal(expected, string.Join('|', hard.Concepts.Select(c => $"{c.UserWords}:{string.Join(',', c.Genres)}")));
+        Assert.All(hard.Concepts, c => Assert.Empty(c.CatalogueLabels));
+        Assert.All(hard.Concepts, c => Assert.Equal(standIn, c.StandInWords));
+    }
+
     [Fact]
     public void Intent_with_no_topic_has_no_concepts_and_negations_are_never_constraints()
     {

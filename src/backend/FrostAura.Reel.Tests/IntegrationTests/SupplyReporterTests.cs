@@ -854,6 +854,133 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         Assert.Equal(seen, (await new SupplyReporter(db, eligibility).ReportAsync(accountId, planned, CancellationToken.None)).AlreadySeen);
     }
 
+    /// <summary>
+    /// HREV8-ASK-01, the founder's live v1 turn: "some romantic comedies please" was read with keyword
+    /// "romantic comedies" (and a flavour genre, comedy), and the resolver OR-ed the phrase's two genres
+    /// because the planner's keyword sat in the concept's labels — 12,572 "romantic comedies" counted,
+    /// most of them comedies or romances alone, with "turning off excluded genre: comedy" offered as if
+    /// it unlocked any. A phrase made only of genre words is those genres AND-ed whichever list carries
+    /// it: the supply is held to <c>eval/askreel/truth/romantic-comedy.sql</c> over the whole catalogue,
+    /// no single exclusion is offered as a relaxation (lifting one alone unlocks nothing), and the shelf
+    /// keeps the user's words. "or" keeps the OR.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "romantic comedies" }, new[] { "comedy" }, "romantic comedies", "romantic comedies")]
+    [InlineData(new[] { "romantic comedy" }, new string[0], "romantic comedy", "romantic comedy")]
+    [InlineData(new[] { "comedy romance" }, new[] { "romance" }, null, "comedy romance")]
+    [InlineData(new string[0], new[] { "romance", "comedy" }, "romantic comedies", "romantic comedies")]
+    [InlineData(new string[0], new[] { "comedy", "romance" }, "a romance comedy", "a romance comedy")]
+    public async Task A_v1_genre_phrase_counts_its_genres_together_and_offers_no_single_genre_relaxation(
+        string[] keywords, string[] genres, string? userWords, string shelf)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        var tag = UniqueTopic();
+        var romcomFilm = await SeedTitleAsync(tag, t => t.Genres = ["romance", "comedy"]);
+        var romcomShow = await SeedTitleAsync(tag, t => { t.MediaType = MediaType.Show; t.Genres = ["comedy"]; t.Keywords = [tag, "love triangle"]; });
+        var soapComedy = await SeedTitleAsync(tag, t => { t.MediaType = MediaType.Show; t.Genres = ["comedy", "soap"]; });
+        var romanceOnly = await SeedTitleAsync(tag, t => t.Genres = ["romance", "drama"]);
+        var comedyOnly = await SeedTitleAsync(tag, t => t.Genres = ["comedy"]);
+        var comedyFilmLoveTriangle = await SeedTitleAsync(tag, t => { t.Genres = ["comedy"]; t.Keywords = [tag, "love triangle"]; });
+        await SeedWatchAsync(accountId, romcomFilm);
+        var mine = new[] { romcomFilm, romcomShow, soapComedy, romanceOnly, comedyOnly, comedyFilmLoveTriangle };
+
+        var planned = IntentConstraints.FromIntent(new SearchIntent(genres, keywords, [], string.Empty, null, null), userWords: userWords);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        await using var snapshot = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+        var resolved = await resolver.ResolveAsync(planned, CancellationToken.None);
+
+        // The fixture's own titles, read on the planned constraints and the resolved ones alike.
+        var want = new[] { romcomFilm, romcomShow, soapComedy }.ToHashSet();
+        foreach (var hard in new[] { planned, resolved })
+        {
+            var matched = await HardConstraintFilter.Apply(db.Titles, db, hard).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+            Assert.Equal(want, matched.ToHashSet());
+        }
+
+        // The whole catalogue, held to the eval's independent truth, on every reporter path.
+        var truthSql = "SELECT count(*)::int AS \"Value\" FROM (" + RomanticComedyTruth() + ") c";
+        var truth = await db.Database.SqlQueryRaw<int>(truthSql).SingleAsync();
+        Assert.True(truth >= want.Count);
+        var eligibility = new EligibilityQueryBuilder(db);
+        foreach (var report in new[]
+        {
+            await new SupplyReporter(db, eligibility, resolver).ReportAsync(accountId, planned, 0, CancellationToken.None),
+            await new SupplyReporter(db, eligibility).ReportAsync(accountId, resolved, 0, CancellationToken.None),
+            await new SupplyReporter(db, eligibility).ReportAsync(accountId, planned, 0, CancellationToken.None),
+        })
+        {
+            Assert.Equal(truth, report.MatchingInCatalogue);
+            Assert.Equal(0, report.Eligible);
+            Assert.True(report.KnockoutsMeasured);
+            Assert.DoesNotContain(report.Knockouts, k => k.Kind == FilterKind.ExcludeGenre);
+        }
+
+        Assert.Equal(shelf, Application.Search.AskReel.AskReelTopic.Shelf(planned));
+        Assert.Equal(shelf, Application.Search.AskReel.AskReelTopic.Shelf(resolved));
+    }
+
+    /// <summary>
+    /// "romance or comedy" asks for either: the OR stays inside one concept, so every title of either
+    /// genre counts and lifting one exclusion is a real relaxation — the fixture that keeps the AND above
+    /// from being the only reading.
+    /// </summary>
+    [Fact]
+    public async Task A_v1_genre_phrase_that_says_or_keeps_either_genre()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        var tag = UniqueTopic();
+        var romcom = await SeedTitleAsync(tag, t => t.Genres = ["romance", "comedy"]);
+        var romanceOnly = await SeedTitleAsync(tag, t => t.Genres = ["romance", "drama"]);
+        var comedyOnly = await SeedTitleAsync(tag, t => t.Genres = ["comedy"]);
+        var dramaOnly = await SeedTitleAsync(tag, t => t.Genres = ["drama"]);
+        var mine = new[] { romcom, romanceOnly, comedyOnly, dramaOnly };
+
+        foreach (var planned in new[]
+        {
+            IntentConstraints.FromIntent(new SearchIntent([], ["romance or comedy"], [], string.Empty, null, null), userWords: "romance or comedy"),
+            IntentConstraints.FromIntent(new SearchIntent(["romance", "comedy"], [], [], string.Empty, null, null), userWords: "romance or comedy"),
+            IntentConstraints.FromIntent(new SearchIntent(["romance", "comedy"], [], [], string.Empty, null, null)),
+        })
+        {
+            await using var db = fixture.CreateContext(new AccountContext());
+            var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+            var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+                new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+                new Application.Search.Retrieval.Concepts.ConceptEmbeddings(
+                    new Fakes.StubEmbeddingProvider(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+                db,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+            var resolved = await resolver.ResolveAsync(planned, CancellationToken.None);
+            var matched = await HardConstraintFilter.Apply(db.Titles, db, resolved).Where(t => mine.Contains(t.Id)).Select(t => t.Id).ToListAsync();
+            Assert.Equal(new[] { romcom, romanceOnly, comedyOnly }.ToHashSet(), matched.ToHashSet());
+
+            // The count names the OR it took, never a phrase that reads as both genres at once.
+            Assert.Equal("romance or comedy", Application.Search.AskReel.AskReelTopic.Shelf(planned));
+        }
+    }
+
     [Fact]
     public async Task Samurai_and_alien_supply_equal_an_independent_sql_statement_over_the_whole_catalogue()
     {
@@ -947,6 +1074,19 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
 
     private static ConditionKnockout Single(SupplyReport report, FilterKind kind) =>
         Assert.Single(report.Knockouts, k => k.Kind == kind);
+
+    /// <summary>The eval's romantic-comedy truth statement (<c>eval/askreel/truth/romantic-comedy.sql</c>), comments and terminator stripped.</summary>
+    private static string RomanticComedyTruth()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "fa.reel.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        var path = Path.Combine(dir?.FullName ?? throw new InvalidOperationException("fa.reel.slnx not found above the test assembly."), "eval", "askreel", "truth", "romantic-comedy.sql");
+        return string.Join('\n', File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal))).TrimEnd().TrimEnd(';');
+    }
 
     private static string UniqueTopic() => $"supplytopic{Guid.NewGuid():N}";
 

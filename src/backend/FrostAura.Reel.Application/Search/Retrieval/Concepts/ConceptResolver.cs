@@ -202,14 +202,25 @@ public sealed partial class ConceptResolver(
         }
 
         var all = named.SelectMany(n => n.Slugs).Distinct(StringComparer.Ordinal).ToList();
-        var labelled = concept.CatalogueLabels.Any(l => ConceptSynonyms.GenresNamedBy(Normalise(l)) is null);
-        if (others.Contains("or") || named.Count == 1 || labelled)
+        if (others.Contains("or") || named.Count == 1 || Labelled(concept))
         {
             return [concept with { Genres = all }];
         }
 
         return [concept with { Genres = [.. named[0].Slugs] }, .. named.Skip(1).Select(n => new ConceptTerm(n.Word, [], [.. n.Slugs], StandInWords: concept.StandInWords))];
     }
+
+    /// <summary>
+    /// True when the planner gave <paramref name="concept"/> a label that is not made only of genre words —
+    /// a real topic beside the phrase, which keeps the phrase's genres OR-ed inside the one concept. A
+    /// label that merely restates the genre phrase ("romantic comedies", the v1 keyword the user's own
+    /// words anchored) is no such topic: reading it as one OR-ed the two genres, so v1 counted every
+    /// comedy and every romance as a romantic comedy and offered lifting either exclusion alone as a
+    /// relaxation that unlocked nothing of what was asked (HREV8-ASK-01). The static reading
+    /// (<see cref="GenreReading"/>) and resolution apply the one rule.
+    /// </summary>
+    private static bool Labelled(ConceptTerm concept) =>
+        concept.CatalogueLabels.Any(l => ConceptSynonyms.GenresNamedBy(Normalise(l)) is null);
 
     private static ConceptTerm Mark(ConceptTerm concept)
     {
@@ -286,7 +297,7 @@ public sealed partial class ConceptResolver(
                 if (!givenGenres)
                 {
                     genres.AddRange(named.SelectMany(n => n.Slugs));
-                    if (seed == words && concept.CatalogueLabels.Count == 0 && !others.Contains("or"))
+                    if (seed == words && !Labelled(concept) && !others.Contains("or"))
                     {
                         phraseGenres.AddRange(named);
                     }
