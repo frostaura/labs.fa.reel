@@ -162,7 +162,7 @@ export function xrefBacktestCaveat(backtest: CrossReferenceBacktest): string {
  * it to mean anything.
  *
  * <p>The refusal is the point of the function. This measurement can never reach significance: only
- * about 2% of ratings are made in the app, so the join behind it is temporal, and a mean over four
+ * a rating records no link to the card behind it, so the join is temporal, and a mean over four
  * outcomes looks exactly like a mean over four hundred on a page. Naming the count and saying "not
  * yet answerable" is the only rendering that cannot be misread.</p>
  */

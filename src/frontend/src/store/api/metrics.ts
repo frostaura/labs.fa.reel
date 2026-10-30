@@ -301,7 +301,8 @@ export interface CrossReferencePayload {
  * How the titles served under one cross-reference standing actually turned out. `answerable` is the
  * server's own judgement about whether `n` is large enough to read anything into — the panel shows
  * the count and refuses to draw a conclusion below it, because this measurement can never reach
- * significance (about 2% of ratings are made in the app) and the offline backtest is the gate.
+ * significance (few ratings are made in the app, and a rating records no link to the card behind it)
+ * and the offline backtest is the gate.
  */
 export interface CrossReferenceVerdictOutcome {
   verdict: string;

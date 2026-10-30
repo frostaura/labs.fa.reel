@@ -486,7 +486,7 @@
           "text": "get live, explainable picks you haven't seen yet"
         },
         {
-          "file": "src/frontend/src/components/askReel/AnswerStrip.tsx",
+          "file": "src/frontend/src/lib/askReel/copy.ts",
           "text": "You’ve watched or rated everything this thread found."
         },
         {
@@ -824,12 +824,13 @@
       "id": "track-record-evidence-base",
       "owner": "WS-10B",
       "verdict": "unverified",
-      "assertion": "The track record and the Lab state their evidence base: only scored calls the user later rated count, the retro fallback is named as weaker evidence, in-app ratings are a small share, and the calibration bands compare promise to outcome.",
-      "evidence": "AccuracyQuery builds the pairs from the exposure log, or from scores written before the rating (labelled retro), and corroborates the offline backtest without gating anything. The per-line statements (the 2% share, PostWatchStrip's 'only learns when you tell it', the Lab's band reading) were not traced to their code in this sweep. R1-47 retired 'the same numbers the engine is judged on internally' (promotion reads NDCG@10, which the page does not show).",
+      "assertion": "The track record and the Lab state their evidence base: only scored calls the user later rated count, the retro fallback is named as weaker evidence, the cross-reference join is by time, not cause, because a rating records no link to the card behind it, and the calibration bands compare promise to outcome.",
+      "evidence": "AccuracyQuery builds the pairs from the exposure log, or from scores written before the rating (labelled retro), and corroborates the offline backtest without gating anything. The per-line statements (PostWatchStrip's 'only learns when you tell it', the Lab's band reading) were not traced to their code in this sweep. R1-47 retired 'the same numbers the engine is judged on internally' (promotion reads NDCG@10, which the page does not show).",
       "tests": [
         "src/frontend/src/lib/trackRecordCopy.test.ts::claims the card was on screen only when the exposure log says so",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/RetroLoopQueryTests.cs::The_counterfactual_compares_reel_picks_with_the_users_own_finds_from_the_same_weeks",
-        "src/frontend/src/lib/trackRecordCopy.test.ts::states the matching band, and the via-Reel ratings left out only when there are any"
+        "src/frontend/src/lib/trackRecordCopy.test.ts::states the matching band, and the via-Reel ratings left out only when there are any",
+        "src/backend/FrostAura.Reel.Tests/Ml/TrackRecordPopulationNoteTests.cs::No_selection_note_states_a_share_or_a_count"
       ],
       "claims": [
         {
@@ -866,7 +867,7 @@
         },
         {
           "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
-          "text": "Only about 2% of ratings are made in the app"
+          "text": "only titles you chose to watch."
         },
         {
           "file": "src/backend/FrostAura.Reel.Application/Ml/ClosedLoop/AccuracyQuery.cs",
@@ -1434,12 +1435,17 @@
       "evidence": "railSupplyLine names the device view only when cards this rail loaded are hidden by the per-device Movies/TV and availability toggles (applied in the browser, not by the server), so the server's count is not quoted as the reason (HREV1-RET-07).",
       "tests": [
         "src/frontend/src/lib/railSupplyCopy.test.ts::blames the device's view, not the conditions, when the cards it did load are hidden by the browse toggles",
-        "src/frontend/tests-e2e/rail-supply.spec.ts::an empty rail names what the conditions hide, and See why opens the editor"
+        "src/frontend/tests-e2e/rail-supply.spec.ts::an empty rail names what the conditions hide, and See why opens the editor",
+        "src/frontend/src/lib/railSupplyCopy.test.ts::names the gate, not the conditions, and offers no conditions link"
       ],
       "claims": [
         {
           "file": "src/frontend/src/lib/railSupplyCopy.ts",
           "text": "Nothing here matches the Movies/TV and availability view set on this device"
+        },
+        {
+          "file": "src/frontend/src/lib/railSupplyCopy.ts",
+          "text": "Nothing else shares a person, keyword or theme with … closely enough (…)…"
         }
       ]
     }

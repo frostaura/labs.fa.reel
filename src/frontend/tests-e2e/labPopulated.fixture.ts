@@ -817,7 +817,7 @@ export const LAB_CROSS_REFERENCE = {
  "window": "all",
  "population": {
   "name": "Titles served under a cross-reference standing that you have since rated",
-  "selectionNote": "Only about 2% of ratings are made in the app, so this joins by time rather than cause, and it holds only titles you chose to watch. It corroborates the offline backtest; it never gates anything."
+  "selectionNote": "A rating records no link to the card that led to it, so this joins by time rather than cause, and it holds only titles you chose to watch. It corroborates the offline backtest; it never gates anything."
  },
  "crossReference": {
   "minimumOutcomes": 20,

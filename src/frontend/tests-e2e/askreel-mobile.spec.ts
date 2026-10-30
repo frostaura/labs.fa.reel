@@ -381,6 +381,71 @@ test.describe("Ask Reel on a phone", () => {
     await expect(status).not.toContainText("Nothing left");
   });
 
+  // HREV5-PH-01 and HREV5-PH-01-R1, at 390×844: a cold open of a stored thread with nothing left
+  // in its grid. The status region names the card the strip renders. The two fixtures are one field
+  // apart — the newest answer's mode — and `lastCardsAt` is set in both, as an earlier Picks turn
+  // leaves it: the all-removed card is announced as all removed, the none-found card as none found.
+  for (const [mode, card, said, never] of [
+    [
+      "Picks", "askreel-all-removed",
+      "Picked up where you left off · 10 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given. You’ve watched or rated everything this thread found.",
+      "no saved picks",
+    ],
+    [
+      "NoneFound", "askreel-none-found",
+      "Picked up where you left off · Nothing left that matches — Reel’s reply says why.",
+      "You’ve watched or rated everything",
+    ],
+  ] as const) {
+    test(`a resumed thread whose newest answer was ${mode} with nothing left is announced as the card on screen`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await stubEventSource(page);
+      await stubAskReel(page);
+      await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+      await mockJson(page, "**/api/sync/status", {
+        pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+        lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+      });
+      await mockJson(page, "**/api/settings/filters", {
+        excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+        minPredictedRating: null, languages: [], minCrowdRating: null, minYear: null, maxYear: null,
+      });
+      const stamp = new Date(Date.now() - 60_000).toISOString();
+      const removed = mode === "Picks" ? 10 : 0;
+      const resume = {
+        id: CONVERSATION, title: "christopher nolan", lastCardsAt: stamp, lastTurnAt: stamp,
+        turns: [
+          { sequence: 0, role: "user", text: "christopher nolan", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "Nolan picks.", kind: "ask", status: "Completed", mode: "Picks" },
+          { sequence: 2, role: "user", text: "only the silent ones", kind: "ask", status: "Completed" },
+          { sequence: 3, role: "assistant", text: "Nothing left that fits.", kind: "ask", status: "Completed", mode },
+        ],
+        cards: [], removed, removedEarlier: removed, mode, reason: null,
+        lastQuery: "only the silent ones", mediaTypes: [], shown: [],
+      };
+      await page.route(
+        (u) => u.pathname === "/api/search/conversations",
+        (route) => route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+      );
+      await page.route(
+        (u) => u.pathname.startsWith("/api/search/conversations/"),
+        (route) => {
+          const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop()!);
+          return id === CONVERSATION
+            ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resume) })
+            : route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+        },
+      );
+      await page.addInitScript((id) => localStorage.setItem("reel.ask.conversationId", id as string), CONVERSATION);
+      await page.goto("/search");
+
+      await expect(page.getByTestId(card)).toBeVisible();
+      const status = page.getByTestId("askreel-status");
+      await expect(status).toHaveText(said);
+      await expect(status).not.toContainText(never);
+    });
+  }
+
   test("transcript is a log landmark with speaker labels", async ({ page }) => {
     await bootSearch(page);
 

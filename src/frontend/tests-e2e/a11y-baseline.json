@@ -1,12 +1,3 @@
 {
-  "_owed": {
-    "saved@desktop": "WS-10A WhereToWatch: provider-chip and tmdb-more-link aria-labels do not contain their visible text (PH-03 CR-5)",
-    "saved@phone": "WS-10A WhereToWatch: provider-chip and tmdb-more-link aria-labels do not contain their visible text (PH-03 CR-5)"
-  },
-  "saved@desktop": {
-    "label-content-name-mismatch": 2
-  },
-  "saved@phone": {
-    "label-content-name-mismatch": 2
-  }
+  "_owed": {}
 }

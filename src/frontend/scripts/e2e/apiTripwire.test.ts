@@ -58,7 +58,11 @@ describe("apiTripwire", () => {
     logFile = path.join(dir, "log.jsonl");
     port = await freePort();
     tripwire = spawn(process.execPath, [SCRIPT, String(port), logFile], { stdio: "ignore" });
-    await expect.poll(() => call(port, "GET", "/__tripwire/health").then((r) => r.status, () => 0)).toBe(200);
+    // A spawned node process can take seconds to listen on a machine loaded by parallel lanes; the
+    // default 1 s poll and 5 s hook timeout made this suite fail under load and pass alone.
+    await expect
+      .poll(() => call(port, "GET", "/__tripwire/health").then((r) => r.status, () => 0), { timeout: 20_000, interval: 100 })
+      .toBe(200);
 
     mockHits = [];
     mock = http.createServer((req, res) => {
@@ -72,7 +76,7 @@ describe("apiTripwire", () => {
     });
     await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
     mockPort = (mock.address() as AddressInfo).port;
-  });
+  }, 30_000);
 
   afterEach(async () => {
     tripwire.kill("SIGTERM");

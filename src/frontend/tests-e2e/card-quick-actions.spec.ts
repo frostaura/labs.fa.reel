@@ -15,8 +15,8 @@ import { mockHomeChrome } from "./home-chrome";
  * reasons the modal offers and posts whichever one the user chose.
  *
  * Plus the 1–10 rating popover the overlay now carries — the same component the hero mounts, so
- * scoring a pick no longer costs a navigation either. Only 2% of ratings are made in the app today;
- * the rest arrive from Trakt hours later, which is why the loop never closes at the moment it is felt.
+ * scoring a pick no longer costs a navigation either. Few ratings are made in the app today;
+ * most arrive from Trakt hours later, which is why the loop never closes at the moment it is felt.
  */
 
 const card = (n: number) => ({

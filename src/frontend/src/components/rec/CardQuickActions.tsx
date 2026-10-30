@@ -75,8 +75,8 @@ const KEYBOARD_REACHABLE = 0;
  *
  * RATING. The third action is a 1–10 popover, and it is here rather than only in the detail modal
  * because a rating is the one input that closes the loop: Reel predicted a number, the user supplies
- * theirs, and until now supplying it cost a navigation into the modal and back — which is why 2% of
- * ratings are made in the app and the rest arrive from Trakt hours later. Rating from a suggestion
+ * theirs, and until now supplying it cost a navigation into the modal and back — which is why few
+ * ratings are made in the app and most arrive from Trakt hours later. Rating from a suggestion
  * surface also means "I have seen this", so the play is logged (`markWatched`) exactly as the /rate
  * grid does, and the title leaves every suggestion surface through the same removedTitlesSlice flow
  * as the other two actions — `rateTitle` dispatches `titleRemoved` on success.

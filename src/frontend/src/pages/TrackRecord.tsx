@@ -453,8 +453,8 @@ function CrossReferenceSummary({ window }: { window: string }) {
       )}
 
       {/* The online half. It cannot reach significance and says so per verdict rather than once at
-          the bottom: only ~2% of ratings are made in the app, so this corroborates the backtest and
-          never replaces it. */}
+          the bottom: a rating records no link to the card behind it, so the join is by time, not cause,
+          and this corroborates the backtest and never replaces it. */}
       <div className="mt-4">
         <p className="fa-overline text-3">since it went live</p>
         {xref.online.length === 0 ? (

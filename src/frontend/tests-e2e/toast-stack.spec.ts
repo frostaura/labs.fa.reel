@@ -137,6 +137,10 @@ test("a pointer resting on the card undo holds the window until it leaves", asyn
   await bootHome(page, { clock: true });
   await notForMeByKeyboard(page, []);
   const toast = page.getByTestId("card-undo-toast");
+  // A keyboard-raised undo takes focus (HREV4-PH-02), and focus holds the clock by design; move it
+  // off the toast so only the pointer is holding the window.
+  await expect(page.getByTestId("card-undo-toast-undo")).toBeFocused();
+  await page.getByTestId("rec-card").first().getByTestId("quick-not-interested").focus();
   await toast.hover();
   await page.clock.runFor(UNDO_WINDOW_MS * 2);
   await expect(toast).toBeVisible();
