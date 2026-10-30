@@ -79,10 +79,122 @@ public static class SearchVocabulary
             ["doc"] = ["documentary"],
             ["docos"] = ["documentary"],
             ["documentaries"] = ["documentary"],
+            // HREV5-ASK-02: the planner reads these as the genre — "sitcoms" is comedy on TV,
+            // "docuseries" a documentary — and the sanitiser, reading the user's words through this
+            // table, then stripped the genre as a standing condition the model had copied. The
+            // conflict frame never fired and the request opened up to The Wire and Stranger Things.
+            ["sitcom"] = ["comedy"],
+            ["sitcoms"] = ["comedy"],
+            ["docuseries"] = ["documentary"],
+            ["docu"] = ["documentary"],
+            ["docus"] = ["documentary"],
+            // HREV5-ASK-02 round 7: the same silent strip for every synonym the table lacked — "a doco",
+            // "a chickflick", "a mockumentary", "stand-up specials", "something to make me laugh".
+            ["doco"] = ["documentary"],
+            ["chickflick"] = ["romance"],
+            ["chickflicks"] = ["romance"],
+            ["mockumentary"] = ["comedy"],
+            ["mockumentaries"] = ["comedy"],
+            ["standup"] = ["comedy"],
+            ["standups"] = ["comedy"],
+            ["laugh"] = ["comedy"],
+            ["laughs"] = ["comedy"],
+            ["whodunit"] = ["mystery"],
+            ["whodunits"] = ["mystery"],
+            ["whodunnit"] = ["mystery"],
+            ["whodunnits"] = ["mystery"],
+            ["tearjerker"] = ["drama"],
+            ["tearjerkers"] = ["drama"],
 
             ["animated"] = ["animation"],
             ["animations"] = ["animation"],
         };
+
+    /// <summary>
+    /// Two-word phrases that name a genre outright though neither word does on its own: "love" is a
+    /// floor word and "chick" names nothing, but "love story" and "chick flick" are romance. Read by
+    /// the conflict detector (<see cref="AskReelStandingFilters.AskedFor"/>), the plan sanitiser and
+    /// the model-less reader alike, so the three can never disagree about whether the user asked for
+    /// a genre (HREV5-ASK-02: "chick flicks" planned as romance was stripped as a copied condition).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> GenrePhrases =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["love story"] = ["romance"],
+            ["love stories"] = ["romance"],
+            ["chick flick"] = ["romance"],
+            ["chick flicks"] = ["romance"],
+            ["rom com"] = ["romance", "comedy"],
+            ["rom coms"] = ["romance", "comedy"],
+            ["space opera"] = ["science-fiction"],
+            ["space operas"] = ["science-fiction"],
+        };
+
+    /// <summary>
+    /// Three-word phrases that name a genre: "stand-up specials" (the tokenizer splits the hyphen).
+    /// Two words alone would misread "stand up to the bullies".
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> GenreTriples =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["stand up special"] = ["comedy"],
+            ["stand up specials"] = ["comedy"],
+            ["stand up comedian"] = ["comedy"],
+            ["stand up comedians"] = ["comedy"],
+            ["stand up comedy"] = ["comedy"],
+            ["stand up show"] = ["comedy"],
+            ["stand up shows"] = ["comedy"],
+        };
+
+    /// <summary>
+    /// Two-word phrases that name a genre only after a word that makes them a noun phrase: "a love
+    /// film" is romance, "I love films about space" is not.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> DeterminedGenrePhrases =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["love film"] = ["romance"],
+            ["love films"] = ["romance"],
+            ["love movie"] = ["romance"],
+            ["love movies"] = ["romance"],
+        };
+
+    /// <summary>The words that make a <see cref="DeterminedGenrePhrases"/> entry a noun phrase.</summary>
+    private static readonly IReadOnlySet<string> PhraseDeterminers = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "a", "an", "some", "any", "good", "great", "old", "classic", "sweet", "nice", "cute", "proper", "cheesy",
+        "little", "new", "few", "real", "decent", "romantic", "soppy", "sappy",
+    };
+
+    /// <summary>
+    /// The genre slugs <paramref name="words"/> (lower-cased, in order) name by a two-word
+    /// <see cref="GenrePhrases"/> entry, in the order they appear, each once.
+    /// </summary>
+    public static IReadOnlyList<string> GenresOfPhrases(IReadOnlyList<string> words)
+    {
+        ArgumentNullException.ThrowIfNull(words);
+        var genres = new List<string>();
+        void Add(string[] slugs) => genres.AddRange(slugs.Where(g => !genres.Contains(g, StringComparer.Ordinal)));
+        for (var i = 0; i + 1 < words.Count; i++)
+        {
+            var pair = $"{words[i]} {words[i + 1]}";
+            if (GenrePhrases.TryGetValue(pair, out var slugs))
+            {
+                Add(slugs);
+            }
+            else if (i > 0 && PhraseDeterminers.Contains(words[i - 1]) && DeterminedGenrePhrases.TryGetValue(pair, out var determined))
+            {
+                Add(determined);
+            }
+
+            if (i + 2 < words.Count && GenreTriples.TryGetValue($"{pair} {words[i + 2]}", out var triple))
+            {
+                Add(triple);
+            }
+        }
+
+        return genres;
+    }
 
     /// <summary>
     /// The concepts a turn's own words may rule out. Deliberately closed, deliberately concrete:

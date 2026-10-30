@@ -271,4 +271,105 @@ public class NoneFoundCopyTests
             CultureInfo.CurrentCulture = previous;
         }
     }
+
+    /// <summary>
+    /// HREV5-RET-03: the supply counts only the TAGGED shelf, and the floor tray may hold a match
+    /// another arm found. "There are no period drama shows left for you … Your 6.0 bar holds back 1
+    /// title I couldn't check against your request — shown below" denied the card it then showed. With
+    /// a possible match on screen the lead is about the tagged ones, and the tray's cards are named as
+    /// OTHER possible matches. Varied over each tray that can hold one, and over a reply with none.
+    /// </summary>
+    [Theory]
+    // The floor tray holds an unjudged card (the keyless "period drama series" turn).
+    [InlineData(0, 1, 0, 0,
+        "None of the tagged period drama shows are left for you.",
+        "Your 6.0 bar holds back 1 other possible match I couldn't check against your request — shown below.")]
+    [InlineData(0, 2, 0, 0,
+        "None of the tagged period drama shows are left for you.",
+        "Your 6.0 bar holds back 2 other possible matches I couldn't check against your request — shown below.")]
+    // A judged match under the bar, named.
+    [InlineData(1, 0, 0, 0, "None of the tagged period drama shows are left for you.", "Under your 6.0 bar: Bleak House — shown below.")]
+    // The unchecked tray.
+    [InlineData(0, 0, 3, 0,
+        "None of the tagged period drama shows are left for you.",
+        "3 other possible matches I couldn't check against your request are below, marked as unchecked.")]
+    // A match the account's model has not scored yet.
+    [InlineData(0, 0, 0, 1, "None of the tagged period drama shows are left for you.", "Bleak House has no score from your model yet")]
+    // Nothing on screen: the shelf really is empty, and the reply says so.
+    [InlineData(0, 0, 0, 0, "There are no period drama shows left for you.", "")]
+    public void A_none_found_lead_never_denies_a_card_it_shows(int underBar, int held, int uncheckedCards, int unscored, string lead, string tray)
+    {
+        var supply = new SupplyReport(
+            MatchingInCatalogue: 145, AlreadySeen: 7, SavedOrDismissed: 1, ExcludedByConditions: 137, Eligible: 0,
+            BelowFloor: 0, Unscored: 0, Knockouts: [], LowVoteMatches: 0, MinVotes: 50, PredictedFloor: 6m, KnockoutsMeasured: true);
+        var names = Enumerable.Range(0, underBar).Select(_ => "Bleak House").ToList();
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            supply, "period drama", MediaScope.Shows, names, 0, 6m,
+            Unchecked: uncheckedCards, JudgedAny: underBar > 0, HeldUnchecked: held,
+            UnscoredHeld: unscored > 0 ? ["Bleak House"] : null));
+
+        Assert.StartsWith(lead, text, StringComparison.Ordinal);
+        Assert.Contains(tray, text, StringComparison.Ordinal);
+        if (underBar + held + uncheckedCards + unscored > 0)
+        {
+            Assert.DoesNotContain("There are no", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// HREV5-RET-02: a turn no model read that found nothing at all says the reading failed — never
+    /// "I didn't find anything to show for that", which told the founder an actor with 80 films in the
+    /// catalogue had nothing. Behind a lead that already says the request was not fully read, it says
+    /// so without repeating itself. A model's reading that found nothing keeps the plain line.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false, NoneFoundCopy.UnreadNothing)]
+    [InlineData(true, true, NoneFoundCopy.UnreadNothingLed)]
+    [InlineData(false, false, NoneFoundCopy.NothingFoundUnchecked)]
+    public void A_model_less_turn_that_found_nothing_owns_up_to_the_reading(bool unread, bool led, string expected)
+    {
+        foreach (var supply in new SupplyReport?[] { null, Ninja() with { MatchingInCatalogue = 0, AlreadySeen = 0, SavedOrDismissed = 0, ExcludedByConditions = 0 } })
+        {
+            var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+                supply, "liam neeson", MediaScope.Movies, [], 0, 6m, JudgedAny: false, Unread: unread, UnreadLed: led));
+
+            Assert.Equal(expected, text);
+        }
+    }
+
+    /// <summary>
+    /// HREV5-RET-02/RET-03 (round 7): with no tagged shelf behind the request, the lead ignored the
+    /// cards the reply still showed — "I couldn't read that well enough to find anything for it — …
+    /// Taken has no score from your model yet, so your 6.0 bar holds it back — shown below." A lead
+    /// never says nothing was found, or that nothing matched, above a card it shows. Varied over each
+    /// tray, over a turn no model read and one a model read, and over a turn the judge did and did not run.
+    /// </summary>
+    [Theory]
+    // Nobody judged anything: what was found was not checked, whatever tray it is in.
+    [InlineData(false, 0, 1, 0, 0, true, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(false, 1, 0, 0, 0, true, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(false, 0, 1, 0, 0, false, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(false, 0, 0, 2, 0, true, "I couldn't check what I found against what you asked this time.")]
+    [InlineData(false, 0, 0, 0, 1, true, "I couldn't check what I found against what you asked this time.")]
+    // The judge ran: a match the bar holds back matched; a card in the unchecked tray was not checked.
+    [InlineData(true, 1, 0, 0, 0, false, "Nothing I found both matches what you asked and clears your 6.0 bar.")]
+    [InlineData(true, 0, 1, 0, 0, true, "Nothing I found both matches what you asked and clears your 6.0 bar.")]
+    [InlineData(true, 0, 0, 2, 0, false, "Nothing I checked matches what you asked closely enough to show.")]
+    public void A_lead_with_no_tagged_shelf_never_denies_a_card_it_shows(
+        bool judged, int underBar, int unscored, int uncheckedCards, int held, bool unread, string lead)
+    {
+        foreach (var supply in new SupplyReport?[] { null, Ninja() with { MatchingInCatalogue = 0, AlreadySeen = 0, SavedOrDismissed = 0, ExcludedByConditions = 0 } })
+        {
+            var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+                supply, "taken", MediaScope.Movies, Enumerable.Repeat("Taken", underBar).ToList(), 0, 6m,
+                Unchecked: uncheckedCards, JudgedAny: judged, HeldUnchecked: held,
+                UnscoredHeld: unscored > 0 ? ["Taken"] : null, Unread: unread));
+
+            Assert.StartsWith(lead, text, StringComparison.Ordinal);
+            Assert.Contains("below", text, StringComparison.Ordinal);
+            Assert.DoesNotContain(NoneFoundCopy.UnreadNothing, text, StringComparison.Ordinal);
+            Assert.DoesNotContain(NoneFoundCopy.NothingFoundUnchecked, text, StringComparison.Ordinal);
+            Assert.DoesNotContain("closely enough to show", judged && underBar + unscored > 0 ? text : string.Empty, StringComparison.Ordinal);
+        }
+    }
 }

@@ -37,7 +37,12 @@ public static class FallbackPlans
         var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
         if (reading.ItemQuestion)
         {
-            return ItemQuestion(PlanSource.CarriedForward, failed.Meta, failed.Failure);
+            return ItemQuestion(reading.QuestionName, message, failed.Meta, failed.Failure);
+        }
+
+        if (reading.Chitchat)
+        {
+            return Chitchat(failed.Meta, failed.Failure);
         }
 
         var known = state.Hard.Concepts.Select(c => c.UserWords).ToList();
@@ -78,7 +83,12 @@ public static class FallbackPlans
         var reading = FallbackReader.Read(message, state, currentYear ?? DateTime.UtcNow.Year);
         if (reading.ItemQuestion)
         {
-            return ItemQuestion(PlanSource.CarriedForward, LlmCallMeta.None, null);
+            return ItemQuestion(reading.QuestionName, message, LlmCallMeta.None, null);
+        }
+
+        if (reading.Chitchat)
+        {
+            return Chitchat(LlmCallMeta.None, null);
         }
 
         return new PlanResult(
@@ -105,18 +115,26 @@ public static class FallbackPlans
     /// <summary>
     /// A question about a card no model read: answered from the title's facts, the search left where it
     /// was (the conversation's media included). The pointer is resolved by the sanitiser's rule
-    /// (<see cref="PlanSanitizer.PointFallback"/>), the subject by name when the message names one.
+    /// (<see cref="PlanSanitizer.PointFallback"/>), the subject by name when the message names one —
+    /// "what is Better Call Saul about?" names it outright (HREV5-ASK-01).
     /// </summary>
-    private static PlanResult ItemQuestion(PlanSource source, LlmCallMeta meta, PlanFailure? failure) =>
+    private static PlanResult ItemQuestion(string? name, string message, LlmCallMeta meta, PlanFailure? failure) =>
         new(
             TurnAct.ItemQuestion,
             ConversationStateDelta.None,
             [],
-            [new ToolRequest(AskTool.TitleFacts)],
+            [new ToolRequest(AskTool.TitleFacts, Name: name)],
             null,
             [],
-            source,
+            PlanSource.CarriedForward,
             meta,
-            null,
+            name is null ? null : message,
             failure);
+
+    /// <summary>
+    /// "What can you do?" read with no model: what Ask Reel does, in one line, and nothing searched —
+    /// searched, it showed sixteen random unchecked titles (HREV5-ASK-01).
+    /// </summary>
+    private static PlanResult Chitchat(LlmCallMeta meta, PlanFailure? failure) =>
+        new(TurnAct.Chitchat, ConversationStateDelta.None, [], [], null, [], PlanSource.CarriedForward, meta, null, failure);
 }

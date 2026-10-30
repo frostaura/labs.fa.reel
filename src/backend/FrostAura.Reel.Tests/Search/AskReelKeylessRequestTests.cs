@@ -21,7 +21,8 @@ public class AskReelKeylessRequestTests
     [InlineData("heist movies from the last 10 years", new[] { "heist" }, new string[0], 2016, 2026)]
     // HREV4-RET-02: a genre word ending a topic phrase is the genre the topic sits in.
     [InlineData("a tense heist thriller from the 2010s, nothing too long", new[] { "heist" }, new[] { "tense" }, 2010, 2019, "thriller")]
-    [InlineData("80s sci-fi movies", new[] { "sci" }, new string[0], 1980, 1989)]
+    // HREV5-ASK-01: a hyphenated genre word is the genre, never the topic "sci".
+    [InlineData("80s sci-fi movies", new string[0], new string[0], 1980, 1989, "science-fiction")]
     [InlineData("a cozy feel-good movie", new string[0], new[] { "cozy", "feel good" }, null, null)]
     [InlineData("dark gritty heist, no superheroes", new[] { "heist" }, new[] { "dark", "gritty" }, null, null)]
     [InlineData("quiet character dramas", new[] { "character" }, new[] { "quiet" }, null, null, "drama")]
@@ -263,5 +264,253 @@ public class AskReelKeylessRequestTests
 
         Assert.Equal(new YearRange(from, to), request.Years);
         Assert.DoesNotContain(request.Phrases, p => p.Any(char.IsDigit));
+    }
+
+    /// <summary>
+    /// HREV5-ASK-01: with the planner failing twice (or no model at all), "action movies but nothing
+    /// with superheroes" planned the concepts [action, superheroes], replied "I searched for action
+    /// superheroes" and showed Black Panther and Birds of Prey — "nothing WITH" closed the negation
+    /// before its object. "sci-fi without aliens" read the topic "sci", and "war movies but not World
+    /// War II" lost "war" to the narrower negation. A word a cue governs is a negation, and never also
+    /// a topic; a negation of something narrower never removes the broader thing asked for. Varied over
+    /// where the "with" stands, over a cue that is not "nothing", and over a later request that does win.
+    /// </summary>
+    [Theory]
+    [InlineData("action movies but nothing with superheroes", "action", "", "superheroes")]
+    [InlineData("comedies, nothing with zombies", "comedies", "", "zombies")]
+    [InlineData("sci-fi without aliens", "", "science-fiction", "aliens")]
+    [InlineData("war movies but not World War II", "war", "", "world war")]
+    [InlineData("thrillers except ones with sharks", "thrillers", "", "sharks")]
+    [InlineData("rom-com, nothing with weddings", "", "romance|comedy", "weddings")]
+    [InlineData("heist movies with no gore", "heist", "", "gore")]
+    [InlineData("no sci-fi, just westerns", "westerns", "", "sci-fi")]
+    // The latest mention still decides when it is the same thing: asked for after, it is asked for;
+    // ruled out on its own after, it is ruled out.
+    [InlineData("no zombies. actually zombie comedies", "zombie", "comedy", "")]
+    [InlineData("ninja movies, no ninja", "", "", "ninja")]
+    // Round 7: "but" after "anything" means "except", and a list of what is ruled out stays ruled out
+    // past "and" — varied over the head, the joining word, a "with" before the second object, and a
+    // list that ends where a request for something else begins.
+    [InlineData("anything but superheroes", "", "", "superheroes")]
+    [InlineData("show me anything but superheroes", "", "", "superheroes")]
+    [InlineData("everything but horror please", "", "", "horror")]
+    [InlineData("any film but a western", "", "", "western")]
+    [InlineData("comedies other than romcoms", "comedies", "", "romcoms")]
+    [InlineData("action movies but nothing with superheroes and aliens", "action", "", "superheroes|aliens")]
+    [InlineData("action movies but nothing with superheroes or aliens", "action", "", "superheroes|aliens")]
+    [InlineData("heist films, nothing with zombies and with vampires", "heist", "", "zombies|vampires")]
+    [InlineData("no gore and something about heists", "heists", "", "gore")]
+    [InlineData("no zombies and no vampires", "", "", "zombies|vampires")]
+    public void A_negated_word_is_lifted_into_the_negations_and_never_read_as_a_topic(
+        string message, string concepts, string genres, string negations)
+    {
+        static string[] List(string text) => text.Split('|', StringSplitOptions.RemoveEmptyEntries);
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.MalformedAnswer, null, false), LlmCallMeta.None);
+        foreach (var plan in new[]
+                 {
+                     FallbackPlans.CarriedForward(failed, message, ConversationState.Empty, Now),
+                     FallbackPlans.Keyless(message, ConversationState.Empty, Now),
+                 })
+        {
+            Assert.Equal(List(concepts), plan.Delta.Concepts);
+            Assert.Equal(List(genres), plan.Delta.Genres);
+            Assert.Equal(List(negations), plan.Delta.Negations);
+
+            // Through the reducer to what the judge is told: nothing ruled out is ever "Requires".
+            var state = ConversationStateReducer.Apply(ConversationState.Empty, plan, MediaScope.Any);
+            var request = AskReelEngine.JudgeRequest(message, state);
+            var requires = (request.Split(". ").FirstOrDefault(p => p.StartsWith("Requires: ", StringComparison.Ordinal)) ?? "Requires: ")
+                ["Requires: ".Length..].Split(", ", StringSplitOptions.RemoveEmptyEntries);
+            Assert.Equal([.. List(concepts), .. List(genres)], state.Hard.Concepts.Select(c => c.UserWords));
+            foreach (var negated in plan.Delta.Negations)
+            {
+                // The phrase ruled out is never required, and a word ruled out on its own is in no requirement.
+                bool Names(string required) =>
+                    NegationTerms.EqualsAnyForm(required, negated) || NegationTerms.EqualsAnyForm(negated, required)
+                    || (!negated.Contains(' ', StringComparison.Ordinal)
+                        && required.Split(' ').Any(w => NegationTerms.EqualsAnyForm(w, negated) || NegationTerms.EqualsAnyForm(negated, w)));
+                Assert.DoesNotContain(state.Hard.Concepts, c => Names(c.UserWords));
+                Assert.DoesNotContain(requires, Names);
+            }
+        }
+    }
+
+    /// <summary>
+    /// HREV5-ASK-01: "what is Better Call Saul about?" searched "9 unseen call saul titles" and "what can
+    /// you do?" showed sixteen random unchecked titles. A question about a named title is an item
+    /// question about that title, small talk about Ask Reel is small talk, and neither searches; a
+    /// search that merely contains the words is still a search.
+    /// </summary>
+    [Theory]
+    [InlineData("what is Better Call Saul about?", "ItemQuestion", "better call saul")]
+    [InlineData("What's Heat about", "ItemQuestion", "heat")]
+    [InlineData("what was The Wire about?", "ItemQuestion", "the wire")]
+    [InlineData("what is that about?", "ItemQuestion", null)]
+    [InlineData("what can you do?", "Chitchat", null)]
+    [InlineData("hey Reel, what can you do?", "Chitchat", null)]
+    [InlineData("how does this work", "Chitchat", null)]
+    [InlineData("thanks!", "Chitchat", null)]
+    [InlineData("what can you do with zombies", "NewRequest", null)]
+    [InlineData("what is a good movie about revenge", "NewRequest", null)]
+    [InlineData("hey, heist movies", "NewRequest", null)]
+    // Round 7: the class, not the cited phrasings — a question about a named title in any of its
+    // common shapes, and small talk however it is put; a request in the same shape is still a request.
+    [InlineData("tell me about Better Call Saul", "ItemQuestion", "better call saul")]
+    [InlineData("tell me more about The Wire please", "ItemQuestion", "the wire")]
+    [InlineData("is Better Call Saul any good?", "ItemQuestion", "better call saul")]
+    [InlineData("is Heat worth watching?", "ItemQuestion", "heat")]
+    [InlineData("what's the plot of Better Call Saul?", "ItemQuestion", "better call saul")]
+    [InlineData("what happens in Dune?", "ItemQuestion", "dune")]
+    [InlineData("who's in Heat?", "ItemQuestion", "heat")]
+    [InlineData("is it any good?", "ItemQuestion", null)]
+    [InlineData("what can you help me with?", "Chitchat", null)]
+    [InlineData("what are you capable of?", "Chitchat", null)]
+    [InlineData("what kind of things can I ask?", "Chitchat", null)]
+    [InlineData("what can you do for me?", "Chitchat", null)]
+    [InlineData("can you help me?", "Chitchat", null)]
+    [InlineData("tell me about yourself", "Chitchat", null)]
+    [InlineData("tell me about some heist movies", "NewRequest", null)]
+    [InlineData("tell me about heist films from the 90s", "NewRequest", null)]
+    [InlineData("is there anything good tonight?", "NewRequest", null)]
+    [InlineData("is horror any good", "NewRequest", null)]
+    [InlineData("can you help me find a heist movie", "NewRequest", null)]
+    [InlineData("what do you recommend with zombies?", "NewRequest", null)]
+    public void A_question_about_a_title_or_about_ask_reel_is_never_searched(string message, string act, string? name)
+    {
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.Truncated, null, false), LlmCallMeta.None);
+        foreach (var plan in new[]
+                 {
+                     FallbackPlans.CarriedForward(failed, message, ConversationState.Empty, Now),
+                     FallbackPlans.Keyless(message, ConversationState.Empty, Now),
+                 })
+        {
+            Assert.Equal(act, plan.Act.ToString());
+            if (act == "ItemQuestion")
+            {
+                Assert.Equal(name, Assert.Single(plan.Tools, t => t.Tool == AskTool.TitleFacts).Name);
+            }
+
+            if (act != "NewRequest")
+            {
+                Assert.Empty(plan.Delta.Concepts);
+                Assert.Empty(plan.Delta.Genres);
+            }
+        }
+    }
+
+    /// <summary>
+    /// HREV5-ASK-02's model-less half: a genre written by a word the conflict detector reads ("sitcoms",
+    /// "docuseries", "chick flicks") is that genre, so the keyless request keeps it — and with it the
+    /// conflict frame — instead of searching an unknown topic.
+    /// </summary>
+    [Theory]
+    [InlineData("sitcoms", "comedy")]
+    [InlineData("a good docuseries", "documentary")]
+    [InlineData("chick flicks", "romance")]
+    [InlineData("nature docs", "documentary")]
+    public void A_genre_by_another_word_is_read_as_the_genre_with_no_model(string message, string genre)
+    {
+        var plan = FallbackPlans.Keyless(message, ConversationState.Empty, Now);
+
+        Assert.Contains(genre, plan.Delta.Genres);
+        Assert.DoesNotContain(plan.Delta.Concepts, c => c.Contains(message.Split(' ')[^1], StringComparison.Ordinal));
+    }
+
+    /// <summary>The credit a model-less person request means (HREV5-RET-02): directing or acting only when its words say so.</summary>
+    [Theory]
+    [InlineData("movies with Liam Neeson", PersonRole.Any)]
+    [InlineData("liam neeson films", PersonRole.Any)]
+    [InlineData("films directed by Christopher Nolan", PersonRole.Director)]
+    [InlineData("christopher nolan as director", PersonRole.Director)]
+    [InlineData("anything starring Zendaya", PersonRole.Cast)]
+    public void A_model_less_person_request_reads_its_role_from_the_words(string message, PersonRole role) =>
+        Assert.Equal(role, AskReelEngine.FallbackRole(message));
+
+    /// <summary>
+    /// HREV5-RET-02 (round 7): the reader handed the grounder role words and broken names. "movies
+    /// starring Liam Neeson" was the topic "starring liam neeson" and "films directed by Christopher
+    /// Nolan" kept "directed" as a hard topic; "Will Smith" was "smith", "Al Pacino" "pacino", "Robert
+    /// De Niro" the two topics "robert" and "niro", "Samuel L. Jackson" "samuel" and "jackson", and
+    /// "Robert Downey Jr." "robert downey". A role word is the role, and a capitalised name is read
+    /// whole. Varied over where the name stands (first, after "with", before a genre), over a negated
+    /// name, over a title after "like", and over messages whose capitals mark no name.
+    /// </summary>
+    [Theory]
+    [InlineData("movies starring Liam Neeson", "liam neeson", "", "")]
+    [InlineData("films directed by Christopher Nolan", "christopher nolan", "", "")]
+    [InlineData("Will Smith movies", "will smith", "", "")]
+    [InlineData("comedies with Will Ferrell", "comedies|will ferrell", "", "")]
+    [InlineData("something with Al Pacino", "al pacino", "", "")]
+    [InlineData("Ed Harris films", "ed harris", "", "")]
+    [InlineData("movies with Robert De Niro", "robert de niro", "", "")]
+    [InlineData("movies with Robert de Niro", "robert de niro", "", "")]
+    [InlineData("Samuel L. Jackson movies", "samuel l jackson", "", "")]
+    [InlineData("anything with Robert Downey Jr. please", "robert downey jr", "", "")]
+    [InlineData("Jean-Claude Van Damme action movies", "jean claude van damme", "action", "")]
+    [InlineData("action movies, nothing with Will Smith", "action", "", "will smith")]
+    // Capitals that mark no name leave the reading as it was.
+    [InlineData("Tense Heist Movies", "heist", "", "")]
+    [InlineData("TENSE HEIST MOVIES", "heist", "", "")]
+    [InlineData("Movies From The 80s", "", "", "")]
+    [InlineData("Any Tom Hanks films?", "tom hanks", "", "")]
+    [InlineData("Show me Will Smith movies", "will smith", "", "")]
+    public void A_role_word_is_the_role_and_a_capitalised_name_is_read_whole(
+        string message, string concepts, string genres, string negations)
+    {
+        static string[] List(string text) => text.Split('|', StringSplitOptions.RemoveEmptyEntries);
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.Truncated, null, false), LlmCallMeta.None);
+        foreach (var plan in new[]
+                 {
+                     FallbackPlans.CarriedForward(failed, message, ConversationState.Empty, Now),
+                     FallbackPlans.Keyless(message, ConversationState.Empty, Now),
+                 })
+        {
+            Assert.Equal(List(concepts), plan.Delta.Concepts);
+            Assert.Equal(List(genres), plan.Delta.Genres);
+            Assert.Equal(List(negations), plan.Delta.Negations);
+            Assert.DoesNotContain(plan.Delta.Concepts, c => c.Split(' ').Any(FallbackReader.IsRoleWord));
+        }
+    }
+
+    /// <summary>A capitalised title after "like" is still the reference, whole, and never also a topic.</summary>
+    [Theory]
+    [InlineData("movies like The Dark Knight", "the dark knight")]
+    [InlineData("shows like Better Call Saul but funnier", "better call saul")]
+    public void A_capitalised_title_after_like_is_the_reference(string message, string reference)
+    {
+        var plan = FallbackPlans.Keyless(message, ConversationState.Empty, Now);
+
+        Assert.Equal([reference], plan.Delta.ReferenceNames);
+        Assert.DoesNotContain(plan.Delta.Concepts, c => reference.Split(' ').Any(w => w.Length > 3 && c.Contains(w, StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// HREV5-RET-02 (round 7): the grounder looked names up by an exact pattern, which no name with a
+    /// full stop in it could match. It now finds the stored name however it is punctuated and keeps
+    /// only the one whose words are exactly the user's, or those and a suffix the user left off.
+    /// </summary>
+    [Theory]
+    [InlineData("Samuel L. Jackson", "samuel l jackson", true)]
+    [InlineData("Robert Downey Jr.", "robert downey jr", true)]
+    [InlineData("Robert Downey Jr.", "robert downey", true)]
+    [InlineData("Robert De Niro", "robert de niro", true)]
+    [InlineData("Jean-Claude Van Damme", "jean claude van damme", true)]
+    [InlineData("Will Smith", "will smith", true)]
+    [InlineData("Will Smithers", "will smith", false)]
+    [InlineData("William Smith", "will smith", false)]
+    [InlineData("Samuel Jackson", "samuel l jackson", false)]
+    [InlineData("Robert Downey Sr. III", "robert downey", false)]
+    [InlineData("Zendaya", "zendaya", true)]
+    public void A_person_name_matches_its_words_whatever_the_punctuation(string stored, string typed, bool matches)
+    {
+        var words = typed.Split(' ');
+
+        Assert.Equal(matches, AskReelEngine.PersonNameMatches(stored, words));
+        // The database pattern never excludes a name the words match.
+        if (matches)
+        {
+            var pattern = "^" + string.Join(".*", AskReelEngine.PersonNamePattern(words).Split('%').Select(System.Text.RegularExpressions.Regex.Escape)) + "$";
+            Assert.Matches(new System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase), stored);
+        }
     }
 }
