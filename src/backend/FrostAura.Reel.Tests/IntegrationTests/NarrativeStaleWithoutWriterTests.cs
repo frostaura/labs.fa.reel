@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Adapters;
@@ -158,13 +159,15 @@ public class NarrativeStaleWithoutWriterTests(PostgresFixture fixture, ReelApiFa
 
     /// <summary>
     /// Seeds a narrative carrying the fingerprint and fact sheet the read will recompute for this
-    /// account, through the same builders the endpoint uses.
+    /// account, through the same builders the endpoint uses. The account is pinned first: tenancy
+    /// fails closed, so the builders' account-scoped reads throw outside a pinned scope (HREV8-PLAT-01).
     /// </summary>
     private static async Task SeedCurrentFingerprintAsync(
         WebApplicationFactory<Program> host, Guid accountId, int promptVersion, string? editedText,
         string? profileHashOverride = null)
     {
         using var scope = host.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(accountId);
         var now = DateTime.UtcNow;
         var taste = await scope.ServiceProvider.GetRequiredService<FeatureVectorBuilder>()
             .BuildTasteStateAsync(accountId, now, CancellationToken.None);

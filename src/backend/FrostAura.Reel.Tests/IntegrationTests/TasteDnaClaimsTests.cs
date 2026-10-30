@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -161,14 +162,22 @@ public class TasteDnaClaimsTests(PostgresFixture fixture, ReelApiFactory api) : 
     }
 
     /// <summary>
-    /// "your taste has moved since" (TasteNarrativePanel, from the narrative API's <c>isStale</c>).
-    /// TRUE: it is set exactly when the account's taste fingerprint (or its crowd stance) differs from
-    /// the one the profile was written at. Not when only the writer moved on — an older prompt version
-    /// is rewritten without being called a taste move — and yes after a dismissal, which the
-    /// fingerprint carries.
+    /// "your taste has moved since" (TasteNarrativePanel, from the narrative API's <c>staleReason</c>
+    /// <c>taste-moved</c>). TRUE: that reason is reported exactly when the account's taste fingerprint
+    /// (or its crowd stance) differs from the one the profile was written at — and yes after a
+    /// dismissal, which the fingerprint carries. The writer moving on is not the taste moving: since
+    /// HREV6-DESK-01 a narrative written under an older prompt reads stale too, but with the reason
+    /// <c>outdated-prompt</c>, which the panel words as "written by an earlier version of Reel"
+    /// (lib/narrativeStale.ts) and never as a taste move. The narrative is seeded at the current prompt
+    /// so that, until the test moves it, only the fingerprint can make it stale (HREV8-PLAT-02).
     /// </summary>
-    [Fact]
-    public async Task The_profile_says_your_taste_has_moved_exactly_when_its_taste_fingerprint_has()
+    [Theory]
+    // The writer moves on first, then the taste: taste-moved wins over the older prompt.
+    [InlineData(true)]
+    // The taste moves under a narrative the current writer would still stand behind.
+    [InlineData(false)]
+    public async Task The_profile_says_your_taste_has_moved_exactly_when_its_taste_fingerprint_has(
+        bool writerMovesOnFirst)
     {
         if (!fixture.Available)
         {
@@ -195,22 +204,29 @@ public class TasteDnaClaimsTests(PostgresFixture fixture, ReelApiFactory api) : 
                 FactsJson = JsonSerializer.Serialize(built.Facts, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
                 RatingsCount = built.Facts.RatingsCount,
                 ModelId = "test/writer",
-                PromptVersion = 1,
+                PromptVersion = OpenRouterLensWriter.CurrentNarrativePromptVersion,
                 GeneratedAt = DateTime.UtcNow,
             });
             await db.SaveChangesAsync();
         }
 
-        Assert.False(await IsStaleAsync(client));
+        Assert.Equal((false, null), await StalenessAsync(client));
 
-        // The writer moving on is not the taste moving.
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        if (writerMovesOnFirst)
         {
-            await db.AccountTasteNarratives.Where(n => n.AccountId == accountId)
-                .ExecuteUpdateAsync(u => u.SetProperty(n => n.PromptVersion, 0));
-        }
+            // The writer moving on is not the taste moving: stale, but never "your taste has moved".
+            await using (var db = fixture.CreateContext(new AccountContext()))
+            {
+                await db.AccountTasteNarratives.Where(n => n.AccountId == accountId)
+                    .ExecuteUpdateAsync(u => u.SetProperty(
+                        n => n.PromptVersion, OpenRouterLensWriter.CurrentNarrativePromptVersion - 1));
+            }
 
-        Assert.False(await IsStaleAsync(client));
+            var (isStale, reason) = await StalenessAsync(client);
+            Assert.True(isStale);
+            Assert.NotEqual(TasteNarrativeService.StaleTasteMoved, reason);
+            Assert.Equal(TasteNarrativeService.StaleOutdatedPrompt, reason);
+        }
 
         // A dismissal is taste moving.
         using (var dismissed = await client.PostAsJsonAsync(
@@ -219,7 +235,7 @@ public class TasteDnaClaimsTests(PostgresFixture fixture, ReelApiFactory api) : 
             Assert.True(dismissed.IsSuccessStatusCode, $"dismiss answered {(int)dismissed.StatusCode}");
         }
 
-        Assert.True(await IsStaleAsync(client));
+        Assert.Equal((true, TasteNarrativeService.StaleTasteMoved), await StalenessAsync(client));
     }
 
     /// <summary>
@@ -266,12 +282,14 @@ public class TasteDnaClaimsTests(PostgresFixture fixture, ReelApiFactory api) : 
         return await services.GetRequiredService<TasteFactsBuilder>().BuildAsync(accountId, taste, DateTime.UtcNow, default);
     }
 
-    private static async Task<bool> IsStaleAsync(HttpClient client)
+    /// <summary>The narrative read's <c>isStale</c> and <c>staleReason</c>, as the panel receives them.</summary>
+    private static async Task<(bool IsStale, string? Reason)> StalenessAsync(HttpClient client)
     {
         using var response = await client.GetAsync("/api/taste/narrative");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        return json.RootElement.GetProperty("isStale").GetBoolean();
+        var root = json.RootElement;
+        return (root.GetProperty("isStale").GetBoolean(), root.GetProperty("staleReason").GetString());
     }
 
     private async Task<JsonElement> DnaAsync(Guid accountId)
