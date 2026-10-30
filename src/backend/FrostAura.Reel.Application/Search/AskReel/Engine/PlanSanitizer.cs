@@ -103,44 +103,72 @@ public static class PlanSanitizer
     }
 
     /// <summary>
-    /// A search whose message rejects the card it points at — "not the first one", "I didn't like the
-    /// second one", "the third one is terrible" (<see cref="AskReelPointer.Rejected"/>) — rejects that
-    /// card and never searches near it (HREV6-ASK-02). Live, every path put the rejected card in the
-    /// soft references: the reference arm re-ranked towards its labels and the judge was told "Points
-    /// at: Heat" and "Like: Heat". A refinement becomes the item critique it is; a new request keeps
-    /// its act, with the card rejected beside it. The card is the one at the rank the user named, by
-    /// the same rule as any pointer (<see cref="Pointed"/>).
+    /// A search whose message rejects a card it points at — "not the first one", "I didn't like the
+    /// second one", "the third one is terrible", "the first one? nah" (<see cref="AskReelPointer.Pointers"/>)
+    /// — rejects that card and never searches near it (HREV6-ASK-02). Live, every path put the rejected
+    /// card in the soft references: the reference arm re-ranked towards its labels and the judge was
+    /// told "Points at: Heat" and "Like: Heat".
+    ///
+    /// <para><b>Only the card the user rejected (HREV6-ASK-02-R1).</b> Each pointer in the message is
+    /// resolved on its own, in the answer the plan's handles name (the newest answer when it names
+    /// none): a rejected one goes to <see cref="PlanResult.RejectedReferences"/>, one asked for stays in
+    /// <see cref="PlanResult.References"/>. "Not the first one, more like the second one" planned with
+    /// both handles had both barred, and with no model the second half was dropped. A handle the model
+    /// named that no pointer names and whose title the message does not name is its miscount, and goes.</para>
+    ///
+    /// <para>With nothing left to search near, a refinement becomes the item critique it is; with a
+    /// card still asked for, an item critique becomes the refinement it is (as a critique, the card
+    /// asked for would be hidden). A message that is ONLY the rejection asks for nothing new.</para>
     /// </summary>
     internal static PlanResult RejectPointed(PlanResult plan, string message, IReadOnlyList<PresentedRef> presented)
     {
-        if (!TurnActs.Searches(plan.Act) || plan.Act == TurnAct.CritiqueSet || AskReelPointer.Rejected(message) is null)
+        var pointers = AskReelPointer.Pointers(message);
+        if (!TurnActs.Searches(plan.Act) || plan.Act == TurnAct.CritiqueSet || presented.Count == 0 || !pointers.Any(p => p.Rejected))
         {
             return plan;
         }
 
-        var shown = presented.Select(p => p.Handle).ToHashSet();
-        var references = Pointed(TurnAct.CritiqueItem, plan.References.Where(shown.Contains).ToList(), message, presented);
+        var named = plan.References.Where(h => presented.Any(p => p.Handle == h)).ToList();
+        int? answer = named.Count > 0
+            ? named.GroupBy(h => h.Turn).OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).First().Key
+            : AskReelIntentSanitizer.Words(message).Any(EarlierCues.Contains) ? null : presented.Max(p => p.Handle.Turn);
+        var ranks = answer is { } turn ? presented.Where(p => p.Handle.Turn == turn).Select(p => p.Handle.Rank).ToList() : [];
+        TurnHandle? HandleOf(int position)
+        {
+            var rank = position == AskReelPointer.Last ? (ranks.Count > 0 ? ranks.Max() : 0) : position;
+            return answer is { } t && ranks.Contains(rank) ? new TurnHandle(t, rank) : null;
+        }
+
+        var rejected = pointers.Where(p => p.Rejected).Select(p => HandleOf(p.Position)).OfType<TurnHandle>().Distinct().ToList();
+        var askedFor = pointers.Where(p => !p.Rejected).Select(p => HandleOf(p.Position)).OfType<TurnHandle>().ToList();
+        var references = named
+            .Where(h => askedFor.Contains(h) || NamesTitle(message, presented.First(p => p.Handle == h).Name))
+            .Concat(askedFor)
+            .Where(h => !rejected.Contains(h))
+            .Distinct()
+            .ToList();
 
         // A message that is ONLY the rejection asks for nothing new: whatever topic a model read off it
         // ("the second one is terrible" planned as the new request "terrible") is the rejection's own
         // words, and a new request on them threw the conversation's topic away.
-        if (AskReelIntentSanitizer.Words(AskReelPointer.WithoutRejectedClause(message)).Count == 0)
+        if (references.Count == 0 && AskReelIntentSanitizer.Words(AskReelPointer.WithoutRejectedClause(message)).Count == 0)
         {
             return plan with
             {
                 Act = TurnAct.CritiqueItem,
                 Delta = plan.Delta with { Concepts = [], Genres = [], Negations = [], People = [], ReferenceNames = [] },
-                References = references,
-                RejectsReferences = true,
+                References = [],
+                RejectedReferences = rejected,
             };
         }
 
-        return plan with
+        var act = (plan.Act, references.Count) switch
         {
-            Act = plan.Act == TurnAct.Refine ? TurnAct.CritiqueItem : plan.Act,
-            References = references,
-            RejectsReferences = true,
+            (TurnAct.Refine, 0) => TurnAct.CritiqueItem,
+            (TurnAct.CritiqueItem, > 0) => TurnAct.Refine,
+            _ => plan.Act,
         };
+        return plan with { Act = act, References = references, RejectedReferences = rejected };
     }
 
     /// <summary>
@@ -169,7 +197,7 @@ public static class PlanSanitizer
         }
 
         var asked = Named(words.Where(w => !w.Negated).Select(w => w.Word));
-        var ruledOut = Named(words.Where(w => w.Negated).Select(w => w.Word));
+        var ruledOut = Named(words.Where((w, i) => w.Negated && !NounOfARuledOutTopic(words, i)).Select(w => w.Word));
         return (asked, ruledOut) switch
         {
             (Retrieval.MediaScope.Movies, not Retrieval.MediaScope.Movies) => Retrieval.MediaScope.Movies,
@@ -184,6 +212,23 @@ public static class PlanSanitizer
             var media = AskReelCarry.MediaIn(said);
             return media.Count == 0 ? null : Retrieval.MediaScopes.From(media);
         }
+    }
+
+    /// <summary>
+    /// True when the ruled-out media word at <paramref name="index"/> is the noun of a ruled-out topic
+    /// — "no SUPERHERO movies", "superhero movies? no thanks", "sick of superhero movies" — rather than
+    /// the medium itself ("samurai, no tv shows", "tv shows? nah"). Read as the medium, each of those
+    /// searched only shows for a user who had said nothing against films (HREV6-ASK-01-R1).
+    /// </summary>
+    private static bool NounOfARuledOutTopic(IReadOnlyList<(string Word, bool Negated)> words, int index)
+    {
+        var j = index - 1;
+        while (j >= 0 && words[j].Negated && AskReelCarry.MediaIn([words[j].Word]).Count > 0)
+        {
+            j--;
+        }
+
+        return j >= 0 && words[j].Negated && !AskReelIntentSanitizer.IsFiller(words[j].Word);
     }
 
     /// <summary>
@@ -281,7 +326,7 @@ public static class PlanSanitizer
     public static int? UnresolvedPointer(PlanResult plan, string message)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        return plan.Act is TurnAct.Refine or TurnAct.CritiqueItem && plan.References.Count == 0
+        return plan.Act is TurnAct.Refine or TurnAct.CritiqueItem && plan.References.Count == 0 && plan.RejectedReferences.Count == 0
             ? AskReelPointer.Ordinal(message)
             : null;
     }

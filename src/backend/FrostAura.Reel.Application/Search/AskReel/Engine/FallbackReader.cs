@@ -129,6 +129,11 @@ public static class FallbackReader
         "different", "another", "similar", "otherwise", "story", "stories", "tale", "tales", "flick", "flicks",
         "picture", "pictures", "options", "ideas", "recommendations", "suggestions", "content", "watching",
         "actually", "honestly", "others", "rest",
+        // Interjections: with no model, "nope, not the first one" searched the new request "nope" and
+        // threw the conversation's topic away (HREV6-ASK-02-R3).
+        "nope", "nah", "naw", "ugh", "meh", "eh", "yuck", "ew", "eww", "hmm", "hmmm", "bleh",
+        // The pointer "number 2" (AskReelPointer), never the topic "number".
+        "number",
         // The credit a person is named for ("starring", "directed by") — read as the role
         // (AskReelEngine.FallbackRole), never as a topic beside the person (HREV5-RET-02, round 7).
         "starring", "starred", "featuring", "featured", "directed", "director", "directors", "directing",
@@ -841,8 +846,11 @@ public static class FallbackReader
             {
                 // The article stays in the name; the loop below reads the rest.
             }
-            else if (NotAName.Contains(tokens[start].Word))
+            else if (NotAName.Contains(tokens[start].Word)
+                || (tokens[start].Word == "number" && start + 1 < tokens.Count && int.TryParse(tokens[start + 1].Word, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) && n is >= 1 and <= 40))
             {
+                // "More like #2" and "more like number 2" point at a card (AskReelPointer), never a title
+                // named "2": read as one, the turn was a new request with no topic and no pointer.
                 continue;
             }
 
@@ -926,7 +934,13 @@ public static class FallbackReader
         foreach (var token in (message ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             var closes = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';') || token.EndsWith('?') || token.EndsWith('!');
-            var tokenWords = AskReelIntentSanitizer.Words(token);
+            var tokenWords = AskReelIntentSanitizer.Words(token).ToList();
+            if (token.StartsWith('#') && tokenWords.Count > 0)
+            {
+                // "#2" reads as "number 2", the pointer it is.
+                tokenWords.Insert(0, "number");
+            }
+
             for (var i = 0; i < tokenWords.Count; i++)
             {
                 tokens.Add((tokenWords[i], closes && i == tokenWords.Count - 1));

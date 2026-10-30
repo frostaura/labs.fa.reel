@@ -121,8 +121,72 @@ public class AskReelTopicAndPointerTests
     [InlineData("is the first one not too violent?", null)]
     [InlineData("isn't the second one terrible?", null)]
     [InlineData("not superheroes", null)]
+    // HREV6-ASK-02-R2: a refusal AFTER the card in a clause of its own, a refusal word before it, the
+    // "#1" and "number 1" pointers, "no to", contractions of the card noun, and the rejected card
+    // second ("but not the second one"). Varied over the punctuation, the refusal's words and the rank.
+    [InlineData("the first one? nah", 1)]
+    [InlineData("first one, no thanks", 1)]
+    [InlineData("the second one, not for me", 2)]
+    [InlineData("the third one. pass", 3)]
+    [InlineData("no to the first one", 1)]
+    [InlineData("nah the first one", 1)]
+    [InlineData("nope, not the first one", 1)]
+    [InlineData("not #1", 1)]
+    [InlineData("not number 1", 1)]
+    [InlineData("not #3 please", 3)]
+    [InlineData("more like the first one but not the second one", 2)]
+    [InlineData("I liked the first one but not the second one", 2)]
+    [InlineData("the first one's terrible", 1)]
+    [InlineData("first one's boring", 1)]
+    [InlineData("the second one’s not for me", 2)]
+    [InlineData("the first one? no, the second one", 1)]
+    [InlineData("the first one? yes", null)]
+    [InlineData("the first one, more like that", null)]
+    [InlineData("more like the first one, no superheroes", null)]
+    [InlineData("the first one's great", null)]
+    [InlineData("#2 please", null)]
+    [InlineData("is there anything like the first one?", null)]
     public void A_rejected_pointer_is_read_off_the_message(string message, int? position) =>
         Assert.Equal(position, AskReelPointer.Rejected(message));
+
+    /// <summary>
+    /// HREV6-ASK-02-R1: one message can reject one card and ask for more like another. Each pointer is
+    /// judged on its own, so "not the first one, more like the second one" rejects the first card and
+    /// keeps the second as the card to search near — never both rejected, never the second dropped.
+    /// </summary>
+    [Theory]
+    [InlineData("not the first one, more like the second one", "1-|2+")]
+    [InlineData("the first one was rubbish, more like the second one", "1-|2+")]
+    [InlineData("more like the first one but not the second one", "1+|2-")]
+    [InlineData("I liked the first one but not the second one", "1+|2-")]
+    [InlineData("skip the third one, something like #5", "3-|5+")]
+    [InlineData("the first one? nah. the last one though", "1-|-1+")]
+    [InlineData("more like the second one", "2+")]
+    [InlineData("not the first one", "1-")]
+    public void Every_pointer_in_a_message_is_read_with_whether_it_is_rejected(string message, string expected)
+    {
+        var read = AskReelPointer.Pointers(message).Select(p => $"{p.Position}{(p.Rejected ? '-' : '+')}");
+        Assert.Equal(expected.Split('|'), read);
+    }
+
+    /// <summary>
+    /// HREV6-ASK-02-R2/R3: the text a model-less reading takes is the message less every clause that
+    /// only rejects a card — the card's own clause, a refusal clause after it ("? nah") and an
+    /// interjection before it ("nope,") — so neither the refusal nor the interjection becomes a topic.
+    /// </summary>
+    [Theory]
+    [InlineData("nope, not the first one", "")]
+    [InlineData("ugh, not the first one", "")]
+    [InlineData("the first one? nah", "")]
+    [InlineData("the second one, not for me", "")]
+    [InlineData("the first one's terrible", "")]
+    [InlineData("not #1", "")]
+    [InlineData("not the first one, more like the second one", "more like the second one")]
+    [InlineData("more like the first one but not the second one", "more like the first one")]
+    [InlineData("not the first one but something darker", "but something darker")]
+    [InlineData("superhero movies? no thanks. not the first one", "superhero movies? no thanks.")]
+    public void The_readable_request_is_the_message_less_its_rejecting_clauses(string message, string expected) =>
+        Assert.Equal(expected, AskReelPointer.WithoutRejectedClause(message));
 
     [Fact]
     public void A_pointer_resolves_only_when_some_answer_shows_that_many_cards()

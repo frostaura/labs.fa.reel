@@ -74,9 +74,14 @@ public static class ConversationStateReducer
             .ToList();
         var moods = baseSoft.Moods.Concat(Clean(delta.Moods)).Distinct(StringComparer.Ordinal).ToList();
 
-        var references = ResolveHandles(plan.References, state.LastPresented);
-        var rejected = state.Rejected.ToList();
-        var referenceIds = baseSoft.ReferenceTitleIds.ToList();
+        // "Not the first one", "I didn't like the second one": the card is rejected and nothing is
+        // searched near it — as a reference it steered the search TOWARDS the card the user turned
+        // down, and the judge was told "Like: <that card>" (HREV6-ASK-02). Only THAT card: "not the
+        // first one, more like the second one" still searches near the second (HREV6-ASK-02-R1).
+        var rejectedNow = ResolveHandles(plan.RejectedReferences, state.LastPresented);
+        var references = ResolveHandles(plan.References, state.LastPresented).Where(id => !rejectedNow.Contains(id)).ToList();
+        var rejected = state.Rejected.Concat(rejectedNow).ToList();
+        var referenceIds = baseSoft.ReferenceTitleIds.Where(id => !rejectedNow.Contains(id)).ToList();
         var steers = delta.Directions.Count > 0 || delta.Moods.Count > 0 || delta.Concepts.Count > 0 || delta.Genres.Count > 0;
         switch (plan.Act)
         {
@@ -85,11 +90,9 @@ public static class ConversationStateReducer
                 // requirement from now on (it is in the concepts above, never in the negations).
                 rejected.AddRange(NewestAnswer(state.LastPresented).Select(p => p.TitleId));
                 break;
-            case TurnAct.CritiqueItem when plan.RejectsReferences || !steers:
-            case not TurnAct.CritiqueItem when plan.RejectsReferences:
-                // "Not the first one", "I didn't like the second one": the card is rejected and nothing
-                // is searched near it — as a reference it steered the search TOWARDS the card the user
-                // turned down, and the judge was told "Like: <that card>" (HREV6-ASK-02).
+            case TurnAct.CritiqueItem when !steers || (references.Count == 0 && rejectedNow.Count > 0):
+                // An item critique that steers nothing, or whose only cards were rejected by place, is a
+                // rejection: its cards are not shown again and nothing is searched near them.
                 rejected.AddRange(references);
                 referenceIds.RemoveAll(references.Contains);
                 break;

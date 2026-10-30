@@ -52,7 +52,25 @@ public static class AskReelIntentSanitizer
     [
         ["other", "than"], ["apart", "from"], ["aside", "from"], ["sick", "of"], ["tired", "of"], ["bored", "of"],
         ["bored", "with"], ["fed", "up", "with"], ["fed", "up", "of"], ["enough", "of"],
+        // HREV6-ASK-01-R1: "sick to death of superheroes" required [sick, death, superheroes], "I've had
+        // it with zombies" required zombies.
+        ["sick", "to", "death", "of"], ["sick", "and", "tired", "of"], ["had", "it", "with"], ["can't", "stand"],
+        ["cant", "stand"], ["done", "with"],
     ];
+
+    /// <summary>
+    /// Several-word cues that rule out what follows only when said of the user — "I'm so done with
+    /// superheroes", "done with zombies, heists please" — never of a film: "a heist done with practical
+    /// effects" asks for practical effects (HREV6-ASK-01-R1).
+    /// </summary>
+    private static readonly IReadOnlySet<string> SaidOfTheUser = new HashSet<string>(StringComparer.Ordinal) { "done" };
+
+    /// <summary>The words that may stand before a cue said of the user ("I'm SO done with", "totally done with").</summary>
+    private static readonly IReadOnlySet<string> UserLeads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "i'm", "im", "i", "am", "we're", "were", "so", "totally", "completely", "really", "just", "pretty", "kinda",
+        "been", "all", "honestly", "officially", "ok", "okay", "well", "and", "but",
+    };
 
     /// <summary>
     /// Refusals of the clause BEFORE them: "superhero movies? no thanks, give me westerns". Read as a
@@ -65,7 +83,14 @@ public static class AskReelIntentSanitizer
     [
         (["no", "thanks"], false), (["no", "thank", "you"], false), (["no", "thankyou"], false),
         (["not", "that"], true), (["nah"], true), (["nope"], true),
+        // HREV6-ASK-01-R1: "superhero movies? no, give me westerns" and "superhero movies, not for me.
+        // westerns" required superhero. "No" and "pass" refuse only as a clause of their own (see
+        // ClauseAlone): "no gore" and "a pass at it" refuse nothing before them.
+        (["not", "for", "me"], true), (["no"], true), (["pass"], true),
     ];
+
+    /// <summary>Refusals that refuse only when they are their whole clause: "superheroes? no, westerns".</summary>
+    private static readonly IReadOnlySet<string> ClauseAlone = new HashSet<string>(StringComparer.Ordinal) { "no", "pass" };
 
     /// <summary>True when <paramref name="word"/> (lower-case) is a one-word negation cue ("no", "without", "excluding").</summary>
     internal static bool IsNegationCue(string word) => NegationCues.Contains(word);
@@ -850,7 +875,8 @@ public static class AskReelIntentSanitizer
     {
         foreach (var cue in PhraseCues)
         {
-            if (Matches(words, index, cue))
+            if (Matches(words, index, cue)
+                && (!SaidOfTheUser.Contains(cue[0]) || index == 0 || words[index - 1].Closes || UserLeads.Contains(words[index - 1].Word)))
             {
                 return cue.Length;
             }
@@ -873,7 +899,8 @@ public static class AskReelIntentSanitizer
         foreach (var (refusal, clauseFinal) in Refusals)
         {
             var end = index + refusal.Length - 1;
-            if (Matches(words, index, refusal) && (!clauseFinal || words[end].Closes || end == words.Count - 1))
+            if (Matches(words, index, refusal) && (!clauseFinal || words[end].Closes || end == words.Count - 1)
+                && (refusal.Length > 1 || !ClauseAlone.Contains(refusal[0]) || words[index - 1].Closes))
             {
                 return refusal.Length;
             }

@@ -320,6 +320,21 @@ public class AskReelKeylessRequestTests
     [InlineData("vampire shows? nah, westerns", "westerns", "", "vampire")]
     [InlineData("superheroes? not that, westerns please", "westerns", "", "superheroes")]
     [InlineData("heist films excluding Heat", "heist", "", "heat")]
+    // HREV6-ASK-01-R1: a bare "no" or "not for me" refusing the clause before it, and the phrase cues
+    // the list missed ("sick to death of", "had it with", "done with") — each left the ruled-out topic,
+    // or the cue's own words, required. Varied over the punctuation, the refusal and the cue's lead-in;
+    // a "no" that opens the message refuses nothing before it, and "done with" governs only when said
+    // of the user ("so done with"), never of a film ("done with practical effects").
+    [InlineData("superhero movies? no, give me westerns", "westerns", "", "superhero")]
+    [InlineData("superhero movies? no. westerns", "westerns", "", "superhero")]
+    [InlineData("superhero movies, not for me. westerns", "westerns", "", "superhero")]
+    [InlineData("vampire shows? pass. heist films", "heist", "", "vampire")]
+    [InlineData("sick to death of superheroes, give me westerns", "westerns", "", "superheroes")]
+    [InlineData("I've had it with zombies, give me heists", "heists", "", "zombies")]
+    [InlineData("done with superheroes, westerns please", "westerns", "", "superheroes")]
+    [InlineData("I'm so done with zombies. heist films", "heist", "", "zombies")]
+    [InlineData("sick and tired of vampires, westerns", "westerns", "", "vampires")]
+    [InlineData("no, westerns", "westerns", "", "")]
     public void A_negated_word_is_lifted_into_the_negations_and_never_read_as_a_topic(
         string message, string concepts, string genres, string negations)
     {
@@ -355,6 +370,29 @@ public class AskReelKeylessRequestTests
     }
 
     /// <summary>
+    /// HREV6-ASK-01-R1: the media word of a ruled-out topic is that topic's noun, not the medium. With
+    /// no model, "superhero movies? no thanks, give me westerns" and "no superhero movies, westerns"
+    /// ruled out "movies" and searched only shows. A medium is ruled out when it is what the user
+    /// refused ("samurai, no tv shows", "tv shows? nah, something with samurai"), and asked for as ever.
+    /// </summary>
+    [Theory]
+    [InlineData("superhero movies? no thanks, give me westerns", null)]
+    [InlineData("superhero movies? no, give me westerns", null)]
+    [InlineData("no superhero movies, westerns", null)]
+    [InlineData("I'm sick of superhero movies, give me westerns", null)]
+    [InlineData("vampire tv shows? nah", null)]
+    [InlineData("superhero movies? no thanks, westerns, no tv shows", MediaScope.Movies)]
+    [InlineData("samurai, no tv shows", MediaScope.Movies)]
+    [InlineData("tv shows? nah, something with samurai", MediaScope.Movies)]
+    [InlineData("no movies, samurai", MediaScope.Shows)]
+    [InlineData("no superhero movies, westerns films", MediaScope.Movies)]
+    public void The_noun_of_a_ruled_out_topic_never_rules_out_its_medium(string message, MediaScope? expected)
+    {
+        Assert.Equal(expected, PlanSanitizer.UserMedia(null, message));
+        Assert.Equal(expected, FallbackPlans.Keyless(message, ConversationState.Empty, Now).Delta.Media);
+    }
+
+    /// <summary>
     /// HREV6-ASK-01, through the engine's own chains: the keyless plan is cleaned by the sanitiser
     /// (which dropped "spy thrillers excluding James Bond" whole as an echo, leaving a broad search with
     /// no negation), and the carried-forward plan has its pointer resolved — then both are reduced into
@@ -369,9 +407,15 @@ public class AskReelKeylessRequestTests
     [InlineData("action movies sans superheroes", "superheroes")]
     [InlineData("spy thrillers excluding James Bond", "james bond")]
     [InlineData("tired of vampires, give me heists", "vampires")]
+    [InlineData("superhero movies? no, give me westerns", "superhero")]
+    [InlineData("superhero movies? no. westerns", "superhero")]
+    [InlineData("superhero movies, not for me. westerns", "superhero")]
+    [InlineData("sick to death of superheroes, give me westerns", "superheroes")]
+    [InlineData("I've had it with zombies, give me heists", "zombies")]
+    [InlineData("done with superheroes, westerns please", "superheroes")]
     public void A_ruled_out_topic_never_reaches_the_requirements_on_either_fallback_chain(string message, string negated)
     {
-        string[] cueWords = ["excluding", "apart", "from", "sans", "sick", "tired", "thanks", "no", "of"];
+        string[] cueWords = ["excluding", "apart", "from", "sans", "sick", "tired", "thanks", "no", "of", "death", "done", "had", "with", "for", "me"];
         var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.TimedOut, null, false), LlmCallMeta.None);
         var later = ConversationState.Empty with
         {
@@ -397,8 +441,10 @@ public class AskReelKeylessRequestTests
                 Assert.DoesNotContain(state.Hard.Concepts, c => Names(c.UserWords));
                 Assert.DoesNotContain(state.Soft.Moods, Names);
                 Assert.DoesNotContain(requires, Names);
-                // The user's request still stands: the turn is never a broad unchecked search.
+                // The user's request still stands: the turn is never a broad unchecked search, and a
+                // topic's noun ("superhero movies") never rules its medium out.
                 Assert.NotEmpty(state.Hard.Concepts);
+                Assert.NotEqual(MediaScope.Shows, state.Hard.Media);
             }
         }
     }
