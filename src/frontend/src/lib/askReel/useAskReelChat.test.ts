@@ -2347,6 +2347,58 @@ describe("resumeAnnouncement", () => {
     // Fixture variation: the transcript-only thread, which is a fact about the THREAD and not an
     // empty answer — "no matches" would be a verdict on a question this visit never asked.
     expect(resumeAnnouncement(0, 0)).toBe("Picked up where you left off · no saved picks.");
+    expect(resumeAnnouncement(0, 0, { branch: "transcript-only", removed: 0, removedEarlier: 0 }))
+      .toBe("Picked up where you left off · no saved picks.");
+  });
+
+  // HREV5-PH-01. The post-removal count is 0 on a thread whose stored picks were ALL removed, and
+  // "no saved picks" is what a thread that never stored any says — the region contradicted a seam
+  // reading "10 picks are gone" and a card reading "you've watched or rated everything".
+  it("a_thread_whose_stored_picks_were_all_removed_says_so_as_the_seam_and_card_do", () => {
+    expect(resumeAnnouncement(0, 0, { branch: "all-removed", removed: 10, removedEarlier: 10 })).toBe(
+      "Picked up where you left off · 10 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given. You’ve watched or rated everything this thread found.",
+    );
+    expect(resumeAnnouncement(0, 0, { branch: "all-removed", removed: 10, removedEarlier: 10 })).not.toMatch(/no saved picks/);
+  });
+
+  it.each([
+    // Fixture variations, one field each: acted on since rather than before; a single pick; and
+    // stored cards with no removal count (an older server) — the card still shows, so it is said.
+    [{ branch: "all-removed", removed: 4, removedEarlier: 0 }, "Picked up where you left off · 4 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them. You’ve watched or rated everything this thread found."],
+    [{ branch: "all-removed", removed: 1, removedEarlier: 1 }, "Picked up where you left off · 1 pick is gone from this answer — you’d already rated, watched, saved or dismissed it when it was given. You’ve watched or rated everything this thread found."],
+    [{ branch: "all-removed", removed: 0, removedEarlier: 0 }, "Picked up where you left off · You’ve watched or rated everything this thread found."],
+    // No stored cards but a removal count: the seam still prints the line, so the region does.
+    [{ branch: "transcript-only", removed: 2, removedEarlier: 0 }, "Picked up where you left off · 2 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them."],
+  ] as const)("an_empty_resume_follows_what_is_on_screen %#", (screen, said) => {
+    expect(resumeAnnouncement(0, 0, screen)).toBe(said);
+  });
+
+  // HREV5-PH-01-R1. One field from the all-removed case — the branch the strip renders. A restored
+  // "nothing found" answer sits on a thread whose `lastCardsAt` an earlier Picks turn (or its own
+  // tray) set; it is the none-found card on screen, and the region said everything had been seen.
+  it.each([
+    [{ branch: "none-found", removed: 0, removedEarlier: 0 }, "Picked up where you left off · Nothing left that matches — Reel’s reply says why."],
+    [{ branch: "none-found", removed: 0, removedEarlier: 0, shown: { unchecked: 0, nearMiss: 1, heldBack: 0, floorLabel: null } }, "Picked up where you left off · Nothing left that matches — Reel’s reply says why."],
+    [{ branch: "none-found", removed: 0, removedEarlier: 0, shown: { unchecked: 3, nearMiss: 1, heldBack: 2, floorLabel: "6.0" } }, "Picked up where you left off · Reel couldn’t check what it found — 3 unchecked titles shown, 1 close but not quite, 2 held back by your 6.0 bar."],
+    [{ branch: "none-found", removed: 2, removedEarlier: 2 }, "Picked up where you left off · 2 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given. Nothing left that matches — Reel’s reply says why."],
+  ] as const)("a_restored_none_found_answer_is_announced_as_the_none_found_card %#", (screen, said) => {
+    expect(resumeAnnouncement(0, 0, screen)).toBe(said);
+    expect(resumeAnnouncement(0, 0, screen)).not.toContain("You’ve watched or rated everything");
+  });
+
+  it("a_restored_reply_beside_an_empty_grid_makes_no_claim_about_a_card", () => {
+    // The strip renders nothing under a restored Clarify/Answer reply; the region names no card.
+    expect(resumeAnnouncement(0, 0, { branch: "beside-grid", removed: 0, removedEarlier: 0 })).toBe("Picked up where you left off.");
+    expect(resumeAnnouncement(0, 0, { branch: "beside-grid", removed: 1, removedEarlier: 0 }))
+      .toBe("Picked up where you left off · 1 pick is gone from this answer — you’ve since rated, watched, saved or dismissed it.");
+  });
+
+  it("a_resume_with_picks_left_names_the_removals_the_seam_prints", () => {
+    expect(resumeAnnouncement(9, 3, { branch: "grid", removed: 3, removedEarlier: 1 })).toBe(
+      "Picked up where you left off · 9 picks. 3 closest-but-outside shown separately. 3 picks are gone from this answer — you’d already rated, watched, saved or dismissed 1 of them when it was given, and you’ve acted on 2 since.",
+    );
+    // No removals: unchanged from F6-15.
+    expect(resumeAnnouncement(9, 0, { branch: "grid", removed: 0, removedEarlier: 0 })).toBe("Picked up where you left off · 9 picks.");
   });
 });
 

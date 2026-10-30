@@ -6,7 +6,7 @@ import CardTray from "./CardTray";
 import PillButton from "./PillButton";
 import RelaxationChip from "./RelaxationChip";
 import { CARD_GRID, CardSkeleton, ResultCard, RetryButton } from "./parts";
-import { failureCopy, nearMissHeading, noneFoundHeading, plural, removedNote } from "../../lib/askReel/copy";
+import { ALL_REMOVED_LINE, failureCopy, nearMissHeading, noneFoundHeading, plural, removedNote } from "../../lib/askReel/copy";
 import { relTime } from "../../lib/format";
 import type { AskReelChat } from "../../lib/askReel/useAskReelChat";
 import type { AskCard } from "../../lib/askReelStream";
@@ -32,7 +32,7 @@ export default function AnswerStrip({
   view: AskView;
   onSaveTapped: (card: AskCard) => void;
 }) {
-  const { status, holdingPrevious, canRetry, reask, mode } = chat;
+  const { status, holdingPrevious, canRetry, reask } = chat;
   const { streaming, visible, outsideVisible } = view;
   // The held previous answer is labelled and kept readable — never under 0.9 (WS-2 task 3). It used
   // to drop to 40 %, which read as "disabled" for an answer the reader was still entitled to use.
@@ -118,8 +118,10 @@ export default function AnswerStrip({
   );
 
   function body() {
-    // One message, never two — exactly one of these branches is live.
-    if (status === "error" && chat.errorReason === "conversation") {
+    // One message, never two — exactly one of these branches is live, and which one is decided once,
+    // in `stripBranch`, so the status region announces the same card this renders (HREV5-PH-01-R1).
+    const { branch } = view;
+    if (branch === "conversation-gone") {
       // 404. The thread this tab remembered is gone. Not a crash and not a fork.
       return (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="askreel-conversation-gone">
@@ -130,7 +132,7 @@ export default function AnswerStrip({
         </div>
       );
     }
-    if (status === "error" && chat.cards.length === 0) {
+    if (branch === "failed") {
       return (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="semantic-error" data-reason={chat.errorReason ?? "unknown"}>
           <AlertTriangle className="h-6 w-6 text-fa-warning mx-auto" aria-hidden />
@@ -140,8 +142,7 @@ export default function AnswerStrip({
         </div>
       );
     }
-    const settledAnswer = status === "done" || status === "resumed";
-    if (settledAnswer && mode === "NoneFound" && visible.length === 0) {
+    if (branch === "none-found") {
       // An honest "nothing left". The reply above already says why, with the counts; this card
       // offers what can be done about it — each relaxation opens the editor on its own rule
       // (FD-2c). Already-seen titles are never offered.
@@ -174,12 +175,12 @@ export default function AnswerStrip({
         </div>
       );
     }
-    if (settledAnswer && (mode === "Clarify" || mode === "Answer") && visible.length === 0) {
+    if (branch === "beside-grid") {
       // The reply asked back, or answered a question about a title — with nothing on screen. The
       // reply is the answer; an empty-results card under it would say a search ran (R1-04).
       return null;
     }
-    if (status === "resumed" && chat.lastCardsAt == null && chat.resumedTail == null && visible.length === 0 && outsideVisible.length === 0) {
+    if (branch === "transcript-only") {
       // A resumed thread is NOT an empty answer — it predates stored results (F4-04: only when the
       // last assistant row completed; a failed or pending tail has its own row in the transcript).
       return (
@@ -190,17 +191,17 @@ export default function AnswerStrip({
         </div>
       );
     }
-    if (status === "resumed" && chat.lastCardsAt != null && visible.length === 0 && outsideVisible.length === 0) {
+    if (branch === "all-removed") {
       // A thread that DID store cards and has none to show: the eligibility re-filter dropped them.
       return (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-all-removed">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
-          <p className="fa-caption text-fa-frost-dim">You’ve watched or rated everything this thread found. Ask again for a fresh set.</p>
+          <p className="fa-caption text-fa-frost-dim">{ALL_REMOVED_LINE} Ask again for a fresh set.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       );
     }
-    if (status === "done" && visible.length === 0 && outsideVisible.length === 0) {
+    if (branch === "empty") {
       return (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="semantic-empty">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />

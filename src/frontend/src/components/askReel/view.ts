@@ -1,5 +1,5 @@
 import { floorPartition, type ChatStatus } from "../../lib/askReel/reducer";
-import { failureCopy, floorHeldBack, footnote, formatFloor, noneFoundAnnouncement, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage, type NoneFoundShown } from "../../lib/askReel/copy";
+import { failureCopy, floorHeldBack, footnote, formatFloor, noneFoundAnnouncement, pickSummary, resumeAnnouncement, showsFootnote, stoppedMessage, type NoneFoundShown, type StripBranch } from "../../lib/askReel/copy";
 import { answerRowIndex, leavesGrid } from "../../lib/askReel/transcript";
 import { pageRefusalMessage } from "../../lib/askReel/paging";
 import { skeletonCount, type AskReelChat } from "../../lib/askReel/useAskReelChat";
@@ -50,6 +50,12 @@ export interface AskView {
   footnoteInSlot: boolean;
   stoppedText: string;
   refusalText: string | null;
+  /**
+   * Which of the strip's bodies is on screen. The strip renders from it and the status region
+   * announces from it — one derivation, so the region never describes a card that is not there
+   * (HREV5-PH-01-R1).
+   */
+  branch: StripBranch;
   /** What the polite status region says once the stream stops. */
   announcement: string;
 }
@@ -106,6 +112,7 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
   const uncheckedVisible = chat.unchecked.filter((c) => !removedSet.has(c.titleId));
   // What the none-found card has beside it — the same arrays its heading and trays are built from.
   const shown: NoneFoundShown = { unchecked: uncheckedVisible.length, nearMiss: nearMissVisible.length, heldBack, floorLabel };
+  const branch = stripBranch(chat, visible, outsideVisible);
 
   return {
     streaming, stopped, removedSet, visible, outsideVisible, pendingSlots, reserveSlots,
@@ -114,8 +121,31 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
     showsTurnConflict: !!turnConflictMessage && streaming && !chat.appending,
     pickCount, keptWholeAnswer, footnoteText, showsProvenance, stoppedText, refusalText,
     footnoteInSlot: chat.gridRow >= turns.length - 1,
-    announcement: announce(status, chat.mode, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title, shown),
+    branch,
+    announcement: announce(status, branch, refusalText, stoppedText, pickCount, outsideVisible.length, failureCopy(chat.errorReason, chat.rateLimit).title, shown, {
+      removed: chat.removed, removedEarlier: chat.removedEarlier,
+    }),
   };
+}
+
+/**
+ * Which body the answer strip renders — exactly one is live, in this order. The strip switches on
+ * it and `announce` reads it, so the status region follows the card on screen rather than
+ * re-deriving it from a field that only usually agrees (HREV5-PH-01-R1: `lastCardsAt` alone
+ * announced the all-removed card over a restored none-found one).
+ */
+export function stripBranch(chat: AskReelChat, visible: readonly AskCard[], outsideVisible: readonly AskCard[]): StripBranch {
+  const { status, mode } = chat;
+  if (status === "error" && chat.errorReason === "conversation") return "conversation-gone";
+  if (status === "error" && chat.cards.length === 0) return "failed";
+  const settledAnswer = status === "done" || status === "resumed";
+  if (settledAnswer && mode === "NoneFound" && visible.length === 0) return "none-found";
+  if (settledAnswer && leavesGrid(mode) && visible.length === 0) return "beside-grid";
+  const nothingShown = visible.length === 0 && outsideVisible.length === 0;
+  if (status === "resumed" && nothingShown && chat.lastCardsAt == null && chat.resumedTail == null) return "transcript-only";
+  if (status === "resumed" && nothingShown && chat.lastCardsAt != null) return "all-removed";
+  if (status === "done" && nothingShown) return "empty";
+  return "grid";
 }
 
 /**
@@ -124,8 +154,8 @@ export function deriveAskView(chat: AskReelChat, inputs: AskViewInputs): AskView
  * things and folding them together is F4-05.
  */
 function announce(
-  status: ChatStatus, mode: string | null, refusal: string | null, stopped: string, picks: number, outside: number, failure: string,
-  shown: NoneFoundShown,
+  status: ChatStatus, branch: StripBranch, refusal: string | null, stopped: string, picks: number, outside: number, failure: string,
+  shown: NoneFoundShown, removal: { removed: number; removedEarlier: number },
 ): string {
   if (status === "streaming") return "";
   // The refusal is what the region says while it stands (R5-04): the state underneath is the one
@@ -135,16 +165,17 @@ function announce(
   if (status === "error") return `${failure}.`;
   if (status === "blocked") return "That question is still being answered.";
   if (status === "stopped") return stopped;
+  // F6-15: a resumed landing is announced as the seam shows it — and, with nothing left on screen,
+  // as the card the strip renders under it does (HREV5-PH-01, HREV5-PH-01-R1).
+  if (status === "resumed") return resumeAnnouncement(picks, outside, { branch, ...removal, shown });
+  if (status !== "done") return "";
   // An honest "nothing left" is announced as one, not as "No matches": the reply beside it gives
   // the counts, and the none-found card the relaxations (WS-2 task 3). It follows the card's own
   // branch — unchecked titles on screen are not "nothing left" (HREV4-PH-01).
-  if (status === "done" && mode === "NoneFound" && picks === 0) return noneFoundAnnouncement(shown);
+  if (branch === "none-found") return noneFoundAnnouncement(shown);
   // A reply that answered beside an EMPTY grid — small talk, a title asked about by name, a question
   // back — is not a search, and "No matches for that one." would announce one that never ran (the
   // R1-04 screen, said aloud). The reply itself is already read out by the transcript's polite log.
-  if (status === "done" && leavesGrid(mode) && picks === 0 && outside === 0) return "";
-  if (status === "done") return pickSummary(picks, outside);
-  // F6-15: a resumed landing is announced as the seam shows it.
-  if (status === "resumed") return resumeAnnouncement(picks, outside);
-  return "";
+  if (branch === "beside-grid") return "";
+  return pickSummary(picks, outside);
 }

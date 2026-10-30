@@ -109,11 +109,72 @@ export function pickSummary(pickCount: number, outsideCount: number): string {
  * announcing a silent zero — that is the transcript-only state, and it is a fact about the thread
  * rather than an empty answer.
  */
-export function resumeAnnouncement(pickCount: number, outsideCount: number): string {
-  if (pickCount === 0 && outsideCount === 0) return "Picked up where you left off · no saved picks.";
+export function resumeAnnouncement(pickCount: number, outsideCount: number, screen: ResumedScreen = NOTHING_STORED): string {
+  const head = "Picked up where you left off ·";
+  // The seam's own removal line, verbatim — the region says what the seam says (HREV5-PH-01).
+  const gone = removedNote(screen.removed, screen.removedEarlier);
+  const said = (...parts: (string | null)[]) => [head, ...parts].filter(Boolean).join(" ");
+  // With nothing left on screen the region says what the CARD under the seam says, and it reads
+  // which card that is from the strip's own branch (HREV5-PH-01-R1). It used to infer it from
+  // `lastCardsAt`, a conversation column an earlier Picks turn — or a none-found turn's own tray —
+  // leaves set, so a restored "nothing found" was announced as "you've watched or rated everything
+  // this thread found" under the none-found card: a search that found nothing, said to have found
+  // things that were then removed.
+  switch (screen.branch) {
+    case "all-removed":
+      return said(gone, ALL_REMOVED_LINE);
+    case "none-found":
+      return said(gone, noneFoundAnnouncement(screen.shown ?? NOTHING_SHOWN));
+    case "beside-grid":
+      // The restored reply asked back or answered beside an empty grid; the strip renders nothing
+      // and the reply is read by the transcript's log. No card, so no claim about one.
+      return gone ? said(gone) : "Picked up where you left off.";
+  }
+  if (pickCount === 0 && outsideCount === 0) return gone ? said(gone) : said("no saved picks.");
   const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
-  return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
+  return `${head} ${pickCount} ${plural(pickCount, "pick")}.${outside}${gone ? ` ${gone}` : ""}`;
 }
+
+/**
+ * Which one of the answer strip's mutually exclusive bodies is on screen — derived once, in
+ * `deriveAskView`, and read by both the strip and the status region so the two cannot disagree
+ * about which card the reader is looking at (HREV5-PH-01-R1).
+ */
+export type StripBranch =
+  /** 404: the thread this tab remembered is gone. */
+  | "conversation-gone"
+  /** A failure with no cards to keep on screen. */
+  | "failed"
+  /** A settled "nothing left" — the none-found card and its trays. */
+  | "none-found"
+  /** A settled reply that asked back or answered beside an empty grid: nothing is rendered. */
+  | "beside-grid"
+  /** A resumed thread that never stored results. */
+  | "transcript-only"
+  /** A resumed thread that stored picks and has none left to show. */
+  | "all-removed"
+  /** A finished search that found nothing at all. */
+  | "empty"
+  /** The grid (possibly still filling), its outside channel and trays. */
+  | "grid";
+
+/** What a resume put on screen beside the picks — the facts the seam and the strip print. */
+export interface ResumedScreen {
+  /** Which body the strip renders under the seam — see {@link StripBranch}. */
+  branch: StripBranch;
+  /** Stored cards the eligibility re-filter dropped, as the seam counts them. */
+  removed: number;
+  /** How many of `removed` were already acted on when the answer was given — see {@link removedNote}. */
+  removedEarlier: number;
+  /** What the none-found card has beside it; read only on that branch. */
+  shown?: NoneFoundShown;
+}
+
+const NOTHING_STORED: ResumedScreen = { branch: "transcript-only", removed: 0, removedEarlier: 0 };
+const NOTHING_SHOWN: NoneFoundShown = { unchecked: 0, nearMiss: 0, heldBack: 0, floorLabel: null };
+
+/** What the all-removed card says — shared with the status region so the two cannot drift. */
+export const ALL_REMOVED_LINE = "You’ve watched or rated everything this thread found.";
 
 /** What the none-found card is headed with — and what the status region opens on — in each case. */
 export const NONE_FOUND_HEADING = {
