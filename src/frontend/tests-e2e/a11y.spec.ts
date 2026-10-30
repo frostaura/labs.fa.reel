@@ -1,10 +1,9 @@
-import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mockFilterChips } from "./filterChips.fixture";
-import { SESSION_FOUNDER, mockJson, stubEventSource, syncJob, syncStatus } from "./helpers";
+import { SESSION_FOUNDER, axeScan, mockJson, stubEventSource, syncJob, syncStatus } from "./helpers";
 import {
   PERSON_ID,
   TITLE,
@@ -255,6 +254,22 @@ const OVERLAYS: AxeCase[] = [
     },
   },
   {
+    // HREV5-PH-04: Radix's modal menu aria-hid everything outside itself, the skip link and the
+    // header's links included, while they stayed focusable — and no case ever opened it.
+    name: "account-menu",
+    path: "/home",
+    mock: mockHome,
+    ready: homeReady,
+    open: async (page, viewport) => {
+      // Tapped on the phone, clicked on the desktop: each pointer's own way in.
+      const trigger = page.getByRole("button", { name: /account menu/i });
+      if (viewport === "phone") await trigger.tap();
+      else await trigger.click();
+      await expect(page.getByRole("menu")).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
+    },
+  },
+  {
     name: "title-sheet",
     path: "/home",
     mock: async (page) => {
@@ -272,7 +287,14 @@ const OVERLAYS: AxeCase[] = [
 ];
 
 async function survey(page: Page, key: string) {
-  const found = (await new AxeBuilder({ page }).analyze()).violations;
+  // One page per case, never two (HREV5-PH-02): WebKit's per-browser page cap is what the WebKit
+  // shards budget against, so a scan that opened a page of its own would spend it unseen.
+  const opened: Page[] = [];
+  const onPage = (p: Page) => opened.push(p);
+  page.context().on("page", onPage);
+  const found = (await axeScan(page).analyze()).violations;
+  page.context().off("page", onPage);
+  expect(opened.length, "the axe scan opened a page of its own").toBe(0);
   if (process.env.A11Y_RECORD) {
     // Survey mode for an owner checking progress: what this case breaks now, per browser. A11Y_RECORD
     // names the directory (a path), so a Chromium and a WebKit run do not clear each other's files.
@@ -341,11 +363,26 @@ test("every a11y baseline entry is a case this file runs, and names its owner an
 /** WebKit, like Safari, only Tabs to links with Option held. */
 const tabKey = (browserName: string) => (browserName === "webkit" ? "Alt+Tab" : "Tab");
 
-/** Presses Tab until the focused element matches `selector`; fails after `max` presses. */
+/** How long one focus check may take before the page counts as not answering. */
+const FOCUS_CHECK_MS = 5_000;
+
+/**
+ * Presses Tab until the focused element matches `selector`; fails after `max` presses. Each check
+ * is bounded (HREV5-PH-02): a page that stops answering fails here, naming the press, instead of
+ * hanging the test past its timeout and its teardown with a trace that never finishes writing.
+ */
 async function tabTo(page: Page, key: string, selector: string, max = 40): Promise<void> {
   for (let i = 0; i < max; i++) {
     await page.keyboard.press(key);
-    if (await page.evaluate((sel) => document.activeElement?.matches(sel) === true, selector)) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const silent = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`the page did not answer a focus check within ${FOCUS_CHECK_MS} ms after press ${i + 1} towards ${selector}`)), FOCUS_CHECK_MS);
+    });
+    try {
+      if (await Promise.race([page.evaluate((sel) => document.activeElement?.matches(sel) === true, selector), silent])) return;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   throw new Error(`focus never reached ${selector} in ${max} presses`);
 }
@@ -371,6 +408,53 @@ test.describe("keyboard paths", () => {
     await tabTo(page, key, 'header a[aria-label="Taste DNA"]');
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/dna$/);
+  });
+
+  test("the account menu opens by keyboard without hiding the page, and Escape returns to its button", async ({ page, browserName }) => {
+    // HREV5-PH-04: a modal menu aria-hid the skip link, the header and <main> while it was open.
+    const key = tabKey(browserName);
+    await shell(page);
+    await mockHome(page);
+    await page.goto("/home");
+    await expect(page.getByTestId("hero-card")).toHaveCount(5);
+
+    const trigger = page.getByRole("button", { name: /account menu/i });
+    await page.locator("body").focus();
+    await tabTo(page, key, 'header button[aria-haspopup="menu"]');
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Enter");
+    const menu = page.getByRole("menu");
+    await expect(menu).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Track record" })).toBeFocused();
+
+    // It renders in the header's landmark, and still drops from its button, inside the screen:
+    // the header's backdrop blur makes it the containing block the menu is positioned in.
+    await expect(page.locator("header [role=menu]")).toHaveCount(1);
+    const at = await page.evaluate(() => {
+      const t = document.querySelector('header button[aria-haspopup="menu"]')!.getBoundingClientRect();
+      const m = document.querySelector("[role=menu]")!.getBoundingClientRect();
+      return { gap: m.top - t.bottom, rightGap: t.right - m.right, left: m.left, right: m.right, width: innerWidth };
+    });
+    expect(at.gap, "the menu's top sits just under its button").toBeGreaterThanOrEqual(0);
+    expect(at.gap).toBeLessThan(16);
+    expect(Math.abs(at.rightGap), "the menu is end-aligned to its button").toBeLessThan(2);
+    expect(at.left).toBeGreaterThanOrEqual(0);
+    expect(at.right).toBeLessThanOrEqual(at.width);
+
+    // Nothing outside the menu is hidden from assistive tech or made inert while it is open.
+    const hidden = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>("[aria-hidden='true'], [inert], [data-aria-hidden]")]
+        .filter((e) => !e.closest("[role=menu]"))
+        .filter((e) => e.matches("main, header, a, button, [tabindex]") || e.querySelector("main, a[href], button"))
+        .map((e) => `${e.tagName.toLowerCase()}${e.id ? `#${e.id}` : ""}`)
+    );
+    expect(hidden, "elements holding the page's controls were hidden while the menu was open").toEqual([]);
+
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "Settings" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toBeFocused();
   });
 
   test("a card opens the title modal by keyboard; focus stays inside it, and Escape returns to the card", async ({ page, browserName }) => {

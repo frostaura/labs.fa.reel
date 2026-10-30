@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
 export const SESSION_FOUNDER = {
@@ -347,4 +348,17 @@ export async function expectHolds(check: () => Promise<unknown> | unknown, ms: n
     await new Promise((resolve) => setTimeout(resolve, 50));
   } while (Date.now() < end);
   await check();
+}
+
+/**
+ * An axe scan that opens no page of its own (HREV5-PH-02). By default `AxeBuilder.analyze()` runs
+ * `axe.runPartial` in each frame and then `axe.finishRun` in a NEW blank page, so every scan costs a
+ * second page — and one WebKit browser can create only 63 (scripts/e2e/webkitShards.ts). The a11y
+ * file's 32 axe cases created 64 pages, and the 65th — the keyboard-path test after them — hung in
+ * `page.goto` every time. Legacy mode runs `axe.run` in the page itself; the only thing it gives up
+ * is cross-origin frame contents (the YouTube trailer, which is not ours to fix), and the frame's
+ * own title is still checked from the top document.
+ */
+export function axeScan(page: Page): AxeBuilder {
+  return new AxeBuilder({ page }).setLegacyMode();
 }
