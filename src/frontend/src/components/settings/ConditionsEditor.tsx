@@ -442,14 +442,16 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
                 <span className="inline-flex items-center gap-1 py-1 pl-2.5 pr-2 capitalize">
                   {chip.label}
                   {/* A saved rule under the catalogue bar: kept on screen so it can be cleared, and
-                      honest that it removes little or nothing. */}
+                      honest that it removes little or nothing. The note and the marginal count take
+                      the chip's own full-strength tone: dimmed with opacity, they fell under 4.5:1 on
+                      the excluded chip's danger tint (HREV8-A11Y-01). */}
                   {chip.belowBar && (
-                    <span className="normal-case opacity-70" data-testid={`genre-below-bar-${chip.slug}`}>
+                    <span className="normal-case" data-testid={`genre-below-bar-${chip.slug}`}>
                       ({chip.movies + chip.shows === 0 ? "matches nothing in the catalogue" : `only ${genreReach(chip)}`})
                     </span>
                   )}
                   {marginal && (
-                    <span className="tabular-nums normal-case opacity-80" data-testid={`genre-marginal-${chip.slug}`}>
+                    <span className="tabular-nums normal-case" data-testid={`genre-marginal-${chip.slug}`}>
                       {marginal}
                     </span>
                   )}
