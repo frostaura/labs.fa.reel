@@ -1,6 +1,6 @@
 import type { RatingVerdict } from "../../lib/verdictCopy";
 import type { LensPayload } from "../feedTypes";
-import { titleRemoved, titleRestored } from "../removedTitlesSlice";
+import { titleRemovalFailed, titleRemovalStarted, titleRemoved, titleRestored } from "../removedTitlesSlice";
 import type { PersonPayload, ProvidersPayload, TitleDetailPayload } from "../titleTypes";
 import { verdictShown } from "../verdictSlice";
 import { api } from "./base";
@@ -68,6 +68,8 @@ export const titlesApi = api.injectEndpoints({
             draft.userState.isFullyWatched = true;
           })
         );
+        // Off the live rows on the tap, back on them if the write fails — see `saveForLater`.
+        dispatch(titleRemovalStarted({ titleId }));
         try {
           const { data } = await queryFulfilled;
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
@@ -85,6 +87,7 @@ export const titlesApi = api.injectEndpoints({
           }
         } catch {
           patch.undo();
+          dispatch(titleRemovalFailed({ titleId }));
         }
       },
     }),
@@ -122,6 +125,8 @@ export const titlesApi = api.injectEndpoints({
             draft.userState.notInterested = true;
           })
         );
+        // Off the live rows on the tap, back on them if the write fails — see `saveForLater`.
+        dispatch(titleRemovalStarted({ titleId }));
         try {
           await queryFulfilled;
           // "Not interested" leaves the feed immediately via the local removal set — and ONLY via
@@ -133,6 +138,7 @@ export const titlesApi = api.injectEndpoints({
           dispatch(titleRemoved({ titleId }));
         } catch {
           patch.undo();
+          dispatch(titleRemovalFailed({ titleId }));
         }
       },
     }),
@@ -221,14 +227,20 @@ export const titlesApi = api.injectEndpoints({
             draft.userState.savedForLater = true;
           })
         );
+        // OPTIMISTIC (HREV7-DESK-01). The card leaves the live rows on the tap, not a round trip
+        // later: before, nothing on it changed until the server answered, so on a real connection a
+        // tap read as dead and invited a second one. A failure releases the hold and the card comes
+        // back. The undo toast still waits for the server (CardQuickActions), and the CONFIRMED set
+        // still moves only on success, which is what Ask Reel's save toast reads as its receipt.
+        dispatch(titleRemovalStarted({ titleId }));
         try {
           await queryFulfilled;
-          // A saved title drops out of the live rows now. Saved list refreshes; the picks snapshot
-          // deliberately does not — see `markNotInterested`.
+          // Saved list refreshes; the picks snapshot deliberately does not — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
           dispatch(api.util.invalidateTags(["Saved"]));
         } catch {
           patch.undo();
+          dispatch(titleRemovalFailed({ titleId }));
         }
       },
     }),

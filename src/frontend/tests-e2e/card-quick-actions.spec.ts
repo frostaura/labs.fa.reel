@@ -327,6 +327,9 @@ test.describe("card quick actions", () => {
     await expect(six).toHaveCount(0);
     expect(saves).toEqual(["POST"]);
     await expect(page).toHaveURL(/\/home/);
+    // The toast's Undo takes focus first (HREV4-PH-02); moving on is done from there, so this spec
+    // no longer races the toast's focus frame (REV7-PH-01, which this used to trip intermittently).
+    await expect(page.getByTestId("card-undo-toast-undo")).toBeFocused();
 
     // And Enter on a title link opens the title.
     const seven = page.getByTestId("rec-card").filter({ hasText: "Pick 7" });
@@ -596,4 +599,181 @@ test.describe("card quick actions", () => {
     await expect(toast).toBeVisible();
     await expect(undo).not.toBeFocused();
   });
+  /**
+   * A route that answers only when the test says so: what the card does WHILE the request is out is
+   * then asserted directly, with no race against a timer (HREV7-DESK-01).
+   */
+  async function holdReactions(page: Page, status = 200) {
+    const calls: string[] = [];
+    const releases: (() => void)[] = [];
+    await page.route(/\/api\/titles\/movie\/\d+\/(reactions\/\w+|rating)$/, async (route) => {
+      const url = new URL(route.request().url());
+      calls.push(`${route.request().method()} ${url.pathname}`);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      const rated = url.pathname.endsWith("/rating") && route.request().method() === "POST";
+      await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(rated ? { userRating: 7 } : {}) });
+    });
+    return { calls, release: () => releases.splice(0).forEach((r) => r()) };
+  }
+
+  // HREV7-DESK-01. Optimistic UI: the card leaves on the tap, not on the server's answer, and comes
+  // back if the server says no. Undo is still offered only once the server has said yes. Varied:
+  // each action (save, not for me, rate), success and failure.
+  for (const action of ["save", "dismiss", "rate"] as const) {
+    test(`${action}: the card leaves on the tap, and Undo waits for the server (HREV7-DESK-01)`, async ({ page }) => {
+      await bootHome(page);
+      const held = await holdReactions(page);
+      const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+      const act = async () => {
+        await six.hover();
+        if (action === "save") await six.getByTestId("quick-save").click();
+        else if (action === "dismiss") await six.getByTestId("quick-not-interested").click();
+        else {
+          await six.getByTestId("quick-rate").click();
+          await page.getByTestId("quick-rate-picker").getByTestId("quick-rate-7").click();
+        }
+      };
+      await act();
+      // The request is still out: the card is already gone and no Undo is on offer yet.
+      await expect(six).toHaveCount(0);
+      expect(held.calls).toHaveLength(1);
+      await expect(page.getByTestId("card-undo-toast")).toHaveCount(0);
+      await expect(page.getByTestId("rec-card")).toHaveCount(3);
+      held.release();
+      await expect(page.getByTestId("card-undo-toast")).toBeVisible();
+      await expect(six).toHaveCount(0);
+    });
+  }
+
+  test("a failed quick action brings the card back where it was, with no Undo (HREV7-DESK-01)", async ({ page }) => {
+    await bootHome(page);
+    const held = await holdReactions(page, 500);
+    const seven = page.getByTestId("rec-card").filter({ hasText: "Pick 7" });
+    await seven.hover();
+    await seven.getByTestId("quick-not-interested").click();
+    await expect(seven).toHaveCount(0);
+    held.release();
+    await expect(seven).toHaveCount(1);
+    // Back in its own place, between Pick 6 and Pick 8.
+    await expect(page.getByTestId("rec-card")).toHaveText([/Pick 6/, /Pick 7/, /Pick 8/, /Pick 9/]);
+    await expect(page.getByTestId("card-undo-toast")).toHaveCount(0);
+    expect(held.calls).toEqual(["POST /api/titles/movie/1007/reactions/not_interested"]);
+  });
+
+  test("a failed keyboard action brings the card back with focus on the control that sent it (HREV7-DESK-01)", async ({ page }) => {
+    await bootHome(page);
+    const held = await holdReactions(page, 500);
+    const eight = page.getByTestId("rec-card").filter({ hasText: "Pick 8" });
+    await eight.getByTestId("quick-save").focus();
+    await page.keyboard.press("Enter");
+    await expect(eight).toHaveCount(0);
+    held.release();
+    await expect(eight).toHaveCount(1);
+    await expect(eight.getByTestId("quick-save")).toBeFocused();
+    await expect(page.getByTestId("card-undo-toast")).toHaveCount(0);
+  });
+
+  // HREV7-DESK-01. A double tap used to post twice. With the card leaving on the first tap, the
+  // second lands on whatever slid into its place — the NEXT card's same control — which must not act
+  // either. Varied: both one-tap actions, and a gap inside and at the edge of a double tap.
+  for (const [testId, gapMs] of [["quick-save", 150], ["quick-not-interested", 150], ["quick-save", 400]] as const) {
+    test(`a double tap on ${testId} (${gapMs} ms apart) sends exactly one request (HREV7-DESK-01)`, async ({ page }) => {
+      await bootHome(page);
+      const held = await holdReactions(page);
+      const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+      await six.hover();
+      const box = (await six.getByTestId(testId).boundingBox())!;
+      const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      await page.mouse.click(at.x, at.y);
+      await page.waitForTimeout(gapMs);
+      await page.mouse.click(at.x, at.y);
+      await page.waitForTimeout(200);
+      expect(held.calls).toHaveLength(1);
+      expect(held.calls[0]).toContain("/1006/");
+      held.release();
+      await expect(page.getByTestId("card-undo-toast")).toBeVisible();
+      await expect(page.getByTestId("rec-card").filter({ hasText: "Pick 7" })).toHaveCount(1);
+      expect(held.calls).toHaveLength(1);
+    });
+  }
+
+  test("a deliberate tap on the next card, once the double-tap window has passed, still acts (HREV7-DESK-01)", async ({ page }) => {
+    await bootHome(page);
+    const held = await holdReactions(page);
+    const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+    await six.hover();
+    const box = (await six.getByTestId("quick-save").boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(900);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => held.calls.length).toBe(2);
+    expect(held.calls[1]).toContain("/1007/");
+    held.release();
+  });
+
+  test("a failed keyboard undo puts focus on Try again, although closing the toast had handed it to the next card (REV7-PH-01)", async ({ page }) => {
+    await bootHome(page);
+    await page.route("**/api/titles/movie/1006/reactions/save_for_later", (route) =>
+      route.fulfill({ status: route.request().method() === "POST" ? 200 : 500, contentType: "application/json", body: "{}" }));
+    await page.getByTestId("rec-card").filter({ hasText: "Pick 6" }).getByTestId("quick-save").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("card-undo-toast-undo")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("card-undo-toast")).toContainText("Couldn’t undo — “Pick 6” is still saved.");
+    await expect(page.getByTestId("card-undo-toast-undo")).toBeFocused();
+    await expect(page.getByTestId("card-undo-toast-undo")).toHaveText("Try again");
+  });
+
+  // REV7-PH-01: a keyboard action hands focus to Undo only if nobody has moved it since. Someone who
+  // went on to the next card mid-request kept their place no longer: the toast took focus, and their
+  // next Enter undid the action instead of opening the card. Varied: moved by script and by Tab,
+  // a slow and an instant server.
+  // (Tab is only meaningful mid-request: once an instant answer has put focus on Undo, a Tab moves on
+  // from there, as it should.)
+  for (const how of ["focus", "tab"] as const) {
+    for (const slow of how === "tab" ? [true] : [true, false]) {
+      test(`a keyboard action does not take focus back from someone who moved on (${how}, ${slow ? "slow" : "instant"} server) (REV7-PH-01)`, async ({ page }) => {
+        await bootHome(page);
+        const calls: string[] = [];
+        let release: () => void = () => undefined;
+        const gate = slow ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve();
+        await page.route(/\/api\/titles\/movie\/\d+\/reactions\/\w+$/, async (route) => {
+          calls.push(route.request().method());
+          await gate;
+          await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        });
+        const six = page.getByTestId("rec-card").filter({ hasText: "Pick 6" });
+        const sevenLink = page.getByTestId("rec-card").filter({ hasText: "Pick 7" }).getByTestId("rec-card-link");
+        await six.getByTestId("quick-save").focus();
+        await page.keyboard.press("Enter");
+        let where: string;
+        if (how === "focus") {
+          await sevenLink.focus();
+          where = "Pick 7";
+        } else {
+          await page.keyboard.press("Tab");
+          where = await page.evaluate(() => {
+            const el = document.activeElement;
+            return !el || el === document.body ? "<body>" : `${el.getAttribute("data-testid")}|${el.textContent}`;
+          });
+          expect(where).not.toBe("<body>");
+        }
+        release();
+        await expect(page.getByTestId("card-undo-toast")).toBeVisible();
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50)))));
+        await expect(page.getByTestId("card-undo-toast-undo")).not.toBeFocused();
+        if (how === "focus") {
+          await expect(sevenLink).toBeFocused();
+          await page.keyboard.press("Enter");
+          await expect(page).toHaveURL(/\/title\/movie\/1007/);
+        } else {
+          expect(await page.evaluate(() => {
+            const el = document.activeElement;
+            return !el || el === document.body ? "<body>" : `${el.getAttribute("data-testid")}|${el.textContent}`;
+          })).toBe(where);
+        }
+        expect(calls).toEqual(["POST"]);
+      });
+    }
+  }
 });

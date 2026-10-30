@@ -9,7 +9,7 @@ import {
 } from "../components/rows/railPaging";
 import { useRailPage } from "../components/rows/railPage";
 import { useLoadMoreFeedMutation } from "../store/api";
-import { selectRemovedKeys } from "../store/removedTitlesSlice";
+import { selectHiddenKeys } from "../store/removedTitlesSlice";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
 import type { AnchoredSupply, FeedCard, MoreFeedRequest, MoreFeedResponse, RailSupply } from "../store/feedTypes";
 
@@ -86,7 +86,7 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
   const mounted = useRef(true);
   // Titles the user just made ineligible (seen/rated, not-interested, saved) drop from view at
   // once. Pagination still tracks the full set via seenRef, so excluding these doesn't re-fetch them.
-  const removed = useSelector(selectRemovedKeys);
+  const removed = useSelector(selectHiddenKeys);
   // Recalibrated numbers for cards this row is already holding. Rows render from local state fed by
   // `loadMoreFeed` — a mutation with no cache tag — so an RTK cache patch cannot reach them; without
   // this, a `feed-scores-updated` frame would update the hero and leave every paginated card stale.

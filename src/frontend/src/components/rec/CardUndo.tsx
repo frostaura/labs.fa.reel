@@ -32,7 +32,7 @@ interface Shown {
 
 /**
  * One undo toast per page for the three one-tap card actions — save, not for me and rate (F-19).
- * Each of them takes the card off the rail the moment the server confirms it, and before this the
+ * Each of them takes the card off the rail on the tap (HREV7-DESK-01), and before this the
  * only way back from a mis-tap was to find the title again and reverse it from its detail page.
  *
  * The toast is raised only AFTER the action succeeded (an undo for something that never happened
@@ -48,7 +48,8 @@ interface Shown {
  *
  * FOCUS (HREV4-PH-02, WCAG 2.4.3). An action taken from the keyboard removes the very card that held
  * focus, which used to drop it on <body> with Undo a long Tab walk away (161 Tabs on real data). For
- * those actions the toast's Undo takes focus as it appears — and while focus is on it the toast's
+ * those actions the toast's Undo takes focus as it appears, unless focus has been put somewhere since
+ * (REV7-PH-01) — and while focus is on it the toast's
  * clock holds, so nothing commits under someone still deciding — and when the toast closes (Undo,
  * Dismiss or the clock) focus goes to the card that was next, else the previous one, else the rail.
  * It is handed back only if it is still on the toast or has fallen to <body>: someone who has tabbed
@@ -58,17 +59,26 @@ export function CardUndoProvider({ children }: { children: ReactNode }) {
   const dispatch = useDispatch<AppDispatch>();
   const [shown, setShown] = useState<Shown | null>(null);
   const sequence = useRef(0);
+  // Where closing the toast for an Undo put focus. If that undo fails, "Try again" may take focus
+  // back from there: it was the toast that put it there, not the user.
+  const handedTo = useRef<Element | null>(null);
   const [unsave] = useUnsaveForLaterMutation();
   const [undoNotInterested] = useUndoNotInterestedMutation();
   const [unrate] = useUnrateTitleMutation();
 
   const announce = useCallback<Announce>((action, focus) => {
+    handedTo.current = null;
     sequence.current += 1;
     setShown({ id: `${action.kind}:${action.titleId}:${sequence.current}`, action, undoFailed: false, focus });
   }, []);
 
-  // A keyboard action's toast (and a failed undo's "Try again") takes focus as it mounts — one frame
-  // later, not in this effect. The toast's column is attached by its own layout effect, and under
+  // A keyboard action's toast (and a failed undo's "Try again") takes focus as it mounts — but only
+  // focus nobody has claimed since (REV7-PH-01): still on <body>, where the acted-on card's removal
+  // dropped it, or already on the toast. Someone who went on to the next card while the request was
+  // out keeps their place; taking it from them made their next Enter undo the action instead of
+  // opening the card they had moved to. The same test the close uses (`focusMayReturn`).
+  //
+  // One frame later, not in this effect. The toast's column is attached by its own layout effect, and under
   // React's StrictMode a newly mounted toast's effects are torn down and run again AFTER this
   // parent effect: the teardown detaches the column, which drops focus to <body> in every browser,
   // and Chromium's Tab then happened to land back on Undo while WebKit's (which skips buttons) did
@@ -77,21 +87,30 @@ export function CardUndoProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!focusId) return;
     const frame = requestAnimationFrame(() => {
-      toastNode()?.querySelector<HTMLElement>(`[data-testid="${TOAST_TEST_ID}-undo"]`)?.focus();
+      const toast = toastNode();
+      const active = document.activeElement;
+      if (!focusMayReturn(active, toast) && (active === null || active !== handedTo.current)) return;
+      handedTo.current = null;
+      toast?.querySelector<HTMLElement>(`[data-testid="${TOAST_TEST_ID}-undo"]`)?.focus();
     });
     return () => cancelAnimationFrame(frame);
   }, [focusId]);
 
-  /** Closes the toast, first handing focus back when it is the toast's to give. */
-  const close = (focus: CardUndoFocus | undefined) => {
-    if (focus && focusMayReturn(document.activeElement, toastNode())) focus.returnTo()?.focus();
+  /** Closes the toast, first handing focus back when it is the toast's to give; says where it went. */
+  const close = (focus: CardUndoFocus | undefined): Element | null => {
+    let target: HTMLElement | null = null;
+    if (focus && focusMayReturn(document.activeElement, toastNode())) {
+      target = focus.returnTo();
+      target?.focus();
+    }
     setShown(null);
+    return target;
   };
 
   const undo = async () => {
     if (!shown) return;
     const { action, focus } = shown;
-    close(focus);
+    const handed = close(focus);
     const ref = { titleId: action.titleId, mediaType: action.mediaType, tmdbId: action.tmdbId };
     try {
       if (action.kind === "save") {
@@ -104,6 +123,7 @@ export function CardUndoProvider({ children }: { children: ReactNode }) {
         dispatch(verdictDismissed());
       }
     } catch {
+      handedTo.current = handed;
       sequence.current += 1;
       setShown({ id: `failed:${action.titleId}:${sequence.current}`, action, undoFailed: true, focus });
     }
