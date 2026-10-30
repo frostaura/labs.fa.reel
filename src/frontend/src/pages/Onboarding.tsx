@@ -188,14 +188,20 @@ export default function Onboarding() {
               Hello, {session.displayName?.trim() || onboarding.traktUser || session.traktSlug}
             </p>
           )}
-          <p className="fa-body text-fa-frost" data-testid="stage-copy">
-            {STAGE_COPY[onboarding.stage]}
-          </p>
-          {onboarding.stalled && streaming && (
-            <p className="fa-caption text-3 animate-pulse" data-testid="stall-notice">
-              Still working — large libraries take a minute…
+          {/* The page's only live region (it renders outside the shell, so the shell's sync
+              announcer is not here). It is always mounted, so a screen reader hears every stage
+              change of a multi-minute import, and the "still working" line, without moving focus.
+              Atomic, so each change reads the whole current line rather than a fragment. */}
+          <div role="status" aria-live="polite" aria-atomic="true" className="space-y-2" data-testid="stage-announcer">
+            <p className="fa-body text-fa-frost" data-testid="stage-copy">
+              {STAGE_COPY[onboarding.stage]}
             </p>
-          )}
+            {onboarding.stalled && streaming && (
+              <p className="fa-caption text-3 animate-pulse" data-testid="stall-notice">
+                Still working — large libraries take a minute…
+              </p>
+            )}
+          </div>
         </div>
 
         {counters.length > 0 && (
@@ -229,15 +235,16 @@ export default function Onboarding() {
         )}
 
         {streaming && (
-          <div className="relative h-1 overflow-hidden rounded-full bg-fa-glass">
+          // Indeterminate: no aria-valuenow, because the pipeline reports no overall fraction.
+          <div role="progressbar" aria-label="Building your profile" className="relative h-1 overflow-hidden rounded-full bg-fa-glass">
             <div className="absolute inset-y-0 rounded-full bg-fa-frost/60 fa-progress-slide" />
           </div>
         )}
 
         {onboarding.stage === "reveal" && !melting && (
           <div className="text-center space-y-4 reel-rise" data-testid="reveal">
-            {/* No headline here — the stage copy above already announces "Your taste DNA is
-                ready.", and this card sits directly beneath it. */}
+            {/* No headline here — the stage line above (a live region) already announces "Your
+                taste DNA is ready.", and this card sits directly beneath it. */}
             <div className="fa-card px-8 py-6 space-y-3 border-fa-frost/30">
               <Sparkles className="h-6 w-6 text-fa-frost mx-auto" />
               <p className="fa-caption text-3">
