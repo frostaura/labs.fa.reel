@@ -1086,6 +1086,125 @@ test.describe("Ask Reel — Recent never shows a failed read as an empty history
   });
 });
 
+test.describe("Ask Reel — a failed resume read is never shown as a fresh start", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
+
+  const STORED_KEY = "reel.ask.conversationId";
+  const storedId = (page: Page) => page.evaluate((key) => localStorage.getItem(key), STORED_KEY);
+
+  /**
+   * Answers the resume route at `path` with `failure` for the first `failures` reads and the stored
+   * payload afterwards. `"abort"` is a dropped connection — the flaky phone network the defect was
+   * found on — and a number is that HTTP status. Every read is counted.
+   */
+  async function routeFlakyResume(page: Page, path: string, failure: number | "abort", failures: number) {
+    const calls: string[] = [];
+    await page.route(
+      (u) => u.pathname === path,
+      (route) => {
+        calls.push(path);
+        if (calls.length > failures) {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(RESUME_PAYLOAD) });
+        }
+        return failure === "abort"
+          ? route.abort("connectionreset")
+          : route.fulfill({ status: failure, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+      },
+    );
+    return calls;
+  }
+
+  /** Every resume read this page makes, id route and the deprecated alias alike. */
+  function resumeReads(page: Page): string[] {
+    const reads: string[] = [];
+    page.on("request", (r) => {
+      const path = new URL(r.url()).pathname;
+      if (/^\/api\/search\/conversations\/[^/]+$/.test(path)) reads.push(path.slice("/api/search/conversations/".length));
+    });
+    return reads;
+  }
+
+  // HREV8-PH-01. A single 503 on GET /conversations/{id} rendered the cold start — "What are you in
+  // the mood for?" and the starters, no alert, no Retry — and wiped the stored id, so the next reload
+  // opened the account's newest thread instead. Varied over a 5xx and a dropped connection.
+  for (const failure of [503, "abort"] as const) {
+    test(`a ${failure === "abort" ? "dropped connection" : failure} says the conversation failed to load, and Retry restores the same thread`, async ({ page }) => {
+      await boot(page, { resume: "stored", storedId: CONVERSATION });
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+      const calls = await routeFlakyResume(page, `/api/search/conversations/${CONVERSATION}`, failure, 1);
+      const reads = resumeReads(page);
+
+      await page.reload();
+
+      const failed = page.getByTestId("askreel-resume-error");
+      await expect(failed).toBeVisible();
+      await expect(failed).toHaveAttribute("role", "alert");
+      await expect(failed).toContainText("Couldn't load your conversation");
+      await expect(failed).toContainText("nothing on your account changed");
+      await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+      await expect(gridNames(page)).toHaveCount(0);
+      expect(await storedId(page)).toBe(CONVERSATION);
+
+      await page.getByTestId("askreel-resume-error-retry").tap();
+
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+      await expect(failed).toHaveCount(0);
+      await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+      expect(await storedId(page)).toBe(CONVERSATION);
+      expect(calls).toHaveLength(2);
+      // Both reads were for THIS thread — never the account's newest.
+      expect(reads).toEqual([CONVERSATION, CONVERSATION]);
+    });
+  }
+
+  test("the stored id survives a failed read, so the next reload opens the same thread", async ({ page }) => {
+    // No init script re-seeding the id on every load: the id is written once, so a client that
+    // forgets it on a 503 shows up as the second reload reading `/latest`.
+    await boot(page);
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    await page.evaluate(([key, id]) => localStorage.setItem(key, id), [STORED_KEY, CONVERSATION] as const);
+    await routeFlakyResume(page, `/api/search/conversations/${CONVERSATION}`, 503, 1);
+    const reads = resumeReads(page);
+
+    await page.reload();
+    await expect(page.getByTestId("askreel-resume-error")).toBeVisible();
+    expect(await storedId(page)).toBe(CONVERSATION);
+
+    await page.reload();
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-resume-error")).toHaveCount(0);
+    expect(reads).toEqual([CONVERSATION, CONVERSATION]);
+    expect(await storedId(page)).toBe(CONVERSATION);
+  });
+
+  test("a 404 still forgets the thread and lands on the cold start, with no alert", async ({ page }) => {
+    // The other side of the rule: the server saying the thread is gone IS an answer.
+    await boot(page);
+    await page.evaluate(([key, id]) => localStorage.setItem(key, id), [STORED_KEY, CONVERSATION] as const);
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, { code: "conversation_not_found" }, 404);
+
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    await expect(page.getByTestId("askreel-resume-error")).toHaveCount(0);
+    await expect.poll(() => storedId(page)).toBeNull();
+  });
+
+  test("with no stored id, a failed /latest says so rather than offering the starters", async ({ page }) => {
+    // Fixture variation, one field: nothing remembered, so the read is the deprecated alias.
+    await boot(page);
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    await routeFlakyResume(page, "/api/search/conversations/latest", 500, 1);
+
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-resume-error")).toBeVisible();
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+    await page.getByTestId("askreel-resume-error-retry").tap();
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+  });
+});
+
 test.describe("Ask Reel — a stopped page leaves nothing under the bar in the grid", () => {
   test("a page keeps paging alive and says what is on screen, not what the page added", async ({ page }) => {
     // R1-03, faces one and two in one run. The old rule counted ids a page added to `order` that
