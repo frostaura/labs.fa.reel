@@ -27,6 +27,12 @@ const WHY_LINES = "fa-caption text-fa-frost/80 line-clamp-2 leading-snug min-h-[
 /** Three chip lines (h-5 each, the chip's own height), the two gaps between them and the top pad. */
 const EVIDENCE_SLOT = "min-h-[4.375rem] pt-0.5";
 
+/**
+ * What a card renders from: a feed card, or anything feed-shaped whose "for you" number may be
+ * honestly absent (Trakt's own recommendations carry Reel's prediction only where the model has one).
+ */
+export type RecCardData = Omit<FeedCard, "predictedRating"> & { predictedRating: number | null };
+
 /** The text block's lines held empty, under a shimmer poster: a rail placeholder card. */
 export function RecCardSkeleton({ evidence = false }: { evidence?: boolean }) {
   return (
@@ -59,7 +65,7 @@ export function RecCardTextSkeleton({ evidence = false }: { evidence?: boolean }
  * then each action, and Enter or Space does what it says on every one of them.
  */
 export default function RecCard({ card, reserveEvidence = false }: {
-  card: FeedCard;
+  card: RecCardData;
   /** An anchored rail: hold the evidence slot on every card, chips or not, so none is shorter. */
   reserveEvidence?: boolean;
 }) {

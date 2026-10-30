@@ -3,6 +3,7 @@ import {
   SESSION_FOUNDER, askEnd, askFailNext, askKeepalive, askPush, askRequests, mockJson,
   stubAskReel, stubEventSource, waitForAsk,
 } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * Continuity — the turn record, from the browser.
@@ -109,6 +110,7 @@ async function boot(
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
   await mockJson(page, "**/api/settings/filters", FILTERS_WITH_FLOOR);
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/feed", FEED);
   await mockJson(page, "**/api/feed/continue-watching", []);
   await mockJson(page, "**/api/search/conversations", CONVERSATION_LIST);

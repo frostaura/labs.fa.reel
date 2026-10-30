@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * The two social/weekly surfaces the remediation added:
@@ -66,6 +67,7 @@ async function bootHome(page: Page, digestItems: unknown[], degradedReason: stri
   await mockJson(page, "**/api/feed", {
     generatedAt: new Date().toISOString(), hero: [card(1, "Hero Pick")], rows: [], lockedRowCount: 0,
   });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/digest/current", {
     weekStart: "2026-08-03", generatedAt: digestItems.length > 0 ? new Date().toISOString() : null, items: digestItems,
     degradedReason,
@@ -87,7 +89,9 @@ test.describe("weekly digest rail", () => {
     await bootHome(page, [card(2, "Fresh Signal")]);
 
     await expect(page.getByText("New & high for you this week")).toBeVisible();
-    await expect(page.getByTestId("rail-caption")).toHaveCount(0);
+    // Scoped to the digest's own rail: the "Trakt recommends" rail below carries a caption of its own.
+    const digestRail = page.locator("section").filter({ has: page.getByRole("heading", { name: "New & high for you this week" }) });
+    await expect(digestRail.getByTestId("rail-caption")).toHaveCount(0);
   });
 
   // IR1S-03: a build that relaxed the "high for you" bar must not keep the claim in its title.
@@ -98,7 +102,9 @@ test.describe("weekly digest rail", () => {
 
     await expect(page.getByRole("heading", { name: "New this week", exact: true })).toBeVisible();
     await expect(page.getByText("New & high for you this week")).toHaveCount(0);
-    await expect(page.getByTestId("rail-caption")).toHaveText(reason);
+    // Scoped to the digest's own rail: the "Trakt recommends" rail below carries a caption of its own.
+    const digestRail = page.locator("section").filter({ has: page.getByRole("heading", { name: "New this week", exact: true }) });
+    await expect(digestRail.getByTestId("rail-caption")).toHaveText(reason);
     await expect(page.getByTestId("rec-card").filter({ hasText: "Fresh Signal" })).toHaveCount(1);
   });
 

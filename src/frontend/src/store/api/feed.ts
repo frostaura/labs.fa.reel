@@ -8,6 +8,7 @@ import type {
   MoreFeedRequest,
   MoreFeedResponse,
   RailSupply,
+  TraktRecommendations,
 } from "../feedTypes";
 import { api } from "./base";
 
@@ -110,6 +111,18 @@ export const feedApi = api.injectEndpoints({
         anchoredSupply: r.anchoredSupply ?? null,
       }),
     }),
+    /**
+     * Trakt's own recommendations for the "Trakt recommends" rail. The argument is the Retry count:
+     * 0 is an ordinary read; anything higher asks the server to ask Trakt again even inside its
+     * failure cooldown (`?retry=true`), and is a fresh cache entry so the press always sends.
+     * Tagged "Feed" so whatever re-reads the picks — a finished sync, saved conditions — re-reads
+     * this too; the server re-applies the eligibility rule on every read, and only asks Trakt
+     * itself when its cached answer is stale.
+     */
+    getTraktRecommendations: b.query<TraktRecommendations, number>({
+      query: (attempt) => (attempt > 0 ? "feed/trakt-recommendations?retry=true" : "feed/trakt-recommendations"),
+      providesTags: ["Feed"],
+    }),
     // Weekly digest — read-only snapshot of this week's "new & high for you" picks.
     getDigest: b.query<DigestPayload, void>({
       query: () => "digest/current",
@@ -126,4 +139,5 @@ export const {
   useGetCrossReferenceQuery,
   useLoadMoreFeedMutation,
   useGetDigestQuery,
+  useGetTraktRecommendationsQuery,
 } = feedApi;

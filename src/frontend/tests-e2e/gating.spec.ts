@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 const card = (n: number) => ({
   titleId: `00000000-0000-0000-0000-00000000000${n}`,
@@ -25,6 +26,7 @@ test.describe("entitlement gating", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
     await mockJson(page, "**/api/feed/continue-watching", []);
     // Server-side strip: free payload carries only 3 hero cards + a locked-row count.
     await mockJson(page, "**/api/feed", {
@@ -48,6 +50,7 @@ test.describe("entitlement gating", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
     await mockJson(page, "**/api/feed/continue-watching", []);
     await mockJson(page, "**/api/feed", {
       generatedAt: new Date().toISOString(),
@@ -69,6 +72,7 @@ test.describe("entitlement gating", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
     await mockJson(page, "**/api/feed/continue-watching", []);
     await mockJson(page, "**/api/feed", {
       generatedAt: new Date().toISOString(),

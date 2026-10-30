@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * Two rows of tonight's picks.
@@ -48,6 +49,7 @@ async function bootHome(page: Page, hero: unknown[], tier = "Founder"): Promise<
   // columns, and a top-up landing mid-measurement would move the cards under them.
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
