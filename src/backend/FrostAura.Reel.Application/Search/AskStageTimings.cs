@@ -163,7 +163,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Load, Plan, PlanContext, PlanHedge, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgeOrder, JudgePrep, Judge,
+            Load, Plan, PlanContext, PlanHedge, RetrieveLadder, RetrieveEmbed, Retrieve, RetrieveSpeculative, RetrieveTitles, JudgeOrder, JudgePrep, Judge,
             JudgeFirstBatch, JudgeSpeculative, Answer, Compose,
         ];
 

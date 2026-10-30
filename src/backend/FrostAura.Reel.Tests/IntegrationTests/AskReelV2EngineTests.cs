@@ -2670,6 +2670,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(conjunctionExists ? [ids[0]] : ids.Order().ToList(), outcome.Cards.Select(c => c.TitleId).Order().ToList());
         Assert.All(judge.Requests, r => Assert.Contains($"Requires: {topic}, {descriptor}", r, StringComparison.Ordinal));
         Assert.Equal(!conjunctionExists, (outcome.DegradedFlags ?? string.Empty).Contains($"relaxed:{descriptor}", StringComparison.Ordinal));
+
+        // The ladder's probes are timed on the row (they sit on the critical path before retrieval).
+        Assert.Contains($"\"{AskStageTimings.RetrieveLadder}\"", outcome.StageTimingsJson ?? string.Empty, StringComparison.Ordinal);
     }
 
     /// <summary>
