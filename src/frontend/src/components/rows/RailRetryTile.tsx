@@ -1,10 +1,13 @@
 import { RotateCw } from "lucide-react";
 import { Button } from "../ui/button";
+import { RecCardTextSkeleton } from "../rec/RecCard";
 
 interface Props {
   onRetry: () => void;
   /** "poster" trails a rail of 2:3 cards; "inline" stands alone where a rail has nothing to show. */
   shape?: "poster" | "inline";
+  /** Poster shape in an anchored rail: hold the evidence slot as its cards do (see `RecRow`). */
+  reserveEvidence?: boolean;
 }
 
 /**
@@ -12,7 +15,7 @@ interface Props {
  * in place of the shimmer that used to promise cards forever. Polite, not an alert — eight failing
  * rails must not shout eight times.
  */
-export default function RailRetryTile({ onRetry, shape = "poster" }: Props) {
+export default function RailRetryTile({ onRetry, shape = "poster", reserveEvidence = false }: Props) {
   const body = (
     <div
       role="status"
@@ -28,8 +31,11 @@ export default function RailRetryTile({ onRetry, shape = "poster" }: Props) {
   );
 
   return shape === "poster" ? (
+    // In a card's slot, a card's height: the poster's box and the text block's held lines under it,
+    // so a rail whose placeholder turns into this tile does not shrink (HREV8-DESK-01).
     <div className="snap-start w-card shrink-0">
       <div className="aspect-[2/3]">{body}</div>
+      <RecCardTextSkeleton evidence={reserveEvidence} />
     </div>
   ) : (
     <div className="py-4">{body}</div>
