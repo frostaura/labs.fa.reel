@@ -190,6 +190,14 @@ public sealed record PlanResult(
     string? Question = null,
     PlanFailure? Failure = null)
 {
+    /// <summary>
+    /// The cards the message rejects by their place ("not the first one", "I didn't like the second
+    /// one"): rejected, and never searched near (HREV6-ASK-02). Kept apart from <see cref="References"/>,
+    /// which stay the cards to search near, because one message can do both — "not the first one, more
+    /// like the second one" (HREV6-ASK-02-R1). Set by the sanitiser from the user's words, never by a model.
+    /// </summary>
+    public IReadOnlyList<TurnHandle> RejectedReferences { get; init; } = [];
+
     /// <summary>A plan that failed with <paramref name="failure"/>.</summary>
     public static PlanResult Failed(PlanFailure failure, LlmCallMeta meta) =>
         new(TurnAct.Refine, ConversationStateDelta.None, [], [], null, [], PlanSource.CarriedForward, meta, null, failure);

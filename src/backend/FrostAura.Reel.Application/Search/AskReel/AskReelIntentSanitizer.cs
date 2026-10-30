@@ -38,7 +38,62 @@ public static class AskReelIntentSanitizer
     {
         "no", "not", "without", "never", "dont", "don't", "nothing", "none", "avoid", "except", "minus",
         "skip", "hate", "nor", "neither", "isnt", "isn't", "aren't", "arent",
+        // HREV6-ASK-01: "heist movies excluding anything with guns", "action movies sans superheroes",
+        // "I didn't like zombies" — each cue was read as a topic and required beside what it ruled out.
+        "excluding", "exclude", "sans", "barring", "didn't", "didnt", "doesn't", "doesnt", "wasn't", "wasnt",
     };
+
+    /// <summary>
+    /// Cues of more than one word, each read as one cue that is never content: "comedies other than
+    /// romcoms", "horror apart from slashers", "I'm sick of superheroes", "fed up with zombies". Split,
+    /// "apart" and "sick" were topics every title had to carry and nothing ruled out (HREV6-ASK-01).
+    /// </summary>
+    private static readonly IReadOnlyList<string[]> PhraseCues =
+    [
+        ["other", "than"], ["apart", "from"], ["aside", "from"], ["sick", "of"], ["tired", "of"], ["bored", "of"],
+        ["bored", "with"], ["fed", "up", "with"], ["fed", "up", "of"], ["enough", "of"],
+        // HREV6-ASK-01-R1: "sick to death of superheroes" required [sick, death, superheroes], "I've had
+        // it with zombies" required zombies.
+        ["sick", "to", "death", "of"], ["sick", "and", "tired", "of"], ["had", "it", "with"], ["can't", "stand"],
+        ["cant", "stand"], ["done", "with"],
+    ];
+
+    /// <summary>
+    /// Several-word cues that rule out what follows only when said of the user — "I'm so done with
+    /// superheroes", "done with zombies, heists please" — never of a film: "a heist done with practical
+    /// effects" asks for practical effects (HREV6-ASK-01-R1).
+    /// </summary>
+    private static readonly IReadOnlySet<string> SaidOfTheUser = new HashSet<string>(StringComparer.Ordinal) { "done" };
+
+    /// <summary>The words that may stand before a cue said of the user ("I'm SO done with", "totally done with").</summary>
+    private static readonly IReadOnlySet<string> UserLeads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "i'm", "im", "i", "am", "we're", "were", "so", "totally", "completely", "really", "just", "pretty", "kinda",
+        "been", "all", "honestly", "officially", "ok", "okay", "well", "and", "but",
+    };
+
+    /// <summary>
+    /// Refusals of the clause BEFORE them: "superhero movies? no thanks, give me westerns". Read as a
+    /// cue, "no" governed only "thanks", and the refused topic was required (HREV6-ASK-01). "no thanks"
+    /// refuses wherever it stands; the shorter refusals only at the end of their clause, since "not
+    /// that scary" and "nah" mid-sentence refuse nothing before them. "not those" and "not them" are
+    /// left out: they point at the cards on screen far more often than at the clause before.
+    /// </summary>
+    private static readonly IReadOnlyList<(string[] Words, bool ClauseFinal)> Refusals =
+    [
+        (["no", "thanks"], false), (["no", "thank", "you"], false), (["no", "thankyou"], false),
+        (["not", "that"], true), (["nah"], true), (["nope"], true),
+        // HREV6-ASK-01-R1: "superhero movies? no, give me westerns" and "superhero movies, not for me.
+        // westerns" required superhero. "No" and "pass" refuse only as a clause of their own (see
+        // ClauseAlone): "no gore" and "a pass at it" refuse nothing before them.
+        (["not", "for", "me"], true), (["no"], true), (["pass"], true),
+    ];
+
+    /// <summary>Refusals that refuse only when they are their whole clause: "superheroes? no, westerns".</summary>
+    private static readonly IReadOnlySet<string> ClauseAlone = new HashSet<string>(StringComparer.Ordinal) { "no", "pass" };
+
+    /// <summary>True when <paramref name="word"/> (lower-case) is a one-word negation cue ("no", "without", "excluding").</summary>
+    internal static bool IsNegationCue(string word) => NegationCues.Contains(word);
 
     /// <summary>Ordinals and pointers: words that refer to something on screen rather than name a topic.</summary>
     private static readonly IReadOnlySet<string> PointerWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -671,8 +726,9 @@ public static class AskReelIntentSanitizer
         var words = new List<(string Word, bool Closes)>();
         foreach (var token in (raw ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            // A comma, a full stop or a semicolon closes the clause a negation cue opened.
-            var closes = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';');
+            // A comma, a full stop, a semicolon, a question or an exclamation mark closes the clause a
+            // negation cue opened: "no horror? fine, comedies" asks for comedies.
+            var closes = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';') || token.EndsWith('?') || token.EndsWith('!');
             var tokenWords = Words(token);
             if (tokenWords.Count == 0)
             {
@@ -690,6 +746,31 @@ public static class AskReelIntentSanitizer
             }
         }
 
+        // A refusal ("no thanks") rules out the clause before it, read before any cue is.
+        var refusals = new Dictionary<int, int>();
+        var refused = new bool[words.Count];
+        for (var i = 0; i < words.Count; i++)
+        {
+            if (RefusalAt(words, i) is not { } length)
+            {
+                continue;
+            }
+
+            refusals[i] = length;
+            var start = i;
+            while (start > 0 && (start == i || !words[start - 1].Closes))
+            {
+                start--;
+            }
+
+            for (var k = start; k < i; k++)
+            {
+                refused[k] = true;
+            }
+
+            i += length - 1;
+        }
+
         var suppressing = false;
         // Whether the open negation scope has ruled out anything yet. "nothing WITH superheroes", "no
         // movies with zombies": a "with" before the scope's object is part of the negation, not the
@@ -700,7 +781,15 @@ public static class AskReelIntentSanitizer
         {
             var closes = words[i].Closes;
             var rejected = RejectedResults(words, i);
-            if (rejected > 0)
+            if (refusals.TryGetValue(i, out var refusal))
+            {
+                // The refusal's own words are never content, and it opens no scope after it.
+                i += refusal - 1;
+                closes = words[i].Closes;
+                suppressing = false;
+                yield return (null, false);
+            }
+            else if (rejected > 0)
             {
                 i += rejected - 1;
                 closes = words[i].Closes;
@@ -713,12 +802,12 @@ public static class AskReelIntentSanitizer
                 scopeNamed = false;
                 yield return (null, false);
             }
-            else if (OtherThan(words, i))
+            else if (PhraseCueAt(words, i) is { } cueLength)
             {
-                // "other than": the cue is two words, and neither is content.
+                // "other than", "apart from", "sick of": the cue is several words, and none is content.
                 suppressing = true;
                 scopeNamed = false;
-                i++;
+                i += cueLength - 1;
                 closes = words[i].Closes;
                 yield return (null, false);
             }
@@ -743,7 +832,7 @@ public static class AskReelIntentSanitizer
             else
             {
                 scopeNamed |= suppressing && !IsFiller(words[i].Word);
-                yield return (words[i].Word, suppressing);
+                yield return (words[i].Word, suppressing || refused[i]);
             }
 
             if (closes)
@@ -778,9 +867,66 @@ public static class AskReelIntentSanitizer
                 && (PointerWords.Contains(previous) || previous is "genre" or "kind" or "type" or "sort"));
     }
 
-    /// <summary>True when "other than" starts at <paramref name="index"/>: "comedies other than romcoms".</summary>
-    private static bool OtherThan(IReadOnlyList<(string Word, bool Closes)> words, int index) =>
-        words[index].Word == "other" && !words[index].Closes && index + 1 < words.Count && words[index + 1].Word == "than";
+    /// <summary>
+    /// The length of the several-word cue (<see cref="PhraseCues"/>) that starts at
+    /// <paramref name="index"/> within one clause — "comedies other than romcoms" — or null.
+    /// </summary>
+    private static int? PhraseCueAt(IReadOnlyList<(string Word, bool Closes)> words, int index)
+    {
+        foreach (var cue in PhraseCues)
+        {
+            if (Matches(words, index, cue)
+                && (!SaidOfTheUser.Contains(cue[0]) || index == 0 || words[index - 1].Closes || UserLeads.Contains(words[index - 1].Word)))
+            {
+                return cue.Length;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The length of the refusal (<see cref="Refusals"/>) that starts at <paramref name="index"/> after
+    /// something it can refuse, or null: "superhero movies? no thanks", "vampires? nah, westerns".
+    /// </summary>
+    private static int? RefusalAt(IReadOnlyList<(string Word, bool Closes)> words, int index)
+    {
+        if (index == 0)
+        {
+            return null;
+        }
+
+        foreach (var (refusal, clauseFinal) in Refusals)
+        {
+            var end = index + refusal.Length - 1;
+            if (Matches(words, index, refusal) && (!clauseFinal || words[end].Closes || end == words.Count - 1)
+                && (refusal.Length > 1 || !ClauseAlone.Contains(refusal[0]) || words[index - 1].Closes))
+            {
+                return refusal.Length;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>True when <paramref name="phrase"/> is written at <paramref name="index"/> with no clause break inside it.</summary>
+    private static bool Matches(IReadOnlyList<(string Word, bool Closes)> words, int index, string[] phrase)
+    {
+        if (index + phrase.Length > words.Count)
+        {
+            return false;
+        }
+
+        for (var k = 0; k < phrase.Length; k++)
+        {
+            if (words[index + k].Word != phrase[k] || (k < phrase.Length - 1 && words[index + k].Closes))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// True when the words from <paramref name="start"/> name another thing to rule out, past an
