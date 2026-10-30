@@ -30,8 +30,9 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// count of titles sent. Null claims no check (<see cref="NoneFoundCopy.Facts.CheckedOfTagged"/>).
 /// </param>
 /// <param name="FirstTurn">
-/// The conversation had no earlier answer: a carried-forward plan has nothing "before" to carry,
-/// so its lead says it searched the user's own words (HREV1-ASK-06).
+/// The conversation held no search before this turn — none at all, or only small talk, a question
+/// about a title or a clarifying question: a carried-forward plan has nothing "before" to carry, so
+/// its lead says it searched the user's own words (HREV1-ASK-06, HREV7-ASK-01).
 /// </param>
 /// <param name="Guessed">
 /// No model read the message and the topic searched is a guess at it (a title it asked for something

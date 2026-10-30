@@ -1373,6 +1373,98 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// HREV7-ASK-01: a plan that fails on the turn after an opening that searched nothing — small talk
+    /// or a question about a title read with no model, a clarifying question a model asked — searches
+    /// the user's topic as a requirement and says so. Read by the answer number, "heist movies" was the
+    /// soft mood "heist" (non-heist titles could be ruled Yes), the reply said "I searched the way I
+    /// did last time" about no earlier search, and a none-found had no supply because nothing was
+    /// required. Each opening runs through the engine and its stored state is what the second turn
+    /// loads. Varied over the second turn's outcome (picks, and a none-found whose supply is counted)
+    /// and a control whose opening did search, which is still carried forward as before.
+    /// </summary>
+    [Theory]
+    [InlineData("chitchat", false)]
+    [InlineData("item", false)]
+    [InlineData("clarify", false)]
+    [InlineData("chitchat", true)]
+    [InlineData("item", true)]
+    [InlineData("clarify", true)]
+    [InlineData("search", false)]
+    public async Task A_plan_failure_after_an_opening_that_searched_nothing_requires_the_topic_and_never_says_last_time(string opening, bool allSeen)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var earlier = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+        if (allSeen)
+        {
+            await MarkSeenAsync(accountId, ids);
+        }
+
+        var named = $"Better Call {Topic()}";
+        if (opening == "item")
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            db.Titles.Add(NewTitle(named, 9_001));
+            await db.SaveChangesAsync();
+        }
+
+        var (first, opener) = opening switch
+        {
+            "chitchat" => ("what can you do?", (IAskReelPlanner)new KeylessPlanner()),
+            "item" => ($"what is {named} about?", new KeylessPlanner()),
+            "clarify" => ("something like fargo", new ScriptedPlanner(_ => Plan(TurnAct.NewRequest) with
+            {
+                ClarifyQuestion = "Do you mean the film or the series?",
+                ClarifyOptions = ["The film", "The series"],
+            })),
+            _ => ($"{earlier} movies", new ScriptedPlanner(_ => Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [earlier] }))),
+        };
+        var (openEngine, _, openEmit) = Build(accountId, opener, new NameJudge(), new NoAnswerer());
+        var opened = await openEngine.StreamAsync(Input(first), accountId, openEmit, CancellationToken.None);
+        var state = ConversationStateJson.Read(opened.ConversationStateJson)!;
+        Assert.Equal(1, state.Version);
+        Assert.Equal(opening == "search", state.HoldsSearch);
+        var conversationId = await SeedConversationAsync(accountId, state);
+
+        var planner = new ScriptedPlanner(_ => PlanResult.Failed(
+            new PlanFailure(AgentFailureKind.TimedOut, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(
+            Input($"{topic} movies") with { ConversationId = conversationId, AnswerNumber = 2 }, accountId, emit, CancellationToken.None);
+
+        var concepts = Assert.Single(events, e => e.Event == "plan").Data.GetProperty("concepts").EnumerateArray().Select(c => c.GetString()).ToList();
+        Assert.Equal("CarriedForward", outcome.PlanSource);
+        Assert.DoesNotContain("last time", outcome.AssistantText, StringComparison.Ordinal);
+        if (opening == "search")
+        {
+            Assert.Equal([earlier], concepts);
+            Assert.StartsWith($"I couldn't fully read that — searching for {earlier} as before.", outcome.AssistantText, StringComparison.Ordinal);
+            return;
+        }
+
+        Assert.Equal([topic], concepts);
+        Assert.DoesNotContain("before", outcome.AssistantText, StringComparison.Ordinal);
+        if (allSeen)
+        {
+            Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+            var supply = Assert.Single(events, e => e.Event == "none-found").Data.GetProperty("supply");
+            Assert.Equal(3, supply.GetProperty("alreadySeen").GetInt32());
+            Assert.StartsWith($"I couldn't fully read that, so I searched for {topic}.", outcome.AssistantText, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal($"I couldn't fully read that, so I searched for {topic}. 3 {topic} movies that fit what you asked.", outcome.AssistantText);
+        }
+    }
+
+    /// <summary>
     /// HREV4-ASK-01: the user's own negations reach the counts the founder reads. "ninja movies but no
     /// turtles" ended NoneFound with "Of the 70 ninja movies … you've seen 18 and your conditions hold
     /// out 52 … turning off 'excluded genre: animation' would unlock 3" — and that knockout's sample

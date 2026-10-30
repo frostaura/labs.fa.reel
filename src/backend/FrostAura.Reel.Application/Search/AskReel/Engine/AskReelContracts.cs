@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -111,6 +112,29 @@ public sealed record ConversationState(
     /// <summary>A conversation that has said nothing yet.</summary>
     public static ConversationState Empty { get; } =
         new(0, HardConstraints.None, SoftPreferences.None, [], [], [], []);
+
+    /// <summary>
+    /// True when the state holds a search a later turn can carry forward: a requirement (a topic, a
+    /// person, a year window, a runtime), a preference (a mood, a steer, a reference), a word the user
+    /// ruled out, or cards on screen — a broad search that showed cards was a search, and "more like
+    /// the second one" refines it. The answer number is not this: an opening small talk, question about
+    /// a title or clarifying question leaves <see cref="Version"/> at 1, nothing searched and no card
+    /// on screen, and a plan that failed on the next turn read "heist movies" as the soft mood "heist"
+    /// and said "I searched the way I did last time" about a search that never ran (HREV7-ASK-01). The
+    /// media alone is not a search either: a clarifying question writes the client's media filter into
+    /// the state. Never stored: it is read from the fields it summarises.
+    /// </summary>
+    [JsonIgnore]
+    public bool HoldsSearch =>
+        Hard.Concepts.Count > 0
+        || Hard.People.Count > 0
+        || Hard.Years is not null
+        || Hard.MaxRuntimeMinutes is not null
+        || Soft.Moods.Count > 0
+        || Soft.Directions.Count > 0
+        || Soft.ReferenceTitleIds.Count > 0
+        || UserNegations.Count > 0
+        || LastPresented.Count > 0;
 }
 
 /// <summary>A tool the planner may ask for (§4.4). The server runs it; no output goes back to the model except an answer's facts.</summary>

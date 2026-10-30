@@ -1092,6 +1092,84 @@ public class AskReelV2UnitTests
         Assert.Equal(TurnAct.Refine, plan.Act);
     }
 
+    /// <summary>
+    /// HREV7-ASK-01: a plan that fails on the turn after an opening small talk, question about a title
+    /// or clarifying question has no search to carry. Read by the answer number (1, not 0), "heist
+    /// movies" became the soft mood "heist" — retrieval and the judge treated the topic as optional —
+    /// and the reply said it searched "the way I did last time" about a search that never ran. Each
+    /// opening is the state the reducer itself writes after it; varied over states that DO hold a
+    /// search — a topic, a person, a year window, a runtime, a mood alone, a steer alone, a reference
+    /// alone, a negation alone, a broad search's cards alone — which still carry it forward, and over
+    /// the keyless reading.
+    /// </summary>
+    [Theory]
+    [InlineData("chitchat", false)]
+    [InlineData("item", false)]
+    [InlineData("clarify", false)]
+    [InlineData("clarify-media", false)]
+    [InlineData("topic", true)]
+    [InlineData("person", true)]
+    [InlineData("years", true)]
+    [InlineData("runtime", true)]
+    [InlineData("mood", true)]
+    [InlineData("steer", true)]
+    [InlineData("reference", true)]
+    [InlineData("negation", true)]
+    [InlineData("cards", true)]
+    public void A_failed_plan_carries_forward_only_a_state_that_holds_a_search(string opening, bool holds)
+    {
+        var empty = ConversationState.Empty;
+        var state = opening switch
+        {
+            "chitchat" => ConversationStateReducer.Apply(empty, Plan(TurnAct.Chitchat), MediaScope.Any),
+            "item" => ConversationStateReducer.Apply(empty, Plan(TurnAct.ItemQuestion), MediaScope.Any),
+            "clarify" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Any)
+                with { ClarifiedOnce = true },
+            "clarify-media" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Shows)
+                with { ClarifiedOnce = true },
+            "topic" => empty with { Version = 1, Hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])] } },
+            "person" => empty with { Version = 1, Hard = HardConstraints.None with { People = [new PersonConstraint("Liam Neeson", null, PersonRole.Cast)] } },
+            "years" => empty with { Version = 1, Hard = HardConstraints.None with { Years = new YearRange(2015, null) } },
+            "runtime" => empty with { Version = 1, Hard = HardConstraints.None with { MaxRuntimeMinutes = 100 } },
+            "mood" => empty with { Version = 1, Soft = SoftPreferences.None with { Moods = ["cosy"] } },
+            "steer" => empty with { Version = 1, Soft = SoftPreferences.None with { Directions = [new AttributeDirection("humor", AttributeTrend.More)] } },
+            "reference" => empty with { Version = 1, Soft = SoftPreferences.None with { ReferenceTitleIds = [A] } },
+            "cards" => Shown((A, 1, 1), (B, 1, 2)),
+            _ => empty with { Version = 1, UserNegations = ["zombies"] },
+        };
+        Assert.Equal(1, state.Version);
+        Assert.Equal(holds, state.HoldsSearch);
+
+        var failed = PlanResult.Failed(new PlanFailure(AgentFailureKind.TimedOut, null, false), LlmCallMeta.None);
+        var plan = FallbackPlans.CarriedForward(failed, "heist movies", state);
+        var next = ConversationStateReducer.Apply(state, plan, MediaScope.Any);
+        if (holds)
+        {
+            Assert.Equal(TurnAct.Refine, plan.Act);
+            Assert.Contains("heist", next.Soft.Moods);
+            Assert.DoesNotContain(next.Hard.Concepts, c => c.UserWords == "heist");
+        }
+        else
+        {
+            Assert.Equal(TurnAct.NewRequest, plan.Act);
+            Assert.Equal(["heist"], next.Hard.Concepts.Select(c => c.UserWords));
+            Assert.Empty(next.Soft.Moods);
+        }
+
+        Assert.Equal(MediaScope.Movies, next.Hard.Media);
+        Assert.Equal(holds ? TurnAct.Refine : TurnAct.NewRequest, FallbackPlans.Keyless("now just shows", state).Act);
+    }
+
+    /// <summary>The flag is read from the fields, never written into the state column.</summary>
+    [Fact]
+    public void The_holds_search_flag_is_never_stored()
+    {
+        var state = ConversationState.Empty with { Version = 1, Hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])] } };
+        var json = ConversationStateJson.Write(state);
+        Assert.DoesNotContain("holdsSearch", json, StringComparison.OrdinalIgnoreCase);
+        Assert.True(ConversationStateJson.Read(json)!.HoldsSearch);
+    }
+
     // ── Pointers and the similar_to pivot ─────────────────────────────────────────────────
 
     /// <summary>

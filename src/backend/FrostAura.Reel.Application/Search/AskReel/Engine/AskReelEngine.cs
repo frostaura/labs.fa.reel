@@ -148,7 +148,7 @@ public sealed class AskReelEngine(
         /// <summary>The viewer's persona line, built once for the planner and reused by the judge.</summary>
         public string? Persona { get; set; }
 
-        /// <summary>The conversation had no answer before this turn (its state's version is 0).</summary>
+        /// <summary>The conversation held no search before this turn (<see cref="ConversationState.HoldsSearch"/>).</summary>
         public bool FirstTurn { get; set; }
 
         /// <summary>
@@ -322,7 +322,9 @@ public sealed class AskReelEngine(
             state = await LoadStateAsync(input, ct);
         }
 
-        turn.FirstTurn = state.Version == 0;
+        // A turn with no search before it is a first turn, whatever its answer number: after an
+        // opening "what can you do?" there is no "last time" to search the way of (HREV7-ASK-01).
+        turn.FirstTurn = !state.HoldsSearch;
 
         // "The third one" with no answer on screen showing a third card is a question to ask back,
         // not a search (R1-04, HREV1-ASK-03) — answered deterministically, before any model call.
@@ -489,7 +491,7 @@ public sealed class AskReelEngine(
         }
 
         turn.Guessed = true;
-        var asTopic = plan.Act == TurnAct.NewRequest || state.Version == 0;
+        var asTopic = plan.Act == TurnAct.NewRequest || !state.HoldsSearch;
         var delta = plan.Delta with
         {
             ReferenceNames = found,
