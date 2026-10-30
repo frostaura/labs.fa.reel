@@ -5,6 +5,8 @@ import { summaryChips } from "../../lib/pickConditions";
 import { conditionChipFace } from "../../lib/conditionChipFace";
 import type { BrowseFilter } from "../../lib/browseFilter";
 import { Button } from "../ui/button";
+import ReadFailedLine from "../rows/ReadFailedLine";
+import type { ReadRetryPhase } from "../../lib/useReadRetry";
 
 /**
  * Home's conditions, as chips you can act on (H-20, H-9, O-11): everything shaping tonight's picks,
@@ -32,6 +34,7 @@ export default function HomeConditionChips({
   limit,
   variant = "row",
   className = "",
+  readFailure = null,
 }: {
   browse?: BrowseFilter | null;
   onBrowseChange?: (next: BrowseFilter) => void;
@@ -40,6 +43,11 @@ export default function HomeConditionChips({
   limit: number;
   variant?: "row" | "strip";
   className?: string;
+  /**
+   * The conditions read failed and nothing is cached (HREV8-DESK-02). Said in the line, never shown
+   * as "none saved": the server still applies every condition the page could not load.
+   */
+  readFailure?: { phase: Exclude<ReadRetryPhase, "ok">; onRetry: () => void } | null;
 }) {
   const { data: filters } = useGetFiltersQuery();
   const [expanded, setExpanded] = useState(false);
@@ -93,6 +101,43 @@ export default function HomeConditionChips({
   // an absent payload out to `languages: ["en"]`, so an in-flight query would briefly assert an
   // "English only" condition the account may not actually have. The strip has no line to hold (it
   // sits inside the phone's control line); the row holds its line with an invisible chip.
+  if (!filters && readFailure) {
+    if (strip) {
+      return (
+        <span
+          role="status"
+          className={`flex shrink-0 items-center gap-x-1 whitespace-nowrap fa-caption text-fa-warning ${className}`}
+          data-testid="home-conditions-failed"
+          data-phase={readFailure.phase}
+        >
+          Conditions didn&apos;t load{readFailure.phase === "retrying" ? " — trying again…" : " ·"}
+          {readFailure.phase === "failed" && (
+            <Button
+              variant="link"
+              onClick={readFailure.onRetry}
+              className="h-auto min-h-11 p-0 text-xs font-normal text-fa-frost underline underline-offset-2"
+              data-testid="home-conditions-failed-retry"
+            >
+              Retry
+            </Button>
+          )}
+        </span>
+      );
+    }
+    // The same one-line box the chips fill, so reporting the failure moves nothing below it.
+    return (
+      <div ref={rowRef} className={`${ONE_LINE} ${className}`}>
+        <ReadFailedLine
+          what="your conditions"
+          note="they still apply to your picks"
+          phase={readFailure.phase}
+          onRetry={readFailure.onRetry}
+          testId="home-conditions-failed"
+          className="flex-nowrap whitespace-nowrap"
+        />
+      </div>
+    );
+  }
   if (!filters) {
     if (strip) return null;
     return (
