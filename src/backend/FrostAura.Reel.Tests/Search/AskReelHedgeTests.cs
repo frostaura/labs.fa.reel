@@ -89,17 +89,20 @@ public class AskReelHedgeTests
     }
 
     /// <summary>
-    /// Through the judge: every batch whose first call hangs is sent once more and judged by the
-    /// second, well inside the judging deadline. Varied: a hedge that hangs too leaves the batch
-    /// unjudged at the deadline — the old outcome, now bounded by the hedge rather than produced by it.
+    /// Through the judge: a batch whose calls hang is sent again at each rung of the judge's hedge
+    /// schedule (<see cref="RequestJudge.HedgeAfter"/>, then twice it) and judged by the first call that
+    /// answers, well inside the judging deadline. Two golden-run turns (fix-golden-v2-2: cerebral-heist
+    /// T3, gritty-crime T3) lost a whole batch to the 12 s deadline with BOTH routes slow, so one hedge
+    /// was not enough. Varied: every call hanging leaves the batch unjudged at the deadline, the old outcome.
     /// </summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_judge_batch_stuck_on_its_first_call_is_judged_by_its_hedge(bool hedgeHangsToo)
+    [InlineData(1, true, 2)]
+    [InlineData(2, true, 3)]
+    [InlineData(3, false, 3)]
+    public async Task A_judge_batch_stuck_on_slow_routes_is_judged_by_the_next_send_of_its_schedule(int hangingCalls, bool judged, int callsPerBatch)
     {
         var titles = Enumerable.Range(0, 16).Select(_ => Title(Guid.NewGuid())).ToList();
-        var model = new FirstCallHangsModel(hedgeHangsToo);
+        var model = new FirstCallsHangModel(hangingCalls);
         var judge = new RequestJudge(model, new MemoryCache(new MemoryCacheOptions()), NullLogger<RequestJudge>.Instance)
         {
             HedgeAfter = TimeSpan.FromMilliseconds(50),
@@ -113,15 +116,77 @@ public class AskReelHedgeTests
         }
 
         Assert.Equal(titles.Select(t => t.TitleId).Order(), verdicts.Select(v => v.TitleId).Order());
-        Assert.All(verdicts, v => Assert.Equal(!hedgeHangsToo, v.Judged));
-        Assert.Equal(RequestJudge.Batches(titles.Select(t => t.TitleId).ToList()).Count * 2, model.Calls);
+        Assert.All(verdicts, v => Assert.Equal(judged, v.Judged));
+        // A batch holds its slot while it waits, so with every call hanging the batch past the slots
+        // never gets one before the deadline and is never sent.
+        var batches = RequestJudge.Batches(titles.Select(t => t.TitleId).ToList()).Count;
+        Assert.Equal((judged ? batches : Math.Min(batches, RequestJudge.MaxConcurrent)) * callsPerBatch, model.Calls);
+    }
+
+    [Fact]
+    public async Task A_schedule_sends_again_at_each_rung_and_the_first_good_answer_wins()
+    {
+        var calls = new ScriptedCalls(("slow", Timeout.InfiniteTimeSpan), ("slow too", Timeout.InfiniteTimeSpan), ("third", TimeSpan.Zero));
+        var hedges = new List<int>();
+
+        var result = await AskReelHedge.RunAsync(
+                calls.Next, r => r.Length > 0, [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100)], hedges.Add, CancellationToken.None)
+            .WaitAsync(Wait);
+
+        Assert.Equal("third", result);
+        Assert.Equal(3, calls.Started);
+        Assert.Equal([2, 3], hedges);
+        await calls.Cancelled(0).WaitAsync(Wait);
+        await calls.Cancelled(1).WaitAsync(Wait);
+    }
+
+    [Fact]
+    public async Task A_schedule_retries_a_fast_failure_at_once_instead_of_waiting_for_its_rung()
+    {
+        var calls = new ScriptedCalls(("fail", TimeSpan.Zero), ("ok", TimeSpan.Zero));
+
+        // The rung is a minute away; the retry must not wait for it.
+        var result = await AskReelHedge.RunAsync(
+                calls.Next, r => r == "ok", [TimeSpan.FromMinutes(1)], null, CancellationToken.None)
+            .WaitAsync(Wait);
+
+        Assert.Equal("ok", result);
+        Assert.Equal(2, calls.Started);
+    }
+
+    [Fact]
+    public async Task A_schedule_sends_at_most_once_per_rung_and_every_failure_returns_the_first()
+    {
+        var calls = new ScriptedCalls(("fail-a", TimeSpan.Zero), ("fail-b", TimeSpan.Zero), ("fail-c", TimeSpan.Zero));
+
+        var result = await AskReelHedge.RunAsync(
+                calls.Next, r => !r.StartsWith("fail", StringComparison.Ordinal), [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(2)], null, CancellationToken.None)
+            .WaitAsync(Wait);
+
+        Assert.Equal("fail-a", result);
+        Assert.Equal(3, calls.Started);
+    }
+
+    [Fact]
+    public async Task A_schedule_is_cancelled_with_its_caller()
+    {
+        var calls = new ScriptedCalls(("slow", Timeout.InfiniteTimeSpan), ("slow too", Timeout.InfiniteTimeSpan));
+        using var cts = new CancellationTokenSource();
+
+        var running = AskReelHedge.RunAsync(
+            calls.Next, _ => true, [TimeSpan.FromMilliseconds(30), TimeSpan.FromMinutes(1)], _ => cts.CancelAfter(50), cts.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running.WaitAsync(Wait));
+        await calls.Cancelled(0).WaitAsync(Wait);
+        await calls.Cancelled(1).WaitAsync(Wait);
+        Assert.Equal(2, calls.Started);
     }
 
     [Fact]
     public async Task The_early_first_batch_is_hedged_too()
     {
         var titles = Enumerable.Range(0, 4).Select(_ => Title(Guid.NewGuid())).ToList();
-        var model = new FirstCallHangsModel(hedgeHangsToo: false);
+        var model = new FirstCallsHangModel(hangingCalls: 1);
         var judge = new RequestJudge(model, new MemoryCache(new MemoryCacheOptions()), NullLogger<RequestJudge>.Instance)
         {
             HedgeAfter = TimeSpan.FromMilliseconds(50),
@@ -163,31 +228,31 @@ public class AskReelHedgeTests
         }
     }
 
-    /// <summary>Every batch's first call hangs until cancelled; its second answers yes (or hangs too).</summary>
-    private sealed class FirstCallHangsModel(bool hedgeHangsToo) : IRequestJudgeModel
+    /// <summary>Every batch's first <c>hangingCalls</c> calls hang until cancelled; the next one answers yes.</summary>
+    private sealed class FirstCallsHangModel(int hangingCalls) : IRequestJudgeModel
     {
-        private readonly HashSet<string> _seen = [];
+        private readonly Dictionary<string, int> _seen = [];
         private int _calls;
 
         public int Calls => Volatile.Read(ref _calls);
 
         public bool IsAvailable => true;
 
-        public string ModelId => "first-call-hangs";
+        public string ModelId => "first-calls-hang";
 
-        public string CacheSalt => $"first-call-hangs-{Guid.NewGuid():N}";
+        public string CacheSalt => $"first-calls-hang-{Guid.NewGuid():N}";
 
         public async Task<JudgeBatchResult> JudgeBatchAsync(JudgeInput input, CancellationToken ct)
         {
             Interlocked.Increment(ref _calls);
             var key = string.Join(',', input.Titles.Select(t => t.TitleId).Order());
-            bool first;
+            int nth;
             lock (_seen)
             {
-                first = _seen.Add(key);
+                nth = _seen[key] = _seen.GetValueOrDefault(key) + 1;
             }
 
-            if (first || hedgeHangsToo)
+            if (nth <= hangingCalls)
             {
                 await Task.Delay(Timeout.Infinite, ct);
             }
@@ -195,7 +260,7 @@ public class AskReelHedgeTests
             var verdicts = input.Titles
                 .Select(t => new JudgeVerdict(t.TitleId, Satisfies.Yes, 0.8, "It fits.", "keyword: ninja", ResultSource.Llm, ResultSource.Llm))
                 .ToList();
-            return new JudgeBatchResult(verdicts, new LlmCallMeta("first-call-hangs", "none", false, 1, 3), false);
+            return new JudgeBatchResult(verdicts, new LlmCallMeta("first-calls-hang", "none", false, 1, 3), false);
         }
     }
 }

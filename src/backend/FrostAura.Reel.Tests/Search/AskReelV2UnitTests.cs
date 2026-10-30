@@ -1724,13 +1724,20 @@ public class AskReelV2UnitTests
 
     // ── The judge's batching ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The first batch is three titles, not four: the first card waits for exactly that call, and a
+    /// batch's time is mostly its output (about 60 tokens a title), so a smaller first batch is the
+    /// first card's cheapest cut (fix-golden-v2-2: first-card p50 4,141 ms against the 4,000 gate,
+    /// judge.first p50 2,238 ms). The top sixteen are still judged; the one left over is a batch of
+    /// its own, sent when the first batch frees its slot, long before the full batches return.
+    /// </summary>
     [Fact]
     public void Batches_are_at_most_six_with_a_smaller_first_and_cover_the_top_sixteen()
     {
         var ids = Enumerable.Range(0, 30).Select(_ => Guid.NewGuid()).ToList();
         var batches = RequestJudge.Batches(ids);
 
-        Assert.Equal([4, 6, 6], batches.Select(b => b.Count));
+        Assert.Equal([3, 6, 6, 1], batches.Select(b => b.Count));
         Assert.Equal(ids.Take(16), batches.SelectMany(b => b));
     }
 
@@ -1768,10 +1775,10 @@ public class AskReelV2UnitTests
     /// is judged afresh only for a different request or where the early call failed.
     /// </summary>
     [Theory]
-    [InlineData("in flight", 1, 3)]
-    [InlineData("finished", 1, 3)]
-    [InlineData("other request", 2, 4)]
-    [InlineData("early call failed", 2, 4)]
+    [InlineData("in flight", 1, 4)]
+    [InlineData("finished", 1, 4)]
+    [InlineData("other request", 2, 5)]
+    [InlineData("early call failed", 2, 5)]
     public async Task A_first_batch_judged_ahead_is_never_sent_twice(string scenario, int firstBatchSends, int calls)
     {
         var titles = Enumerable.Range(0, 16).Select(_ => Title(Guid.NewGuid())).ToList();

@@ -35,7 +35,12 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
 
     public const int BatchSize = 6;
 
-    public const int FirstBatchSize = 4;
+    /// <summary>
+    /// Three, not four: the first card waits for exactly this call, and a batch's time is mostly its
+    /// output (about 60 tokens a title), so the smaller first batch is the first card's cheapest cut
+    /// (fix-golden-v2-2: first-card p50 4,141 ms against the 4,000 ms gate, this call's p50 2,238 ms).
+    /// </summary>
+    public const int FirstBatchSize = 3;
 
     public const int MaxConcurrent = 3;
 
@@ -61,6 +66,13 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
     internal TimeSpan StageDeadline { get; init; } = Deadline;
 
     internal TimeSpan HedgeAfter { get; init; } = DefaultHedgeAfter;
+
+    /// <summary>
+    /// When a turn's batch is sent again (<see cref="AskReelHedge"/>'s schedule): at
+    /// <see cref="HedgeAfter"/> and at twice it, each inside <see cref="Deadline"/> with time for a
+    /// healthy call to answer; a failed answer is re-sent at once, within the same two extra calls.
+    /// </summary>
+    private IReadOnlyList<TimeSpan> HedgeSchedule => [HedgeAfter, HedgeAfter * 2];
 
     /// <summary>The batches <paramref name="titles"/> are judged in — membership only, retrieval order.</summary>
     public static IReadOnlyList<IReadOnlyList<Guid>> Batches(IReadOnlyList<Guid> titles)
@@ -341,10 +353,10 @@ public sealed class RequestJudge(IRequestJudgeModel model, IMemoryCache cache, I
             var result = await AskReelHedge.RunAsync(
                 token => model.JudgeBatchAsync(shuffled, token),
                 r => !r.Failed,
-                HedgeAfter,
-                () => logger.LogInformation(
-                    "Ask Reel v2 judge batch {Batch} passed {HedgeAfter} s; sending it once more and taking the first answer.",
-                    index, HedgeAfter.TotalSeconds),
+                HedgeSchedule,
+                call => logger.LogInformation(
+                    "Ask Reel v2 judge batch {Batch} is slow or failed; sending call {Call} and taking the first good answer.",
+                    index, call),
                 bounded.Token);
             Keep(result);
 

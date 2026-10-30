@@ -74,6 +74,103 @@ public static class AskReelHedge
         return winner.Result;
     }
 
+    /// <summary>
+    /// Runs <paramref name="call"/>, and sends it once more at each offset of <paramref name="schedule"/>
+    /// (from the start) while no answer <paramref name="succeeded"/> accepts is in — and AT ONCE, rather
+    /// than at the next offset, when every call sent so far has come back unaccepted, so a fast failure
+    /// is retried instead of waited out. At most one call per offset beyond the first. Returns the first
+    /// accepted result; when every call failed, the first call's own outcome. Calls still out when it
+    /// returns are cancelled. <paramref name="onHedge"/> is told the number of the call about to be sent.
+    ///
+    /// <para><b>Why a schedule (fix-golden-v2-2).</b> Two golden turns lost a whole judge batch to the
+    /// 12 s judging deadline with the batch hedged at 4 s: both routes stayed slow for eight seconds,
+    /// while a healthy batch answers in 0.5–2.5 s. A third send at 8 s still has four seconds inside
+    /// the deadline, and costs nothing on a healthy turn, which never reaches it.</para>
+    /// </summary>
+    public static async Task<T> RunAsync<T>(
+        Func<CancellationToken, Task<T>> call,
+        Func<T, bool> succeeded,
+        IReadOnlyList<TimeSpan> schedule,
+        Action<int>? onHedge,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(call);
+        ArgumentNullException.ThrowIfNull(succeeded);
+        ArgumentNullException.ThrowIfNull(schedule);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var sent = new List<(Task<T> Task, CancellationTokenSource Cts)>();
+        var answered = new HashSet<Task<T>>();
+        Task<T>? winner = null;
+        void Send()
+        {
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            sent.Add((Start(call, cts), cts));
+        }
+
+        Send();
+        var rung = 0;
+        try
+        {
+            while (true)
+            {
+                var pending = sent.Where(s => !answered.Contains(s.Task)).Select(s => (Task)s.Task).ToList();
+                if (pending.Count == 0)
+                {
+                    if (rung >= schedule.Count)
+                    {
+                        // Every call failed: the first one's own outcome, as the single hedge returns it.
+                        return await sent[0].Task;
+                    }
+
+                    rung++;
+                    onHedge?.Invoke(sent.Count + 1);
+                    Send();
+                    continue;
+                }
+
+                using var timerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                Task? timer = null;
+                if (rung < schedule.Count)
+                {
+                    var wait = schedule[rung] - clock.Elapsed;
+                    timer = Task.Delay(wait > TimeSpan.Zero ? wait : TimeSpan.Zero, timerCts.Token);
+                    pending.Add(timer);
+                }
+
+                var done = await Task.WhenAny(pending);
+                await timerCts.CancelAsync();
+                ct.ThrowIfCancellationRequested();
+                if (done == timer)
+                {
+                    rung++;
+                    onHedge?.Invoke(sent.Count + 1);
+                    Send();
+                    continue;
+                }
+
+                var task = (Task<T>)done;
+                answered.Add(task);
+                if (Accepted(task, succeeded))
+                {
+                    winner = task;
+                    return task.Result;
+                }
+            }
+        }
+        finally
+        {
+            foreach (var (task, cts) in sent)
+            {
+                if (task != winner && !task.IsCompleted)
+                {
+                    await cts.CancelAsync();
+                }
+
+                Release(task, cts);
+            }
+        }
+    }
+
     private static Task<T> Start<T>(Func<CancellationToken, Task<T>> call, CancellationTokenSource cts)
     {
         try
