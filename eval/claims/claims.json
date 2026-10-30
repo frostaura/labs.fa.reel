@@ -615,12 +615,13 @@
       "owner": "WS-1",
       "verdict": "true",
       "assertion": "The taste profile is rewritten when taste moves and whenever the user asks, from ratings, dismissals and rewatches; the panel says the taste has moved exactly when its fingerprint has, and a user's edit stands until they ask for a rewrite.",
-      "evidence": "R1-45 (WS-1 ccd521c, copy fixed at integration): the background rewrite waits for a fingerprint or crowd-band move; the user-regenerate job forces a rewrite on unmoved taste; the writer's prompt carries dismissals, preference tags and the pockets' unrated rewatches. The old lines ('only when your taste has genuinely moved', 'Turning your ratings into…') were false.",
+      "evidence": "R1-45 (WS-1 ccd521c, copy fixed at integration): the background rewrite waits for a fingerprint or crowd-band move; the user-regenerate job forces a rewrite on unmoved taste; the writer's prompt carries dismissals, preference tags and the pockets' unrated rewatches. The old lines ('only when your taste has genuinely moved', 'Turning your ratings into…') were false. HREV6-DESK-01 (WS-1 d5bff40, copy moved at integration round 7): a narrative stale only for an older prompt carries staleReason outdated-prompt and the panel says 'written by an earlier version of Reel', never that the taste moved (lib/narrativeStale.ts).",
       "tests": [
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::The_only_narrative_rewrite_with_a_card_is_the_forced_one_and_it_spends_on_unmoved_taste",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::A_background_run_rewrites_the_profile_once_taste_has_moved",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::The_taste_profile_is_written_from_dismissals_as_well_as_ratings",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/TasteDnaClaimsTests.cs::The_profile_says_your_taste_has_moved_exactly_when_its_taste_fingerprint_has",
+        "src/frontend/src/lib/narrativeStale.test.ts",
         "src/backend/FrostAura.Reel.Tests/IntegrationTests/LensPipelineTests.cs::A_user_edit_wins_and_survives_regeneration_until_they_ask_for_a_rewrite"
       ],
       "claims": [
@@ -633,7 +634,7 @@
           "text": "Turning your ratings, dismissals and rewatches into a description of what you like"
         },
         {
-          "file": "src/frontend/src/components/dna/TasteNarrativePanel.tsx",
+          "file": "src/frontend/src/lib/narrativeStale.ts",
           "text": "your taste has moved since"
         },
         {
