@@ -977,6 +977,115 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
   });
 });
 
+test.describe("Ask Reel — Recent never shows a failed read as an empty history", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
+
+  /**
+   * The list read fails `failures` times with `status`, then answers with `total` threads. Each
+   * request is counted, so a test can say how many reads the menu made.
+   */
+  async function routeFailingThreadList(page: Page, status: number, failures: number, total: number) {
+    const calls: number[] = [];
+    const threads = Array.from({ length: total }, (_, i) => ({
+      id: i === 0 ? CONVERSATION : `7f3a1b2c-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      title: i === 0 ? "a tense heist" : `thread ${i}`,
+      turnCount: 2,
+      lastTurnAt: new Date(Date.now() - i * 60_000).toISOString(),
+      lastCardsAt: null,
+    }));
+    await page.route(
+      (u) => u.pathname === "/api/search/conversations",
+      (route) => {
+        calls.push(Number(new URL(route.request().url()).searchParams.get("limit") ?? 20));
+        if (calls.length <= failures) {
+          return route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+        }
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(threads.slice(0, total)) });
+      },
+    );
+    return calls;
+  }
+
+  // REV7-PH-02. GET /api/search/conversations answered 500 or 503 and the menu said exactly
+  // "Nothing here yet — ask something." — a failed read presented as an account with no threads,
+  // and no way to ask again. A failed read is a third state: it says it failed and offers Retry.
+  // Varied over the status and over what the retry finds (threads, and a real empty list).
+  for (const [status, total] of [[500, 3], [503, 3], [500, 0]] as const) {
+    test(`a ${status} says the list failed, offers Retry, and the retry shows ${total ? "the threads" : "the empty state"}`, async ({ page }) => {
+      await boot(page, { resume: "stored", storedId: CONVERSATION });
+      const calls = await routeFailingThreadList(page, status, 1, total);
+
+      await page.getByTestId("askreel-recent").tap();
+      const failed = page.getByTestId("askreel-recent-error");
+      await expect(failed).toBeVisible();
+      await expect(failed).toHaveAttribute("role", "alert");
+      await expect(failed).toContainText("Couldn't load your conversations");
+      await expect(page.getByTestId("askreel-recent-empty")).toHaveCount(0);
+      await expect(page.getByTestId("askreel-recent-menu")).not.toContainText("Nothing here yet");
+      expect(calls).toHaveLength(1);
+
+      await page.getByTestId("askreel-recent-error-retry").tap();
+
+      await expect(failed).toHaveCount(0);
+      if (total > 0) {
+        await expect(page.getByTestId("askreel-recent-row")).toHaveCount(total);
+        await expect(page.getByTestId("askreel-recent-empty")).toHaveCount(0);
+      } else {
+        await expect(page.getByTestId("askreel-recent-empty")).toHaveText("Nothing here yet — ask something.");
+      }
+      expect(calls).toHaveLength(2);
+    });
+  }
+
+  test("a list that keeps failing keeps saying so after the retry", async ({ page }) => {
+    // Fixture variation, one number: every read fails. The retry must not fall through to the empty
+    // copy on its second failure either.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const calls = await routeFailingThreadList(page, 500, 99, 3);
+
+    await page.getByTestId("askreel-recent").tap();
+    await expect(page.getByTestId("askreel-recent-error")).toBeVisible();
+    await page.getByTestId("askreel-recent-error-retry").tap();
+    await expect.poll(() => calls.length).toBe(2);
+    await expect(page.getByTestId("askreel-recent-error")).toBeVisible();
+    await expect(page.getByTestId("askreel-recent-empty")).toHaveCount(0);
+  });
+
+  test("Show older that fails keeps the threads already listed and says the older ones failed", async ({ page }) => {
+    // The first page arrives (20 of 51); the longer read fails. The rows on screen are still true,
+    // so they stay, and the failure is named as what it is.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const calls: number[] = [];
+    const threads = Array.from({ length: 51 }, (_, i) => ({
+      id: i === 0 ? CONVERSATION : `7f3a1b2c-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      title: i === 0 ? "a tense heist" : `thread ${i}`,
+      turnCount: 2,
+      lastTurnAt: new Date(Date.now() - i * 60_000).toISOString(),
+      lastCardsAt: null,
+    }));
+    await page.route(
+      (u) => u.pathname === "/api/search/conversations",
+      (route) => {
+        const limit = Number(new URL(route.request().url()).searchParams.get("limit") ?? 20);
+        calls.push(limit);
+        return limit > 20
+          ? route.fulfill({ status: 503, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(threads.slice(0, limit)) });
+      },
+    );
+
+    await page.getByTestId("askreel-recent").tap();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(20);
+    await page.getByTestId("askreel-recent-older").tap();
+
+    const failed = page.getByTestId("askreel-recent-error");
+    await expect(failed).toContainText("Couldn't load your older threads");
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(20);
+    await expect(page.getByTestId("askreel-recent-empty")).toHaveCount(0);
+    expect(calls).toEqual([20, 100]);
+  });
+});
+
 test.describe("Ask Reel — a stopped page leaves nothing under the bar in the grid", () => {
   test("a page keeps paging alive and says what is on screen, not what the page added", async ({ page }) => {
     // R1-03, faces one and two in one run. The old rule counted ids a page added to `order` that

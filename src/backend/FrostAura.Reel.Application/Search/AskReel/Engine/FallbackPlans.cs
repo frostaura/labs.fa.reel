@@ -3,7 +3,7 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// <summary>
 /// The two plans no model wrote (§4.10).
 ///
-/// <para><b>Carried forward</b> — the planner failed twice. The previous state is searched again
+/// <para><b>Carried forward</b> — the planner failed twice. The previous search is searched again
 /// with only ADDITIVE words from the new message, and those as soft preferences: a word that made it
 /// into the hard concepts would AND-filter the catalogue by a term nobody resolved ("funnier" is not
 /// a keyword any title carries), and an ordinal or a negation phrase must never become something to
@@ -50,7 +50,9 @@ public static class FallbackPlans
             .Where(w => !known.Any(k => NegationTerms.EqualsAnyForm(k, w) || NegationTerms.EqualsAnyForm(w, k)))
             .Where(w => !reading.YearWords.Contains(w, StringComparer.Ordinal))
             .ToList();
-        var first = state.Version == 0;
+        // First means nothing searched yet, not answer one: after an opening small talk, item question
+        // or clarifying question there is no search to carry (HREV7-ASK-01).
+        var first = !state.HoldsSearch;
         return new PlanResult(
             first ? TurnAct.NewRequest : TurnAct.Refine,
             ConversationStateDelta.None with
@@ -92,7 +94,7 @@ public static class FallbackPlans
         }
 
         return new PlanResult(
-            reading.NamesSomething || state.Version == 0 ? TurnAct.NewRequest : TurnAct.Refine,
+            reading.NamesSomething || !state.HoldsSearch ? TurnAct.NewRequest : TurnAct.Refine,
             ConversationStateDelta.None with
             {
                 Concepts = reading.Concepts,
