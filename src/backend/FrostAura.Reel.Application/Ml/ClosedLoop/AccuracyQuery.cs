@@ -60,8 +60,8 @@ public sealed record ConversionStats(
 /// How the titles carrying one cross-reference standing actually turned out — the ONLINE half of
 /// the cross-reference report, and corroboration only.
 ///
-/// <para><b>It can never be the gate, and the shape says so.</b> Only about 2% of this account's
-/// ratings are made in app, so the join behind it is temporal rather than causal, and the standing
+/// <para><b>It can never be the gate, and the shape says so.</b> A rating records no link to the
+/// card that led to it, so the join behind it is temporal rather than causal, and the standing
 /// itself is written on the exposure row at serve time rather than reconstructed later. Every rate
 /// is nullable and <see cref="Answerable"/> is false until the count clears
 /// <see cref="AccuracyQuery.MinimumVerdictOutcomes"/>: a mean later rating over four titles is a
@@ -221,9 +221,9 @@ public sealed class AccuracyQuery(
     /// <para>Twenty is not a significance threshold and is not presented as one — at n = 20 a
     /// difference of a whole rating point is still inside the noise. It is the point below which a
     /// mean is actively misleading rather than merely imprecise, and it exists because this panel
-    /// was never going to reach significance: demoted titles are served less often and only about
-    /// 2% of this account's ratings are made in the app, which is why the OFFLINE backtest is the
-    /// gate and this half is corroboration.</para>
+    /// was never going to reach significance: demoted titles are served less often, most ratings
+    /// arrive from Trakt rather than from the app, and none records the card that led to it, which
+    /// is why the OFFLINE backtest is the gate and this half is corroboration.</para>
     /// </summary>
     public const int MinimumVerdictOutcomes = 20;
 
@@ -347,8 +347,11 @@ public sealed class AccuracyQuery(
             + "for the same titles count only when they came after Reel showed them."),
         new PopulationNote(
             "Titles served under a cross-reference standing that you have since rated",
-            "Only about 2% of ratings are made in the app, so this joins by time rather than cause, and it holds only "
-            + "titles you chose to watch. It corroborates the offline backtest; it never gates anything."));
+            // No share here (HREV5-DESK-02): "about 2% of ratings are made in the app" was one
+            // account's number on one day, printed for every account. The join is temporal for a
+            // reason that holds for anyone — a rating records no link to the card that led to it.
+            "A rating records no link to the card that led to it, so this joins by time rather than cause, and it holds "
+            + "only titles you chose to watch. It corroborates the offline backtest; it never gates anything."));
 
     /// <summary>
     /// The strong evidence base: the outcome view, restricted to exposures that were followed by a

@@ -34,28 +34,29 @@ public static class FeedBuildInputs
         IReelDbContext db, Account account, ModelArtifact artifact, DateOnly day, CancellationToken ct)
     {
         var id = account.Id;
-        var watched = await db.WatchedTitles.Where(w => w.AccountId == id)
-            .GroupBy(_ => 1)
-            .Select(g => new { Count = g.Count(), Latest = g.Max(w => w.UpdatedAt), Plays = g.Sum(w => w.Plays) })
-            .FirstOrDefaultAsync(ct);
-        var rated = await db.UserRatings.Where(r => r.AccountId == id)
-            .GroupBy(_ => 1)
-            .Select(g => new { Count = g.Count(), Latest = g.Max(r => r.SyncedAt), Sum = g.Sum(r => (int)r.Rating) })
-            .FirstOrDefaultAsync(ct);
-        var people = await db.UserPersonRatings.Where(r => r.AccountId == id)
-            .GroupBy(_ => 1)
-            .Select(g => new { Count = g.Count(), Latest = g.Max(r => r.UpdatedAt), Sum = g.Sum(r => (int)r.Rating) })
-            .FirstOrDefaultAsync(ct);
-        var reactions = await db.UserTitleReactions.Where(r => r.AccountId == id)
-            .GroupBy(_ => 1)
-            .Select(g => new
+        // One round trip for the four footprints, rooted on the account's own row: each aggregate is
+        // a correlated subquery, so an account with no rows in a table reads a count of zero rather
+        // than no group at all. HREV5-PLAT-02: the earlier GroupBy(_ => 1)…FirstOrDefaultAsync shape
+        // made EF log a FirstWithoutOrderByAndFilter warning per table on every build, the only
+        // recurring warnings in the log; a filtered root has nothing to order.
+        var f = await db.Accounts.Where(a => a.Id == id)
+            .Select(a => new
             {
-                Count = g.Count(),
-                Created = g.Max(r => r.CreatedAt),
-                Revoked = g.Count(r => r.RevokedAt != null),
-                LatestRevoke = g.Max(r => r.RevokedAt),
+                Watched = db.WatchedTitles.Count(w => w.AccountId == id),
+                WatchedLatest = db.WatchedTitles.Where(w => w.AccountId == id).Max(w => (DateTime?)w.UpdatedAt),
+                Plays = db.WatchedTitles.Where(w => w.AccountId == id).Sum(w => w.Plays),
+                Rated = db.UserRatings.Count(r => r.AccountId == id),
+                RatedLatest = db.UserRatings.Where(r => r.AccountId == id).Max(r => (DateTime?)r.SyncedAt),
+                RatedSum = db.UserRatings.Where(r => r.AccountId == id).Sum(r => (int)r.Rating),
+                People = db.UserPersonRatings.Count(r => r.AccountId == id),
+                PeopleLatest = db.UserPersonRatings.Where(r => r.AccountId == id).Max(r => (DateTime?)r.UpdatedAt),
+                PeopleSum = db.UserPersonRatings.Where(r => r.AccountId == id).Sum(r => (int)r.Rating),
+                Reactions = db.UserTitleReactions.Count(r => r.AccountId == id),
+                ReactionsCreated = db.UserTitleReactions.Where(r => r.AccountId == id).Max(r => (DateTime?)r.CreatedAt),
+                Revoked = db.UserTitleReactions.Count(r => r.AccountId == id && r.RevokedAt != null),
+                LatestRevoke = db.UserTitleReactions.Where(r => r.AccountId == id).Max(r => r.RevokedAt),
             })
-            .FirstOrDefaultAsync(ct);
+            .SingleAsync(ct);
         var conditions = await db.ContentFilters.Where(f => f.AccountId == id)
             .Select(f => f.Kind.ToString() + "=" + f.Value)
             .ToListAsync(ct);
@@ -69,12 +70,14 @@ public static class FeedBuildInputs
             day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             artifact.Id.ToString("N"),
             head is null ? "nohead" : $"{head.BaseArtifactId:N}:{head.UpdateCount.ToString(CultureInfo.InvariantCulture)}:{Stamp(head.UpdatedAt)}",
-            watched is null ? "w0" : $"w{watched.Count.ToString(CultureInfo.InvariantCulture)}:{watched.Plays.ToString(CultureInfo.InvariantCulture)}:{Stamp(watched.Latest)}",
-            rated is null ? "r0" : $"r{rated.Count.ToString(CultureInfo.InvariantCulture)}:{rated.Sum.ToString(CultureInfo.InvariantCulture)}:{Stamp(rated.Latest)}",
-            people is null ? "p0" : $"p{people.Count.ToString(CultureInfo.InvariantCulture)}:{people.Sum.ToString(CultureInfo.InvariantCulture)}:{Stamp(people.Latest)}",
-            reactions is null
+            // An empty table keeps its old bare token ("w0" …), so the fingerprint of an unchanged
+            // footprint is the one the previous shape produced and a deploy forces no rebuild.
+            f.Watched == 0 ? "w0" : $"w{f.Watched.ToString(CultureInfo.InvariantCulture)}:{f.Plays.ToString(CultureInfo.InvariantCulture)}:{Stamp(f.WatchedLatest)}",
+            f.Rated == 0 ? "r0" : $"r{f.Rated.ToString(CultureInfo.InvariantCulture)}:{f.RatedSum.ToString(CultureInfo.InvariantCulture)}:{Stamp(f.RatedLatest)}",
+            f.People == 0 ? "p0" : $"p{f.People.ToString(CultureInfo.InvariantCulture)}:{f.PeopleSum.ToString(CultureInfo.InvariantCulture)}:{Stamp(f.PeopleLatest)}",
+            f.Reactions == 0
                 ? "x0"
-                : $"x{reactions.Count.ToString(CultureInfo.InvariantCulture)}:{Stamp(reactions.Created)}:{reactions.Revoked.ToString(CultureInfo.InvariantCulture)}:{Stamp(reactions.LatestRevoke)}",
+                : $"x{f.Reactions.ToString(CultureInfo.InvariantCulture)}:{Stamp(f.ReactionsCreated)}:{f.Revoked.ToString(CultureInfo.InvariantCulture)}:{Stamp(f.LatestRevoke)}",
             "c" + string.Join(',', conditions.Order(StringComparer.Ordinal)),
             $"s{account.Region}:{account.Tier}:{account.Settings.MaturityCeiling}");
 
