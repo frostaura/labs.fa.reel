@@ -22,6 +22,8 @@ import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { refineChips, showMoodPresets } from "../lib/askReel/copy";
 import { scrollTargetFor, turnSettled } from "../lib/askReel/reducer";
+import { isConversationGone, resumeFailureShown } from "../lib/askReel/resumeRead";
+import LoadFailed from "../components/ui/load-failed";
 import {
   claimHandoff, FRESH_CONVERSATION, mediaFilterFor, nextBootstrap, NO_RESUME, PENDING_TURN_BUDGET_MS,
   PENDING_TURN_POLL_MS, prefersReducedMotion, readStoredConversationId, resumeTarget, storeConversationId,
@@ -150,7 +152,9 @@ function AskReel() {
    * the transcript of a DELETED thread back on screen one render after `+ New` had cleared it.
    */
   const resumeSkipped = !shouldResume || resumeFrom === NO_RESUME;
-  const { data: resumed, error: resumeError, refetch: refetchConversation } = useGetConversationQuery(resumeFrom, {
+  const {
+    data: resumed, error: resumeError, isFetching: resumeFetching, refetch: refetchConversation,
+  } = useGetConversationQuery(resumeFrom, {
     skip: resumeSkipped,
     // R3-03's backstop. The invalidation below keeps the cache warm while the tab is here, but a
     // turn answered in ANOTHER tab, or a fetch that never landed because the user navigated away
@@ -217,10 +221,13 @@ function AskReel() {
   }, [resumed, resume, setFilter, hasLocalTurn, resumeFrom, resumeSkipped]);
 
   // A stored id the server does not have any more — deleted from another device, or past
-  // retention. Forget it rather than asking for it on every visit from here.
+  // retention. Forget it rather than asking for it on every visit from here. ONLY then
+  // (HREV8-PH-01): a 503 or a dropped connection says nothing about whether the thread exists, and
+  // forgetting on it sent the next reload to `/conversations/latest` — another device's thread.
+  const resumeGone = isConversationGone(resumeError);
   useEffect(() => {
-    if (resumeError && threadId) storeConversationId(null);
-  }, [resumeError, threadId]);
+    if (resumeGone && threadId) storeConversationId(null);
+  }, [resumeGone, threadId]);
 
   // A resumed thread whose last turn is STILL RUNNING — the tab that started it went away before
   // the stream finished, and the server kept going.
@@ -336,6 +343,12 @@ function AskReel() {
 
   const liveSlot = <LiveSlot chat={chat} view={view} settledRef={settledRef} />;
 
+  // HREV8-PH-01. A failed resume read is a third state: the cold start on its own told the reader
+  // they had no conversation to come back to.
+  const resumeFailed = resumeFailureShown({
+    error: resumeError, skipped: resumeSkipped, turnCount: turns.length, streaming,
+  });
+
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it.
     <div className="space-y-5 pb-44 md:pb-32">
@@ -383,8 +396,19 @@ function AskReel() {
         onSaveTapped={setSavePending}
       />
 
+      {/* The resume read failed: say so and offer the way back, in place of a cold start that
+          would claim there was nothing to resume. The stored id is kept (see `resumeGone`). */}
+      {resumeFailed && (
+        <LoadFailed
+          what="your conversation"
+          onRetry={() => void refetchConversation()}
+          retrying={resumeFetching}
+          testId="askreel-resume-error"
+        />
+      )}
+
       {/* Cold-start mood presets — gone the moment a conversation exists. */}
-      {showMoodPresets(turns.length, chat.cards.length + chat.outsideCards.length, streaming) && (
+      {!resumeFailed && showMoodPresets(turns.length, chat.cards.length + chat.outsideCards.length, streaming) && (
         <MoodPresets onPick={(preset) => send(preset)} />
       )}
 
