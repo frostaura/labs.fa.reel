@@ -1,6 +1,7 @@
-import { Fragment, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { Fragment, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Sparkles } from "lucide-react";
 import CardTray from "./CardTray";
+import HoldLiveTurn from "./HoldLiveTurn";
 import PillButton from "./PillButton";
 import { ConflictNotice, RetryButton } from "./parts";
 import { earlierAnswerSummary, failedTurnMessage, showsConflictPill } from "../../lib/askReel/copy";
@@ -40,9 +41,11 @@ export default function Transcript({
    * Where the page scrolls when a turn starts (F6-02): just above the newest QUESTION, so the first
    * screen of a turn is the question, then Reel's reply, the narration and the cards — in that
    * order, with nothing of the new turn inserted above the viewport (WS-2 task 3, mobile: "the
-   * first screen shows the reply plus at least one row of posters").
+   * first screen shows the reply plus at least one row of posters"). An object ref, because
+   * {@link HoldLiveTurn} reads the same element to keep the live turn still while the earlier
+   * answer folds above it (HREV6-PH-01).
    */
-  liveAnchor: Ref<HTMLDivElement>;
+  liveAnchor: RefObject<HTMLDivElement | null>;
   watchExpired: boolean;
   onSaveTapped: (card: AskCard) => void;
 }) {
@@ -57,34 +60,36 @@ export default function Transcript({
   const streaming = view.streaming;
 
   return (
-    <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
-      {turns.map((turn, i) => (
-        <Fragment key={i}>
-          {i === lastQuestion && anchor}
-          {row(turn, i)}
-          {/* The live turn's block sits under the newest row, and the live answer under the row
-              that produced it — after the slot when that is the newest row, so the banner hands
-              over to the provenance line ABOVE the grid in one box and the grid never moves
-              (F6-04's residual). */}
-          {i === lastIndex && liveSlot}
-          {i === gridRow && answer}
-        </Fragment>
-      ))}
-      {turns.length === 0 && (
-        <>
-          {anchor}
-          {liveSlot}
-          {answer}
-        </>
-      )}
-      {/* A turn that is not finished, it is still running — nothing to retry and nothing to
-          apologise for; the page's poll finds out. */}
-      {resumedTail?.status === "pending" && (
-        <p className="fa-caption text-fa-frost-dim" data-testid="askreel-pending-turn">
-          {watchExpired ? "That one is taking a while. Ask again to start over." : "Still working on that one…"}
-        </p>
-      )}
-    </div>
+    <HoldLiveTurn anchor={liveAnchor} gridRow={gridRow} active={streaming}>
+      <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
+        {turns.map((turn, i) => (
+          <Fragment key={i}>
+            {i === lastQuestion && anchor}
+            {row(turn, i)}
+            {/* The live turn's block sits under the newest row, and the live answer under the row
+                that produced it — after the slot when that is the newest row, so the banner hands
+                over to the provenance line ABOVE the grid in one box and the grid never moves
+                (F6-04's residual). */}
+            {i === lastIndex && liveSlot}
+            {i === gridRow && answer}
+          </Fragment>
+        ))}
+        {turns.length === 0 && (
+          <>
+            {anchor}
+            {liveSlot}
+            {answer}
+          </>
+        )}
+        {/* A turn that is not finished, it is still running — nothing to retry and nothing to
+            apologise for; the page's poll finds out. */}
+        {resumedTail?.status === "pending" && (
+          <p className="fa-caption text-fa-frost-dim" data-testid="askreel-pending-turn">
+            {watchExpired ? "That one is taking a while. Ask again to start over." : "Still working on that one…"}
+          </p>
+        )}
+      </div>
+    </HoldLiveTurn>
   );
 
   function row(turn: ChatTurn, i: number) {
