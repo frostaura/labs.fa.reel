@@ -11,6 +11,15 @@ export interface TypeaheadTitle {
   year: number | null;
   posterPath: string | null;
   isFullyWatched: boolean;
+  /** The account's own rating of the whole movie or show. Absent from servers that predate it. */
+  userRating?: number | null;
+  /** Watched in part. Absent from servers that predate it. */
+  inProgress?: boolean;
+  /**
+   * The account has watched any of it, rated any of it, saved or dropped it: not a discovery title,
+   * so it never carries a "for you" number. Absent from servers that predate it.
+   */
+  footprint?: boolean;
   /** Always null from the lookup itself: the badge arrives after the rows (`useTypeaheadScoresQuery`). */
   predictedRating: number | null;
   crowdRating?: number | null;

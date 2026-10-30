@@ -27,6 +27,13 @@ public enum MatchTier
 }
 
 /// <summary>One local title row.</summary>
+/// <param name="UserRating">The account's own rating of the whole movie or show, when it has one.</param>
+/// <param name="InProgress">Watched in part: a watch row that is not a full watch.</param>
+/// <param name="Footprint">
+/// The account has interacted with the title — watched any of it, rated any of it, saved, dropped or
+/// set it aside (<see cref="EligibilityQueryBuilder.InteractedTitleIdsAsync"/>). Such a title is not
+/// a discovery title, so it never carries a "for you" prediction (HREV5-RET-05).
+/// </param>
 public sealed record TypeaheadTitle(
     Guid TitleId,
     string MediaType,
@@ -37,7 +44,10 @@ public sealed record TypeaheadTitle(
     bool IsFullyWatched,
     decimal? CrowdRating,
     int? CrowdVotes,
-    MatchTier Tier);
+    MatchTier Tier,
+    short? UserRating,
+    bool InProgress,
+    bool Footprint);
 
 /// <summary>One person row; <see cref="Affinity"/> is the account's own affinity with them, when it has one.</summary>
 public sealed record TypeaheadPerson(Guid PersonId, string Name, string? KnownFor, string? ProfilePath, MatchTier Tier, decimal? Affinity);
@@ -102,6 +112,19 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
     /// <summary>The fewest characters a term needs.</summary>
     public const int MinTermLength = 2;
 
+    /// <summary>
+    /// The ids of <paramref name="titleIds"/> a "for you" prediction may be shown on: those the account
+    /// has no footprint on (<see cref="TypeaheadTitle.Footprint"/>). A prediction beside a title the
+    /// user already rated is an in-sample grade next to their own; on one they are watching or have
+    /// set aside it is a discovery number on a title that is not a discovery (HREV5-RET-05). Order kept.
+    /// </summary>
+    public async Task<IReadOnlyList<Guid>> ScorableAsync(Guid accountId, IReadOnlyCollection<Guid> titleIds, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(titleIds);
+        var footprint = await eligibility.InteractedTitleIdsAsync(accountId, titleIds, ct);
+        return [.. titleIds.Where(id => !footprint.Contains(id))];
+    }
+
     /// <summary>The local leg for <paramref name="term"/>.</summary>
     public async Task<TypeaheadLocal> LocalAsync(Guid accountId, string term, CancellationToken ct)
     {
@@ -150,11 +173,22 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
             .Take(TitleLimit)
             .ToList();
         var ids = withinCeiling.Select(x => x.Title.Id).ToList();
-        var watchedFull = (await db.WatchedTitles
-                .Where(w => w.AccountId == accountId && ids.Contains(w.TitleId) && w.IsFullyWatched)
-                .Select(w => w.TitleId)
+        var watched = (await db.WatchedTitles
+                .Where(w => w.AccountId == accountId && ids.Contains(w.TitleId))
+                .Select(w => new { w.TitleId, w.IsFullyWatched })
                 .ToListAsync(ct))
-            .ToHashSet();
+            .GroupBy(w => w.TitleId)
+            .ToDictionary(g => g.Key, g => g.Any(w => w.IsFullyWatched));
+
+        // The rating of the whole movie or show; a season or episode rating is a footprint, not "yours".
+        var rated = (await db.UserRatings
+                .Where(r => r.AccountId == accountId && ids.Contains(r.TitleId)
+                    && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
+                .Select(r => new { r.TitleId, r.Rating })
+                .ToListAsync(ct))
+            .GroupBy(r => r.TitleId)
+            .ToDictionary(g => g.Key, g => g.Max(r => r.Rating));
+        var footprint = await eligibility.InteractedTitleIdsAsync(accountId, ids, ct);
 
         var titles = withinCeiling
             .Select(x => new TypeaheadTitle(
@@ -164,10 +198,13 @@ public sealed partial class TypeaheadSearch(IReelDbContext db, EligibilityQueryB
                 x.Title.Name,
                 x.Title.Year,
                 x.Title.PosterPath,
-                watchedFull.Contains(x.Title.Id),
+                watched.TryGetValue(x.Title.Id, out var full) && full,
                 CrowdRating.For(x.Title),
                 CrowdRating.VotesFor(x.Title),
-                (MatchTier)x.Tier))
+                (MatchTier)x.Tier,
+                rated.TryGetValue(x.Title.Id, out var rating) ? rating : null,
+                watched.TryGetValue(x.Title.Id, out var whole) && !whole,
+                footprint.Contains(x.Title.Id)))
             .ToList();
 
         // FD-5: what the conditions hide among the strong matches — every catalogue title the term

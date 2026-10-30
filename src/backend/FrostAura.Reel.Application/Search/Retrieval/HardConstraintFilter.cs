@@ -36,8 +36,14 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// concept made only of genre words is read as those genres (<see cref="Read"/>), and a concept that
 /// requires exactly what an earlier one does is the same requirement, counted once.</item>
 /// <item>A person matches by credit, by resolved id or else by exact case-insensitive name.</item>
-/// <item>The year window is inclusive and resolves <c>Year → ReleasedAt → FirstAiredAt</c>; an
-/// undated title passes, exactly as the standing year rule treats it.</item>
+/// <item>The year window is inclusive, resolves <c>Year → ReleasedAt → FirstAiredAt</c>, and needs a
+/// KNOWN date: "only from the 90s" is a statement about the title, exactly as a runtime ceiling is,
+/// and a title with no year, release date or air date cannot be shown to satisfy it. The STANDING
+/// year rule (<see cref="EligibilityQueryBuilder"/>, <see cref="FilterBreaches.BeforeYear"/>) keeps
+/// letting an undated title through: it is a condition on what to hide, where the truth SQL defines
+/// an absent date as not breaking it. Reading the request's window that way showed the founder
+/// Glenville 2, Doppelgänger and Glenville 3 — all three undated, one vote each — as 90s horror
+/// (HREV5-ASK-03).</item>
 /// <item>A runtime ceiling needs a KNOWN runtime: "under 90 minutes" is a statement about the title,
 /// and a title with no runtime cannot be shown to satisfy it.</item>
 /// </list>
@@ -183,10 +189,11 @@ public static class HardConstraintFilter
         {
             var from = years.From ?? int.MinValue;
             var to = years.To ?? int.MaxValue;
+            // A known date only (see the class remarks): an undated title fails the user's own window.
             query = query.Where(t =>
-                (t.Year == null && t.ReleasedAt == null && t.FirstAiredAt == null)
-                || ((t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year)) >= from
-                    && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year)) <= to));
+                (t.Year != null || t.ReleasedAt != null || t.FirstAiredAt != null)
+                && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year)) >= from
+                && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year)) <= to);
         }
 
         if (hard.MaxRuntimeMinutes is { } ceiling)
@@ -352,6 +359,35 @@ public static class HardConstraintFilter
         if (arms.Count == 0)
         {
             return t => false;
+        }
+
+        var parameter = Expression.Parameter(typeof(Title), "t");
+        var body = arms
+            .Select(arm => new ParameterSwap(arm.Parameters[0], parameter).Visit(arm.Body))
+            .Aggregate(Expression.OrElse);
+        return Expression.Lambda<Func<Title, bool>>(body, parameter);
+    }
+
+    /// <summary>
+    /// True for a title carrying a keyword label any of <paramref name="stems"/> reaches — the keyword
+    /// arm of a positive concept (<see cref="KeywordPattern"/>, behind the same strpos guard), and only
+    /// that arm: the rejection's widened reach (<see cref="NegatedConcepts.Stems"/>) is a claim about
+    /// tags, never about names or prose. Null when there are no stems, so the caller adds nothing.
+    /// </summary>
+    public static Expression<Func<Title, bool>>? NegatedConceptPredicate(IReadOnlyList<string> stems)
+    {
+        ArgumentNullException.ThrowIfNull(stems);
+        var arms = new List<Expression<Func<Title, bool>>>();
+        foreach (var stem in Clean(stems))
+        {
+            var value = stem;
+            var keywordPattern = KeywordPattern(stem);
+            arms.Add(t => t.Keywords.Any(k => k.Contains(value) && Regex.IsMatch(k, keywordPattern)));
+        }
+
+        if (arms.Count == 0)
+        {
+            return null;
         }
 
         var parameter = Expression.Parameter(typeof(Title), "t");

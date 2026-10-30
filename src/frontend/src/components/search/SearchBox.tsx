@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
+import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { Link, useLocation, useNavigate, type Location } from "react-router";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
 import {
   useLazySearchTypeaheadQuery,
@@ -7,7 +7,16 @@ import {
   useSearchTypeaheadQuery,
   useTypeaheadScoresQuery,
 } from "../../store/api";
-import { enterTarget, hiddenLine, peopleFirst, shouldQueryGlobal, strongMatchCount } from "../../lib/globalTypeahead";
+import type { TypeaheadTitle } from "../../store/api/typeahead";
+import {
+  enterTarget,
+  hasFootprint,
+  hiddenLine,
+  peopleFirst,
+  scoredTitleIds,
+  shouldQueryGlobal,
+  strongMatchCount,
+} from "../../lib/globalTypeahead";
 import { mintHandoff } from "../../lib/askReel/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import { ScoreChip } from "../rec/ScoreBadges";
@@ -73,10 +82,12 @@ export default function SearchBox() {
   const titles = data?.titles ?? [];
   const people = data?.people ?? [];
 
-  // The badge, after the rows: the lookup itself loads no model, so it answers fast.
-  const scoredIds = titles.filter((t) => !t.isFullyWatched).map((t) => t.titleId).join(",");
+  // The badge, after the rows: the lookup itself loads no model, so it answers fast. Only titles
+  // with no footprint are scored (HREV5-RET-05): a rated or half-watched title shows what the
+  // account did with it instead.
+  const scoredIds = scoredTitleIds(titles);
   const { data: scoreData } = useTypeaheadScoresQuery(scoredIds, { skip: scoredIds.length === 0 });
-  const predictedFor = (t: (typeof titles)[number]) => scoreData?.scores[t.titleId] ?? t.predictedRating;
+  const predictedFor = (t: TypeaheadTitle) => (hasFootprint(t) ? null : (scoreData?.scores[t.titleId] ?? t.predictedRating));
 
   // The global TMDB leg fires only after the LOCAL query has resolved with few STRONG matches — a
   // lookup beyond the ingested pool ("jeanne dielman" → something, not nothing). Gating on `data`
@@ -254,7 +265,12 @@ export default function SearchBox() {
       </div>
 
       {showDropdown && (
-        <div className="absolute top-11 inset-x-0 z-50 rounded-lg border border-fa-edge bg-fa-ink-2/95 backdrop-blur-md shadow-2xl overflow-hidden reel-rise">
+        // Opaque, never a translucent fill over a blur: the page's own badges read through a 95%
+        // panel and fought the rows for the eye (HREV5-DESK-06).
+        <div
+          className="absolute top-11 inset-x-0 z-50 rounded-lg border border-fa-edge bg-fa-ink-2 shadow-2xl overflow-hidden reel-rise"
+          data-testid="typeahead-panel"
+        >
           {/* Ask Reel — pinned; promoted to top when the query reads like a sentence */}
           {looksNatural && <AskRow query={query} onAsk={askReel} promoted />}
 
@@ -309,38 +325,16 @@ export default function SearchBox() {
               {titles.length > 0 && (
                 <div role="group" aria-label="Titles">
                   {titles.map((title, i) => (
-                    <Link
+                    <TitleRow
                       key={title.titleId}
-                      ref={titleOffset + i === active ? activeRef : undefined}
-                      id={optionId(titleOffset + i)}
-                      role="option"
-                      aria-selected={titleOffset + i === active}
-                      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
-                      state={{ backgroundLocation: location }}
-                      onClick={() => setOpen(false)}
-                      className={`flex items-center gap-3 px-3 py-2 transition ${titleOffset + i === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
-                      data-testid="typeahead-result"
-                    >
-                      {/* PosterImage, not a bare <img>: it carries the shimmer and the
-                          gradient-initials fallback for both a null path and a broken URL. */}
-                      <div className="w-8 shrink-0">
-                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
-                        <p className="fa-caption text-fa-frost-dim">
-                          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
-                        </p>
-                      </div>
-                      {title.isFullyWatched && (
-                        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0">
-                          <Eye className="h-3.5 w-3.5" /> seen
-                        </span>
-                      )}
-                      {predictedFor(title) != null && !title.isFullyWatched && (
-                        <ScoreChip predictedRating={predictedFor(title)} />
-                      )}
-                    </Link>
+                      title={title}
+                      index={titleOffset + i}
+                      active={titleOffset + i === active}
+                      activeRef={activeRef}
+                      predicted={predictedFor(title)}
+                      backgroundLocation={location}
+                      onPick={() => setOpen(false)}
+                    />
                   ))}
                 </div>
               )}
@@ -350,38 +344,16 @@ export default function SearchBox() {
               {titles.length > 0 && (
                 <div role="group" aria-label="Titles">
                   {titles.map((title, i) => (
-                    <Link
+                    <TitleRow
                       key={title.titleId}
-                      ref={titleOffset + i === active ? activeRef : undefined}
-                      id={optionId(titleOffset + i)}
-                      role="option"
-                      aria-selected={titleOffset + i === active}
-                      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
-                      state={{ backgroundLocation: location }}
-                      onClick={() => setOpen(false)}
-                      className={`flex items-center gap-3 px-3 py-2 transition ${titleOffset + i === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
-                      data-testid="typeahead-result"
-                    >
-                      {/* PosterImage, not a bare <img>: it carries the shimmer and the
-                          gradient-initials fallback for both a null path and a broken URL. */}
-                      <div className="w-8 shrink-0">
-                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
-                        <p className="fa-caption text-fa-frost-dim">
-                          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
-                        </p>
-                      </div>
-                      {title.isFullyWatched && (
-                        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0">
-                          <Eye className="h-3.5 w-3.5" /> seen
-                        </span>
-                      )}
-                      {predictedFor(title) != null && !title.isFullyWatched && (
-                        <ScoreChip predictedRating={predictedFor(title)} />
-                      )}
-                    </Link>
+                      title={title}
+                      index={titleOffset + i}
+                      active={titleOffset + i === active}
+                      activeRef={activeRef}
+                      predicted={predictedFor(title)}
+                      backgroundLocation={location}
+                      onPick={() => setOpen(false)}
+                    />
                   ))}
                 </div>
               )}
@@ -480,6 +452,62 @@ export default function SearchBox() {
         </div>
       )}
     </div>
+  );
+}
+
+interface TitleRowProps {
+  title: TypeaheadTitle;
+  index: number;
+  active: boolean;
+  activeRef: RefObject<HTMLAnchorElement | null>;
+  /** The "for you" number, already null for a title with a footprint. */
+  predicted: number | null;
+  backgroundLocation: Location;
+  onPick: () => void;
+}
+
+/**
+ * One local title row. What the account has done with the title is said on the row, and a "for you"
+ * number only where it has done nothing (HREV5-RET-05): its own rating (the shared chip's "yours"
+ * line, which replaces a prediction everywhere), "seen" for a full watch, "in progress" for a part
+ * watch. A title only saved or dropped carries no number and no mark.
+ */
+function TitleRow({ title, index, active, activeRef, predicted, backgroundLocation, onPick }: TitleRowProps) {
+  const rated = title.userRating != null;
+  return (
+    <Link
+      ref={active ? activeRef : undefined}
+      id={optionId(index)}
+      role="option"
+      aria-selected={active}
+      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
+      state={{ backgroundLocation }}
+      onClick={onPick}
+      className={`flex items-center gap-3 px-3 py-2 transition ${active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
+      data-testid="typeahead-result"
+    >
+      {/* PosterImage, not a bare <img>: it carries the shimmer and the
+          gradient-initials fallback for both a null path and a broken URL. */}
+      <div className="w-8 shrink-0">
+        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
+        <p className="fa-caption text-fa-frost-dim">
+          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
+        </p>
+      </div>
+      {(title.isFullyWatched || title.inProgress) && (
+        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0" data-testid="typeahead-watch-mark">
+          <Eye className="h-3.5 w-3.5" /> {title.isFullyWatched ? "seen" : "in progress"}
+        </span>
+      )}
+      {rated ? (
+        <ScoreChip userRating={title.userRating} />
+      ) : (
+        predicted != null && <ScoreChip predictedRating={predicted} />
+      )}
+    </Link>
   );
 }
 

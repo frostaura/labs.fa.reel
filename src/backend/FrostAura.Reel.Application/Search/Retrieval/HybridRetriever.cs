@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -56,6 +57,14 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// the eligible titles that satisfy the remaining hard constraints, and the bare best-regarded list
 /// runs only when no mood, reference or steer list found anything.</para>
 ///
+/// <para><b>Prose is not evidence when nobody judges (HREV5-RET-04).</b> A full-text hit found only in
+/// the overview (<see cref="FullTextHit.ProseOnly"/>) is a lead for the judge, not a match: "shark
+/// movies" found Sarah's Oil ("greedy oil sharks") and Below (the submarine USS Tiger Shark). With no
+/// judge model (<see cref="IRequestJudgeModel.IsAvailable"/> false: the keyless turn shows what was
+/// found, unchecked) such a hit is admitted only when no candidate carries tagged evidence — a tag, a
+/// name, a theme — so the trays hold the titles the supply counts, and the overview still answers a
+/// concept the tags never carry. With a judge, or with no judge registered, it is admitted as before.</para>
+///
 /// <para><b>Supply</b> is <see cref="ISupplyReporter"/>'s over the RESOLVED constraints, so the
 /// counts a reply quotes are counted with the same labels the cards were found with.</para>
 /// </summary>
@@ -68,7 +77,8 @@ public sealed class HybridRetriever(
     ConceptEmbeddings embeddings,
     KeywordNeighbours neighbours,
     IServiceScopeFactory scopes,
-    ILogger<HybridRetriever> logger) : IAskReelRetriever
+    ILogger<HybridRetriever> logger,
+    IRequestJudgeModel? judgeModel = null) : IAskReelRetriever
 {
     private readonly MoodArm moodArm = new(db, resolver);
 
@@ -150,11 +160,12 @@ public sealed class HybridRetriever(
         }
 
         var exclude = q.Exclude.Distinct().ToList();
-        var eligible = await EligibleBaseAsync(q, ct);
+        var eligible = await EligibleBaseAsync(q, hard, ct);
         var withoutConcepts = hard with { Concepts = [] };
         var basePool = HardConstraintFilter.Apply(eligible, db, withoutConcepts).Where(t => !exclude.Contains(t.Id));
         var conceptPool = HardConstraintFilter.Apply(eligible, db, hard).Where(t => !exclude.Contains(t.Id));
         var lists = new Dictionary<string, List<Guid>>();
+        var proseHits = new List<Guid>();
         var evidence = new Dictionary<Guid, List<string>>();
         var similarity = new Dictionary<Guid, double>();
 
@@ -170,6 +181,7 @@ public sealed class HybridRetriever(
             {
                 var hits = await fullText.SearchAsync(basePool, hard.Concepts, ArmDepth, ct);
                 lists["fulltext"] = [.. hits.Select(h => h.TitleId)];
+                proseHits.AddRange(hits.Where(h => h.ProseOnly).Select(h => h.TitleId));
                 foreach (var hit in hits)
                 {
                     Add(evidence, hit.TitleId, hit.Evidence());
@@ -200,10 +212,20 @@ public sealed class HybridRetriever(
             timings["reference"] = clock.ElapsedMilliseconds;
         }
 
-        // With a concept, only titles carrying catalogue evidence may be returned (§4.7).
+        // With a concept, only titles carrying catalogue evidence may be returned (§4.7) — and, when no
+        // judge will rule on them, an overview-only hit only when nothing tagged was found (see remarks).
         HashSet<Guid>? admitted = hard.HasConcepts
             ? [.. lists.GetValueOrDefault("facet", []), .. lists.GetValueOrDefault("fulltext", [])]
             : null;
+        if (admitted is not null && judgeModel is { IsAvailable: false })
+        {
+            var tagged = lists.GetValueOrDefault("facet", []).ToHashSet();
+            var prose = proseHits.Where(id => !tagged.Contains(id)).ToHashSet();
+            if (prose.Count > 0 && admitted.Count > prose.Count)
+            {
+                admitted.ExceptWith(prose);
+            }
+        }
 
         // R1-18: with a concept the semantic arm can only re-rank titles that evidence admits, so its
         // embedding is never waited for (taken if it has arrived, else the reached labels stand in);
@@ -435,8 +457,12 @@ public sealed class HybridRetriever(
         return [.. scores.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key).Select(kv => (kv.Key, kv.Value))];
     }
 
-    /// <summary>The standing conditions, plus this turn's own rejections when there are any.</summary>
-    private async Task<IQueryable<Title>> EligibleBaseAsync(RetrievalQuery q, CancellationToken ct)
+    /// <summary>
+    /// The standing conditions, plus this turn's own rejections when there are any — each rejected
+    /// word read as wide as the same word asked for (<see cref="NegatedConcepts"/>, HREV5-ASK-04), the
+    /// very reading the supply counts with (<see cref="SupplyReporter"/>).
+    /// </summary>
+    private async Task<IQueryable<Title>> EligibleBaseAsync(RetrievalQuery q, HardConstraints hard, CancellationToken ct)
     {
         if (q.ExcludeGenres.Count == 0 && q.ExcludeKeywords.Count == 0)
         {
@@ -445,7 +471,10 @@ public sealed class HybridRetriever(
 
         var rows = await db.ContentFilters.IgnoreQueryFilters().Where(f => f.AccountId == q.AccountId).ToListAsync(ct);
         var rules = FilterRuleSet.FromRows(rows).WithExclusions(q.ExcludeGenres, q.ExcludeKeywords);
-        return eligibility.EligibleTitles(q.AccountId, rules);
+        var eligible = eligibility.EligibleTitles(q.AccountId, rules);
+        return HardConstraintFilter.NegatedConceptPredicate(NegatedConcepts.Stems(q.ExcludeKeywords, hard.Concepts)) is { } widened
+            ? eligible.Where(FilterBreaches.Not(widened))
+            : eligible;
     }
 
     /// <summary>
