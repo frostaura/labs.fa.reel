@@ -1,5 +1,6 @@
 using System.Net;
 using FrostAura.Reel.Application.Configuration;
+using Microsoft.AspNetCore.Builder;
 
 namespace FrostAura.Reel.Api.Security;
 
@@ -12,10 +13,10 @@ namespace FrostAura.Reel.Api.Security;
 /// loopback or HTTPS; believing them from no peer leaves every request looking like plain HTTP from
 /// the gateway, which is what kept production cookies from ever being <c>Secure</c>.</para>
 ///
-/// <para>The default trusts loopback (a local Vite proxy or slot API) and <c>172.16.0.0/12</c>, the
-/// range Docker allocates bridge networks from. The API's port is never published off the host —
-/// only the gateway's is — so nothing outside the stack can stand in those ranges. A host whose
-/// Docker address pool differs sets <c>TRUSTED_PROXY_NETWORKS</c>: comma-separated CIDRs.</para>
+/// <para>The code default trusts loopback (a local Vite proxy or slot API) and <c>172.16.0.0/12</c>,
+/// the range Docker allocates bridge networks from — right for the dev and eval stacks. The production
+/// stack narrows it to its own pinned bridge (<c>docker-compose.prod.yml</c>), where cloudflared and
+/// the gateway are the only two hops and no service publishes a host port. Comma-separated CIDRs.</para>
 /// </summary>
 public sealed class TrustedProxyOptions : ValidatedOptions
 {
@@ -52,6 +53,29 @@ public sealed class TrustedProxyOptions : ValidatedOptions
     }
 
     private int BadEntries { get; set; }
+
+    /// <summary>
+    /// Points the forwarded-headers middleware at these networks and nothing else.
+    ///
+    /// <para><see cref="ForwardedHeadersOptions.ForwardLimit"/> is lifted (null) rather than left at
+    /// the framework's 1. With one hop believed, production's cloudflared → gateway → API chain resolves
+    /// the client to the cloudflared CONTAINER — the last entry the gateway appended — not the visitor.
+    /// Unbounded is still safe because the walk is bounded by trust instead of a count: entries are
+    /// consumed right to left only while the address just revealed is itself in a trusted network, so
+    /// it stops at the first address outside them (the real visitor) and anything a client wrote
+    /// further left is never believed.</para>
+    /// </summary>
+    public void ApplyTo(ForwardedHeadersOptions forwarded)
+    {
+        forwarded.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
+        forwarded.ForwardLimit = null;
+        forwarded.KnownProxies.Clear();
+        forwarded.KnownIPNetworks.Clear();
+        foreach (var network in Networks)
+        {
+            forwarded.KnownIPNetworks.Add(network);
+        }
+    }
 
     protected override void Check(Action<string> problem)
     {

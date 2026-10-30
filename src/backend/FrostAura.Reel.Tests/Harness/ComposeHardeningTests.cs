@@ -202,6 +202,7 @@ public partial class ComposeHardeningTests
     [Theory]
     [InlineData("backend")]
     [InlineData("frontend")]
+    [InlineData("gateway")]
     public void Production_images_are_pinned_by_REEL_TAG(string service)
     {
         // K-9: `:latest` names whatever was pushed last, so neither a rollback nor "what is running"
@@ -209,6 +210,49 @@ public partial class ComposeHardeningTests
         Assert.Contains(
             $"    image: ${{DOCKERHUB_USERNAME:-frostaura}}/reel-{service}:${{REEL_TAG:-latest}}",
             ComposeDescriptor.Load("docker-compose.prod.yml").ServiceBlock(service));
+    }
+
+    [Fact]
+    public void Production_publishes_no_host_port_and_its_only_way_in_is_the_in_stack_tunnel()
+    {
+        // One exposed surface: the gateway, reached only by the cloudflared service of this same stack.
+        // A published port beside it is a second surface nobody is watching (and, on 0.0.0.0, J-1).
+        var compose = ComposeDescriptor.Load("docker-compose.prod.yml");
+
+        Assert.Equal(["postgres", "backend", "backup", "frontend", "gateway", "cloudflared"], compose.Services);
+        Assert.All(compose.Services, service =>
+        {
+            Assert.Empty(compose.Ports(service));
+            Assert.DoesNotContain(compose.ServiceBlock(service), l => l.Trim() is "ports:" or "network_mode: host");
+        });
+
+        var tunnel = compose.ServiceBlock("cloudflared");
+        // Pinned to a released version; `latest` would change the public edge under an unchanged file.
+        var image = Assert.Single(tunnel, l => l.StartsWith("    image: ", StringComparison.Ordinal));
+        Assert.Matches(@"^    image: cloudflare/cloudflared:[0-9]{4}\.[0-9]+\.[0-9]+$", image);
+        Assert.Contains("    command: [ \"tunnel\", \"--no-autoupdate\", \"run\" ]", tunnel);
+        Assert.StartsWith("${CLOUDFLARE_TUNNEL_TOKEN:?", compose.Environment("cloudflared")["TUNNEL_TOKEN"], StringComparison.Ordinal);
+        Assert.Contains("      - gateway", tunnel);
+    }
+
+    [Fact]
+    public void Production_believes_forwarded_headers_only_from_its_own_pinned_bridge()
+    {
+        var compose = ComposeDescriptor.Load("docker-compose.prod.yml");
+        var subnet = Assert.Single(
+            compose.TopLevelBlock("networks"),
+            l => l.StartsWith("        - subnet: ", StringComparison.Ordinal))["        - subnet: ".Length..].Trim();
+        var network = System.Net.IPNetwork.Parse(subnet);
+
+        // Outside Docker's default address pools, so Docker can never allocate it to anything else.
+        foreach (var pool in new[] { "172.16.0.0/12", "192.168.0.0/16" })
+        {
+            var p = System.Net.IPNetwork.Parse(pool);
+            Assert.False(p.Contains(network.BaseAddress) || network.Contains(p.BaseAddress), $"{subnet} overlaps Docker's default pool {pool}.");
+        }
+
+        // And it is exactly what the API trusts: no loopback, no Docker-wide range.
+        Assert.Equal($"\"${{TRUSTED_PROXY_NETWORKS:-{subnet}}}\"", compose.Environment("backend")["TRUSTED_PROXY_NETWORKS"]);
     }
 
     [Fact]

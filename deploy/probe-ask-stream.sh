@@ -14,8 +14,9 @@
 #
 # What it runs
 # ------------
-# The gateway config is lifted from docker-compose.prod.yml VERBATIM (the same extraction as
-# deploy/probe-gateway.sh) and run by a NATIVE nginx on loopback, against a stub upstream that
+# The gateway config is nginx/nginx.conf — the file the reel-gateway image bakes — rendered the way
+# that image renders it at start (its ${NGINX_*} placeholders filled from nginx/Dockerfile's ENV
+# defaults), and run by a NATIVE nginx on loopback, against a stub upstream that
 # writes one frame, then stays silent for 5 s and writes a heartbeat, twice, then `done`. No Docker,
 # no database, no API, no model call. Only what a native run needs is rewritten: listen address,
 # log, pid and temp paths, mime.types, and the upstream hostnames and port (Docker DNS names →
@@ -26,7 +27,7 @@
 #
 # Not covered: cloudflared. The same check through the tunnel needs the live host (G0).
 #
-# Usage:   deploy/probe-ask-stream.sh [path/to/docker-compose.prod.yml]
+# Usage:   deploy/probe-ask-stream.sh [path/to/nginx.conf]
 # Needs:   nginx and python3 on PATH; ports 8198 and 8199 free.
 # Exit:    0 when every frame arrived on time and uncompressed, 1 otherwise, 2 on setup failure.
 
@@ -36,9 +37,11 @@ GATEWAY_PORT=8198
 UPSTREAM_PORT=8199
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DESCRIPTOR="${1:-$REPO_ROOT/docker-compose.prod.yml}"
+DESCRIPTOR="${1:-$REPO_ROOT/nginx/nginx.conf}"
+DOCKERFILE="$REPO_ROOT/nginx/Dockerfile"
 
-[ -f "$DESCRIPTOR" ] || { echo "No such descriptor: $DESCRIPTOR" >&2; exit 2; }
+[ -f "$DESCRIPTOR" ] || { echo "No such config: $DESCRIPTOR" >&2; exit 2; }
+[ -f "$DOCKERFILE" ] || { echo "No such Dockerfile: $DOCKERFILE" >&2; exit 2; }
 command -v nginx > /dev/null || { echo "probe-ask-stream: needs nginx on PATH (brew install nginx)." >&2; exit 2; }
 
 for port in "$GATEWAY_PORT" "$UPSTREAM_PORT"; do
@@ -62,24 +65,21 @@ MIME_TYPES="$(dirname "$(nginx -V 2>&1 | tr ' ' '\n' | sed -n 's/^--conf-path=//
 [ -f "$MIME_TYPES" ] || { echo "probe-ask-stream: cannot find nginx's mime.types (looked at $MIME_TYPES)." >&2; exit 2; }
 
 # --- 1. The gateway config, verbatim, adapted only where a native run must differ ----------------
-python3 - "$DESCRIPTOR" "$WORK" "$GATEWAY_PORT" "$UPSTREAM_PORT" "$MIME_TYPES" > "$WORK/gateway.conf" <<'PY'
+python3 - "$DESCRIPTOR" "$WORK" "$GATEWAY_PORT" "$UPSTREAM_PORT" "$MIME_TYPES" "$DOCKERFILE" > "$WORK/gateway.conf" <<'PY'
 import re, sys, pathlib
 
-descriptor, work, gateway_port, upstream_port, mime_types = sys.argv[1:6]
-lines = pathlib.Path(descriptor).read_text().splitlines()
-named = next((i for i, l in enumerate(lines) if re.match(r"^\s*gateway_nginx:\s*$", l)), None)
-start = None if named is None else next(
-    (i for i in range(named + 1, len(lines)) if re.match(r"^\s*content:\s*\|\s*$", lines[i])), None)
-if start is None:
-    sys.exit("No `gateway_nginx: content: |` block found in the descriptor — has the gateway config moved?")
+descriptor, work, gateway_port, upstream_port, mime_types, dockerfile = sys.argv[1:7]
+conf = pathlib.Path(descriptor).read_text()
 
-indent = len(lines[start]) - len(lines[start].lstrip())
-body = []
-for line in lines[start + 1:]:
-    if line.strip() and (len(line) - len(line.lstrip())) <= indent:
-        break
-    body.append(line[indent + 2:] if line.strip() else "")
-conf = "\n".join(body).replace("$$", "$")
+# Render the template as the image does: every ${NGINX_*} from the Dockerfile's ENV defaults.
+env_text = re.sub(r"\\\n\s*", " ", pathlib.Path(dockerfile).read_text())
+defaults = {}
+for line in re.findall(r"(?m)^ENV\s+(.+)$", env_text):
+    defaults.update(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)", line))
+for name in sorted(set(re.findall(r"\$\{(NGINX_[A-Z_]+)\}", conf))):
+    if name not in defaults:
+        sys.exit(f"nginx/Dockerfile has no ENV default for ${{{name}}}.")
+    conf = conf.replace("${" + name + "}", defaults[name])
 
 def swap(old, new, count=1):
     global conf

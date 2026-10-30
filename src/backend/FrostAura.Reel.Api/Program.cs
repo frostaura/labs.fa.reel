@@ -63,15 +63,7 @@ builder.Services.AddOpenApi();
 // the real client's behind cloudflared → nginx and cannot be claimed by anyone else.
 builder.Services.AddValidatedOptions<TrustedProxyOptions>();
 builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<IOptions<TrustedProxyOptions>>((forwarded, trusted) =>
-{
-    forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    forwarded.KnownProxies.Clear();
-    forwarded.KnownIPNetworks.Clear();
-    foreach (var network in trusted.Value.Networks)
-    {
-        forwarded.KnownIPNetworks.Add(network);
-    }
-});
+    trusted.Value.ApplyTo(forwarded));
 builder.Services.AddHsts(options =>
 {
     // A year, this host only: frostaura.net carries other subdomains this API does not speak for.

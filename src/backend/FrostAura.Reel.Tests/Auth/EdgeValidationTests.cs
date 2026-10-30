@@ -89,6 +89,58 @@ public class EdgeValidationTests
         Assert.DoesNotContain(options.Networks, n => n.Contains(System.Net.IPAddress.Parse("192.168.0.148")));
     }
 
+    [Theory]
+    // Production: cloudflared (10.83.30.7) -> gateway (10.83.30.3) -> API, every hop on the pinned bridge.
+    [InlineData("203.0.113.9, 10.83.30.7", "203.0.113.9")]
+    // A visitor-written X-Forwarded-For is left of the real address and never believed.
+    [InlineData("6.6.6.6, 203.0.113.9, 10.83.30.7", "203.0.113.9")]
+    // The dev and eval stacks: browser -> gateway -> API, one hop.
+    [InlineData("203.0.113.9", "203.0.113.9")]
+    public async Task The_production_chain_resolves_the_visitor_not_the_tunnel_container(string forwardedFor, string expected)
+    {
+        var trusted = ValidatedOptions.From<TrustedProxyOptions>(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [TrustedProxyOptions.NetworksKey] = "10.83.30.0/24" }).Build());
+        var forwarded = new Microsoft.AspNetCore.Builder.ForwardedHeadersOptions();
+        trusted.ApplyTo(forwarded);
+
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("10.83.30.3");
+        context.Request.Headers["X-Forwarded-For"] = forwardedFor;
+        context.Request.Headers["X-Forwarded-Proto"] = "https";
+
+        var middleware = new Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersMiddleware(
+            _ => Task.CompletedTask,
+            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
+            Microsoft.Extensions.Options.Options.Create(forwarded));
+        await middleware.Invoke(context);
+
+        Assert.Null(forwarded.ForwardLimit);
+        Assert.Equal(System.Net.IPAddress.Parse(expected), context.Connection.RemoteIpAddress);
+        Assert.True(context.Request.IsHttps);
+    }
+
+    [Fact]
+    public async Task A_peer_outside_the_trusted_bridge_cannot_claim_an_address_or_https()
+    {
+        var trusted = ValidatedOptions.From<TrustedProxyOptions>(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [TrustedProxyOptions.NetworksKey] = "10.83.30.0/24" }).Build());
+        var forwarded = new Microsoft.AspNetCore.Builder.ForwardedHeadersOptions();
+        trusted.ApplyTo(forwarded);
+
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("172.18.0.5");
+        context.Request.Headers["X-Forwarded-For"] = "127.0.0.1";
+        context.Request.Headers["X-Forwarded-Proto"] = "https";
+
+        await new Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersMiddleware(
+            _ => Task.CompletedTask,
+            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
+            Microsoft.Extensions.Options.Options.Create(forwarded)).Invoke(context);
+
+        Assert.Equal(System.Net.IPAddress.Parse("172.18.0.5"), context.Connection.RemoteIpAddress);
+        Assert.False(context.Request.IsHttps);
+    }
+
     [Fact]
     public void A_malformed_trusted_proxy_entry_fails_startup_without_echoing_it()
     {

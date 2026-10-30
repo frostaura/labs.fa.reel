@@ -1,7 +1,7 @@
 .PHONY: up down build test lint lint-backend lint-frontend e2e docker-build docker-ready docker-down release-validation qa \
 	ci ci-backend ci-frontend ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit \
 	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-design-ratchet ci-vite-proxy ci-e2e ci-a11y \
-	ci-trivy ci-compose ci-docker
+	ci-trivy ci-compose ci-docker ci-gateway ci-docker-prod
 
 # Compose needs these two before it will interpolate (both are `:?` required in the compose
 # files). Real values live in .env locally / Portainer in prod; these defaults exist so
@@ -12,6 +12,9 @@ GATEWAY_PORT ?= 8090
 # GIT_SHA is stamped into the backend image so /health reports the commit (A-17).
 GIT_SHA ?= $(shell git rev-parse HEAD 2> /dev/null)
 COMPOSE_ENV = POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) JWT_SECRET=$(JWT_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) GIT_SHA=$(GIT_SHA)
+# Which descriptor(s) docker-ready/docker-down drive; empty is docker-compose.yml. ci-docker-prod sets
+# it to the production file plus its smoke overlay.
+COMPOSE_FILES ?=
 
 up:
 	$(COMPOSE_ENV) docker compose up -d --build
@@ -48,7 +51,7 @@ docker-build:
 # Probes go through the gateway, so a pass means backend + postgres/pgvector migrations +
 # nginx routing + the frontend bundle are all wired correctly — not just that images built.
 docker-ready:
-	@$(COMPOSE_ENV) docker compose up -d --build
+	@$(COMPOSE_ENV) docker compose $(COMPOSE_FILES) up -d --build
 	@echo "Waiting for the stack to become ready on :$(GATEWAY_PORT)..."
 	@for attempt in $$(seq 1 60); do \
 		if curl -fsS http://localhost:$(GATEWAY_PORT)/health >/dev/null 2>&1 \
@@ -66,12 +69,12 @@ docker-ready:
 		sleep 3; \
 	done; \
 	echo "docker-ready failed: the stack did not become reachable in time." >&2; \
-	$(COMPOSE_ENV) docker compose ps >&2; \
-	$(COMPOSE_ENV) docker compose logs --tail 100 >&2; \
+	$(COMPOSE_ENV) docker compose $(COMPOSE_FILES) ps >&2; \
+	$(COMPOSE_ENV) docker compose $(COMPOSE_FILES) logs --tail 100 >&2; \
 	exit 1
 
 docker-down:
-	$(COMPOSE_ENV) docker compose down -v --remove-orphans
+	$(COMPOSE_ENV) docker compose $(COMPOSE_FILES) down -v --remove-orphans
 
 release-validation: lint build test e2e docker-ready
 
@@ -102,9 +105,19 @@ FRONTEND_COVERAGE_MIN ?= 6
 # The CI image-smoke project: its own name and ports, so it never collides with a stack already
 # running on this machine (the live stack publishes 5433).
 CI_COMPOSE_ENV = $(COMPOSE_ENV) COMPOSE_PROJECT_NAME=reel-ci GATEWAY_PORT=18090 POSTGRES_HOST_PORT=15433 BACKUP_HOST_DIR=$(CI_OUT)/backups
+# The production-descriptor smoke: docker-compose.prod.yml itself plus deploy/ci/docker-compose.prod-smoke.yml
+# (builds the three images from this checkout under a throwaway namespace, publishes the gateway on
+# loopback for the probe, parks cloudflared). Its own project, port and dump directory. The provider
+# keys are dummies: the stack must BOOT and SERVE, not reach Trakt or TMDB.
+PROD_SMOKE_PROJECT ?= reel-ci-prod
+PROD_SMOKE_PORT ?= 18091
+PROD_SMOKE_FILES = -f docker-compose.prod.yml -f deploy/ci/docker-compose.prod-smoke.yml
+PROD_REQUIRED_ENV = TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci CLOUDFLARE_TUNNEL_TOKEN=ci-unused
+CI_PROD_COMPOSE_ENV = $(COMPOSE_ENV) $(PROD_REQUIRED_ENV) COMPOSE_PROJECT_NAME=$(PROD_SMOKE_PROJECT) GATEWAY_PORT=$(PROD_SMOKE_PORT) \
+	DOCKERHUB_USERNAME=reel-smoke-local REEL_TAG=smoke BACKUP_HOST_DIR=$(CI_OUT)/backups-prod
 export MSBuildEnableWorkloadResolver := false
 
-ci: ci-backend ci-frontend ci-trivy ci-compose ci-docker
+ci: ci-backend ci-frontend ci-trivy ci-compose ci-docker ci-gateway ci-docker-prod
 
 ci-backend: ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit
 
@@ -236,12 +249,27 @@ ci-trivy:
 # Every descriptor parses with only its required variables supplied, and not without them.
 ci-compose:
 	$(COMPOSE_ENV) docker compose -f docker-compose.yml config -q
-	$(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f docker-compose.prod.yml config -q
-	@# And the production file refuses to start with nowhere for the dumps but a volume of the stack.
-	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci docker compose -f docker-compose.prod.yml config -q 2> /dev/null \
+	$(COMPOSE_ENV) $(PROD_REQUIRED_ENV) BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f docker-compose.prod.yml config -q
+	$(COMPOSE_ENV) $(PROD_REQUIRED_ENV) BACKUP_HOST_DIR=/var/lib/reel-ci/backups GATEWAY_PORT=$(PROD_SMOKE_PORT) docker compose $(PROD_SMOKE_FILES) config -q
+	@# And the production file refuses to start with nowhere for the dumps but a volume of the stack,
+	@# and without the tunnel token that is its only way in.
+	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) $(PROD_REQUIRED_ENV) docker compose -f docker-compose.prod.yml config -q 2> /dev/null \
 		|| { echo "ci-compose: docker-compose.prod.yml parsed without BACKUP_HOST_DIR" >&2; exit 1; }
+	@! env -u CLOUDFLARE_TUNNEL_TOKEN $(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f docker-compose.prod.yml config -q 2> /dev/null \
+		|| { echo "ci-compose: docker-compose.prod.yml parsed without CLOUDFLARE_TUNNEL_TOKEN" >&2; exit 1; }
 
 # Build both images and prove the composed stack serves, under its own project name and ports.
 ci-docker:
 	$(MAKE) docker-ready COMPOSE_ENV="$(CI_COMPOSE_ENV)" GATEWAY_PORT=18090; status=$$?; \
 		$(MAKE) docker-down COMPOSE_ENV="$(CI_COMPOSE_ENV)"; exit $$status
+
+# The gateway image (nginx/Dockerfile, built exactly as the publish jobs build it) against stub
+# upstreams: /api is not rewritten, the Ask stream reaches the backend, *.map is 404, headers are set.
+ci-gateway:
+	deploy/probe-gateway.sh
+
+# docker-compose.prod.yml itself, through the reel-gateway image built from this checkout: the same
+# /health, /health/ready, / and commit probes as ci-docker. cloudflared is the one service not run.
+ci-docker-prod:
+	$(MAKE) docker-ready COMPOSE_ENV="$(CI_PROD_COMPOSE_ENV)" COMPOSE_FILES="$(PROD_SMOKE_FILES)" GATEWAY_PORT=$(PROD_SMOKE_PORT); status=$$?; \
+		$(MAKE) docker-down COMPOSE_ENV="$(CI_PROD_COMPOSE_ENV)" COMPOSE_FILES="$(PROD_SMOKE_FILES)"; exit $$status

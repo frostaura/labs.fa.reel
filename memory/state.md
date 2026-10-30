@@ -34,10 +34,9 @@ early August. CI runs its integration job against a real `pgvector/pgvector:pg16
 green; `dotnet format`, dual coverage ratchets, `npm audit` and `dotnet list package --vulnerable` are all
 build-failing gates.
 
-**Multi-arch images are published; nothing is deployed.** That run built and pushed backend and frontend images to
-Docker Hub, and the Portainer redeploy step was **skipped, not failed**: the repo has no `DEPLOY_ENABLED` variable and
-no `PORTAINER_STACK_ID` secret (the other Portainer secrets exist). So the deploy is two settings and a founder
-decision away, not an engineering task — `questions.md`.
+**Multi-arch images are published; nothing is deployed.** The deploy chain, the single-exposure production
+topology and exactly what the founder still has to create are in `deploy.md` — a founder decision, not an
+engineering task (`questions.md`).
 
 ## Where it stands, by half
 
