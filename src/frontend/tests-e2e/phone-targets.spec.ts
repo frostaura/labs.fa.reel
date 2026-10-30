@@ -87,6 +87,53 @@ test.describe("phone targets on WS-10A routes", () => {
     await context.close();
   });
 
+  // HREV5-PH-05: on real data at 390 px the media-type control sat at the end of the control strip's
+  // horizontal scroller (clientWidth 358, scrollWidth 657): "Movies" was cut mid-word at the clip and
+  // "TV" was entirely off-screen. Every browse segment must be wholly on screen at first paint —
+  // inside the viewport's gutters and inside whatever scroller holds it — with the founder's long
+  // conditions line and with none.
+  for (const [label, filters] of [["the founder's conditions", FILTERS], ["no conditions", { languages: ["*"] }]] as const) {
+    test(`Home's Movies/TV control is never clipped at 390 px (${label})`, async ({ browser }) => {
+      const context = await browser.newContext(PHONE);
+      const page = await context.newPage();
+      await stubEventSource(page);
+      await mockHomeChrome(page, { filters });
+      await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+      await mockJson(page, "**/api/sync/status", {
+        pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+        lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+      });
+      await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [card(1), card(2)], rows: [], lockedRowCount: 0 });
+      await page.goto("/home");
+      await expect(page.getByTestId("hero-card").first()).toBeVisible();
+      await expect(page.getByTestId("browse-show")).toBeAttached();
+      const clipped = await page.evaluate(() => {
+        const out: string[] = [];
+        for (const id of ["browse-media-all", "browse-movie", "browse-show"]) {
+          const el = document.querySelector<HTMLElement>(`[data-testid="${id}"]`)!.closest("button")!;
+          const r = el.getBoundingClientRect();
+          const box = `${id} x${Math.round(r.left)}–${Math.round(r.right)}`;
+          if (r.left < 0 || r.right > window.innerWidth) out.push(`${box} outside the ${window.innerWidth} px viewport`);
+          for (let a = el.parentElement; a; a = a.parentElement) {
+            const style = getComputedStyle(a);
+            if (!/(auto|scroll|hidden)/.test(style.overflowX)) continue;
+            const c = a.getBoundingClientRect();
+            if (r.left < c.left - 0.5 || r.right > c.right + 0.5) out.push(`${box} clipped by a scroller at x${Math.round(c.left)}–${Math.round(c.right)}`);
+          }
+        }
+        return out;
+      });
+      expect(clipped).toEqual([]);
+      // The two groups stay told apart by name (two radio groups, each with its own "All").
+      await expect(page.getByRole("radiogroup", { name: "Media type" }).getByRole("radio", { name: "All" })).toHaveCount(1);
+      await expect(page.getByRole("radiogroup", { name: "Availability" }).getByRole("radio", { name: "All" })).toHaveCount(1);
+      // And the first pick is still on the first screen.
+      const hero = (await page.getByTestId("hero-card").first().boundingBox())!;
+      expect(hero.y, "the first pick's top").toBeLessThan(844 / 2);
+      await context.close();
+    });
+  }
+
   // Twice: the plain shelf, and one with saves held out by the conditions — the held-out line's
   // "Change conditions" link-button measured 101×16 on touch, and the plain fixture never drew it (PH-07).
   for (const heldOutByRules of [undefined, 4]) test(`Saved has no interactive element under 44 px${heldOutByRules ? " — with saves held out" : ""}`, async ({ browser }) => {

@@ -19,6 +19,7 @@ import GenreRow from "../components/rows/GenreRow";
 import RailPageProvider from "../components/rows/RailPageProvider";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
+import FadeScrollRow from "../components/FadeScrollRow";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import PickConditionsButton from "../components/rec/PickConditionsButton";
 import HomeConditionChips from "../components/rec/HomeConditionChips";
@@ -138,6 +139,44 @@ export default function Home() {
     ...digestFiltered,
   ].map((c) => c.titleId);
 
+  // The control line's parts, laid out per form factor below.
+  const conditionsControl = (
+    <>
+      <div className={isMdUp || !hasConditions ? "shrink-0" : "contents"}>
+        <PickConditionsButton
+          open={conditionsOpen}
+          onOpenChange={setConditionsOpen}
+          trigger={isMdUp || !hasConditions}
+          onSaved={() => {
+            setAdoptOnNext(true);
+            setConditionsVersion((v) => v + 1);
+          }}
+        />
+      </div>
+      {!isMdUp && (
+        <HomeConditionChips className="shrink-0" variant="strip" onOpenEditor={() => setConditionsOpen(true)} limit={2} />
+      )}
+    </>
+  );
+  const freshPicksButton = hasFresherPicks && (
+    <Button
+      onClick={() => setAdoptedKey(latestKey)}
+      data-testid="adopt-fresh-picks"
+      title="Load the newly generated picks — this resets the rows below"
+      className="h-auto min-h-11 shrink-0 gap-1.5 rounded-lg border-fa-frost/40 bg-fa-glass px-2.5 py-2 font-normal text-fa-frost hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
+    >
+      <Sparkles className="h-3.5 w-3.5" aria-hidden />
+      <span className="fa-overline">New picks ready</span>
+    </Button>
+  );
+  // Refresh is last from `md`, at the end of the control strip where it has always been. Not while
+  // the first build is still running: there is nothing to refresh yet.
+  const refreshButton = !building && (
+    <div className="shrink-0">
+      <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+    </div>
+  );
+
   return (
     // Tighter rhythm on a phone, where every 12px of chrome above the first pick is 12px of pick
     // below the fold. The budget is the cold-Home acceptance: the first pick's top edge within 220px
@@ -174,49 +213,35 @@ export default function Home() {
               conditions saved the button stands in, so the editor is always one tap away. The browse
               toggles always render (F-12), building or not, with picks or without: they are how a
               "TV only" view that matches nothing is undone. */}
-          <div className="-mx-1 flex w-full items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:mx-0 md:w-auto md:flex-wrap md:overflow-visible md:px-0">
-            <div className={isMdUp || !hasConditions ? "shrink-0" : "contents"}>
-              <PickConditionsButton
-                open={conditionsOpen}
-                onOpenChange={setConditionsOpen}
-                trigger={isMdUp || !hasConditions}
-                onSaved={() => {
-                  setAdoptOnNext(true);
-                  setConditionsVersion((v) => v + 1);
-                }}
-              />
-            </div>
-            {!isMdUp && (
-              <HomeConditionChips
-                className="shrink-0"
-                variant="strip"
-                onOpenEditor={() => setConditionsOpen(true)}
-                limit={2}
-              />
-            )}
-            {hasFresherPicks && (
-              <Button
-                onClick={() => setAdoptedKey(latestKey)}
-                data-testid="adopt-fresh-picks"
-                title="Load the newly generated picks — this resets the rows below"
-                className="h-auto min-h-11 shrink-0 gap-1.5 rounded-lg border-fa-frost/40 bg-fa-glass px-2.5 py-2 font-normal text-fa-frost hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
-              >
-                <Sparkles className="h-3.5 w-3.5" aria-hidden />
-                <span className="fa-overline">New picks ready</span>
-              </Button>
-            )}
-            {/* Refresh sits right after the conditions on a phone so it is never scrolled out of
-                reach, and last from `md`, at the end of the control strip where it has always been.
-                Not while the first build is still running: there is nothing to refresh yet. */}
-            {!building && (
-              <div className="shrink-0 md:order-last">
-                <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+          {isMdUp ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              {conditionsControl}
+              {freshPicksButton}
+              <div className="shrink-0">
+                <BrowseFilters value={filter} onChange={setFilter} />
               </div>
-            )}
-            <div className="shrink-0">
-              <BrowseFilters value={filter} onChange={setFilter} />
+              {refreshButton}
             </div>
-          </div>
+          ) : (
+            // On a phone the Movies/TV control is pinned at the line's start, outside the scroller:
+            // as the scroller's tail it sat past the edge once the founder's conditions filled the
+            // line — "Movies" cut mid-word, "TV" wholly off-screen (HREV5-PH-05). New picks and
+            // refresh follow it so neither is ever scrolled out of reach; the conditions and the
+            // availability toggle scroll after them, under an edge fade that says there is more.
+            <div className="flex w-full items-center gap-1">
+              <div className="shrink-0">
+                <BrowseFilters value={filter} onChange={setFilter} showAvailability={false} />
+              </div>
+              <FadeScrollRow className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none]">
+                {freshPicksButton}
+                {refreshButton}
+                {conditionsControl}
+                <div className="shrink-0">
+                  <BrowseFilters value={filter} onChange={setFilter} showMedia={false} />
+                </div>
+              </FadeScrollRow>
+            </div>
+          )}
           {/* Everything actually in force, on its own full-width line under the title and the
               controls: the saved conditions AND the browse toggles. Without this the feed silently
               obeys settings made on another screen — a standing "no documentary" is invisible

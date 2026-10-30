@@ -13,24 +13,29 @@ export default function BrowseFilters({
   value,
   onChange,
   showAvailability = true,
+  showMedia = true,
 }: {
   value: BrowseFilter;
   onChange: (next: BrowseFilter) => void;
   showAvailability?: boolean;
+  /** False renders the availability group alone: Home's phone line places the two apart (HREV5-PH-05). */
+  showMedia?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2" data-testid="browse-filters">
-      <SegmentedControl<MediaFilter>
-        label="Media type"
-        size="sm"
-        options={[
-          segment("all", "All", "browse-media-all"),
-          segment("movie", "Movies", "browse-movie"),
-          segment("show", "TV", "browse-show"),
-        ]}
-        value={value.media}
-        onValueChange={(media) => onChange({ ...value, media })}
-      />
+    <div className="flex flex-wrap items-center gap-2" data-testid={showMedia ? "browse-filters" : "browse-filters-availability"}>
+      {showMedia && (
+        <SegmentedControl<MediaFilter>
+          label="Media type"
+          size="sm"
+          options={[
+            segment("all", "All", "browse-media-all"),
+            segment("movie", "Movies", "browse-movie"),
+            segment("show", "TV", "browse-show"),
+          ]}
+          value={value.media}
+          onValueChange={(media) => onChange({ ...value, media })}
+        />
+      )}
       {showAvailability && (
         <SegmentedControl<AvailabilityFilter>
           label="Availability"
