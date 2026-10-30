@@ -2296,18 +2296,24 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     /// the turn is a person request over their credits, and the reply names them. Varied over the
     /// keyless and the failed-plan paths, over the name with a topic word left beside it, and over a name
     /// nobody in the catalogue has, which says the reading failed rather than that nothing exists.
+    /// <para>HREV8-ASK-02 / HREV8-RET-03 / HREV8-PLAT-03: the reply names the person in the role the
+    /// message read, so the expected credit is a parameter rather than one string for every shape —
+    /// "movies starring X" is the cast role and reads "starring X" (the composer's pinned copy, see
+    /// <c>AskReelV2UnitTests</c> and <c>LiveSearchExpansionTests</c>), while "with X" and a bare name
+    /// carry no role and read "with X". The round-7 rows asserted "with X" for the starring shape and
+    /// had never run against a database.</para>
     /// </summary>
     [Theory]
-    [InlineData(true, "movies with {0}", true)]
-    [InlineData(false, "movies with {0}", true)]
-    [InlineData(true, "{0} films", true)]
-    [InlineData(false, "{0} films", true)]
-    [InlineData(true, "movies with {0}", false)]
-    [InlineData(false, "movies with {0}", false)]
+    [InlineData(true, "movies with {0}", true, "with {0}")]
+    [InlineData(false, "movies with {0}", true, "with {0}")]
+    [InlineData(true, "{0} films", true, "with {0}")]
+    [InlineData(false, "{0} films", true, "with {0}")]
+    [InlineData(true, "movies with {0}", false, null)]
+    [InlineData(false, "movies with {0}", false, null)]
     // Round 7: a role word before the name is the role, never a topic left beside the person.
-    [InlineData(true, "movies starring {0}", true)]
-    [InlineData(false, "movies starring {0}", true)]
-    public async Task A_model_less_person_request_searches_the_persons_credits(bool keyless, string shape, bool known)
+    [InlineData(true, "movies starring {0}", true, "starring {0}")]
+    [InlineData(false, "movies starring {0}", true, "starring {0}")]
+    public async Task A_model_less_person_request_searches_the_persons_credits(bool keyless, string shape, bool known, string? credit)
     {
         if (!Fixture.Available)
         {
@@ -2356,7 +2362,12 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Empty(plan.GetProperty("concepts").EnumerateArray());
         Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
         Assert.Equal(credited.Order(), outcome.Cards.Select(c => c.TitleId).Order());
-        Assert.Contains($"with {name}", outcome.AssistantText, StringComparison.Ordinal);
+        var expectedCredit = string.Format(CultureInfo.InvariantCulture, credit!, name);
+        Assert.Contains(expectedCredit, outcome.AssistantText, StringComparison.Ordinal);
+        // And never the other role's wording: a role the message did not state is not invented, and
+        // one it did state is not dropped.
+        var otherCredit = credit!.StartsWith("starring", StringComparison.Ordinal) ? $"with {name}" : $"starring {name}";
+        Assert.DoesNotContain(otherCredit, outcome.AssistantText, StringComparison.Ordinal);
         Assert.Equal(0, judge.Batches);
     }
 
