@@ -4,14 +4,15 @@
 - 40 scenarios, 60 turns, concurrency 2, 1235 s wall, $0.1313 from the ledger
 - Latency gates do NOT apply (build slots not held during the run) — latency below is reported, not gated
 - Model key: unrecorded · scenario fingerprint `e84f9e89e829c196`
+- **13 turn(s) have no materialised concept truth** (ninja-critique#1: ninja-meant; ninja-critique#2: ninja-meant; tense-heist#1: heist-meant; cerebral-heist-ordinals#1: heist-meant; cerebral-heist-ordinals#3: heist-meant): no concept check scored them; re-materialise with `askreel.mjs rematerialise <recording.json> --db <eval db>`
 - Started 2026-10-24T18:51:33.506Z, finished 2026-10-24T19:12:08.737Z
 
 ## Gates
 
 | Metric | Value | n | Gate | Status |
 |---|---|---|---|---|
-| Constraint precision@8 (facet scenarios) | 0.414 | 35 | >= 0.9 | FAIL |
-| Honest-empty compliance | 0 | 4 | >= 1 | FAIL |
+| Constraint precision@8 (facet scenarios) | 0.426 | 34 | >= 0.9 | FAIL |
+| Honest-empty compliance | 0 | 2 | >= 1 | FAIL |
 | Missed supply (no pick while eligible titles clear the bar) | 0 | 60 | <= 0 | pass |
 | Supply counts equal the SQL truth (none-found replies) | — | 0 | >= 1 | no data |
 | Reference accuracy | 0 | 5 | >= 0.95 | FAIL |
@@ -23,7 +24,7 @@
 | Fallback rate | 0.717 | 60 | <= 0.01 | FAIL |
 | Standing-exclusion leaks (shown titles outside the eligibility truth) | 0 | 60 | <= 0 | pass |
 | Picks against the request's own media filter | 0 | 60 | <= 0 | pass |
-| Ruled-out titles shown (picks and trays) | 23 | 60 | <= 0 | FAIL |
+| Ruled-out titles shown (picks and trays) | 19 | 60 | <= 0 | FAIL |
 | Trakt calls from the eval stack | 0 | 60 | <= 0 | pass |
 | Turn latency p50 (ms, concurrency ≤ 2) | 40927 | 60 | <= 8000 | not-gated (build slots not held during the run) |
 | Turn latency p95 (ms, concurrency ≤ 2) | 53018 | 60 | <= 15000 | not-gated (build slots not held during the run) |
@@ -35,14 +36,14 @@
 
 | Metric | Value | n |
 |---|---|---|
-| constraintPrecisionAt8 | 0.414 | 35 |
-| negationPrecisionAt8 | 0.875 | 7 |
-| honestEmptyCompliance | 0 | 4 |
+| constraintPrecisionAt8 | 0.426 | 34 |
+| negationPrecisionAt8 | 0.896 | 6 |
+| honestEmptyCompliance | 0 | 2 |
 | referenceAccuracy | 0 | 5 |
 | critiqueCompliance | 0 | 1 |
 | actClassification | — | 0 |
 | conflictDetection | 0.667 | 3 |
-| modeAccuracy | 0 | 8 |
+| modeAccuracy | 0 | 6 |
 | noRepeatCompliance | 1 | 6 |
 | supplyCountAccuracy | — | 0 |
 | groundingViolations | 54 | 60 |
@@ -50,8 +51,8 @@
 | fallbackRate | 0.717 | 60 |
 | exclusionLeaks | 0 | 60 |
 | mediaFilterViolations | 0 | 60 |
-| mediaMismatches | 34 | 60 |
-| mustNotViolations | 23 | 60 |
+| mediaMismatches | 38 | 60 |
+| mustNotViolations | 19 | 60 |
 | hedgingWhyLines | 243 | 60 |
 | nonLatinWhyLines | 1 | 60 |
 | missedSupply | 0 | 60 |
@@ -72,17 +73,17 @@
 | ambiguous | 1 | 0 / 0 | 1 |
 | chitchat | 5 | 3 / 4 | 4 |
 | conflict | 4 | 5 / 7 | 2 |
-| critique | 6 | 7 / 8 | 5 |
-| empty-supply | 8 | 12 / 13 | 6 |
-| facet | 50 | 16 / 24 | 35 |
-| item-question | 11 | 12 / 13 | 9 |
+| critique | 6 | 3 / 4 | 5 |
+| empty-supply | 8 | 8 / 9 | 6 |
+| facet | 50 | 12 / 20 | 35 |
+| item-question | 11 | 8 / 9 | 9 |
 | media-switch | 8 | 3 / 4 | 5 |
 | mood | 6 | 0 / 0 | 6 |
 | mood-vs-exclusion | 3 | 0 / 0 | 2 |
 | multilingual | 1 | 0 / 0 | 1 |
 | negation | 5 | 0 / 0 | 5 |
 | new-topic | 5 | 1 / 3 | 5 |
-| ordinal | 18 | 14 / 19 | 16 |
+| ordinal | 18 | 10 / 15 | 16 |
 | pagination | 4 | 1 / 3 | 4 |
 | reference-title | 1 | 0 / 0 | 1 |
 | seen-title | 1 | 0 / 0 | 0 |
@@ -102,13 +103,14 @@
 ## Per-scenario diffs (turns with a failed check, a leak, a fallback or a grounding violation)
 
 ### ninja-critique (facet, empty-supply, critique, ordinal, item-question)
-- T1 “ninja movies” — 24 picks, supply 0 eligible of 87
-  - failed: honestEmpty, mode
+- T1 “ninja movies” — 24 picks, precision@8 0, supply 0 eligible of 87
+  - concept truth `ninja-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Triple Threat; Man of Tai Chi; Blade of the 47 Ronin; Lady Bloodfight; Tornado; Black Lotus; Weekend in Taipei; Gunpowder Milkshake
   - fallback: stub reply
   - reply echoes the user's message
-- T2 “none of the above are ninja movies. I want ninja movies” — 10 picks, supply 0 eligible of 87
-  - failed: honestEmpty, mode, critique
+- T2 “none of the above are ninja movies. I want ninja movies” — 10 picks, precision@8 0, supply 0 eligible of 87
+  - failed: critique
+  - concept truth `ninja-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Darc; Jack Hunter and the Star of Heaven; Tracker; Under the Hood; The Brave One; Five Fingers; Kicks; To End All Wars
 - T3 “more like the second one you showed me first time round” — 15 picks
   - failed: reference
@@ -141,6 +143,11 @@
   - failed: honestEmpty, mode
   - off-topic in first 8: 2081; Xeno; Slash/Back; Code 8 Part II; Monsters; Cosmic Chaos; Doctor Who: The Next Doctor; Proximity
 
+### tense-heist (facet)
+- T1 “tense heist thrillers” — 24 picks, precision@8 0.63, supply 57 eligible of 582
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
+  - off-topic in first 8: Thick as Thieves; All the Devils Are Here; Blowback
+
 ### psych-thriller-tell-more (facet, item-question, ordinal)
 - T1 “a psychological thriller movie” — 6 picks, precision@8 0.67, supply 833 eligible of 7550
   - off-topic in first 8: Suspiria; Hitchcock
@@ -162,15 +169,15 @@
 - T1 “fantasy or mystery movies” — 11 picks
   - fallback: stub reply
   - reply echoes the user's message
-- T2 “Ok let's do mind benders instead. dark ones” — 11 picks, precision@8 0.75
+- T2 “Ok let's do mind benders instead. dark ones” — 11 picks
   - wrong media: Mr. Mercedes; Tell Me a Story; Chambers; Persons Unknown; Creeped Out; Dig
-  - ruled-out titles shown: A Dark Song; The Dark; Creeped Out; Herman
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on Persons Unknown
   - reply echoes the user's message
 
 ### cerebral-heist-ordinals (facet, ordinal, pagination)
 - T1 “a cerebral heist movie with a twist ending” — 24 picks, precision@8 0.50, supply 40 eligible of 543
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Sharper; No Sudden Move; Thick as Thieves; All the Devils Are Here
   - fallback: stub reply
   - reply echoes the user's message
@@ -181,11 +188,13 @@
   - reply echoes the user's message
 - T3 “actually go back to cerebral heists with a twist” — 7 picks, precision@8 0.14, supply 40 eligible of 543
   - wrong media: The Capture; Collateral; Ice; Trackers; Somewhere Between; Prey; Motive
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: The Capture; Collateral; Trackers; Somewhere Between; Prey; Motive
   - fallback: stub reply
   - reply echoes the user's message
 - T4 “more of those please” — 16 picks, precision@8 0, supply 40 eligible of 543
   - wrong media: Tell Me You Love Me; The Client List; Good Girls; 666 Park Avenue; For the People
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Chosen; Dirty Pretty Things; Love Finds You in Charm; Tell Me You Love Me; The Fits; The Client List; The Ones Below; Love Finds You In Sugarcreek
   - fallback: stub reply; 5 stub why-lines
   - grounding: stub why on Love Finds You in Charm; stub why on Tell Me You Love Me; stub why on The Fits; stub why on The Client List; stub why on Love Finds You In Sugarcreek
@@ -198,13 +207,14 @@
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on Alien: Containment
   - reply echoes the user's message
-- T2 “not that, older” — 20 picks, precision@8 0, supply 39 eligible of 302
-  - off-topic in first 8: We Still Kill the Old Way; Chosen; Edie; 12 and Holding; Anne of Green Gables; Unforgotten; Too Late; Lucky
+- T2 “not that, older” — 20 picks
+  - wrong media: Unforgotten; Too Old to Die Young
+  - concept truth `space@-1999` was never materialised for this recording: no concept check scored
   - fallback: stub reply; 6 stub why-lines
   - grounding: stub why on Edie; stub why on 12 and Holding; stub why on Anne of Green Gables; stub why on Unforgotten; stub why on Too Late; stub why on Lucky
   - reply echoes the user's message
-- T3 “same but as a series” — 7 picks, precision@8 0, supply 27 eligible of 89
-  - off-topic in first 8: American Crime Story; The Missing; Channel Zero; Tales of the City; The Romanoffs; Tyler Perry's If Loving You Is Wrong; Tell Me You Love Me
+- T3 “same but as a series” — 7 picks
+  - concept truth `space@-1999` was never materialised for this recording: no concept check scored
   - fallback: stub reply
   - reply echoes the user's message
 - T4 “what did I ask you before?” — 12 picks
@@ -248,6 +258,8 @@
   - reply echoes the user's message
 
 ### heist-2010s-then-comedy (facet, conflict)
+- T1 “a tense heist thriller from the 2010s, nothing too long” — 24 picks
+  - concept truth `heist-2010s:Any` was never materialised for this recording: no concept check scored
 - T2 “actually something funny instead, a comedy heist” — 9 picks, precision@8 1
   - fallback: stub reply
   - reply echoes the user's message
@@ -287,10 +299,13 @@
 
 ### heist-more-heart (facet, critique)
 - T1 “heist movies” — 24 picks, precision@8 0.63, supply 40 eligible of 543
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Thick as Thieves; Rob the Mob; The Crew
   - fallback: stub reply
   - reply echoes the user's message
-- T2 “not that, something with more heart” — 14 picks, precision@8 0, supply 57 eligible of 582
+- T2 “not that, something with more heart” — 14 picks, precision@8 0, supply 40 eligible of 543
+  - wrong media: Dare Me; Tell Me You Love Me
+  - concept truth `heist-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Short Term 12; Stronger; Heavyweight; A Question of Faith; 12 and Holding; The Air I Breathe; Fathers and Daughters; Lilting
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on 12 and Holding
@@ -316,6 +331,7 @@
 
 ### ninja-tv (facet, empty-supply)
 - T1 “ninja shows” — 12 picks, precision@8 0.13, supply 1 eligible of 23
+  - concept truth `ninja-meant` was never materialised for this recording: no concept check scored
   - off-topic in first 8: Warrior; Nikita; Painkiller Jane; Kamen Rider: Dragon Knight; Breakout Kings; Knightfall; Blade: The Series
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on Star Trek: Short Treks
@@ -345,6 +361,11 @@
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on The Kitchen
   - reply echoes the user's message
+
+### facet-dinosaur (facet)
+- T1 “dinosaur movies” — 8 picks, precision@8 0.25, supply 4 eligible of 112
+  - concept truth `dinosaur-meant` was never materialised for this recording: no concept check scored
+  - off-topic in first 8: Discovering Dinotopia; Basilisk: The Serpent King; Where the Wild Things Are; Monsters; Centurion; Under the Hood
 
 ### facet-con-artist (facet)
 - T1 “con artist movies” — 9 picks, precision@8 0.13, supply 3 eligible of 81

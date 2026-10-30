@@ -522,6 +522,73 @@ test("missed supply: no pick while eligible titles clear the bar fails a gate; n
   assert.equal(score(rec(turn("heist movies", [card(A, "Alpha")]), f), sc, prices, gates).gates.find((g) => g.metric === "missedSupply").status, "pass");
 });
 
+test("missed supply subtracts what the conversation already showed: the app may never repeat a title", () => {
+  // T1 showed A, the one title clearing the bar; T2 ("more of those") can only honestly say none-found.
+  const def = { expect: { concept: "heist" } };
+  const t1 = turn("heist movies", [card(A, "Alpha")]);
+  const t2 = turn("more of those", [], { mode: "NoneFound" });
+  const exact = facts({ truth: { heist: { members: [A], supply: { Any: { ...supplyTruthOf({ top: { clearing: 1 } }), clearingShown: [A] } } } } });
+  const r = evaluateTurn(def, t2, 1, [t1, t2], exact);
+  assert.equal(r.missedSupply, undefined, "the only clearing title was shown on T1 and must not repeat");
+  assert.equal(r.checks.honestEmpty, true);
+  assert.equal(r.shownClearing, 1);
+  // The same turn opening a conversation (nothing shown before it) still missed supply.
+  assert.equal(evaluateTurn(def, t2, 0, [t2], exact).missedSupply, true);
+  // A title shown on the SAME turn is not "already shown": only earlier turns count.
+  assert.equal(evaluateTurn(def, t2, 0, [t2], exact).shownClearing, 0);
+  // Two clearing, one shown before: one is still offerable, so showing nothing is still missed supply.
+  const two = facts({ truth: { heist: { members: [A, B], supply: { Any: { ...supplyTruthOf({ top: { clearing: 2 } }), clearingShown: [A] } } } } });
+  assert.equal(evaluateTurn(def, t2, 1, [t1, t2], two).missedSupply, true);
+  // A recording from before `clearingShown` was frozen: earlier PICKS and the unchecked tray (both clear
+  // the bar by construction) of truth members are subtracted; a floor-tray card is under the bar and is not.
+  const legacy = facts({ truth: { heist: { members: [A, B], supply: { Any: supplyTruthOf({ top: { clearing: 1 } }) } } } });
+  assert.equal(evaluateTurn(def, t2, 1, [t1, t2], legacy).missedSupply, undefined);
+  const floorOnly = turn("heist movies", [], { belowFloor: [card(A, "Alpha")] });
+  assert.equal(evaluateTurn(def, t2, 1, [floorOnly, t2], legacy).missedSupply, true);
+  // An earlier pick outside the concept's truth is not subtracted.
+  const offTopic = turn("heist movies", [card(C, "Charlie")]);
+  assert.equal(evaluateTurn(def, t2, 1, [offTopic, t2], legacy).missedSupply, true);
+});
+
+test("missed supply reads `meant` when the scenario names it: the request as a person means it, not the tag population the reply counts", () => {
+  // The concept truth (what the reply's counts are held to) holds A and B clearing; the narrower meant
+  // truth holds only A, which T1 already showed. "More of those" with nothing left is honest-empty.
+  const def = { expect: { concept: "ninja", meant: "ninja-meant" } };
+  const t1 = turn("ninja shows", [card(A, "Alpha")]);
+  const t2 = turn("more of those", [], { mode: "NoneFound" });
+  const f = facts({ truth: {
+    ninja: { members: [A, B], supply: { Any: { ...supplyTruthOf({ top: { clearing: 2 } }), clearingShown: [A] } } },
+    "ninja-meant": { members: [A], supply: { Any: { ...supplyTruthOf({ top: { clearing: 1 } }), clearingShown: [A] } } },
+  } });
+  const r = evaluateTurn(def, t2, 1, [t1, t2], f);
+  assert.equal(r.missedSupply, undefined);
+  assert.equal(r.checks.honestEmpty, true);
+  // Without `meant` the same turn is held to the tag population, where B still clears: missed.
+  assert.equal(evaluateTurn({ expect: { concept: "ninja" } }, t2, 1, [t1, t2], f).missedSupply, true);
+  // A meant truth that clears more than was shown is still missed supply.
+  const more = structuredClone(f);
+  more.truth["ninja-meant"].supply.Any.clearing = 2;
+  assert.equal(evaluateTurn(def, t2, 1, [t1, t2], more).missedSupply, true);
+  // A recording that never froze the meant truth is unverified, never scored against the tag population.
+  const legacy = structuredClone(f);
+  delete legacy.truth["ninja-meant"];
+  const u = evaluateTurn(def, t2, 1, [t1, t2], legacy);
+  assert.equal(u.truthMissing, "ninja-meant");
+  assert.equal(u.missedSupply, undefined);
+});
+
+test("a turn whose media scope the recording never materialised is unverified, never scored against another scope's supply", () => {
+  const def = { expect: { concept: "heist", media: "Movie" } };
+  const none = turn("heist movies", [], { mode: "NoneFound" });
+  const f = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf() } } } });
+  const r = evaluateTurn(def, none, 0, [none], f);
+  assert.equal(r.missedSupply, undefined);
+  assert.equal(r.truthMissing, "heist:Movie");
+  // The scope it ran under is scored.
+  const g = facts({ truth: { heist: { members: [A], supply: { Movie: supplyTruthOf() } } } });
+  assert.equal(evaluateTurn(def, none, 0, [none], g).missedSupply, true);
+});
+
 test("supply counts: a none-found reply's seen, unscored and relaxation counts must equal the SQL truth, ±0", () => {
   const def = { expect: { concept: "heist" } };
   const f = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf({ top: { clearing: 0 } }) } } } });

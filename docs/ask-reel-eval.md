@@ -146,7 +146,24 @@ passes the window, as it passes the API's. Without `years` a "last ten years" re
 year's heists (487 matching, MinYear 2000 "unlocks 36"), so a correct reply read as wrong supply counts
 and missed supply (HREV3-EVAL-A, HREV3-RET-05). A recording made before a turn gained its window has no
 windowed truth: the turn is reported as unverified (`truthMissing`), never scored against an empty set,
-until `rematerialise` adds it from the database the recording ran on.
+until `rematerialise` adds it from the database the recording ran on. A turn whose media scope the recording
+never counted (a `media` expectation added after it ran) is unverified the same way (`truthMissing`
+`<key>:<scope>`), never scored against another scope's supply.
+
+`meant` (with its justification, `meantWhy`) names a narrower truth where the concept truth is the TAG
+population a reply counts ("You have 1 unseen ninja show tagged that way, but none of the ones I checked is
+really a match"). Supply counts stay held to the concept; whether the turn missed supply, or owed an honest
+empty, is read from the meant truth. It exists because the app has two layers by design — retrieval counts
+what the catalogue tags, the judge rules on what the request means — and one SQL truth cannot be both: held
+to the tags, a judge that correctly rejects American Ninja Warrior for "ninja shows" reads as missed supply;
+held to the meaning, a reply that correctly counts the tags reads as wrong counts. Precision is still scored
+against the concept (an upper bound). Three exist, each with its SQL fixture test in `ConceptTruthParityTests`:
+`ninja-meant` (ninja minus the Ninja Warrior competition format), `heist-meant` (tagged or named a heist,
+never only a robbery; it errs narrow) and `dinosaur-meant` (dinosaur minus hand-labelled titles that carry the
+tag for a passing sequence, each named in the file by TMDB id with its reason — today only The Tree of Life).
+A hand label is added only for a title no film-literate reader would call the concept, never to clear a turn
+the judge got wrong: crit-not-spy T2's residual in fix-golden-v2-2 (a tagged spy title the judge rejected) is
+not unambiguous, so it has no label and stays missed supply.
 
 A concept truth states the concept as the request's own words mean it, not as its nearest genre tag.
 "Romantic comedies" (`conflict-romcom`) is `truth/romantic-comedy.sql`: romance AND comedy, each read the way
@@ -154,6 +171,26 @@ an exclusion of that genre reads it (the soap alias, romance's TV stand-in keywo
 generated from `GenreStandIns` like `_eligible.sql`'s lists) — the app's own reading, held to it by
 `ConceptTruthParityTests`. Held to every romance title instead, the app's correct count (2,981 of 4,675 at
 50 votes) failed the supply gate and was filed as an app defect (HREV4-RET-01).
+
+## Truth restatements of fix-golden-v2-2 (2026-10-30)
+
+Each is a correctness fix — what the request's words mean, or the app's reading where the app is right —
+made after the second fix run, verified on the eval copy (`reel_int_fix2`) count for count against the
+reply it had failed, and held by a parity or unit test. No bar moved.
+
+| Scenario / truth | Change | Why |
+|---|---|---|
+| scorer | Missed supply subtracts clearing titles an earlier turn showed | The app may never repeat a title. Turns that had already shown every clearing title ("only series", "show me more", "half of these have no zombies in them") were called missed supply for answering honestly (`askreel-score.test.mjs`) |
+| `media` (20 turns) | Added where the user's words name the medium ("heist movies", "french films", "crime series") and on follow-ups of such a turn | "Films"/"movies" mean movies; without it the turn was held to movies and shows together, and the app's correct movie counts read as wrong (crit-not-heists, crit-not-spy, crit-zombie-not, conflict-french-films, …) |
+| `media` (6 turns) | Removed where the words name none ("westerns", "found footage horror", "kidnapping thrillers", "something like The Hurt Locker", "a tense heist thriller from the 2010s") | A media expectation comes from the user's words, the rule the app itself holds (`PlanSanitizer.UserMedia`); "kidnapping thrillers" counted 4 shows the eval wrongly excluded |
+| refine-recent → `kidnapping-thriller.sql` | kidnapping AND thriller (alias suspense; TV stand-ins) | "Kidnapping thrillers" are thrillers about kidnapping; held to every kidnapping title the reply's 69 read as 90 (`ConceptTruthParityTests`) |
+| conflict-animated-kids → `animated-for-kids.sql` | animation AND family (alias children), movies | "For kids" is the family genre; held to every animated title the reply's 1,247 read as 4,004 |
+| space-isolation-chain T2/T3 | `years: {to: 1999}` | "Not that, older" after cards all from 2000 on (the account's standing floor; the oldest shown was 2000) means before 2000 — the app's reading, which honestly reports the collision with "released 2000 or later" |
+| `space.sql` | The app's space synonym group from a word start, the name arm on "space" only | It left out the bare "space" label (219 titles) and "spacecraft" (104), so "space opera" was not space; the app's 110 / 27 read as 55 / 18 |
+| `martial-arts.sql` | Name arm reads "martial arts" only, not "kung fu" | A synonym is a keyword claim (HREV3-RET-A, as `heist.sql`); four untagged "Kung Fu …" names made 523 read as 527 |
+| fantasy-then-mind-benders T2 | `mustNot: genre-fantasy` removed | "Let's do mind benders instead" switches topic and rules nothing out; only the user's own words are negations (founder-locked) |
+| ninja / heist / dinosaur turns | `meant: ninja-meant` / `heist-meant` / `dinosaur-meant` | See `meant` above |
+| `genre-fantasy.sql`, `kidnapping.sql` | Moved to the sealed holdout's truth / deleted | No open scenario uses them any more (`check`) |
 
 ## SQL truth
 
@@ -211,7 +248,7 @@ is listed with its reason in `eval/askreel/gates.json` → `amendments`.
 | Grounding violations | Stub-family why-lines on picks (invented explanations shown as model output) + catalogue titles a reply names that are not on screen and not in the user's words. A title is named only as a whole name with its own capitalisation, and only where no longer cited name covers the mention ("Blade of the 47 Ronin" names that film, not 47 Ronin); it is on screen when any card shown this turn or earlier has the same normalised name (the reply cannot say which of two equal names it meant); one name counts once |
 | Echo | The reply quotes the user's message (“…”), or repeats a message of five or more words verbatim |
 | Fallback rate | Turns that failed, carry a stub reply, a stub why-line, a typed fallback source (`Fallback`, `Stub`, or `Templater` on an in-request pick), or a `degraded` frame. `Generic` (the captionless filmography list) and `Templater` on an outside-request card (its deterministic exclusion caption) are by design |
-| Missed supply | Turns with a concept that show no pick while the truth holds eligible titles clearing the For-you bar (gated at 0). Eligible titles with none clearing the bar make the turn an honest-empty check instead |
+| Missed supply | Turns with a concept that show no pick while the truth (its `meant` truth when it has one) holds eligible titles clearing the For-you bar that the conversation has NOT already shown (gated at 0). The app never repeats a title, so a clearing title an earlier turn showed — as a pick or in any tray — is not supply a later turn can offer; the recording freezes which shown titles clear (`clearingShown`), and an older recording infers it from earlier picks and unchecked cards only (both clear the bar by construction), so the inference can only under-subtract. Eligible titles with none left clearing the bar make the turn an honest-empty check instead |
 | Supply count accuracy | Over none-found turns that state supply counts: every count in `done.supply` and every count the **reply's words** state (matching, seen, saved or dismissed, held out, under the bar, unscored, each named relaxation, and that no unnamed relaxation unlocks more than a named one) equals the supply truth at the stated vote floor, ±0. A reply whose report says a partition or an unscored count was due, but which states none the parser reads, fails. Gated at 100% |
 | Exclusion leaks | Shown titles (picks and every tray: under the bar, near misses, unchecked) outside `_eligible.sql` |
 | Ruled-out titles | Shown titles (picks and every tray) in a turn's `mustNot` truth (gated at 0) |

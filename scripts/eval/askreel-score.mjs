@@ -205,23 +205,61 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
   r.mustNotViolations = shown.filter((c) => mustNotMembers.has(c.titleId)).map((c) => c.name);
 
   const truthKey = conceptKey(e, opts.startedAt);
+  // `meant` (optional): the request as a person means it, where the concept truth is the TAG population
+  // the reply's counts describe ("You have 1 unseen ninja show tagged that way, but none … is really a
+  // match"). Supply counts stay held to the concept; whether the turn missed supply — or owed an honest
+  // empty — is read from the meant truth. Each `meant` is justified per scenario in docs/ask-reel-eval.md.
+  const meantKey = e.meant ? conceptKey({ concept: e.meant, years: e.years }, opts.startedAt) : null;
+  const scopeMissing = (tr) => tr?.supply && Object.keys(tr.supply).length > 0 && !tr.supply[scope];
   if (e.concept && !facts.truth?.[truthKey]) {
     // A turn whose concept truth the recording never materialised (a window added after it ran) is
     // unverified, never scored against an empty set: that would read as off-topic picks or missed supply.
     r.truthMissing = truthKey;
+  } else if (e.concept && scopeMissing(facts.truth[truthKey])) {
+    // Nor is a turn whose media scope the recording never counted (a media expectation added after it
+    // ran) scored against another scope's supply: a movie request held to movies and shows reads as
+    // wrong counts and missed supply.
+    r.truthMissing = `${truthKey}:${scope}`;
   } else if (e.concept) {
     const tr = facts.truth[truthKey];
     const members = new Set(tr?.members ?? []);
-    const supply = tr?.supply?.[scope] ?? tr?.supply?.Any ?? null;
+    const supply = tr?.supply?.[scope] ?? null;
     const first8 = picks.slice(0, 8);
     const precise = first8.filter((c) => members.has(c.titleId) && !mustNotMembers.has(c.titleId));
     r.supply = supply;
     r.offTopic = first8.filter((c) => !members.has(c.titleId)).map((c) => c.name);
+    const meant = meantKey ? facts.truth?.[meantKey] ?? null : tr;
+    if (meantKey && (!meant || scopeMissing(meant))) r.truthMissing = meant ? `${meantKey}:${scope}` : meantKey;
+    const decide = meant?.supply?.[scope] ?? null;
+    const decideMembers = new Set(meant?.members ?? []);
     // What Ask Reel could have picked: eligible, scored and clearing the For-you bar. Recordings made
     // before `clearing` was materialised carry `aboveBar`, the same count compared unrounded.
-    const clearing = supply ? (supply.clearing ?? supply.aboveBar ?? null) : null;
+    const clearingAll = decide ? (decide.clearing ?? decide.aboveBar ?? null) : null;
+    // The app may never repeat a title this conversation already showed (SearchTurnCards is its no-repeat
+    // set: picks and every tray), so a clearing title shown on an EARLIER turn is not supply this turn can
+    // offer — "more of those" after every clearing title was shown is honestly none-found. The recording
+    // freezes which shown titles clear the bar inside the concept and scope (`clearingShown`); a recording
+    // from before that field infers it from the earlier picks and unchecked tray of truth members (both
+    // clear the bar by construction — AskReelGate.Place / UncheckedTier), never from the floor or
+    // near-miss trays, so the inference can only under-subtract.
+    const priorShown = new Set(scenarioTurns.slice(0, index)
+      .flatMap((x) => [...(x.cards ?? []), ...(x.belowFloor ?? []), ...(x.nearMiss ?? []), ...(x.unchecked ?? [])])
+      .map((c) => c.titleId).filter(Boolean));
+    const inScope = (id) => scope === "Any" || !facts.media?.[id] || facts.media[id] === scope;
+    const shownClearingIds = Array.isArray(decide?.clearingShown)
+      ? decide.clearingShown.filter((id) => priorShown.has(id))
+      : [...new Set(scenarioTurns.slice(0, index)
+        .flatMap((x) => [...(x.cards ?? []).filter((c) => !c.outsideRequest), ...(x.unchecked ?? [])])
+        .map((c) => c.titleId)
+        .filter((id) => id && decideMembers.has(id) && eligible.has(id) && inScope(id)))];
+    r.shownClearing = shownClearingIds.length;
+    const clearing = clearingAll === null ? null : Math.max(0, clearingAll - shownClearingIds.length);
     const honest = () => !t.failed && t.mode === "NoneFound" && picks.length === 0;
-    if (supply && supply.eligible === 0) {
+    if (r.truthMissing) {
+      // The meant truth was never frozen: the turn's precision and counts are scored, its supply is not.
+      if (first8.length > 0) r.precision = precise.length / first8.length;
+      else if (t.failed) r.precision = 0;
+    } else if (decide && decide.eligible === 0) {
       // Honest only when the turn ran and SAID none were found; a 500, a timeout or an unrun turn is not.
       r.checks.honestEmpty = honest();
     } else if (first8.length > 0) {
@@ -229,14 +267,14 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
     } else if (t.failed) {
       r.precision = 0; // a failure must never improve precision by leaving the denominator
     } else if (clearing === 0) {
-      // Eligible titles exist but none clears the bar (or none is scored): nothing could be a pick, so
-      // the honest answer is none-found (with the under-bar tray) — the "samurai films" case.
+      // Eligible titles exist but none clears the bar (or none is scored, or every one was shown on an earlier
+      // turn): nothing could be a pick, so the honest answer is none-found — the "samurai films" case.
       r.checks.honestEmpty = honest();
     } else {
       // The truth holds titles that clear the bar and the turn showed no pick: missed supply (gated).
       r.missedSupply = true;
     }
-    supplyCheck(r, t, tr?.supply?.[scope] ?? tr?.supply?.Any ?? null);
+    supplyCheck(r, t, supply);
   } else if ((e.mustNot ?? []).length > 0 && (picks.length > 0 || t.failed)) {
     // Negation-only scenarios: precision is "nothing the user ruled out", over the first 8.
     const first8 = picks.slice(0, 8);
@@ -623,7 +661,7 @@ export function renderReport(recording, metrics) {
       if (t.leaks.length) L.push(`  - exclusion leaks: ${t.leaks.join("; ")}`);
       if (t.mediaViolations.length) L.push(`  - wrong media: ${t.mediaViolations.join("; ")}`);
       if (t.mustNotViolations.length) L.push(`  - ruled-out titles shown: ${t.mustNotViolations.join("; ")}`);
-      if (t.missedSupply) L.push(`  - missed supply: no pick, while ${t.supply?.clearing ?? t.supply?.aboveBar ?? "?"} eligible title(s) clear the bar`);
+      if (t.missedSupply) L.push(`  - missed supply: no pick, while ${t.supply?.clearing ?? t.supply?.aboveBar ?? "?"} eligible title(s) clear the bar${t.shownClearing ? ` (${t.shownClearing} of them shown on an earlier turn)` : ""}`);
       if (t.supplyMismatches?.length) L.push(`  - supply counts differ from the SQL truth: ${t.supplyMismatches.join("; ")}`);
       if (t.supplyUnverified) L.push(`  - supply counts unverified: ${t.supplyUnverified}`);
       if (t.truthMissing) L.push(`  - concept truth \`${t.truthMissing}\` was never materialised for this recording: no concept check scored`);

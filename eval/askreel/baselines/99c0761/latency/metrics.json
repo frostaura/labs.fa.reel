@@ -22,7 +22,21 @@
   "turns": 60,
   "fingerprint": "e84f9e89e829c196",
   "staleScenarios": [],
-  "truthMissing": [],
+  "truthMissing": [
+   "ninja-critique#1: ninja-meant",
+   "ninja-critique#2: ninja-meant",
+   "tense-heist#1: heist-meant",
+   "cerebral-heist-ordinals#1: heist-meant",
+   "cerebral-heist-ordinals#3: heist-meant",
+   "cerebral-heist-ordinals#4: heist-meant",
+   "space-isolation-chain#2: space@-1999",
+   "space-isolation-chain#3: space@-1999",
+   "heist-2010s-then-comedy#1: heist-2010s:Any",
+   "heist-more-heart#1: heist-meant",
+   "heist-more-heart#2: heist-meant",
+   "ninja-tv#1: ninja-meant",
+   "facet-dinosaur#1: dinosaur-meant"
+  ],
   "modelKey": "unrecorded",
   "buildSlotsHeld": false,
   "wallSeconds": 1235,
@@ -33,16 +47,16 @@
  },
  "metrics": {
   "constraintPrecisionAt8": {
-   "value": 0.4141156462585034,
-   "n": 35
+   "value": 0.4262955182072829,
+   "n": 34
   },
   "negationPrecisionAt8": {
-   "value": 0.875,
-   "n": 7
+   "value": 0.8958333333333334,
+   "n": 6
   },
   "honestEmptyCompliance": {
    "value": 0,
-   "n": 4
+   "n": 2
   },
   "referenceAccuracy": {
    "value": 0,
@@ -62,7 +76,7 @@
   },
   "modeAccuracy": {
    "value": 0,
-   "n": 8
+   "n": 6
   },
   "noRepeatCompliance": {
    "value": 1,
@@ -93,11 +107,11 @@
    "n": 60
   },
   "mediaMismatches": {
-   "value": 34,
+   "value": 38,
    "n": 60
   },
   "mustNotViolations": {
-   "value": 23,
+   "value": 19,
    "n": 60
   },
   "hedgingWhyLines": {
@@ -164,8 +178,8 @@
    "label": "Constraint precision@8 (facet scenarios)",
    "op": ">=",
    "target": 0.9,
-   "value": 0.4141156462585034,
-   "n": 35,
+   "value": 0.4262955182072829,
+   "n": 34,
    "status": "FAIL"
   },
   {
@@ -174,7 +188,7 @@
    "op": ">=",
    "target": 1,
    "value": 0,
-   "n": 4,
+   "n": 2,
    "status": "FAIL"
   },
   {
@@ -281,7 +295,7 @@
    "label": "Ruled-out titles shown (picks and trays)",
    "op": "<=",
    "target": 0,
-   "value": 23,
+   "value": 19,
    "n": 60,
    "status": "FAIL"
   },
@@ -351,32 +365,32 @@
  "byCategory": {
   "facet": {
    "turns": 50,
-   "failedChecks": 16,
-   "checks": 24,
+   "failedChecks": 12,
+   "checks": 20,
    "fallback": 35
   },
   "empty-supply": {
    "turns": 8,
-   "failedChecks": 12,
-   "checks": 13,
+   "failedChecks": 8,
+   "checks": 9,
    "fallback": 6
   },
   "critique": {
    "turns": 6,
-   "failedChecks": 7,
-   "checks": 8,
+   "failedChecks": 3,
+   "checks": 4,
    "fallback": 5
   },
   "ordinal": {
    "turns": 18,
-   "failedChecks": 14,
-   "checks": 19,
+   "failedChecks": 10,
+   "checks": 15,
    "fallback": 16
   },
   "item-question": {
    "turns": 11,
-   "failedChecks": 12,
-   "checks": 13,
+   "failedChecks": 8,
+   "checks": 9,
    "fallback": 9
   },
   "negation": {
@@ -538,10 +552,7 @@
      "failed": false,
      "notRun": false,
      "picks": 24,
-     "checks": {
-      "honestEmpty": false,
-      "mode": false
-     },
+     "checks": {},
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
@@ -562,6 +573,9 @@
       "Weekend in Taipei",
       "Gunpowder Milkshake"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
+     "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -602,8 +616,6 @@
      "notRun": false,
      "picks": 10,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "critique": false
      },
      "leaks": [],
@@ -626,6 +638,9 @@
       "Kicks",
       "To End All Wars"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
+     "precision": 0,
      "repeatsRejected": [],
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -780,6 +795,7 @@
       "In the Dark",
       "The Dark"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -835,6 +851,7 @@
      "offTopic": [
       "When Strangers Appear"
      ],
+     "shownClearing": 4,
      "precision": 0.7142857142857143,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -964,6 +981,7 @@
       "Doctor Who: The Next Doctor",
       "Proximity"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -1031,6 +1049,8 @@
       "All the Devils Are Here",
       "Blowback"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1106,6 +1126,7 @@
       "Suspiria",
       "Hitchcock"
      ],
+     "shownClearing": 0,
      "precision": 0.6666666666666666,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1222,6 +1243,7 @@
       "Doom Patrol",
       "The Banana Splits Movie"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -1328,13 +1350,7 @@
       "Dig"
      ],
      "mediaFilterViolations": [],
-     "mustNotViolations": [
-      "A Dark Song",
-      "The Dark",
-      "Creeped Out",
-      "Herman"
-     ],
-     "precision": 0.75,
+     "mustNotViolations": [],
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Persons Unknown"
@@ -1405,6 +1421,8 @@
       "Thick as Thieves",
       "All the Devils Are Here"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1528,6 +1546,8 @@
       "Prey",
       "Motive"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.14285714285714285,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1594,6 +1614,8 @@
       "The Ones Below",
       "Love Finds You In Sugarcreek"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 5,
@@ -1681,6 +1703,7 @@
       "The Survivalist",
       "The Twilight Zone"
      ],
+     "shownClearing": 0,
      "precision": 0.2857142857142857,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -1725,26 +1748,13 @@
       "noRepeat": true
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Unforgotten",
+      "Too Old to Die Young"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 302,
-      "eligible": 39,
-      "scored": 21,
-      "aboveBar": 13
-     },
-     "offTopic": [
-      "We Still Kill the Old Way",
-      "Chosen",
-      "Edie",
-      "12 and Holding",
-      "Anne of Green Gables",
-      "Unforgotten",
-      "Too Late",
-      "Lucky"
-     ],
-     "precision": 0,
+     "truthMissing": "space@-1999",
      "repeats": [],
      "groundingViolations": 6,
      "groundingDetail": [
@@ -1799,22 +1809,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 89,
-      "eligible": 27,
-      "scored": 15,
-      "aboveBar": 10
-     },
-     "offTopic": [
-      "American Crime Story",
-      "The Missing",
-      "Channel Zero",
-      "Tales of the City",
-      "The Romanoffs",
-      "Tyler Perry's If Loving You Is Wrong",
-      "Tell Me You Love Me"
-     ],
-     "precision": 0,
+     "truthMissing": "space@-1999",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -2090,6 +2085,7 @@
      "offTopic": [
       "Mob City"
      ],
+     "shownClearing": 0,
      "precision": 0.875,
      "groundingViolations": 5,
      "groundingDetail": [
@@ -2264,6 +2260,7 @@
       "aboveBar": 571
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2373,23 +2370,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 175,
-      "eligible": 10,
-      "scored": 8,
-      "aboveBar": 6
-     },
-     "offTopic": [
-      "Thick as Thieves",
-      "Blowback",
-      "Heist",
-      "All the Devils Are Here",
-      "Triple Threat",
-      "High Rollers",
-      "Heist 88",
-      "Risqué"
-     ],
-     "precision": 0,
+     "truthMissing": "heist-2010s:Any",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -2562,6 +2543,7 @@
       "The Dark",
       "Creeped Out"
      ],
+     "shownClearing": 0,
      "precision": 0.42857142857142855,
      "groundingViolations": 2,
      "groundingDetail": [
@@ -2630,6 +2612,7 @@
       "Half Light",
       "Caveat"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2678,6 +2661,7 @@
       "aboveBar": 116
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2980,6 +2964,8 @@
       "Rob the Mob",
       "The Crew"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3027,14 +3013,17 @@
       "noRepeat": true
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Dare Me",
+      "Tell Me You Love Me"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 582,
-      "eligible": 57,
-      "scored": 40,
-      "aboveBar": 16
+      "matching": 543,
+      "eligible": 40,
+      "scored": 27,
+      "aboveBar": 11
      },
      "offTopic": [
       "Short Term 12",
@@ -3046,6 +3035,8 @@
       "Fathers and Daughters",
       "Lilting"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 1,
@@ -3123,6 +3114,7 @@
       "The Librarian: Quest for the Spear",
       "Shanghai"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -3193,6 +3185,7 @@
       "Parallels",
       "From Time to Time"
      ],
+     "shownClearing": 0,
      "precision": 0.42857142857142855,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3261,6 +3254,7 @@
       "Sanctum",
       "Sea Patrol"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3389,6 +3383,8 @@
       "Knightfall",
       "Blade: The Series"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -3457,6 +3453,7 @@
       "The Crazies",
       "Carriers"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3523,6 +3520,7 @@
       "Mortal",
       "Kin"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3588,6 +3586,7 @@
      "offTopic": [
       "Intelligence"
      ],
+     "shownClearing": 0,
      "precision": 0.875,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3655,6 +3654,7 @@
       "2149: The Aftermath",
       "Cyberbully"
      ],
+     "shownClearing": 0,
      "precision": 0.2857142857142857,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -3723,6 +3723,7 @@
       "Light of My Life",
       "Parallels"
      ],
+     "shownClearing": 0,
      "precision": 0.16666666666666666,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3787,6 +3788,7 @@
       "Bad Ass 2: Bad Asses",
       "In Full Bloom"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3856,6 +3858,7 @@
       "First Snow",
       "The Limits of Control"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3920,6 +3923,7 @@
       "State Property",
       "Illegal Tender"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -3990,6 +3994,7 @@
       "Free Willy: Escape from Pirate's Cove",
       "Tracker"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4055,6 +4060,8 @@
       "Centurion",
       "Under the Hood"
      ],
+     "truthMissing": "dinosaur-meant",
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4115,6 +4122,7 @@
       "A Prayer Before Dawn",
       "Girlfight"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4183,6 +4191,7 @@
       "Creep",
       "Turks & Caicos"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4251,6 +4260,7 @@
       "Finding Steve McQueen",
       "Red-Eyed"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],

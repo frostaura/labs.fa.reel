@@ -26,6 +26,10 @@ public class StandInTruthSqlTests
         Path.Combine("eval", "askreel", "supply", "rules.sql"),
         // HREV4-RET-01: "romantic comedies" is romance read as its exclusion reads it, AND comedy.
         Path.Combine("eval", "askreel", "truth", "romantic-comedy.sql"),
+        // fix-golden-v2-2: "kidnapping thrillers" is kidnapping AND thriller read as its exclusion reads it,
+        // and "animated movies for kids" animation AND family (the children alias) — the app's readings.
+        Path.Combine("eval", "askreel", "truth", "kidnapping-thriller.sql"),
+        Path.Combine("eval", "askreel", "truth", "animated-for-kids.sql"),
     ];
 
     [Fact]

@@ -149,6 +149,146 @@ public class ConceptTruthParityTests(PostgresFixture fixture)
         Assert.Equal(wanted, Names(truth));
     }
 
+    /// <summary>
+    /// fix-golden-v2-2: four truths restated to the app's reading of the scenario's words, each held here to
+    /// <see cref="HardConstraintFilter"/> on the edges that moved. "space" is the space synonym group from a
+    /// word start (the bare "space" label, "space opera", "spacecraft"; never "cyberspace" or "aerospace"),
+    /// named only by the user's own word; "martial arts" names a title only by those words, never by the
+    /// synonym "kung fu"; "kidnapping thrillers" is kidnapping AND the thriller genre as its exclusion reads
+    /// it (the suspense alias; on TV the stand-in labels); "animated movies for kids" is animation AND
+    /// family (the children alias). Each concept is built as the engine builds the planner's reading.
+    /// </summary>
+    [Theory]
+    [InlineData("space")]
+    [InlineData("martial-arts")]
+    [InlineData("kidnapping-thriller")]
+    [InlineData("animated-for-kids")]
+    public async Task A_restated_truth_reads_its_request_exactly_as_the_app_does(string truthKey)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var seeded = new Dictionary<Guid, string>();
+        var expected = new Dictionary<string, bool>(StringComparer.Ordinal);
+        async Task Seed(string label, bool wanted, MediaType media, string[] genres, string[] keywords, string? name = null)
+        {
+            seeded[await SeedTitleAsync(media, genres, keywords, null, name)] = label;
+            expected[label] = wanted;
+        }
+
+        ConceptTerm[] concepts;
+        switch (truthKey)
+        {
+            case "space":
+                await Seed("keyword space", true, MediaType.Movie, ["drama"], ["space"]);
+                await Seed("keyword space opera", true, MediaType.Movie, ["drama"], ["space opera"]);
+                await Seed("keyword spacecraft", true, MediaType.Show, ["drama"], ["spacecraft"]);
+                await Seed("keyword astronaut", true, MediaType.Movie, ["drama"], ["astronaut"]);
+                await Seed("keyword cyberspace", false, MediaType.Movie, ["drama"], ["cyberspace"]);
+                await Seed("keyword aerospace engineer", false, MediaType.Movie, ["drama"], ["aerospace engineer"]);
+                await Seed("named Space Cowboys", true, MediaType.Movie, ["drama"], [], "Space Cowboys golden");
+                await Seed("named Spaced Out", false, MediaType.Movie, ["drama"], [], "Spaced Out golden");
+                await Seed("named Astronaut Farmer, untagged", false, MediaType.Movie, ["drama"], [], "The Astronaut Farmer golden");
+                concepts = [new ConceptTerm("space", [], [])];
+                break;
+            case "martial-arts":
+                await Seed("keyword martial arts", true, MediaType.Movie, ["action"], ["martial arts"]);
+                await Seed("keyword kung fu", true, MediaType.Movie, ["action"], ["kung fu"]);
+                await Seed("named Martial Arts Kid", true, MediaType.Movie, ["action"], [], "The Martial Arts Kid golden");
+                await Seed("named Kung Fu Soccer, untagged", false, MediaType.Movie, ["comedy"], [], "Kung Fu Soccer golden");
+                concepts = [new ConceptTerm("martial arts", [], [])];
+                break;
+            case "kidnapping-thriller":
+                await Seed("thriller film, keyword kidnapping", true, MediaType.Movie, ["thriller"], ["kidnapping"]);
+                await Seed("suspense film, keyword child abduction", true, MediaType.Movie, ["suspense"], ["child abduction"]);
+                await Seed("drama film, keyword kidnapping", false, MediaType.Movie, ["drama"], ["kidnapping"]);
+                await Seed("thriller film, no kidnapping", false, MediaType.Movie, ["thriller"], ["heist"]);
+                await Seed("crime show, keywords kidnapping and hostage situation", true, MediaType.Show, ["crime"], ["kidnapping", "hostage situation"]);
+                await Seed("crime show, keyword kidnapping", false, MediaType.Show, ["crime"], ["kidnapping"]);
+                await Seed("crime film, keywords kidnapping and hostage situation", false, MediaType.Movie, ["crime"], ["kidnapping", "hostage situation"]);
+                concepts = [new ConceptTerm("kidnapping", [], []), new ConceptTerm("thriller", [], [])];
+                break;
+            default:
+                await Seed("animation and family", true, MediaType.Movie, ["animation", "family"], []);
+                await Seed("animation and children", true, MediaType.Movie, ["animation", "children"], []);
+                await Seed("animation only", false, MediaType.Movie, ["animation", "adventure"], []);
+                await Seed("family only", false, MediaType.Movie, ["family", "comedy"], []);
+                concepts = [new ConceptTerm("animation", [], []), new ConceptTerm("family", [], [])];
+                break;
+        }
+
+        var ids = seeded.Keys.ToList();
+        await using var db = fixture.CreateContext(new AccountContext());
+        var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new Application.Search.Retrieval.Concepts.ConceptResolver(
+            new Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache),
+            new Application.Search.Retrieval.Concepts.ConceptEmbeddings(new NoEmbeddingsHere(), cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptEmbeddings>.Instance),
+            db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Application.Search.Retrieval.Concepts.ConceptResolver>.Instance);
+        var hard = await resolver.ResolveAsync(HardConstraints.None with { Concepts = concepts }, CancellationToken.None);
+        var app = await HardConstraintFilter.Apply(db.Titles.Where(t => ids.Contains(t.Id)), db, hard).Select(t => t.Id).ToListAsync();
+        var truth = await TruthAsync(truthKey, ids);
+
+        string Names(IEnumerable<Guid> set) => string.Join(" | ", set.Select(id => seeded[id]).Order(StringComparer.Ordinal));
+        var wanted = string.Join(" | ", expected.Where(e => e.Value).Select(e => e.Key).Order(StringComparer.Ordinal));
+        Assert.Equal(wanted, Names(app));
+        Assert.Equal(wanted, Names(truth));
+    }
+
+    /// <summary>
+    /// fix-golden-v2-2: the three `meant` truths — what a person means, where the concept truth is the tag
+    /// population the reply counts. Missed supply reads them; nothing else does. ninja-meant is the ninja
+    /// truth minus the Ninja Warrior competition format; heist-meant is a title tagged or named a heist,
+    /// never one tagged only with a robbery; dinosaur-meant drops only its hand-labelled films, by id.
+    /// </summary>
+    [Fact]
+    public async Task The_meant_truths_narrow_their_tag_populations_to_what_a_person_means()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var ninja = new Dictionary<Guid, string>
+        {
+            [await SeedTitleAsync(MediaType.Movie, ["action"], ["ninja"], null)] = "keyword ninja",
+            [await SeedTitleAsync(MediaType.Movie, ["action"], [], null, "Ninja Assassin golden")] = "named Ninja Assassin",
+            [await SeedTitleAsync(MediaType.Show, ["reality"], ["obstacle course"], null, "American Ninja Warrior golden")] = "named American Ninja Warrior",
+        };
+        var heist = new Dictionary<Guid, string>
+        {
+            [await SeedTitleAsync(MediaType.Movie, ["crime"], ["jewelry heist"], null)] = "keyword jewelry heist",
+            [await SeedTitleAsync(MediaType.Movie, ["crime"], [], null, "Heist golden")] = "named Heist",
+            [await SeedTitleAsync(MediaType.Movie, ["thriller"], ["armed robbery"], null)] = "keyword armed robbery",
+            [await SeedTitleAsync(MediaType.Movie, ["crime"], ["bank robbery"], null)] = "keyword bank robbery",
+        };
+
+        var dinosaur = new Dictionary<Guid, string>
+        {
+            [await SeedTitleAsync(MediaType.Movie, ["adventure"], ["dinosaur"], null)] = "keyword dinosaur",
+            [await SeedTitleAsync(MediaType.Movie, ["drama", "fantasy"], ["dinosaur"], null, null, 8967)] = "The Tree of Life (tmdb 8967)",
+            [await SeedTitleAsync(MediaType.Show, ["drama"], ["dinosaur"], null, null, 8967)] = "a show with tmdb id 8967",
+        };
+
+        string Names(IEnumerable<Guid> set, Dictionary<Guid, string> names) => string.Join(" | ", set.Select(id => names[id]).Order(StringComparer.Ordinal));
+        Assert.Equal("The Tree of Life (tmdb 8967) | a show with tmdb id 8967 | keyword dinosaur", Names(await TruthAsync("dinosaur", [.. dinosaur.Keys]), dinosaur));
+        Assert.Equal("a show with tmdb id 8967 | keyword dinosaur", Names(await TruthAsync("dinosaur-meant", [.. dinosaur.Keys]), dinosaur));
+        Assert.Equal("keyword ninja | named American Ninja Warrior | named Ninja Assassin", Names(await TruthAsync("ninja", [.. ninja.Keys]), ninja));
+        Assert.Equal("keyword ninja | named Ninja Assassin", Names(await TruthAsync("ninja-meant", [.. ninja.Keys]), ninja));
+        Assert.Equal("keyword armed robbery | keyword bank robbery | keyword jewelry heist | named Heist", Names(await TruthAsync("heist", [.. heist.Keys]), heist));
+        Assert.Equal("keyword jewelry heist | named Heist", Names(await TruthAsync("heist-meant", [.. heist.Keys]), heist));
+    }
+
+    private sealed class NoEmbeddingsHere : FrostAura.Reel.Domain.Ports.IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            Task.FromResult(Array.Empty<float[]>());
+    }
+
     /// <summary>The ids of <paramref name="ids"/> the truth file <c>eval/askreel/truth/&lt;key&gt;.sql</c> returns.</summary>
     private async Task<List<Guid>> TruthAsync(string key, IReadOnlyList<Guid> ids)
     {
@@ -183,16 +323,16 @@ public class ConceptTruthParityTests(PostgresFixture fixture)
             [.. expect.GetProperty("mustNot").EnumerateArray().Select(m => m.GetString()!)]);
     }
 
-    private async Task<Guid> SeedTitleAsync(MediaType media, string[] genres, string[] keywords, string? overview)
+    private async Task<Guid> SeedTitleAsync(MediaType media, string[] genres, string[] keywords, string? overview, string? name = null, long? tmdbId = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
             MediaType = media,
-            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TmdbId = tmdbId ?? Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = string.Empty,
-            Name = $"golden-concept {Guid.NewGuid():N}",
+            Name = name is null ? $"golden-concept {Guid.NewGuid():N}" : $"{name} {Guid.NewGuid():N}",
             Overview = overview,
             Language = "en",
             Year = 2012,

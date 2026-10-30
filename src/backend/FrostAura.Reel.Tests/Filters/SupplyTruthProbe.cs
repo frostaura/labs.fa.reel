@@ -87,6 +87,8 @@ public class SupplyTruthProbe(ITestOutputHelper output)
         ("time-travel", "time travel movies", MediaScope.Movies), ("time-loop", "time loop movies", MediaScope.Movies),
         ("hitman", "hitman movies", MediaScope.Movies), ("zombie", "zombie movies", MediaScope.Movies),
         ("shark", "shark movies", MediaScope.Movies), ("ninja", "ninja shows", MediaScope.Shows),
+        // fix-golden-v2-2's truth restatements whose words the resolver alone reads as the planner does.
+        ("space", "space", MediaScope.Shows), ("french", "french films", MediaScope.Movies),
     ];
 
     [Fact]

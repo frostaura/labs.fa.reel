@@ -23,9 +23,37 @@
   "fingerprint": "cab2a605e71bc860",
   "staleScenarios": [],
   "truthMissing": [
+   "ninja-critique#1: ninja-meant",
+   "ninja-critique#2: ninja-meant",
+   "tense-heist#1: heist-meant",
+   "cerebral-heist-ordinals#1: heist-meant",
+   "cerebral-heist-ordinals#3: heist-meant",
+   "cerebral-heist-ordinals#4: heist-meant",
+   "space-isolation-chain#2: space@-1999",
+   "space-isolation-chain#3: space@-1999",
+   "heist-2010s-then-comedy#1: heist-2010s:Any",
+   "heist-more-heart#1: heist-meant",
+   "heist-more-heart#2: heist-meant",
+   "ninja-tv#1: ninja-meant",
+   "facet-dinosaur#1: dinosaur-meant",
+   "facet-found-footage#1: found-footage:Any",
+   "facet-genre-western#1: genre-western:Any",
    "conflict-romcom#1: romantic-comedy",
+   "conflict-animated-kids#1: animated-for-kids",
+   "conflict-french-films#1: french:Movie",
+   "conflict-low-rated#1: low-rated:Movie",
    "no-conflict-control#1: heist@2016-2026",
-   "refine-recent#2: kidnapping@2021-2026"
+   "ord-first-one#1: time-travel:Movie",
+   "ord-last-tv#1: genre-crime:Show",
+   "crit-not-scary#1: genre-horror:Movie",
+   "crit-not-heists#1: heist-meant",
+   "crit-not-heists#2: heist-meant",
+   "crit-more-heart-scifi#1: genre-scifi:Movie",
+   "iq-scary#1: witch:Movie",
+   "refine-recent#1: kidnapping-thriller",
+   "refine-recent#2: kidnapping-thriller@2021-2026",
+   "chitchat-midstream#1: dinosaur-meant",
+   "chitchat-midstream#3: dinosaur-meant"
   ],
   "modelKey": "unrecorded",
   "buildSlotsHeld": false,
@@ -37,16 +65,16 @@
  },
  "metrics": {
   "constraintPrecisionAt8": {
-   "value": 0.47035596416784525,
-   "n": 101
+   "value": 0.45031055900621114,
+   "n": 92
   },
   "negationPrecisionAt8": {
-   "value": 0.9416666666666667,
-   "n": 15
+   "value": 0.9553571428571429,
+   "n": 14
   },
   "honestEmptyCompliance": {
    "value": 0,
-   "n": 16
+   "n": 11
   },
   "referenceAccuracy": {
    "value": 0,
@@ -66,7 +94,7 @@
   },
   "modeAccuracy": {
    "value": 0,
-   "n": 29
+   "n": 24
   },
   "noRepeatCompliance": {
    "value": 1,
@@ -97,11 +125,11 @@
    "n": 167
   },
   "mediaMismatches": {
-   "value": 94,
+   "value": 91,
    "n": 167
   },
   "mustNotViolations": {
-   "value": 63,
+   "value": 59,
    "n": 167
   },
   "hedgingWhyLines": {
@@ -168,8 +196,8 @@
    "label": "Constraint precision@8 (facet scenarios)",
    "op": ">=",
    "target": 0.9,
-   "value": 0.47035596416784525,
-   "n": 101,
+   "value": 0.45031055900621114,
+   "n": 92,
    "status": "FAIL"
   },
   {
@@ -178,7 +206,7 @@
    "op": ">=",
    "target": 1,
    "value": 0,
-   "n": 16,
+   "n": 11,
    "status": "FAIL"
   },
   {
@@ -285,7 +313,7 @@
    "label": "Ruled-out titles shown (picks and trays)",
    "op": "<=",
    "target": 0,
-   "value": 63,
+   "value": 59,
    "n": 167,
    "status": "FAIL"
   },
@@ -355,32 +383,32 @@
  "byCategory": {
   "facet": {
    "turns": 114,
-   "failedChecks": 27,
-   "checks": 45,
+   "failedChecks": 23,
+   "checks": 41,
    "fallback": 68
   },
   "empty-supply": {
    "turns": 12,
-   "failedChecks": 14,
-   "checks": 15,
+   "failedChecks": 10,
+   "checks": 11,
    "fallback": 8
   },
   "critique": {
    "turns": 16,
-   "failedChecks": 10,
-   "checks": 13,
+   "failedChecks": 6,
+   "checks": 9,
    "fallback": 8
   },
   "ordinal": {
    "turns": 39,
-   "failedChecks": 29,
-   "checks": 39,
+   "failedChecks": 25,
+   "checks": 35,
    "fallback": 32
   },
   "item-question": {
    "turns": 22,
-   "failedChecks": 23,
-   "checks": 24,
+   "failedChecks": 19,
+   "checks": 20,
    "fallback": 17
   },
   "negation": {
@@ -391,8 +419,8 @@
   },
   "conflict": {
    "turns": 15,
-   "failedChecks": 27,
-   "checks": 36,
+   "failedChecks": 21,
+   "checks": 30,
    "fallback": 12
   },
   "title-lookup": {
@@ -560,10 +588,7 @@
      "failed": false,
      "notRun": false,
      "picks": 24,
-     "checks": {
-      "honestEmpty": false,
-      "mode": false
-     },
+     "checks": {},
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
@@ -584,6 +609,9 @@
       "Tornado",
       "Waist Deep"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
+     "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -626,8 +654,6 @@
      "notRun": false,
      "picks": 8,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "critique": false
      },
      "leaks": [],
@@ -650,6 +676,9 @@
       "Kumiko, the Treasure Hunter",
       "The Last Movie Star"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
+     "precision": 0,
      "repeatsRejected": [],
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -812,6 +841,7 @@
       "The Final",
       "The Sense of an Ending"
      ],
+     "shownClearing": 0,
      "precision": 0.16666666666666666,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -866,6 +896,7 @@
       "The Ghoul",
       "Half Light"
      ],
+     "shownClearing": 1,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -993,6 +1024,7 @@
       "Cosmic Chaos",
       "Resident Evil"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -1056,6 +1088,8 @@
       "Sharper",
       "Rev"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1133,6 +1167,7 @@
      "offTopic": [
       "Suspiria"
      ],
+     "shownClearing": 0,
      "precision": 0.8333333333333334,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1254,6 +1289,7 @@
       "Benji",
       "Scorpion"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -1351,13 +1387,7 @@
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
-     "mustNotViolations": [
-      "A Dark Song",
-      "The Dark",
-      "After the Dark",
-      "Herman"
-     ],
-     "precision": 0.75,
+     "mustNotViolations": [],
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on A Dark Song"
@@ -1428,6 +1458,8 @@
       "Sharper",
       "All the Devils Are Here"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1549,6 +1581,8 @@
       "Somewhere Between",
       "Collateral"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1615,6 +1649,8 @@
       "The Ones Below",
       "Love Finds You In Sugarcreek"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 5,
@@ -1699,6 +1735,7 @@
       "The Survivalist",
       "The Twilight Zone"
      ],
+     "shownClearing": 0,
      "precision": 0.2857142857142857,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1739,26 +1776,13 @@
       "noRepeat": true
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Unforgotten",
+      "Too Old to Die Young"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 302,
-      "eligible": 39,
-      "scored": 29,
-      "aboveBar": 18
-     },
-     "offTopic": [
-      "Chosen",
-      "Edie",
-      "Never Grow Old",
-      "We Still Kill the Old Way",
-      "Too Late",
-      "Anne of Green Gables",
-      "Lucky",
-      "The Ballad of Lefty Brown"
-     ],
-     "precision": 0,
+     "truthMissing": "space@-1999",
      "repeats": [],
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -1810,22 +1834,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 89,
-      "eligible": 27,
-      "scored": 22,
-      "aboveBar": 14
-     },
-     "offTopic": [
-      "American Crime Story",
-      "The Missing",
-      "Channel Zero",
-      "Tales of the City",
-      "Tyler Perry's If Loving You Is Wrong",
-      "The Romanoffs",
-      "Tell Me You Love Me"
-     ],
-     "precision": 0,
+     "truthMissing": "space@-1999",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -2096,6 +2105,7 @@
      "offTopic": [
       "Mob City"
      ],
+     "shownClearing": 0,
      "precision": 0.875,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2253,6 +2263,7 @@
       "aboveBar": 793
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2358,31 +2369,10 @@
      "picks": 10,
      "checks": {},
      "leaks": [],
-     "mediaViolations": [
-      "Inside Men",
-      "Trackers",
-      "Ice",
-      "Prey",
-      "Collateral",
-      "The Bletchley Circle"
-     ],
+     "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 175,
-      "eligible": 10,
-      "scored": 6,
-      "aboveBar": 5
-     },
-     "offTopic": [
-      "Premium Rush",
-      "Free Fire",
-      "Traders",
-      "Trackers",
-      "Prey",
-      "Collateral"
-     ],
-     "precision": 0.25,
+     "truthMissing": "heist-2010s:Any",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -2551,6 +2541,7 @@
       "A Dark Song",
       "Creeped Out"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2614,6 +2605,7 @@
       "aboveBar": 202
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2679,6 +2671,7 @@
       "Good Trouble",
       "Queer as Folk"
      ],
+     "shownClearing": 13,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -2966,6 +2959,8 @@
       "Stander",
       "Illegal Tender"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.3333333333333333,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3002,14 +2997,18 @@
       "noRepeat": true
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Nurses",
+      "Tell Me You Love Me",
+      "Chambers"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 583,
-      "eligible": 58,
-      "scored": 41,
-      "aboveBar": 16
+      "matching": 544,
+      "eligible": 41,
+      "scored": 28,
+      "aboveBar": 10
      },
      "offTopic": [
       "Short Term 12",
@@ -3021,6 +3020,8 @@
       "Nurses",
       "Somewhere"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 0,
@@ -3095,6 +3096,7 @@
       "Seraphim Falls",
       "Jack Hunter and the Star of Heaven"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3160,6 +3162,7 @@
       "Doctor Who: Twice Upon a Time",
       "Parallels"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3226,6 +3229,7 @@
       "Carriers",
       "Cargo"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3349,6 +3353,8 @@
       "Mutant X",
       "Painkiller Jane"
      ],
+     "truthMissing": "ninja-meant",
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3417,6 +3423,7 @@
       "Carriers",
       "The Crazies"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3484,6 +3491,7 @@
       "SuperFly",
       "Fast Girls"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3546,6 +3554,7 @@
       "Intelligence",
       "Strike Back"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3613,6 +3622,7 @@
       "The Final Cut",
       "Cosmic Chaos"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3687,6 +3697,7 @@
       "Alien: Specimen",
       "Light of My Life"
      ],
+     "shownClearing": 0,
      "precision": 0.16666666666666666,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3750,6 +3761,7 @@
       "Bad Ass 2: Bad Asses",
       "In Full Bloom"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3820,6 +3832,7 @@
       "Small Town Crime",
       "Finestkind"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3890,6 +3903,7 @@
       "State Property",
       "Miami Vice"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -3957,6 +3971,7 @@
       "Tracker",
       "Shanghai"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4022,6 +4037,8 @@
       "Princess",
       "Centurion"
      ],
+     "truthMissing": "dinosaur-meant",
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4089,6 +4106,7 @@
       "Darc",
       "Bad Ass 2: Bad Asses"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4155,6 +4173,7 @@
       "All Is Lost",
       "Swallows and Amazons"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 3,
      "groundingDetail": [
@@ -4230,6 +4249,7 @@
       "Cheaters",
       "Gangster No. 1"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4295,6 +4315,7 @@
       "The Haunting Hour: Don't Think About It",
       "Terrifier"
      ],
+     "shownClearing": 0,
      "precision": 0.5714285714285714,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -4359,6 +4380,7 @@
      "offTopic": [
       "Van Helsing"
      ],
+     "shownClearing": 0,
      "precision": 0.875,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -4426,6 +4448,7 @@
       "Dinner Rush",
       "Cheaters"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4496,6 +4519,7 @@
       "Dig",
       "The Terror"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4559,6 +4583,7 @@
       "Older Gods",
       "Godless: The Eastfield Exorcism"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4631,6 +4656,7 @@
       "Z Nation",
       "Channel Zero"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -4701,6 +4727,7 @@
       "El padrino: The Latin Godfather",
       "State Property"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4766,6 +4793,7 @@
       "Legends of the Hidden Temple",
       "Sanctum"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4834,6 +4862,7 @@
       "The Dark",
       "Dark Light"
      ],
+     "shownClearing": 0,
      "precision": 0.16666666666666666,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -4884,19 +4913,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 324,
-      "eligible": 42,
-      "scored": 12,
-      "aboveBar": 5
-     },
-     "offTopic": [
-      "Creep",
-      "Feast",
-      "Terrifier",
-      "Polaroid"
-     ],
-     "precision": 0.3333333333333333,
+     "truthMissing": "found-footage:Any",
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Unfriended: Dark Web"
@@ -4966,6 +4983,7 @@
       "The Driver",
       "The Last Survivors"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -5026,6 +5044,7 @@
       "aboveBar": 11
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 2,
      "groundingDetail": [
@@ -5082,14 +5101,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 325,
-      "eligible": 46,
-      "scored": 29,
-      "aboveBar": 11
-     },
-     "offTopic": [],
-     "precision": 1,
+     "truthMissing": "genre-western:Any",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -5157,6 +5169,7 @@
       "Alabama Moon",
       "All Is Lost"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -5224,6 +5237,7 @@
       "Whitechapel",
       "Killing Eve"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 6,
      "groundingDetail": [
@@ -5292,6 +5306,7 @@
       "aboveBar": 154
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -5364,6 +5379,7 @@
       "Alive in Joburg",
       "Monsters"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 3,
      "groundingDetail": [
@@ -5438,6 +5454,7 @@
       "No Such Thing",
       "Within the Shadow of the Tree: Dark Dreams"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -5512,6 +5529,7 @@
       "Brooklyn's Finest",
       "Premium Rush"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -5583,6 +5601,7 @@
       "White Collar",
       "Dexter"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -5716,6 +5735,7 @@
       "Darc",
       "Kicks"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -5792,6 +5812,7 @@
       "Last and First Men",
       "Alien: Romulus"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -5847,30 +5868,13 @@
      "notRun": false,
      "picks": 17,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "conflict": true
      },
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 4149,
-      "eligible": 0,
-      "scored": 0,
-      "aboveBar": 0
-     },
-     "offTopic": [
-      "Treasure Buddies",
-      "Where the Wild Things Are",
-      "Alex & Me",
-      "Swallows and Amazons",
-      "Free Willy: Escape from Pirate's Cove",
-      "Benji",
-      "The Good Witch's Family",
-      "Duma"
-     ],
+     "truthMissing": "animated-for-kids",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -5953,6 +5957,7 @@
       "Spree",
       "Kicks"
      ],
+     "shownClearing": 0,
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Inhale"
@@ -6004,30 +6009,18 @@
      "notRun": false,
      "picks": 12,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "conflict": false
      },
      "leaks": [],
-     "mediaViolations": [],
-     "mediaFilterViolations": [],
-     "mustNotViolations": [],
-     "supply": {
-      "matching": 2674,
-      "eligible": 0,
-      "scored": 0,
-      "aboveBar": 0
-     },
-     "offTopic": [
-      "Femme Fatale",
-      "Swimming Pool",
+     "mediaViolations": [
       "Gypsy",
       "Baptiste",
       "Birdsong",
-      "Les Misérables",
-      "Hereafter",
-      "Cinema 16: European Short Films (U.S. Edition)"
+      "Les Misérables"
      ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "truthMissing": "french:Movie",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -6104,6 +6097,7 @@
       "Channel Zero",
       "Coma"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -6158,30 +6152,13 @@
      "notRun": false,
      "picks": 14,
      "checks": {
-      "honestEmpty": false,
-      "mode": false,
       "conflict": false
      },
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 2463,
-      "eligible": 0,
-      "scored": 0,
-      "aboveBar": 0
-     },
-     "offTopic": [
-      "The Banana Splits Movie",
-      "The Last Movie Star",
-      "Feast",
-      "Mean Creek",
-      "Green Street Hooligans",
-      "The Young Cannibals",
-      "The Loved Ones",
-      "The Business"
-     ],
+     "truthMissing": "low-rated:Movie",
      "groundingViolations": 7,
      "groundingDetail": [
       "stub why on The Last Movie Star",
@@ -6265,6 +6242,7 @@
       "Southland",
       "Station 19"
      ],
+     "shownClearing": 0,
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Tell Me You Love Me"
@@ -6352,6 +6330,7 @@
       "Primeval: New World",
       "Primeval"
      ],
+     "shownClearing": 0,
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Zoo"
@@ -6483,12 +6462,13 @@
       "Shadow Master"
      ],
      "supply": {
-      "matching": 7667,
-      "eligible": 692,
-      "scored": 431,
-      "aboveBar": 215
+      "matching": 6062,
+      "eligible": 399,
+      "scored": 266,
+      "aboveBar": 110
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6555,6 +6535,7 @@
       "aboveBar": 202
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6618,6 +6599,7 @@
       "Creepshow",
       "The Terror"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6687,6 +6669,7 @@
       "aboveBar": 263
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6750,15 +6733,16 @@
       "Ghosts of War"
      ],
      "supply": {
-      "matching": 1002,
-      "eligible": 145,
-      "scored": 69,
-      "aboveBar": 38
+      "matching": 815,
+      "eligible": 81,
+      "scored": 44,
+      "aboveBar": 22
      },
      "offTopic": [
       "Tomorrow, When the War Began",
       "Hounds of War"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6816,10 +6800,10 @@
       "Xeno"
      ],
      "supply": {
-      "matching": 302,
-      "eligible": 39,
-      "scored": 29,
-      "aboveBar": 18
+      "matching": 213,
+      "eligible": 12,
+      "scored": 7,
+      "aboveBar": 4
      },
      "offTopic": [
       "Cosmic Chaos",
@@ -6829,6 +6813,7 @@
       "Proximity",
       "The Vast of Night"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6889,6 +6874,7 @@
       "aboveBar": 79
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -6952,6 +6938,7 @@
      "offTopic": [
       "Strapped"
      ],
+     "shownClearing": 0,
      "precision": 0.8333333333333334,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7036,6 +7023,7 @@
       "Special",
       "Heroes Reborn"
      ],
+     "shownClearing": 5,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7097,6 +7085,7 @@
       "UFO",
       "Two Harbors"
      ],
+     "shownClearing": 7,
      "precision": 0.2857142857142857,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7165,6 +7154,7 @@
       "Our Kind of Traitor",
       "Turks & Caicos"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -7275,20 +7265,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 459,
-      "eligible": 49,
-      "scored": 33,
-      "aboveBar": 20
-     },
-     "offTopic": [
-      "Mission to Mars",
-      "The Librarian: Quest for the Spear",
-      "Carriers",
-      "The Fall",
-      "Stranded"
-     ],
-     "precision": 0.2857142857142857,
+     "truthMissing": "time-travel:Movie",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -7395,14 +7372,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 5493,
-      "eligible": 935,
-      "scored": 475,
-      "aboveBar": 263
-     },
-     "offTopic": [],
-     "precision": 1,
+     "truthMissing": "genre-crime:Show",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -7529,6 +7499,7 @@
       "Ticker",
       "Sniper: Ghost Shooter"
      ],
+     "shownClearing": 0,
      "precision": 0.2857142857142857,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7582,6 +7553,7 @@
       "Traitor",
       "The Fix"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7683,14 +7655,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 4858,
-      "eligible": 448,
-      "scored": 246,
-      "aboveBar": 79
-     },
-     "offTopic": [],
-     "precision": 1,
+     "truthMissing": "genre-horror:Movie",
      "groundingViolations": 1,
      "groundingDetail": [
       "stub why on Return"
@@ -7790,16 +7755,18 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 583,
-      "eligible": 58,
-      "scored": 41,
-      "aboveBar": 16
+      "matching": 544,
+      "eligible": 41,
+      "scored": 28,
+      "aboveBar": 10
      },
      "offTopic": [
       "Thick as Thieves",
       "Rob the Mob",
       "The Crew"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7849,14 +7816,21 @@
       "critique": false
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Inside Men",
+      "Thief",
+      "The Kill Point",
+      "The Player",
+      "StartUp",
+      "Breakout Kings"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 583,
-      "eligible": 58,
-      "scored": 41,
-      "aboveBar": 16
+      "matching": 544,
+      "eligible": 41,
+      "scored": 28,
+      "aboveBar": 10
      },
      "offTopic": [
       "RocknRolla",
@@ -7864,6 +7838,8 @@
       "The Player",
       "StartUp"
      ],
+     "truthMissing": "heist-meant",
+     "shownClearing": 0,
      "precision": 0.5,
      "repeatsRejected": [],
      "groundingViolations": 0,
@@ -7926,10 +7902,10 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 434,
-      "eligible": 63,
-      "scored": 42,
-      "aboveBar": 24
+      "matching": 327,
+      "eligible": 18,
+      "scored": 13,
+      "aboveBar": 8
      },
      "offTopic": [
       "Spooks: The Greater Good",
@@ -7937,6 +7913,7 @@
       "Black Site",
       "One Shot"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -7983,10 +7960,10 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 434,
-      "eligible": 63,
-      "scored": 42,
-      "aboveBar": 24
+      "matching": 327,
+      "eligible": 18,
+      "scored": 13,
+      "aboveBar": 8
      },
      "offTopic": [
       "The Girl in the Spider's Web",
@@ -7997,6 +7974,7 @@
       "Weekend in Taipei",
       "Running Scared"
      ],
+     "shownClearing": 4,
      "precision": 0.125,
      "repeatsRejected": [],
      "groundingViolations": 0,
@@ -8054,14 +8032,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 4805,
-      "eligible": 576,
-      "scored": 349,
-      "aboveBar": 202
-     },
-     "offTopic": [],
-     "precision": 1,
+     "truthMissing": "genre-scifi:Movie",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -8162,16 +8133,17 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 345,
-      "eligible": 27,
-      "scored": 17,
-      "aboveBar": 7
+      "matching": 305,
+      "eligible": 16,
+      "scored": 12,
+      "aboveBar": 5
      },
      "offTopic": [
       "Feral",
       "Carriers",
       "The Crazies"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -8210,14 +8182,21 @@
       "critique": false
      },
      "leaks": [],
-     "mediaViolations": [],
+     "mediaViolations": [
+      "Light as a Feather",
+      "Being Human",
+      "Being Human",
+      "Them",
+      "October Faction",
+      "Monsterland"
+     ],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 345,
-      "eligible": 27,
-      "scored": 17,
-      "aboveBar": 7
+      "matching": 305,
+      "eligible": 16,
+      "scored": 12,
+      "aboveBar": 5
      },
      "offTopic": [
       "Light as a Feather",
@@ -8229,6 +8208,7 @@
       "Mostly Ghostly 3: One Night in Doom House",
       "Herman"
      ],
+     "shownClearing": 6,
      "precision": 0,
      "repeatsRejected": [],
      "groundingViolations": 12,
@@ -8301,8 +8281,8 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 68,
-      "eligible": 5,
+      "matching": 60,
+      "eligible": 3,
       "scored": 3,
       "aboveBar": 2
      },
@@ -8314,6 +8294,7 @@
       "All Is Lost",
       "Swallows and Amazons"
      ],
+     "shownClearing": 0,
      "precision": 0.25,
      "groundingViolations": 3,
      "groundingDetail": [
@@ -8429,6 +8410,7 @@
       "aboveBar": 20
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -8528,16 +8510,7 @@
      "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 357,
-      "eligible": 53,
-      "scored": 37,
-      "aboveBar": 17
-     },
-     "offTopic": [
-      "A Dark Song"
-     ],
-     "precision": 0.875,
+     "truthMissing": "witch:Movie",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -8658,6 +8631,7 @@
       "Cypher",
       "Fugitive at 17"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -8847,6 +8821,7 @@
       "aboveBar": 0
      },
      "offTopic": [],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [],
@@ -8912,6 +8887,7 @@
       "aboveBar": 2
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -8999,6 +8975,7 @@
      "offTopic": [
       "Fast X"
      ],
+     "shownClearing": 0,
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [],
@@ -9063,6 +9040,7 @@
       "The Kelly Clarkson Show",
       "Homeland"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -9135,6 +9113,7 @@
       "Fast X",
       "Doctor Strange in the Multiverse of Madness"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -9241,27 +9220,20 @@
      "picks": 18,
      "checks": {},
      "leaks": [],
-     "mediaViolations": [
-      "Generation Kill",
-      "The Long Road Home",
-      "Our Girl",
-      "SIX",
-      "The Unit",
-      "House of Saddam",
-      "Valor"
-     ],
+     "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
      "supply": {
-      "matching": 815,
-      "eligible": 81,
-      "scored": 44,
-      "aboveBar": 22
+      "matching": 1002,
+      "eligible": 145,
+      "scored": 69,
+      "aboveBar": 38
      },
      "offTopic": [
       "The Kingdom",
       "Basic"
      ],
+     "shownClearing": 0,
      "precision": 0.75,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -9394,6 +9366,7 @@
       "The Vast of Night",
       "Masters of Science Fiction"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -9451,6 +9424,7 @@
       "Terra Nova",
       "Battlestar Galactica"
      ],
+     "shownClearing": 5,
      "precision": 0.375,
      "groundingViolations": 2,
      "groundingDetail": [
@@ -9516,6 +9490,7 @@
       "Stalked by My Doctor: The Return",
       "The Return"
      ],
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 0,
@@ -9590,6 +9565,7 @@
       "The House of the Devil",
       "A Dark Song"
      ],
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -9638,6 +9614,7 @@
       "aboveBar": 15
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -10111,6 +10088,7 @@
       "Britannia",
       "NCIS"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -10301,6 +10279,7 @@
       "Wolf Creek 2",
       "The Dark"
      ],
+     "shownClearing": 0,
      "precision": 0.125,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -10406,26 +10385,10 @@
      "picks": 6,
      "checks": {},
      "leaks": [],
-     "mediaViolations": [
-      "The Missing",
-      "Ransom",
-      "Kidnapped"
-     ],
+     "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "supply": {
-      "matching": 535,
-      "eligible": 62,
-      "scored": 30,
-      "aboveBar": 9
-     },
-     "offTopic": [
-      "Abducted: The Mary Stauffer Story",
-      "Whisper",
-      "Ransom",
-      "Daddy's Little Girl"
-     ],
-     "precision": 0.3333333333333333,
+     "truthMissing": "kidnapping-thriller",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -10461,19 +10424,10 @@
      "picks": 14,
      "checks": {},
      "leaks": [],
-     "mediaViolations": [
-      "I Know What You Did Last Summer",
-      "The Survivors",
-      "Amazing Stories",
-      "The One",
-      "Missing You",
-      "Apples Never Fall",
-      "We Were Liars",
-      "The Last Thing He Told Me"
-     ],
+     "mediaViolations": [],
      "mediaFilterViolations": [],
      "mustNotViolations": [],
-     "truthMissing": "kidnapping@2021-2026",
+     "truthMissing": "kidnapping-thriller@2021-2026",
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
@@ -10544,6 +10498,7 @@
       "In Full Bloom",
       "Bad Ass 2: Bad Asses"
      ],
+     "shownClearing": 0,
      "precision": 0.5,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -10618,6 +10573,7 @@
       "Luther",
       "CSI: Crime Scene Investigation"
      ],
+     "shownClearing": 4,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 1,
@@ -10691,6 +10647,7 @@
       "Return to Innocence",
       "Lockdown"
      ],
+     "shownClearing": 0,
      "precision": 0.625,
      "groundingViolations": 1,
      "groundingDetail": [
@@ -10753,6 +10710,7 @@
       "One Hour Photo",
       "Broken"
      ],
+     "shownClearing": 8,
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -10815,6 +10773,7 @@
       "aboveBar": 154
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -10935,6 +10894,7 @@
       "aboveBar": 1
      },
      "offTopic": [],
+     "shownClearing": 0,
      "precision": 1,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -11052,6 +11012,8 @@
       "Where the Wild Things Are",
       "Duma"
      ],
+     "truthMissing": "dinosaur-meant",
+     "shownClearing": 0,
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
@@ -11158,6 +11120,8 @@
       "The Loved Ones",
       "Lucky Them"
      ],
+     "truthMissing": "dinosaur-meant",
+     "shownClearing": 0,
      "precision": 0,
      "repeats": [],
      "groundingViolations": 0,

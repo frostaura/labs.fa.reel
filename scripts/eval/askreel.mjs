@@ -118,7 +118,7 @@ export function truthKeysIn(dir) {
 }
 
 export function usedTruthKeys(scenarios) {
-  return new Set(scenarios.flatMap((s) => (s.turns ?? []).flatMap((t) => [t.expect?.concept, ...(t.expect?.mustNot ?? [])].filter(Boolean))));
+  return new Set(scenarios.flatMap((s) => (s.turns ?? []).flatMap((t) => [t.expect?.concept, t.expect?.meant, ...(t.expect?.mustNot ?? [])].filter(Boolean))));
 }
 
 // The open truth directory holds only what the open set uses: a truth file no open scenario uses names
@@ -143,9 +143,11 @@ export function validateScenarios(scenarios, truthDirs) {
       if (typeof t.query !== "string" || t.query.trim().length === 0) errors.push(`${s.id}#${i + 1}: empty query`);
       if (e.act && !ACTS.includes(e.act)) errors.push(`${s.id}#${i + 1}: unknown act ${e.act}`);
       if (e.mode && !MODES.includes(e.mode)) errors.push(`${s.id}#${i + 1}: unknown mode ${e.mode}`);
-      for (const k of [e.concept, ...(e.mustNot ?? [])].filter(Boolean)) {
+      for (const k of [e.concept, e.meant, ...(e.mustNot ?? [])].filter(Boolean)) {
         if (!truthKeys.has(k)) errors.push(`${s.id}#${i + 1}: no truth query '${k}.sql'`);
       }
+      if (e.meant && !e.concept) errors.push(`${s.id}#${i + 1}: meant narrows a concept, so it needs one`);
+      if (e.meant && typeof e.meantWhy !== "string") errors.push(`${s.id}#${i + 1}: meant needs its justification (meantWhy)`);
       for (const r of e.references ?? []) {
         if (!(r.turn >= 1 && r.turn <= i && r.rank >= 1)) errors.push(`${s.id}#${i + 1}: reference T${r.turn}.${r.rank} does not point at an earlier turn`);
       }
@@ -462,8 +464,11 @@ function materialise(db, accountId, recording, scenarios) {
       // The concept is materialised inside the turn's own year window, under its windowed key.
       const ck = conceptKey(e, recording.startedAt);
       if (ck) windows.set(ck, { concept: e.concept, window: yearWindow(e.years, recording.startedAt) });
+      // The meant truth (what a person means, where the concept is the tag population) in the same window.
+      const mk = ck && e.meant ? conceptKey({ concept: e.meant, years: e.years }, recording.startedAt) : null;
+      if (mk) windows.set(mk, { concept: e.meant, window: yearWindow(e.years, recording.startedAt) });
       for (const k of (e.mustNot ?? [])) windows.set(k, { concept: k, window: null });
-      for (const k of [ck, ...(e.mustNot ?? [])].filter(Boolean)) {
+      for (const k of [ck, mk, ...(e.mustNot ?? [])].filter(Boolean)) {
         if (!need.has(k)) need.set(k, new Set());
         need.get(k).add(m);
       }
@@ -497,7 +502,15 @@ function materialise(db, accountId, recording, scenarios) {
           from c join "Titles" t on t."Id" = c."Id" left join e on e."Id" = c."Id"
           left join "TitleScores" s on s."TitleId" = c."Id" and s."AccountId" = :'account' and s."ModelArtifactId" = :'artifact'
          where true${mediaFilter}`, { account: accountId, artifact: artifact[0] ?? "00000000-0000-0000-0000-000000000000", bar: bar ?? "NULL", clearbar: clearBar ?? "NULL" })[0].map(Number);
-      supply[scope] = { matching, eligible: elig, scored, aboveBar: above, clearing };
+      // clearingShown: which titles the run SHOWED are clearing ones here, so the scorer can subtract what a
+      // conversation already showed (the app never repeats a title) from what a later turn could offer.
+      const clearingShown = sql(db, `
+        with c as (select distinct "Id" from (${body}) q), e as (${eligibleSql})
+        select c."Id" from c join "Titles" t on t."Id" = c."Id" join e on e."Id" = c."Id"
+          join "TitleScores" s on s."TitleId" = c."Id" and s."AccountId" = :'account' and s."ModelArtifactId" = :'artifact'
+         where c."Id" in (${inShown}) and (:clearbar::numeric is null or round(s."PredictedRating", 1) >= :clearbar::numeric)${mediaFilter}`,
+      { account: accountId, artifact: artifact[0] ?? "00000000-0000-0000-0000-000000000000", clearbar: clearBar ?? "NULL" }).map((r) => r[0]);
+      supply[scope] = { matching, eligible: elig, scored, aboveBar: above, clearing, clearingShown };
       for (const minVotes of supplyNeed.get(key)?.get(scope) ?? []) {
         supply[scope].floored ??= {};
         supply[scope].floored[minVotes] = supplyTruth(db, accountId, body, scope, minVotes);

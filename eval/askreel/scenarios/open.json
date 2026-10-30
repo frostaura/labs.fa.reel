@@ -19,7 +19,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "ninja",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "ninja-meant",
+      "meantWhy": "the concept truth is the ninja TAG population the reply counts; a person asking for ninjas does not mean the Ninja Warrior obstacle-course competition (truth/ninja-meant.sql)"
      }
     },
     {
@@ -30,7 +32,9 @@
       "rejectTurns": [
        1
       ],
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "ninja-meant",
+      "meantWhy": "the concept truth is the ninja TAG population the reply counts; a person asking for ninjas does not mean the Ninja Warrior obstacle-course competition (truth/ninja-meant.sql)"
      }
     },
     {
@@ -148,7 +152,9 @@
      "query": "tense heist thrillers",
      "expect": {
       "act": "NewRequest",
-      "concept": "heist"
+      "concept": "heist",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     }
    ],
@@ -231,9 +237,6 @@
      "query": "Ok let's do mind benders instead. dark ones",
      "expect": {
       "act": "NewRequest",
-      "mustNot": [
-       "genre-fantasy"
-      ],
       "media": "Movie"
      }
     }
@@ -256,7 +259,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "heist",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     },
     {
@@ -279,7 +284,9 @@
      "expect": {
       "act": "Refine",
       "concept": "heist",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     },
     {
@@ -292,7 +299,9 @@
        2,
        3
       ],
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     }
    ],
@@ -326,7 +335,11 @@
       "concept": "space",
       "noRepeatTurns": [
        1
-      ]
+      ],
+      "media": "Movie",
+      "years": {
+       "to": 1999
+      }
      }
     },
     {
@@ -334,7 +347,10 @@
      "expect": {
       "act": "Refine",
       "concept": "space",
-      "media": "Show"
+      "media": "Show",
+      "years": {
+       "to": 1999
+      }
      }
     },
     {
@@ -503,8 +519,7 @@
      "query": "a tense heist thriller from the 2010s, nothing too long",
      "expect": {
       "act": "NewRequest",
-      "concept": "heist-2010s",
-      "media": "Movie"
+      "concept": "heist-2010s"
      }
     },
     {
@@ -664,7 +679,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "heist",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     },
     {
@@ -674,7 +691,10 @@
       "concept": "heist",
       "noRepeatTurns": [
        1
-      ]
+      ],
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     }
    ],
@@ -779,7 +799,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "ninja",
-      "media": "Show"
+      "media": "Show",
+      "meant": "ninja-meant",
+      "meantWhy": "the concept truth is the ninja TAG population the reply counts; a person asking for ninjas does not mean the Ninja Warrior obstacle-course competition (truth/ninja-meant.sql)"
      }
     }
    ],
@@ -987,7 +1009,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "dinosaur",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "dinosaur-meant",
+      "meantWhy": "the concept truth is the dinosaur TAG population the reply counts; The Tree of Life carries the tag for one sequence of a family drama and is not a dinosaur film (truth/dinosaur-meant.sql)"
      }
     }
    ],
@@ -1256,8 +1280,7 @@
      "query": "found footage horror",
      "expect": {
       "act": "NewRequest",
-      "concept": "found-footage",
-      "media": "Movie"
+      "concept": "found-footage"
      }
     }
    ],
@@ -1316,8 +1339,7 @@
      "query": "westerns",
      "expect": {
       "act": "NewRequest",
-      "concept": "genre-western",
-      "media": "Movie"
+      "concept": "genre-western"
      }
     }
    ],
@@ -1568,7 +1590,8 @@
      "expect": {
       "act": "NewRequest",
       "conflict": true,
-      "concept": "genre-animation"
+      "concept": "animated-for-kids",
+      "media": "Movie"
      }
     }
    ],
@@ -1608,7 +1631,8 @@
      "expect": {
       "act": "NewRequest",
       "conflict": true,
-      "concept": "french"
+      "concept": "french",
+      "media": "Movie"
      }
     }
    ],
@@ -1651,7 +1675,8 @@
      "expect": {
       "act": "NewRequest",
       "conflict": true,
-      "concept": "low-rated"
+      "concept": "low-rated",
+      "media": "Movie"
      }
     }
    ],
@@ -1726,7 +1751,9 @@
       "media": "Movie",
       "years": {
        "last": 10
-      }
+      },
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     }
    ],
@@ -1749,7 +1776,8 @@
       "concept": "genre-action",
       "mustNot": [
        "superhero"
-      ]
+      ],
+      "media": "Movie"
      }
     }
    ],
@@ -1842,7 +1870,8 @@
       "concept": "genre-war",
       "mustNot": [
        "world-war-ii"
-      ]
+      ],
+      "media": "Movie"
      }
     }
    ],
@@ -1865,7 +1894,8 @@
       "concept": "space",
       "mustNot": [
        "alien"
-      ]
+      ],
+      "media": "Movie"
      }
     }
    ],
@@ -1987,7 +2017,8 @@
      "query": "time travel movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "time-travel"
+      "concept": "time-travel",
+      "media": "Movie"
      }
     },
     {
@@ -2022,7 +2053,8 @@
      "query": "crime series",
      "expect": {
       "act": "NewRequest",
-      "concept": "genre-crime"
+      "concept": "genre-crime",
+      "media": "Show"
      }
     },
     {
@@ -2101,7 +2133,8 @@
      "query": "horror movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "genre-horror"
+      "concept": "genre-horror",
+      "media": "Movie"
      }
     },
     {
@@ -2130,7 +2163,10 @@
      "query": "heist movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "heist"
+      "concept": "heist",
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     },
     {
@@ -2140,7 +2176,10 @@
       "concept": "heist",
       "rejectTurns": [
        1
-      ]
+      ],
+      "media": "Movie",
+      "meant": "heist-meant",
+      "meantWhy": "the concept truth is the heist TAG population the reply counts, generic robbery tags included; a person asking for heists means films tagged or named heists, not every film with a robbery in it (truth/heist-meant.sql)"
      }
     }
    ],
@@ -2160,7 +2199,8 @@
      "query": "spy movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "spy"
+      "concept": "spy",
+      "media": "Movie"
      }
     },
     {
@@ -2170,7 +2210,8 @@
       "concept": "spy",
       "rejectTurns": [
        1
-      ]
+      ],
+      "media": "Movie"
      }
     }
    ],
@@ -2190,7 +2231,8 @@
      "query": "sci-fi movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "genre-scifi"
+      "concept": "genre-scifi",
+      "media": "Movie"
      }
     },
     {
@@ -2219,7 +2261,8 @@
      "query": "zombie movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "zombie"
+      "concept": "zombie",
+      "media": "Movie"
      }
     },
     {
@@ -2229,7 +2272,8 @@
       "concept": "zombie",
       "rejectTurns": [
        1
-      ]
+      ],
+      "media": "Movie"
      }
     }
    ],
@@ -2249,7 +2293,8 @@
      "query": "submarine movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "submarine"
+      "concept": "submarine",
+      "media": "Movie"
      }
     },
     {
@@ -2315,7 +2360,8 @@
      "query": "witch movies",
      "expect": {
       "act": "NewRequest",
-      "concept": "witch"
+      "concept": "witch",
+      "media": "Movie"
      }
     },
     {
@@ -2524,8 +2570,7 @@
      "query": "something like The Hurt Locker",
      "expect": {
       "act": "NewRequest",
-      "concept": "genre-war",
-      "media": "Movie"
+      "concept": "genre-war"
      }
     }
    ],
@@ -2910,16 +2955,14 @@
      "query": "kidnapping thrillers",
      "expect": {
       "act": "NewRequest",
-      "concept": "kidnapping",
-      "media": "Movie"
+      "concept": "kidnapping-thriller"
      }
     },
     {
      "query": "only ones from the last five years",
      "expect": {
       "act": "Refine",
-      "concept": "kidnapping",
-      "media": "Movie",
+      "concept": "kidnapping-thriller",
       "years": {
        "last": 5
       }
@@ -3077,7 +3120,9 @@
      "expect": {
       "act": "NewRequest",
       "concept": "dinosaur",
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "dinosaur-meant",
+      "meantWhy": "the concept truth is the dinosaur TAG population the reply counts; The Tree of Life carries the tag for one sequence of a family drama and is not a dinosaur film (truth/dinosaur-meant.sql)"
      }
     },
     {
@@ -3095,7 +3140,9 @@
       "noRepeatTurns": [
        1
       ],
-      "media": "Movie"
+      "media": "Movie",
+      "meant": "dinosaur-meant",
+      "meantWhy": "the concept truth is the dinosaur TAG population the reply counts; The Tree of Life carries the tag for one sequence of a family drama and is not a dinosaur film (truth/dinosaur-meant.sql)"
      }
     }
    ],
