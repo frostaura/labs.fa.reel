@@ -26,15 +26,18 @@ namespace FrostAura.Reel.Application.Search.AskReel.Engine;
 /// satisfies what was asked.</para>
 ///
 /// <para><b>Which concept goes first:</b> a keyword before a genre (a genre is a shelf, a keyword
-/// describes something on it: "documentaries about space", "nature documentary series"), a concept the
-/// user's NEWEST message does not say before one it does ("now spy movies" after "hitman movies" keeps
-/// spy), and among the rest the one said last ("space movies about isolation and silence" keeps space).</para>
+/// describes something on it: "documentaries about space", "nature documentary series"), a word the
+/// newest message adds before the topic the conversation already holds (a refinement modifies the
+/// topic: "not that, something with more heart" after "heist movies" keeps heist — a topic SWITCH is
+/// read as a new request upstream, <see cref="PlanSanitizer"/>), and among the rest the one said last
+/// ("space movies about isolation and silence" keeps space).</para>
 ///
-/// <para><b>Which rung an empty answer reports</b> (<see cref="ReportRung"/>): the broadest rung that
-/// is itself empty — the level at which the request runs dry. "Documentaries about space" against an
-/// excluded documentary genre is empty at "documentaries", so the reply counts documentaries and
-/// offers the documentary relaxation (997), not the 27 the conjunction would; "zombie westerns" with
-/// westerns to spare is empty only as zombie westerns, and is reported as such.</para>
+/// <para><b>Which rung an empty answer reports</b> (<see cref="Choose"/>): the anchor, when nothing on
+/// it is eligible at all — the conditions or the footprint empty the whole shelf, so that shelf and its
+/// relaxation are the explanation: "documentaries about space" against an excluded documentary genre
+/// counts documentaries and offers the documentary relaxation (997), not the 27 the conjunction would.
+/// Otherwise the request as asked: "zombie westerns" with westerns to spare, or "kidnapping thrillers
+/// from the last five years" with thrillers under the bar, is empty only as asked and is reported so.</para>
 /// </summary>
 public static class ConceptLadder
 {
@@ -63,9 +66,10 @@ public static class ConceptLadder
     }
 
     /// <summary>
-    /// Given whether each rung of <see cref="Rungs"/> has offerable supply, the rung to search (the
-    /// first that has some, else the request itself) and the rung an empty answer reports (the last
-    /// empty rung before the first that has some, else the anchor).
+    /// Given whether each rung of <see cref="Rungs"/> has offerable supply (probed in order, stopping at
+    /// the first that has some), the rung to search — the first that has some, else the request itself —
+    /// and the rung an empty answer may report: the request itself when any rung has supply, else the
+    /// anchor (the caller reports the anchor only when nothing of it is eligible at all, see the remarks).
     /// </summary>
     public static (int Search, int Report) Choose(IReadOnlyList<bool> offerable)
     {
@@ -74,7 +78,7 @@ public static class ConceptLadder
         {
             if (offerable[i])
             {
-                return (i, Math.Max(0, i - 1));
+                return (i, 0);
             }
         }
 
@@ -92,7 +96,7 @@ public static class ConceptLadder
         return concepts
             .Select((concept, index) => (Index: index, Genre: IsGenre(concept), Position: PositionIn(said, concept)))
             .OrderBy(c => c.Genre ? 0 : 1)
-            .ThenBy(c => c.Position < 0 ? 1 : 0)
+            .ThenBy(c => c.Position < 0 ? 0 : 1)
             .ThenBy(c => c.Position < 0 ? c.Index : c.Position)
             .ThenBy(c => c.Index)
             .Select(c => c.Index);

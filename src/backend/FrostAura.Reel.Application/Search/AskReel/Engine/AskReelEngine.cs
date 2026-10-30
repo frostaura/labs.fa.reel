@@ -990,9 +990,9 @@ public sealed class AskReelEngine(
         var relaxed = !ReferenceEquals(searchHard, resolved);
         if (relaxed)
         {
-            query = QueryFor(turn, next with { Hard = searchHard });
             turn.Note(SearchTurnDegraded.RelaxedPrefix + string.Join('+', ConceptLadder.Dropped(resolved, searchHard)));
         }
+
         // Named by every constraint the supply intersects, so a count and its label describe one shelf (HREV2-ASK-01).
         var topic = AskReelTopic.Shelf(hard);
         await PhaseAsync(turn, "searching", topic is null ? "Searching the catalogue" : $"Searching the catalogue for {topic}");
@@ -1002,6 +1002,10 @@ public sealed class AskReelEngine(
         using (turn.Timings.Stage(AskStageTimings.Retrieve))
         {
             retrieval = await RetrieveAsync(turn, query, ct);
+            if (relaxed)
+            {
+                retrieval = Widened(retrieval, await retriever.RetrieveAsync(QueryFor(turn, next with { Hard = searchHard }), ct));
+            }
         }
 
         // An arm that contributed nothing is a thin retrieval, recorded on the row (WS-3 CR-2c), not a
@@ -1027,8 +1031,7 @@ public sealed class AskReelEngine(
         }
 
         var candidates = await JudgeOrderAsync(
-            turn, db, () => scorer, () => relaxed ? Task.FromResult(searchHard) : ResolvedAsync(turn, hard, ct), next,
-            judgeable, titles, exclude, turn.Timings, ct);
+            turn, db, () => scorer, () => ResolvedAsync(turn, hard, ct), next, judgeable, titles, exclude, turn.Timings, ct);
 
         // A person's credits are listed unjudged only when the person IS the request. A rung relaxed down
         // to the person is judged like any other: listing those credits would answer "Nolan heist films"
@@ -1124,6 +1127,14 @@ public sealed class AskReelEngine(
             if (countable && !(personOnly && retrieval.Supply.MatchingInCatalogue == 0))
             {
                 supply = await RecountAsync(turn, reportHard, Rejected(next), retrieval.Supply, ct);
+
+                // The anchor is reported only when nothing on it is eligible at all (ConceptLadder):
+                // an anchor with titles under the bar or unscored did not run dry, the request did.
+                if (!ReferenceEquals(reportHard, resolved) && supply.Eligible > 0)
+                {
+                    reportHard = resolved;
+                    supply = await RecountAsync(turn, reportHard, Rejected(next), retrieval.Supply, ct);
+                }
             }
 
             // Nothing unseen survives the conditions, and dropping one would bring something back: the
@@ -1212,6 +1223,25 @@ public sealed class AskReelEngine(
         var saved = ConversationStateReducer.Presented(next, presented) with { Version = turn.Input.AnswerNumber };
         var all = picks.Concat(placedTrays.SelectMany(t => t.Cards)).ToList();
         return Outcome(turn, plan, saved, composed.Reply, composed.Reason, mode, all, IntentJsonOf(hard, next));
+    }
+
+    /// <summary>
+    /// A relaxed turn's candidates: the request's own retrieval first — its titles have no stored
+    /// prediction clearing the bar (that is why the ladder widened), but an unscored one is scored beside
+    /// the judge and can still be a pick ("treasure hunt adventures": five unscored treasure hunts) —
+    /// at most half the judge's slice of them, then the wider rung's to fill the slice. Bounded to the
+    /// slice so the request's own titles are always judged; the request's supply and TMDB finds stand.
+    /// </summary>
+    internal static RetrievalResult Widened(RetrievalResult asked, RetrievalResult wider)
+    {
+        var own = asked.Candidates.Take(RequestJudge.MaxJudged / 2).ToList();
+        var ids = own.Select(c => c.TitleId).ToHashSet();
+        var room = RequestJudge.MaxJudged - own.Count;
+        return asked with
+        {
+            Candidates = [.. own, .. wider.Candidates.Where(c => ids.Add(c.TitleId)).Take(room)],
+            SkippedArms = [.. asked.SkippedArms.Union(wider.SkippedArms, StringComparer.Ordinal)],
+        };
     }
 
     /// <summary>

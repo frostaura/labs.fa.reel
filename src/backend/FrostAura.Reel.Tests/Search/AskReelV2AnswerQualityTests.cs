@@ -52,13 +52,12 @@ public class AskReelV2AnswerQualityTests
     }
 
     [Fact]
-    public void A_concept_the_newest_message_does_not_say_is_dropped_before_one_it_does()
+    public void A_word_a_refinement_adds_is_dropped_before_the_topic_the_conversation_holds()
     {
-        // "hitman movies", then "now spy movies" read as a refinement: the newest words anchor.
-        var hard = HardConstraints.None with { Concepts = [Keyword("hitman"), Keyword("spy")] };
+        // "heist movies", then "not that, something with more heart" planned with "heart" as a concept.
+        var hard = HardConstraints.None with { Concepts = [Keyword("heist"), Keyword("heart")] };
 
-        Assert.Equal(["spy"], Words(ConceptLadder.Rungs(hard, "now spy movies")[^1]));
-        Assert.Equal(["hitman"], Words(ConceptLadder.Rungs(hard, "hitman movies")[^1]));
+        Assert.Equal(["heist"], Words(ConceptLadder.Rungs(hard, "not that, something with more heart")[^1]));
     }
 
     [Theory]
@@ -110,15 +109,59 @@ public class AskReelV2AnswerQualityTests
     [Theory]
     // The request itself has supply: searched and reported as asked.
     [InlineData(new[] { true }, 0, 0)]
-    [InlineData(new[] { true, true }, 0, 0)]
-    // Empty as asked, a wider rung has some: search that rung, report where it ran dry.
+    // Empty as asked, a wider rung has some: search that rung, and an empty answer is the request's.
     [InlineData(new[] { false, true }, 1, 0)]
-    [InlineData(new[] { false, false, true }, 2, 1)]
-    // Empty all the way down: search as asked, report the anchor.
+    [InlineData(new[] { false, false, true }, 2, 0)]
+    // Empty all the way down: search as asked, and the anchor may be reported (if nothing on it is eligible).
     [InlineData(new[] { false, false, false }, 0, 2)]
     [InlineData(new[] { false }, 0, 0)]
-    public void The_searched_rung_is_the_first_with_supply_and_the_reported_one_where_it_ran_dry(bool[] offerable, int search, int report) =>
+    public void The_searched_rung_is_the_first_with_supply_and_only_a_dry_ladder_reports_its_anchor(bool[] offerable, int search, int report) =>
         Assert.Equal((search, report), ConceptLadder.Choose(offerable));
+
+    [Theory]
+    [InlineData(5, 20)]
+    [InlineData(12, 20)]
+    [InlineData(0, 3)]
+    public void A_widened_retrieval_judges_the_requests_own_titles_first_and_fills_the_slice_from_the_wider_rung(int own, int wider)
+    {
+        static Candidate Of(Guid id) => new(id, 0.1, null, []);
+        var asked = Enumerable.Range(0, own).Select(_ => Guid.NewGuid()).ToList();
+        var wide = asked.Take(2).Concat(Enumerable.Range(0, wider).Select(_ => Guid.NewGuid())).ToList();
+        var supply = new SupplyReport(0, 0, 0, 0, 0, 0, 0, [], 0, 50, null, true);
+
+        var merged = AskReelEngine.Widened(
+            new RetrievalResult([.. asked.Select(Of)], supply, new StageTimings(new Dictionary<string, long>())),
+            new RetrievalResult([.. wide.Select(Of)], supply, new StageTimings(new Dictionary<string, long>())));
+
+        var kept = Math.Min(own, RequestJudge.MaxJudged / 2);
+        var ids = merged.Candidates.Select(c => c.TitleId).ToList();
+        Assert.Equal(asked.Take(kept), ids.Take(kept));
+        Assert.Equal(ids.Distinct().Count(), ids.Count);
+        Assert.Equal(Math.Min(RequestJudge.MaxJudged, kept + wide.Except(asked.Take(kept)).Count()), ids.Count);
+        Assert.Same(supply, merged.Supply);
+    }
+
+    // ── A stated topic switch ───────────────────────────────────────────────────────────────
+
+    private static ConversationState Holding(params ConceptTerm[] concepts) =>
+        ConversationState.Empty with { Hard = HardConstraints.None with { Concepts = concepts } };
+
+    [Theory]
+    [InlineData("Ok let's do mind benders instead. dark ones", new[] { "mind bender" }, new string[0], true)]
+    [InlineData("now spy movies", new[] { "spy" }, new string[0], true)]
+    // Restating the old topic keeps it a refinement.
+    [InlineData("actually something funny instead, a comedy heist", new[] { "heist" }, new[] { "comedy" }, false)]
+    // No replacement cue: a refinement.
+    [InlineData("darker ones with spies", new[] { "spy" }, new string[0], false)]
+    // A cue with no topic of its own ("now TV shows like that") is a media switch, not a new request.
+    [InlineData("now TV shows like that", new string[0], new string[0], false)]
+    public void A_refinement_that_says_it_replaces_the_topic_is_a_new_request(string message, string[] concepts, string[] genres, bool switches)
+    {
+        var state = Holding(new ConceptTerm("heist", [], []), new ConceptTerm("fantasy or mystery", [], ["fantasy", "mystery"]));
+
+        Assert.Equal(switches, PlanSanitizer.SwitchesTopic(TurnAct.Refine, message, state, concepts, genres, []));
+        Assert.False(PlanSanitizer.SwitchesTopic(TurnAct.CritiqueSet, message, state, concepts, genres, []));
+    }
 
     // ── Languages ───────────────────────────────────────────────────────────────────────────
 

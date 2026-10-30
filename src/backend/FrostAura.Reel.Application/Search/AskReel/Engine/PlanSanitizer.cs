@@ -90,9 +90,11 @@ public static class PlanSanitizer
         var media = UserMedia(delta.Media, message);
 
         var clarify = state.ClarifiedOnce ? null : plan.ClarifyQuestion;
+        var act = SwitchesTopic(plan.Act, message, state, concepts, genres, references) ? TurnAct.NewRequest : plan.Act;
         return RejectPointed(
             plan with
             {
+                Act = act,
                 References = references,
                 Delta = delta with { Concepts = concepts, Genres = genres, Negations = negations, Media = media },
                 ClarifyQuestion = clarify,
@@ -120,6 +122,39 @@ public static class PlanSanitizer
     /// card still asked for, an item critique becomes the refinement it is (as a critique, the card
     /// asked for would be hidden). A message that is ONLY the rejection asks for nothing new.</para>
     /// </summary>
+    /// <summary>
+    /// True when a refinement is really a new request: the message says it REPLACES what came before
+    /// ("…mind benders instead", "now spy movies"), brings a topic of its own, points at no card, and
+    /// restates nothing the conversation required. Merged as a refinement, "Ok let's do mind benders
+    /// instead" after "fantasy or mystery movies" searched fantasy mind-benders — the very genre the user
+    /// had just walked away from — and "now spy movies" after hitman movies searched hitman spies. A
+    /// switch that restates the old topic ("actually something funny instead, a comedy heist" after
+    /// heists) is still a refinement of it.
+    /// </summary>
+    internal static bool SwitchesTopic(
+        TurnAct act, string message, ConversationState state, IReadOnlyList<string> concepts, IReadOnlyList<string> genres,
+        IReadOnlyList<TurnHandle> references)
+    {
+        if (act != TurnAct.Refine || references.Count > 0 || concepts.Count + genres.Count == 0 || !state.Hard.HasConcepts)
+        {
+            return false;
+        }
+
+        var words = AskReelIntentSanitizer.Words(message);
+        var lead = words.SkipWhile(w => w is "ok" or "okay" or "so" or "and" or "right" or "alright").FirstOrDefault();
+        if (!words.Contains("instead") && lead != "now")
+        {
+            return false;
+        }
+
+        bool Restated(Retrieval.ConceptTerm concept) =>
+            NegationTerms.MatchesPhrase(message, concept.UserWords)
+            || concept.Genres.Any(g => NegationTerms.MatchesPhrase(message, g))
+            || (Retrieval.Concepts.ConceptSynonyms.GenresNamedBy(Retrieval.Concepts.ConceptResolver.Normalise(concept.UserWords)) is { } named
+                && named.Any(g => GenresSaid(words).Contains(g)));
+        return !state.Hard.Concepts.Any(Restated);
+    }
+
     internal static PlanResult RejectPointed(PlanResult plan, string message, IReadOnlyList<PresentedRef> presented)
     {
         var pointers = AskReelPointer.Pointers(message);
