@@ -367,6 +367,37 @@ public class RetrievalContractTests
     }
 
     [Theory]
+    [InlineData(new[] { "keyword:shark" }, new[] { "fts:overview" }, new[] { "name:shark", "fts:overview" }, 2, 1)]
+    [InlineData(new[] { "fts:overview", "mood:dark" }, new[] { "fts:overview", "steer:darker" }, new[] { "fts:overview" }, 0, 3)]
+    [InlineData(new[] { "keyword:shark" }, new[] { "fts:themes", "fts:overview" }, new[] { "genre:horror" }, 3, 0)]
+    [InlineData(new[] { "mood:dark" }, new[] { "reference:jaws" }, new[] { "fts:name" }, 3, 0)]
+    public void Overview_only_leads_are_counted_apart_from_the_tagged_matches(
+        string[] first, string[] second, string[] third, int tagged, int prose)
+    {
+        // HREV5-RET-04: "shark movies" found Sarah's Oil ("greedy oil sharks") in its overview. A reply
+        // that says "3 shark films" must not count a synopsis lead as a shark film nobody checked.
+        var result = new RetrievalResult(
+            [Lead(first), Lead(second), Lead(third)],
+            new SupplyReport(3, 0, 0, 0, 3, 0, 0, [], 0, 50, null, KnockoutsMeasured: true),
+            StageTimings.Empty);
+
+        Assert.Equal(prose, result.ProseLeads);
+        Assert.Equal(tagged, result.TaggedMatches);
+        Assert.Equal(result.Candidates.Count, result.TaggedMatches + result.ProseLeads);
+    }
+
+    [Fact]
+    public void An_empty_retrieval_has_no_tagged_matches_and_no_prose_leads()
+    {
+        var result = new RetrievalResult([], new SupplyReport(0, 0, 0, 0, 0, 0, 0, [], 0, 50, null, KnockoutsMeasured: true), StageTimings.Empty);
+
+        Assert.Equal(0, result.ProseLeads);
+        Assert.Equal(0, result.TaggedMatches);
+    }
+
+    private static Candidate Lead(string[] evidence) => new(Guid.NewGuid(), 0d, null, evidence);
+
+    [Theory]
     [InlineData(FilterKind.ExcludeGenre, "comedy", "excluded genre: comedy")]
     [InlineData(FilterKind.IncludeGenre, "drama", "only these genres: drama")]
     [InlineData(FilterKind.ExcludeKeyword, "zombie", "excluded keyword: zombie")]

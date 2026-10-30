@@ -222,6 +222,20 @@ public sealed record RetrievalResult(IReadOnlyList<Candidate> Candidates, Supply
     /// (<c>semantic</c>, <c>tmdb</c>, <c>fulltext</c>); the turn fused without them (§4.10).
     /// </summary>
     public IReadOnlyList<string> SkippedArms { get; init; } = [];
+
+    /// <summary>
+    /// Candidates whose only evidence for the request's concepts is an overview hit
+    /// (<see cref="FullTextHit.OnlyInProse"/>): leads for the judge, not matches. A reply counts them
+    /// apart from <see cref="TaggedMatches"/>, so "3 shark films" never counts Sarah's Oil ("greedy oil
+    /// sharks") as a shark film nobody checked (HREV5-RET-04).
+    /// </summary>
+    public int ProseLeads => Candidates.Count(FullTextHit.OnlyInProse);
+
+    /// <summary>
+    /// Candidates that are not <see cref="ProseLeads"/>: found by a tag, a name, a genre or an
+    /// extracted theme — or, on a turn without a concept, every candidate.
+    /// </summary>
+    public int TaggedMatches => Candidates.Count - ProseLeads;
 }
 
 /// <summary>A title named in a reply or a sample, with just enough to print it.</summary>
