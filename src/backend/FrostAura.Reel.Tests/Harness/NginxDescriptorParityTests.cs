@@ -3,20 +3,21 @@ using System.Text.RegularExpressions;
 namespace FrostAura.Reel.Tests.Harness;
 
 /// <summary>
-/// A source-level guard over the gateway's nginx config, which this repository ships twice.
+/// A source-level guard over the gateway's nginx config and the image that delivers it.
 ///
 /// <para>
-/// <c>nginx/nginx.conf</c> is the CANONICAL file, an envsubst template the dev compose stack
-/// mounts; <c>docker-compose.prod.yml</c> carries the same file inline as the compose config
-/// <c>gateway_nginx</c>, because a Portainer stack cannot mount a file out of a repository it never
-/// clones. The two are held byte-equal after the inline copy's three template values are filled in
-/// and compose's <c>$$</c> escape is undone (<see cref="The_production_copy_is_the_canonical_file"/>),
-/// so every other check here is a check of both.
+/// <c>nginx/nginx.conf</c> is the ONLY copy. <c>nginx/Dockerfile</c> bakes it into the
+/// <c>reel-gateway</c> image CI publishes beside the backend and frontend, the production stack runs
+/// that image, and the dev compose stack mounts the same file as its template. Until 2026-10-30
+/// production carried a second, inline copy as a compose <c>configs:</c> block held byte-equal to
+/// this one; that copy is gone, and <see cref="The_gateway_image_bakes_the_canonical_file"/> and
+/// <see cref="Production_runs_the_published_gateway_image_and_carries_no_nginx_config_of_its_own"/>
+/// are what stop a second one from coming back.
 /// </para>
 ///
 /// <para>
-/// The check exists because the divergence was real and it was invisible. On 2026-09-10 a second
-/// production descriptor (since removed) was found to be rewriting <c>/api/…</c> to <c>/…</c>
+/// The content checks exist because a divergence was real and it was invisible. On 2026-09-10 a
+/// second production descriptor (since removed) was found to be rewriting <c>/api/…</c> to <c>/…</c>
 /// before it reached the backend — a <c>proxy_pass</c> with a trailing-slash URI replaces the
 /// matched location prefix — so every API call on the deployed host would have 404'd, while every
 /// file looked fine to a reader skimming them side by side. The same pass found that none of them
@@ -27,24 +28,16 @@ namespace FrostAura.Reel.Tests.Harness;
 ///
 /// <para>
 /// Deliberately unit-level: it reads text off disk, touches no database and starts no host, so it
-/// runs in the default <c>dotnet test</c> pass rather than behind the integration gate.
+/// runs in the default <c>dotnet test</c> pass rather than behind the integration gate. What the
+/// built image actually DOES to a request is <c>deploy/probe-gateway.sh</c>'s job.
 /// </para>
 /// </summary>
 public partial class NginxDescriptorParityTests
 {
-    /// <summary>The canonical file first, then the inline production copy.</summary>
+    /// <summary>The one gateway config. Every content check below reads it.</summary>
     private static readonly string[] Descriptors =
     [
         "nginx/nginx.conf",
-        "docker-compose.prod.yml",
-    ];
-
-    /// <summary>The values the production copy fills into the canonical template.</summary>
-    private static readonly (string Placeholder, string Value)[] ProductionTemplateValues =
-    [
-        ("${NGINX_BACKEND_PORT}", "5000"),
-        ("${NGINX_FRONTEND_PORT}", "80"),
-        ("${NGINX_CLIENT_MAX_BODY_SIZE}", "10m"),
     ];
 
     /// <summary>The streamed locations: Ask Reel's turn and the pipeline event channel.</summary>
@@ -215,25 +208,84 @@ public partial class NginxDescriptorParityTests
     }
 
     [Fact]
-    public void The_production_copy_is_the_canonical_file()
+    public void The_gateway_image_bakes_the_canonical_file()
     {
         var root = RepositoryRoot();
-        var expected = ProductionTemplateValues.Aggregate(
-            File.ReadAllText(Path.Combine(root, "nginx", "nginx.conf")).Replace("\r\n", "\n", StringComparison.Ordinal),
-            (text, pair) => text.Replace(pair.Placeholder, pair.Value, StringComparison.Ordinal));
-        var inline = ComposeDescriptor.Load("docker-compose.prod.yml").InlineConfig("gateway_nginx");
+        var dockerfile = File.ReadAllText(Path.Combine(root, "nginx", "Dockerfile")).Replace("\r\n", "\n", StringComparison.Ordinal);
 
-        Assert.NotNull(inline);
-        Assert.DoesNotContain("${NGINX_", expected.Replace("NGINX_*", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
-        // Compose interpolates the inline copy, so every nginx $ in it is written $$.
-        Assert.DoesNotMatch(@"(?<!\$)\$(?!\$)", inline);
-        var actual = inline.Replace("$$", "$", StringComparison.Ordinal);
-        Assert.True(
-            string.Equals(expected, actual, StringComparison.Ordinal),
-            "docker-compose.prod.yml's gateway_nginx is not nginx/nginx.conf. Replace its content block with:"
-            + Environment.NewLine
-            + string.Join('\n', expected.Replace("$", "$$", StringComparison.Ordinal).TrimEnd('\n').Split('\n').Select(l => l.Length == 0 ? l : "      " + l)));
+        // The upstream nginx image renders templates/<name>.template to $NGINX_ENVSUBST_OUTPUT_DIR/<name>
+        // at start; nginx.conf is a main config (events + http), so it must land on /etc/nginx/nginx.conf.
+        Assert.Matches(@"(?m)^FROM nginx:", dockerfile);
+        Assert.Matches(@"(?m)^COPY nginx\.conf /etc/nginx/templates/nginx\.conf\.template$", dockerfile);
+        var defaults = DockerfileEnv(dockerfile);
+        Assert.Equal("/etc/nginx", defaults.GetValueOrDefault("NGINX_ENVSUBST_OUTPUT_DIR"));
+        // Only NGINX_* names are ever substituted, so no container variable can collide with one of
+        // nginx's own $variables.
+        Assert.Equal("^NGINX_", defaults.GetValueOrDefault("NGINX_ENVSUBST_FILTER"));
+
+        // Every placeholder the template uses has a default baked in, so the image alone renders a
+        // working config instead of a literal ${NGINX_BACKEND_PORT} in a proxy_pass.
+        var template = File.ReadAllText(Path.Combine(root, "nginx", "nginx.conf"));
+        var placeholders = Placeholder().Matches(template).Select(m => m.Groups[1].Value).Distinct().ToList();
+        Assert.NotEmpty(placeholders);
+        Assert.All(placeholders, name => Assert.False(string.IsNullOrWhiteSpace(defaults.GetValueOrDefault(name)), $"nginx/Dockerfile has no ENV default for ${{{name}}}."));
+
+        // And the defaults are the ports the stack actually listens on (backend 5000, SPA 80).
+        Assert.Equal("5000", defaults["NGINX_BACKEND_PORT"]);
+        Assert.Equal("80", defaults["NGINX_FRONTEND_PORT"]);
     }
+
+    [Fact]
+    public void Production_runs_the_published_gateway_image_and_carries_no_nginx_config_of_its_own()
+    {
+        var prod = ComposeDescriptor.Load("docker-compose.prod.yml");
+        var gateway = prod.ServiceBlock("gateway");
+
+        Assert.Contains("    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-gateway:${REEL_TAG:-latest}", gateway);
+        Assert.DoesNotContain(gateway, l => l.Trim() == "configs:" || l.Contains("nginx.conf", StringComparison.Ordinal));
+        Assert.Null(prod.InlineConfig("gateway_nginx"));
+        Assert.DoesNotMatch(@"(?m)^\s*(listen|proxy_pass|server_tokens)\b", prod.Text);
+
+        // The dev stack renders the very same file through the same template mechanism.
+        Assert.Contains(
+            "      - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro",
+            ComposeDescriptor.Load("docker-compose.yml").ServiceBlock("gateway"));
+    }
+
+    [Fact]
+    public void Ci_publishes_the_gateway_image_from_the_nginx_directory_with_the_backend_tag_scheme()
+    {
+        var workflow = File.ReadAllText(Path.Combine(RepositoryRoot(), ".github", "workflows", "ci.yml"));
+
+        foreach (var arch in new[] { "amd64", "arm64" })
+        {
+            Assert.Contains($"  build-gateway-{arch}:", workflow, StringComparison.Ordinal);
+            Assert.Contains($"${{{{ secrets.DOCKERHUB_USERNAME }}}}/reel-gateway:${{{{ steps.tag.outputs.tag }}}}-{arch}", workflow, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("          context: ./nginx\n          file: ./nginx/Dockerfile\n", workflow.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway", workflow, StringComparison.Ordinal);
+        Assert.Matches(@"needs: \[merge-backend-manifests, merge-frontend-manifests, merge-gateway-manifests\]", workflow);
+    }
+
+    /// <summary>The <c>ENV</c> defaults a Dockerfile declares, continuation lines included.</summary>
+    private static Dictionary<string, string> DockerfileEnv(string dockerfile)
+    {
+        var joined = Regex.Replace(dockerfile, @"\\\n\s*", " ");
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match line in Regex.Matches(joined, @"(?m)^ENV\s+(.+)$"))
+        {
+            foreach (Match pair in Regex.Matches(line.Groups[1].Value, @"([A-Za-z_][A-Za-z0-9_]*)=(\S*)"))
+            {
+                result[pair.Groups[1].Value] = pair.Groups[2].Value;
+            }
+        }
+
+        return result;
+    }
+
+    [GeneratedRegex(@"\$\{(NGINX_[A-Z_]+)\}")]
+    private static partial Regex Placeholder();
 
     [Fact]
     public void The_gateway_resolves_upstreams_per_request()

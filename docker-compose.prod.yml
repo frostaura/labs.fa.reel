@@ -2,12 +2,18 @@
 # reel.frostaura.net, and the only one (K-14). It mirrors docker-compose.yml but pulls published
 # multi-arch images instead of building. CI's deploy-portainer job sets REEL_TAG to the commit it
 # just built (`sha-<short>`) and redeploys this stack, then polls /health until that commit answers.
-# Cloudflared maps reel.frostaura.net → this host's GATEWAY_PORT (docs/deployment.md#network-exposure).
+#
+# Topology — ONE way in (docs/deployment.md#network-exposure). The `cloudflared` service below runs
+# the Cloudflare tunnel INSIDE this stack and reaches the gateway by service name (http://gateway:80)
+# over the pinned bridge network. No service publishes a host port: not the gateway, not the API, not
+# the SPA, not Postgres. The tunnel is the only path from the internet to anything here, and the
+# gateway is the only thing the tunnel can reach that matters.
 #
 # Required stack env vars: POSTGRES_PASSWORD, JWT_SECRET, TRAKT_CLIENT_ID, TRAKT_CLIENT_SECRET,
-# TMDB_READ_ACCESS_TOKEN, OPENROUTER_API_KEY and BACKUP_HOST_DIR (an absolute host path, ideally a
-# mount of off-host storage; never a volume of this stack — docs/deployment.md#backups-and-restore).
-# REEL_TAG pins the image (default `latest`; a rollback is a REEL_TAG change, see the docs).
+# TMDB_READ_ACCESS_TOKEN, CLOUDFLARE_TUNNEL_TOKEN and BACKUP_HOST_DIR (an absolute host path, ideally
+# a mount of off-host storage; never a volume of this stack — docs/deployment.md#backups-and-restore).
+# OPENROUTER_API_KEY is optional to boot but every LLM feature is off without it.
+# REEL_TAG pins all three Reel images together (default `latest`; a rollback is a REEL_TAG change).
 # Every other backend key has a default here and is documented in .env.example; the LLM ceilings
 # the process actually resolved are printed in one startup log line ("Effective LLM ceilings").
 # Every service logs through Docker's `local` driver with rotation (J*2). The json-file default kept
@@ -20,6 +26,20 @@ x-logging: &default-logging
   options:
     max-size: "100m"
     max-file: "10"
+
+# The stack's bridge is PINNED rather than left to Docker's default pool, because the backend
+# believes X-Forwarded-* only from this /24 (TRUSTED_PROXY_NETWORKS below) — the gateway and
+# cloudflared are the only two hops that ever set those headers, and both live here. It sits in 10/8
+# on purpose, outside Docker's default address pools (172.17.0.0/12 and 192.168.0.0/16), so Docker
+# can never hand it to another network and the stack can never fail to deploy with "Pool overlaps".
+# One /24 away from crusaders.mainframe's 10.83.29.0/24, so both stacks can share a host. If the
+# host's LAN is 10.83.30.x, pick another free /24 and change it HERE AND in TRUSTED_PROXY_NETWORKS;
+# ComposeHardeningTests holds the two equal.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.83.30.0/24
 
 services:
   postgres:
@@ -58,7 +78,8 @@ services:
       FOUNDER_TRAKT_SLUGS: ${FOUNDER_TRAKT_SLUGS:-}
       # Edge security (docs/deployment.md#edge-security): the proxies whose X-Forwarded-* the API
       # believes, the per-account Ask turn limits (FD-8) and the key-ring certificate (J-12).
-      TRUSTED_PROXY_NETWORKS: "${TRUSTED_PROXY_NETWORKS:-127.0.0.0/8,::1/128,172.16.0.0/12}"
+      # Exactly the pinned bridge above: cloudflared -> gateway -> API, nothing else.
+      TRUSTED_PROXY_NETWORKS: "${TRUSTED_PROXY_NETWORKS:-10.83.30.0/24}"
       ASK_TURNS_CONCURRENT: ${ASK_TURNS_CONCURRENT:-1}
       ASK_TURNS_PER_MINUTE: ${ASK_TURNS_PER_MINUTE:-6}
       ASK_TURNS_PER_HOUR: ${ASK_TURNS_PER_HOUR:-20}
@@ -232,18 +253,12 @@ services:
       - backend
     logging: *default-logging
 
+  # The single entry point. A built image (nginx/Dockerfile bakes nginx/nginx.conf), pinned by
+  # REEL_TAG with the backend and frontend, so a gateway change ships by the same redeploy as the code
+  # behind it. Deliberately NO `ports:` — cloudflared reaches it as http://gateway:80 on the bridge.
   gateway:
-    image: nginx:alpine
+    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-gateway:${REEL_TAG:-latest}
     restart: unless-stopped
-    ports:
-      # Loopback only by default (J-1). A cloudflared PROCESS on this host reaches it at
-      # 127.0.0.1:GATEWAY_PORT. A cloudflared container, or one on another machine, cannot: no tunnel
-      # joins this stack's network, so set GATEWAY_BIND to the interface it uses. Check the live
-      # tunnel's ingress target before the first rebuild (docs/deployment.md#network-exposure).
-      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8090}:80"
-    configs:
-      - source: gateway_nginx
-        target: /etc/nginx/nginx.conf
     depends_on:
       backend:
         condition: service_healthy
@@ -251,11 +266,24 @@ services:
         condition: service_started
     logging: *default-logging
 
-# Portainer stacks can't mount repo files, so the gateway config ships inline. `nginx/nginx.conf`
-# is the CANONICAL descriptor and `gateway_nginx` below is that file with its three NGINX_*
-# template values filled in (5000, 80, 10m) and every nginx $ escaped as $$ so compose
-# interpolation leaves it for nginx. NginxDescriptorParityTests holds the two byte-equal after that
-# substitution. Verify a change with `deploy/probe-gateway.sh`, which runs it against stub upstreams.
+  # The public edge: the Cloudflare tunnel for reel.frostaura.net, run as a service of THIS stack.
+  # The tunnel's public hostname targets http://gateway:80 (set in Cloudflare Zero Trust, not here).
+  # Pinned to a released version, never `latest`, and --no-autoupdate, so the edge only changes when
+  # this file does. The token arrives as TUNNEL_TOKEN (cloudflared's own variable for `tunnel run`) so
+  # it is not on the process command line; anyone holding it can run the tunnel — rotate it in the
+  # Cloudflare dashboard if it is ever pasted anywhere.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    restart: unless-stopped
+    command: [ "tunnel", "--no-autoupdate", "run" ]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required (the reel tunnel's token)}
+    depends_on:
+      - gateway
+    logging: *default-logging
+
+# The backup script ships inline because a Portainer stack cannot mount a repo file; the gateway's
+# nginx config no longer does — it is baked into the reel-gateway image (nginx/Dockerfile).
 configs:
   reel_backup_script:
     content: |
@@ -418,194 +446,6 @@ configs:
           i=$$(( i + 1 ))
         done
       done
-  gateway_nginx:
-    content: |
-      # fa.reel — Gateway Reverse Proxy (dev/local compose; envsubst template)
-      # Single public entry point: routes /api and /sse traffic to the backend,
-      # everything else to the frontend SPA.
-      #
-      # CANONICAL. docker-compose.prod.yml carries this same file inline as `configs: gateway_nginx`
-      # (Portainer cannot mount a repo file), with the three NGINX_* template values filled in and every
-      # nginx dollar escaped for compose. NginxDescriptorParityTests holds the two byte-equal after that
-      # substitution and, when they differ, prints the exact block to paste — edit here, then copy it.
-
-      worker_processes auto;
-      error_log /var/log/nginx/error.log warn;
-      pid /tmp/nginx.pid;
-
-      events {
-          worker_connections 1024;
-      }
-
-      http {
-          include /etc/nginx/mime.types;
-          default_type application/octet-stream;
-
-          # rid= is the X-Request-Id the API logs as RequestId and returns to the caller (R1-36).
-          log_format main '$$remote_addr - $$remote_user [$$time_local] "$$request" '
-                          '$$status $$body_bytes_sent "$$http_referer" '
-                          '"$$http_user_agent" "$$http_x_forwarded_for" rid=$$request_id';
-          access_log /var/log/nginx/access.log main;
-
-          sendfile on;
-          keepalive_timeout 65;
-
-          # No nginx version in the Server header or on error pages (K-8).
-          server_tokens off;
-
-          # Compression for everything text-shaped the gateway relays: API JSON here, and the SPA's
-          # assets when the frontend container has not already compressed them (nginx never re-gzips a
-          # response that arrives with a Content-Encoding). text/event-stream is deliberately absent:
-          # a compressed stream is a buffered stream. The Ask location below turns gzip off outright.
-          gzip on;
-          gzip_vary on;
-          gzip_proxied any;
-          gzip_comp_level 5;
-          gzip_min_length 1024;
-          gzip_types text/plain text/css application/javascript application/json application/manifest+json image/svg+xml;
-
-          # The scheme the visitor actually used. cloudflared terminates TLS and sends
-          # X-Forwarded-Proto: https; the gateway itself only ever sees http, so forwarding its own
-          # $$scheme told the API every production request was plain HTTP (J-7). A request with no header
-          # (local QA straight to the gateway) is what it is: $$scheme.
-          map $$http_x_forwarded_proto $$forwarded_proto {
-              default $$http_x_forwarded_proto;
-              "" $$scheme;
-          }
-
-          # HSTS only on a response to an HTTPS visitor: an empty value means nginx sends no header.
-          map $$forwarded_proto $$hsts {
-              https "max-age=31536000";
-              default "";
-          }
-
-          server {
-              listen 80;
-              server_name _;
-
-              # Docker's embedded DNS, re-consulted every 10s. Load-bearing: nginx resolves an `upstream`
-              # block's hostname ONCE at startup and caches the IP forever, so recreating the backend or
-              # frontend container — which `docker compose up --build backend` does routinely — handed
-              # this gateway a dead IP and it 502'd the whole app until someone restarted it by hand.
-              # Nothing crashes, so no restart policy can catch it; the stack looks healthy from
-              # `docker ps` while every request fails.
-              resolver 127.0.0.11 valid=10s ipv6=off;
-
-              # The hostnames live in variables ON PURPOSE. A literal proxy_pass target is resolved at
-              # config-load time; a variable one is resolved per request, which is what makes the
-              # `resolver` above actually apply. $$request_uri carries the original path AND query string,
-              # so it must be passed explicitly — a variable proxy_pass does no URI rewriting of its own.
-              set $$backend_host backend;
-              set $$frontend_host frontend;
-
-              # Security headers on every response (K-14). Declared here and in NO location: an add_header
-              # inside a location replaces this whole set for that location instead of adding to it.
-              add_header X-Content-Type-Options "nosniff" always;
-              add_header X-Frame-Options "DENY" always;
-              add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-              add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
-              add_header Strict-Transport-Security $$hsts always;
-
-              # Source maps are a build artefact, never served (J-15).
-              location ~* \.map$$ {
-                  return 404;
-              }
-
-              # --- Ask Reel: a token-by-token SSE turn ---
-              # Its own block (I-13): never gzipped, never buffered, and an hour to finish. Everything else
-              # under /api/ is ordinary JSON and is compressed and buffered like any other response.
-              location = /api/search/ask {
-                  proxy_pass http://$$backend_host:5000$$request_uri;
-                  proxy_set_header Host $$http_host;
-                  proxy_set_header X-Real-IP $$remote_addr;
-                  proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $$forwarded_proto;
-                  # One id from the gateway's access log to every API log line and the X-Request-Id response
-                  # header (R1-36). Always the gateway's own: an id from the internet is not forwarded.
-                  proxy_set_header X-Request-Id $$request_id;
-                  proxy_set_header CF-IPCountry $$http_cf_ipcountry;
-                  # The gateway's HSTS stands for every response; the API's copy would be a duplicate.
-                  proxy_hide_header Strict-Transport-Security;
-                  client_max_body_size 10m;
-                  gzip off;
-                  proxy_set_header Connection '';
-                  proxy_http_version 1.1;
-                  chunked_transfer_encoding off;
-                  proxy_buffering off;
-                  proxy_cache off;
-                  proxy_read_timeout 3600s;
-              }
-
-              # --- Backend API routes ---
-
-              location /api/ {
-                  proxy_pass http://$$backend_host:5000$$request_uri;
-                  proxy_set_header Host $$http_host;
-                  proxy_set_header X-Real-IP $$remote_addr;
-                  proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $$forwarded_proto;
-                  # One id from the gateway's access log to every API log line and the X-Request-Id response
-                  # header (R1-36). Always the gateway's own: an id from the internet is not forwarded.
-                  proxy_set_header X-Request-Id $$request_id;
-                  # Cloudflare provides the country code in prod; forward it for the geo-IP
-                  # region default at signup.
-                  proxy_set_header CF-IPCountry $$http_cf_ipcountry;
-                  proxy_hide_header Strict-Transport-Security;
-                  client_max_body_size 10m;
-                  proxy_http_version 1.1;
-                  proxy_set_header Connection '';
-                  # Long enough for the slowest founder diagnostics; a response that streams sets
-                  # X-Accel-Buffering: no itself, which nginx honours per response.
-                  proxy_read_timeout 300s;
-              }
-
-              # SSE streams — disable buffering for the pipeline/onboarding event channel
-              location /sse/ {
-                  proxy_pass http://$$backend_host:5000$$request_uri;
-                  proxy_set_header Host $$host;
-                  proxy_set_header X-Real-IP $$remote_addr;
-                  proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $$forwarded_proto;
-                  # One id from the gateway's access log to every API log line and the X-Request-Id response
-                  # header (R1-36). Always the gateway's own: an id from the internet is not forwarded.
-                  proxy_set_header X-Request-Id $$request_id;
-                  proxy_hide_header Strict-Transport-Security;
-                  gzip off;
-                  proxy_set_header Connection '';
-                  proxy_http_version 1.1;
-                  chunked_transfer_encoding off;
-                  proxy_buffering off;
-                  proxy_cache off;
-                  proxy_read_timeout 86400s;
-              }
-
-              # Health check passthrough (the API maps /health)
-              location /health {
-                  proxy_pass http://$$backend_host:5000$$request_uri;
-                  proxy_hide_header Strict-Transport-Security;
-              }
-
-              # Readiness — /health is a liveness ping that answers before the app can serve anything.
-              # /health/ready checks the database and pending migrations, which is what the compose
-              # healthchecks gate on; stated as its own location so an external monitor reaches the same
-              # answer they do, and so a future `location /health` restriction cannot silently take it.
-              location /health/ready {
-                  proxy_pass http://$$backend_host:5000$$request_uri;
-                  proxy_hide_header Strict-Transport-Security;
-              }
-
-              # --- Frontend (SPA) — catch-all ---
-              # Caching and the /assets/ 404 rule are the frontend container's (src/frontend/nginx.conf);
-              # its Cache-Control headers pass through untouched.
-              location / {
-                  proxy_pass http://$$frontend_host:80$$request_uri;
-                  proxy_set_header Host $$host;
-                  proxy_set_header X-Real-IP $$remote_addr;
-                  proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $$forwarded_proto;
-              }
-          }
-      }
 
 volumes:
   postgres_data:

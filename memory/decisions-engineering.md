@@ -50,6 +50,9 @@ last_verified: 2026-09-11
   a patched transitive. The `security` CI job fails the build otherwise.
 
 ## Deploy
-- **`proxy_pass` in the Portainer stack's nginx config must never carry a URI, and a parity test guards it.** *Why:*
-  a URI on `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed
-  stack would have 404'd every call. The deploy itself is still a founder action (`decisions-product.md`).
+- **`proxy_pass` in the gateway's nginx config must never carry a URI, and a test guards it.** *Why:* a URI on
+  `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed stack
+  would have 404'd every call. The deploy itself is still a founder action (`decisions-product.md`).
+- **The gateway ships as the `reel-gateway` image, and production exposes only the in-stack tunnel (2026-10-30).**
+  *Why:* the deploy job re-submits the stored stack file, so an inline nginx config never moved with a redeploy;
+  and one exposed surface is the house pattern (crusaders.mainframe). Rationale and state: `deploy.md`.

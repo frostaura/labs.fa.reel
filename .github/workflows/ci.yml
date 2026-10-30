@@ -252,7 +252,7 @@ jobs:
         run: make ci-integration
 
   # ============================================================================
-  # Docker — every descriptor parses; both images build; the composed stack serves
+  # Docker — every descriptor parses; all three images build; both stacks serve
   # ============================================================================
   # Runs on pull requests too, deliberately: until this job existed the Dockerfiles and the
   # compose wiring were only exercised by the publish jobs, which are push-to-main only. A
@@ -261,7 +261,7 @@ jobs:
   docker:
     name: Docker Build & Stack Smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: [backend, frontend]
     steps:
       - name: Checkout code
@@ -274,6 +274,16 @@ jobs:
         # /health, /health/ready (real pgvector migrations applied, after the pre-migration dump
         # handshake with the backup service) and / (SPA bundle) through the gateway.
         run: make ci-docker
+
+      - name: Build the gateway image and probe its routing against stub upstreams
+        # nginx/Dockerfile exactly as the publish jobs build it: /api and /api/search/ask reach the
+        # backend unrewritten, source maps 404, security headers set (deploy/probe-gateway.sh).
+        run: make ci-gateway
+
+      - name: Smoke the PRODUCTION descriptor through the built gateway image
+        # docker-compose.prod.yml itself (minus cloudflared, which needs a real tunnel token), with
+        # all three images built from this commit: the same probes, through reel-gateway.
+        run: make ci-docker-prod
 
   # ============================================================================
   # Docker Build & Push — only on push to main, after all CI gates pass
@@ -472,6 +482,102 @@ jobs:
             "$IMAGE:$tag-amd64" \
             "$IMAGE:$tag-arm64"
 
+  build-gateway-amd64:
+    name: Build Gateway (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image tag for this commit
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # The gateway's nginx config ships as an image, not as a stack-file paste: the deploy job pins
+      # this image to the same sha-<short> as the backend and frontend (nginx/Dockerfile).
+      - name: Build and push gateway image (amd64)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nginx
+          file: ./nginx/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:latest-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:${{ steps.tag.outputs.tag }}-amd64
+
+  build-gateway-arm64:
+    name: Build Gateway (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image tag for this commit
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push gateway image (arm64)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nginx
+          file: ./nginx/Dockerfile
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:latest-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:${{ steps.tag.outputs.tag }}-arm64
+
+  merge-gateway-manifests:
+    name: Create Gateway Multi-arch Manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-gateway-amd64, build-gateway-arm64]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Two names for one manifest, exactly as for the backend and frontend (K-9).
+      - name: Create and push manifest
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway
+        run: |
+          set -euo pipefail
+          tag="sha-${GITHUB_SHA::7}"
+          docker buildx imagetools create -t "$IMAGE:$tag" -t "$IMAGE:latest" \
+            "$IMAGE:$tag-amd64" \
+            "$IMAGE:$tag-arm64"
+
   # ============================================================================
   # Portainer deploy — pin the stack to this commit's images, redeploy, prove it (K-9, J-22)
   # ============================================================================
@@ -481,7 +587,7 @@ jobs:
   # the variable is unset the job is skipped (not failed), so CI stays green.
   #
   # The job sets the stack's REEL_TAG to `sha-<short>` (docker-compose.prod.yml pulls
-  # reel-*:${REEL_TAG}), so the stack names the exact images it runs and a rollback is one REEL_TAG
+  # reel-backend, reel-frontend and reel-gateway at ${REEL_TAG}), so the stack names the exact images it runs and a rollback is one REEL_TAG
   # edit. It then polls the public /health until the commit it reports is this one, and FAILS if
   # that never happens: a redeploy Portainer accepted is not a deploy that is serving. The window
   # covers the backend's pre-migration dump and migrations (its healthcheck start_period is 40 min).
@@ -489,7 +595,7 @@ jobs:
     name: Pin, redeploy on Portainer and verify /health
     runs-on: ubuntu-latest
     timeout-minutes: 50
-    needs: [merge-backend-manifests, merge-frontend-manifests]
+    needs: [merge-backend-manifests, merge-frontend-manifests, merge-gateway-manifests]
     if: vars.DEPLOY_ENABLED == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Pin REEL_TAG and redeploy
@@ -514,6 +620,13 @@ jobs:
           # as done. Refuse instead: paste the current docker-compose.prod.yml into the stack once.
           if ! grep -q 'REEL_TAG' <<< "${stack_file_content}"; then
             echo "The Portainer stack file does not reference REEL_TAG; paste docker-compose.prod.yml into it first (docs/deployment.md#deploys-and-rollback)." >&2
+            exit 1
+          fi
+          # A stored file from before the gateway image existed would redeploy the new backend behind
+          # the OLD inline nginx config and report success. Same remedy: re-paste the stack file once.
+          # shellcheck disable=SC2016 # the literal compose text, not a shell expansion
+          if ! grep -qF 'reel-gateway:${REEL_TAG' <<< "${stack_file_content}"; then
+            echo "The Portainer stack file does not run reel-gateway:\${REEL_TAG...}; paste docker-compose.prod.yml into it first (docs/deployment.md#standing-up-the-portainer-stack)." >&2
             exit 1
           fi
 

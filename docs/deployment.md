@@ -1,6 +1,19 @@
 # Deployment
 
-Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**, same shape as `fa.lifeos`.
+Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**, the same shape as `crusaders.mainframe`: three published images (backend, frontend, gateway) and a Portainer stack whose Cloudflare tunnel runs inside it.
+
+## Production topology — one way in
+
+```
+internet ──▶ Cloudflare edge ──tunnel──▶ cloudflared ──http://gateway:80──▶ gateway ──▶ backend :5000
+                                         (service of                          (reel-      └─▶ frontend :80
+                                          the stack)                           gateway)       backend ──▶ postgres
+```
+
+- **Exactly one service is reachable from outside the stack: the gateway, and only through the tunnel.** `cloudflared` is a service of the Portainer stack (`cloudflare/cloudflared`, pinned to a released version, `tunnel --no-autoupdate run`) and reaches the gateway by service name over the stack's bridge network.
+- **No service publishes a host port.** Not the gateway, not the API, not the SPA, not Postgres. `ComposeHardeningTests` fails the build if `docker-compose.prod.yml` grows a `ports:` entry, or if the tunnel image floats to `latest`. There is no opt-in publish in production: nothing on the host or the LAN needs the gateway directly (unlike Crusaders, whose court box dials the gateway over the club LAN). Local probing uses an overlay instead (`deploy/ci/docker-compose.prod-smoke.yml`).
+- **The bridge is pinned to `10.83.30.0/24`**, outside Docker's default address pools so it can never collide with another network, and one /24 away from Crusaders' `10.83.29.0/24` so both stacks can share a host. The backend believes `X-Forwarded-For`/`X-Forwarded-Proto` only from that /24 (`TRUSTED_PROXY_NETWORKS` defaults to exactly it in the prod file), and walks the chain until the first address outside it — so it sees the visitor, not the `cloudflared` container. If the host's own LAN is `10.83.30.x`, change the subnet and `TRUSTED_PROXY_NETWORKS` together; the test holds them equal.
+- **Cloudflare public hostname:** `reel.frostaura.net` → service `http://gateway:80`. That is the only ingress rule the tunnel needs.
 
 ## Pipeline
 
@@ -10,7 +23,7 @@ Every push to `main`, every pull request and every manual dispatch runs `.github
 | --- | --- | --- |
 | Quality | `Backend`, `OpenAPI contract`, `Frontend`, `Frontend E2E`, `Backend Integration (Postgres + pgvector)`, `Security Scan` | PRs + `main` + dispatch |
 | Deployability | `Docker Build & Stack Smoke` | PRs + `main` + dispatch |
-| Publish | `Build {Backend,Frontend} ({amd64,arm64})` → `Create … Multi-arch Manifest` | `main` only |
+| Publish | `Build {Backend,Frontend,Gateway} ({amd64,arm64})` → `Create … Multi-arch Manifest` | `main` only |
 | Deploy | `Pin, redeploy on Portainer and verify /health` | `main` only, gated (see below) |
 
 Every quality and deployability step is a `make ci-*` target; the workflow holds no gate logic of its own. See [Local CI](#local-ci).
@@ -19,18 +32,24 @@ The publish jobs build per-architecture on native runners (`ubuntu-latest` for a
 
 - `${DOCKERHUB_USERNAME}/reel-backend:sha-<short>` and `:latest` — one manifest, two names (+ `:sha-<short>-amd64`, `:sha-<short>-arm64`, `:latest-amd64`, `:latest-arm64`)
 - `${DOCKERHUB_USERNAME}/reel-frontend:sha-<short>` and `:latest`, likewise
+- `${DOCKERHUB_USERNAME}/reel-gateway:sha-<short>` and `:latest`, likewise — `nginx/Dockerfile` (build context `./nginx`), which bakes `nginx/nginx.conf` in as an envsubst template with `NGINX_*` defaults. The gateway config therefore ships by the same redeploy as the code it fronts; a stack-file paste is never how an nginx change reaches production.
 
 `sha-<short>` is the first seven characters of the commit. It is what a deploy pins and what a rollback names; `latest` only serves a stack that pins nothing. Both Dockerfiles run their build stage on the build machine's own architecture (`--platform=$BUILDPLATFORM`) and the backend cross-publishes `linux-$TARGETARCH`, with restore in its own cached layer. The backend image runs as the unprivileged `app` user (`USER $APP_UID`) and stamps the commit into the assembly from the `GIT_SHA` build argument, so `/health` answers `{"status":"ok","commit":"<sha>"}`.
 
 ### The stack smoke gate
 
-`Docker Build & Stack Smoke` runs `make docker-ready` on pull requests as well as `main`. It builds both images from the repo-root context exactly as the publish jobs do, brings the full compose stack up, and probes through the gateway:
+`Docker Build & Stack Smoke` runs on pull requests as well as `main`, in four steps:
+
+1. `make ci-compose` parses every descriptor with only its required variables supplied, and proves the prod file refuses to parse without `BACKUP_HOST_DIR` or `CLOUDFLARE_TUNNEL_TOKEN` — the prod file is the literal content behind a stack and nothing else parses it.
+2. `make ci-docker` builds the backend and frontend images from the repo-root context exactly as the publish jobs do, brings the dev compose stack up as project `reel-ci` (ports 18090/15433), and probes through its gateway.
+3. `make ci-gateway` runs `deploy/probe-gateway.sh`: it builds `nginx/Dockerfile` exactly as the publish jobs do and runs that image against stub upstreams — `/api` and `/api/search/ask` reach the backend unrewritten, `*.map` is 404, the security headers are set.
+4. `make ci-docker-prod` brings up **`docker-compose.prod.yml` itself** with the overlay `deploy/ci/docker-compose.prod-smoke.yml`, which builds all three images from this checkout under a throwaway namespace (`reel-smoke-local/*:smoke`), publishes the gateway on loopback for the probe only, and parks `cloudflared` behind a profile (it needs a real tunnel token). Project `reel-ci-prod`, port 18091. Same probes as step 2, through the `reel-gateway` image.
+
+The probes, in both smokes:
 
 - `/health` — backend reachable via nginx, and reporting the commit `make` passed as `GIT_SHA`
 - `/health/ready` — Postgres reachable **and** every EF migration applied against real pgvector
 - `/` — the built SPA bundle is served
-
-It also runs `make ci-compose`, which parses both descriptors with only their required variables supplied, because the prod file is the literal content behind a stack and nothing else parses it. The smoke runs as compose project `reel-ci` on ports 18090/15433, so it never collides with a stack already running on the same machine.
 
 This gate exists because the publish jobs are push-to-main only: without it, a broken Dockerfile or gateway route passed CI on the PR and was only discovered after a bad `:latest` had already shipped.
 
@@ -47,7 +66,7 @@ Repository → Settings → Secrets and variables → Actions.
 | `PORTAINER_URL` | deploy job | e.g. `https://portainer.example.net` |
 | `PORTAINER_TOKEN` | deploy job | Portainer API key (`X-API-Key`). |
 | `PORTAINER_ENDPOINT_ID` | deploy job | Numeric environment id. |
-| `PORTAINER_STACK_ID` | deploy job | Numeric stack id for `reel.frostaura.net`. |
+| `PORTAINER_STACK_ID` | deploy job | Numeric stack id for `reel.frostaura.net`. **Not set yet** — it can only be read once the stack exists. |
 
 ### Variables
 
@@ -60,13 +79,31 @@ Repository → Settings → Secrets and variables → Actions.
 
 ## Standing up the Portainer stack
 
-1. Create a new stack in Portainer named `reel`.
-2. Paste the contents of `docker-compose.prod.yml` as the stack file — the only production descriptor (the former `deploy/portainer-stack.yml` copy drifted from it and was removed, K-14). It pulls published images rather than building, and ships the gateway nginx config and the backup script inline as compose `configs` — Portainer stacks cannot mount repo files. **An existing stack must be re-pasted once** after this change: the deploy job refuses a stack file that does not read `REEL_TAG`.
-3. Populate the stack environment variables. Required (the compose file refuses to start without them): `POSTGRES_PASSWORD`, `JWT_SECRET`, `TRAKT_CLIENT_ID`, `TRAKT_CLIENT_SECRET`, `TMDB_READ_ACCESS_TOKEN`. Everything else has a production-shaped default — see `.env.example` for the full surface.
-4. Note the stack id from the Portainer URL and set it as `PORTAINER_STACK_ID`.
-5. Point Cloudflared at the gateway. A `cloudflared` running on the Docker host reaches it at `http://127.0.0.1:${GATEWAY_PORT}` (default `8090`). See [Network exposure](#network-exposure) for any other placement.
-6. Name the backup destination: `BACKUP_HOST_DIR` is **required**, an absolute host path, ideally a mount of off-host storage. The stack refuses to start without it. See [Backups and restore](#backups-and-restore).
-7. Set `DEPLOY_ENABLED=true`.
+The founder's one-time steps. Nothing in the repository or in CI does these; the deploy job stays skipped until the last one.
+
+1. **Create the tunnel.** Cloudflare Zero Trust → Networks → Tunnels → create a `cloudflared` tunnel (e.g. `reel`), and copy its token. Add one public hostname: `reel.frostaura.net` → service **`http://gateway:80`**. (If `reel.frostaura.net` already routes through an older tunnel, move the hostname to this one, or point that tunnel's ingress at `http://gateway:80` and use its token.)
+2. **Create the stack** in Portainer, named `reel`, on the endpoint whose id is `PORTAINER_ENDPOINT_ID`. Paste the contents of `docker-compose.prod.yml` as the stack file — the only production descriptor (K-14). It pulls published images rather than building; the gateway's nginx config is inside the `reel-gateway` image and only the backup script ships inline as a compose `config`, because a Portainer stack cannot mount a repo file.
+3. **Set the stack environment variables** (names only here; values from their sources, never from this repo):
+
+   | Key | Required | Notes |
+   | --- | --- | --- |
+   | `POSTGRES_PASSWORD` | yes | Strong, new. |
+   | `JWT_SECRET` | yes | At least 32 characters, new. |
+   | `TRAKT_CLIENT_ID`, `TRAKT_CLIENT_SECRET` | yes | The Trakt app whose redirect URI is `https://reel.frostaura.net/auth/trakt/callback`. |
+   | `TMDB_READ_ACCESS_TOKEN` | yes | TMDB v4 read token. |
+   | `CLOUDFLARE_TUNNEL_TOKEN` | yes | The token from step 1. Reaches the container as `TUNNEL_TOKEN`. |
+   | `BACKUP_HOST_DIR` | yes | Absolute host path for the dumps, ideally off-host storage; never a stack volume ([Backups and restore](#backups-and-restore)). |
+   | `OPENROUTER_API_KEY` | effectively | Boots without it, but every LLM feature is off. |
+   | `FOUNDER_TRAKT_SLUGS` | recommended | The founder's Trakt slug, or nobody gets the Founder tier ([Founder tier](#founder-tier)). |
+   | `DOCKERHUB_USERNAME` | only if not `frostaura` | The image namespace; must equal the `DOCKERHUB_USERNAME` secret CI pushes under, or every deploy is green and nothing changes. |
+   | `REEL_TAG` | no | Written by the deploy job on every deploy; leave unset at creation (`latest`). |
+
+   Every other key has a production-shaped default — `.env.example` documents the full surface.
+4. **Deploy the stack once by hand** and check it: `https://reel.frostaura.net/health` answers `{"status":"ok","commit":"…"}` and `/health/ready` answers ready. The first start takes a pre-migration dump and applies every migration before the backend listens (up to ~40 minutes on a large restored database; seconds on an empty one).
+5. **Set `PORTAINER_STACK_ID`** — the numeric id in the stack's Portainer URL — as a repository secret.
+6. **Set the repository variable `DEPLOY_ENABLED=true`.** The next push to `main` publishes, pins `REEL_TAG`, redeploys and waits for `/health` to report that commit.
+
+**An existing stack must be re-pasted once** whenever the stack file's shape changes: the deploy job re-submits the *stored* file, and refuses one that does not read `REEL_TAG` or does not run `reel-gateway:${REEL_TAG…}` (a pre-gateway-image file would redeploy a new backend behind the old inline nginx config and report success).
 
 ## Deploys and rollback
 
@@ -82,21 +119,17 @@ It then polls `DEPLOY_HEALTH_URL` every 20 s until `/health` reports the commit 
 
 ## Network exposure
 
-Every descriptor publishes its ports on `127.0.0.1` unless a bind variable opts in:
+**Production publishes nothing** — see [Production topology](#production-topology--one-way-in). The rest of this section is about the dev and eval stacks, which publish their ports on `127.0.0.1` unless a bind variable opts in:
 
 | Variable | Default | Port |
 | --- | --- | --- |
-| `GATEWAY_BIND` | `127.0.0.1` | gateway, `GATEWAY_PORT` (8090; 5173 in the founder's `.env`) |
-| `POSTGRES_BIND` | `127.0.0.1` | dev Postgres, `POSTGRES_HOST_PORT` (5433). Not published at all in prod. |
+| `GATEWAY_BIND` | `127.0.0.1` | dev gateway, `GATEWAY_PORT` (8090; 5173 in the founder's `.env`) |
+| `POSTGRES_BIND` | `127.0.0.1` | dev Postgres, `POSTGRES_HOST_PORT` (5433) |
 
 Why: on 2026-10-22 the dev stack published its gateway on `0.0.0.0` with the host firewall off, and an unauthenticated request from another LAN host was answered by `/api/dev/residual-replay`, while `POST /api/auth/dev/link` would have minted a Founder session (J-1). Postgres has its own variable so that opening the gateway for phone QA never opens the database with it.
 
 - **Phone QA on the LAN:** set `GATEWAY_BIND=0.0.0.0`, recreate the gateway, and unset it again afterwards.
-- **Cloudflared.** No descriptor attaches a tunnel container to the stack network, so the gateway is reachable only through its published port:
-  - `cloudflared` as a process on the Docker host: target `http://127.0.0.1:${GATEWAY_PORT}`. The loopback default works.
-  - `cloudflared` in a container on the same host: it cannot reach the host's 127.0.0.1. Attach it to the stack network and target `http://gateway:80`, or set `GATEWAY_BIND` to the Docker bridge address it uses.
-  - `cloudflared` on another machine: set `GATEWAY_BIND` to the interface it connects to, and firewall that port to the tunnel host.
-- **Before the first rebuild on these descriptors (G0)**, read the live tunnel's ingress target (Cloudflare Zero Trust → Networks → Tunnels → the tunnel → Public hostnames, or `cloudflared tunnel info`) and match it to the list above. On 2026-10-24 no `cloudflared` process ran on the founder's Mac and no local ingress file existed, so the target could not be confirmed from that machine. If the tunnel reaches the gateway on a LAN address, the loopback default takes `reel.frostaura.net` offline until `GATEWAY_BIND` is set.
+- **Cloudflared** runs only in production, as a service of the stack, targeting `http://gateway:80`. A tunnel whose public hostname still targets a host address (`http://127.0.0.1:…`, a LAN IP) reaches nothing: production has no published port for it to land on. Check the hostname's service in Cloudflare Zero Trust before the first deploy (step 1 of [Standing up the Portainer stack](#standing-up-the-portainer-stack)).
 
 The QA helpers are also locked in code, independently of the bind address:
 
@@ -110,7 +143,7 @@ The QA helpers are also locked in code, independently of the bind address:
 
 What the API and the gateway do about who is calling (WS-8 P1). Every setting here is in all descriptors and `.env.example`.
 
-- **Forwarded headers.** cloudflared terminates TLS and sends `X-Forwarded-Proto: https`; the gateway passes the visitor's scheme through (`$http_x_forwarded_proto`, falling back to its own `$scheme`) instead of its own `http`. The API believes `X-Forwarded-For`/`X-Forwarded-Proto` only from `TRUSTED_PROXY_NETWORKS` (default loopback plus `172.16.0.0/12`, Docker's bridge range — the API's port is never published off the host, so nothing else stands there). A host whose Docker address pool differs sets the variable; a malformed entry stops startup.
+- **Forwarded headers.** cloudflared terminates TLS and sends `X-Forwarded-Proto: https`; the gateway passes the visitor's scheme through (`$http_x_forwarded_proto`, falling back to its own `$scheme`) instead of its own `http`. The API believes `X-Forwarded-For`/`X-Forwarded-Proto` only from `TRUSTED_PROXY_NETWORKS`: in production exactly the stack's pinned bridge, `10.83.30.0/24`; in the code default (dev and eval stacks) loopback plus `172.16.0.0/12`, Docker's bridge range. The hop limit is lifted, so the API walks `X-Forwarded-For` right to left only while each revealed address is itself trusted: `visitor, cloudflared` resolves to the visitor, and anything a client wrote further left is never believed (`EdgeValidationTests`). A malformed entry stops startup.
 - **Cookies and HSTS.** Outside Development the session cookies are always `Secure`, whatever the request claims (J-7). HSTS (one year, this host only) is sent by the gateway to HTTPS visitors and by the API outside Development; the gateway hides the API's copy so there is one header.
 - **Refresh rotation.** One conditional `UPDATE` revokes the presented refresh session and names its successor; it must affect exactly one row. A concurrent refresh of the same token within 10 s gets an access token on the successor and keeps the winner's refresh cookie; a token revoked by logout is refused (J-10). Three concurrent refreshes therefore make exactly one session.
 - **Refresh reuse (J\*4).** A rotated refresh token presented again more than 10 s after its rotation can only be a copy, so the API refuses it and revokes every live session descended from it — the copier's and the owner's — with one warning line naming the account (`Refresh token reuse for account …`). The owner signs in again. The account's sessions on other devices are separate families and survive. A token revoked by logout is simply refused.
@@ -118,7 +151,7 @@ What the API and the gateway do about who is calling (WS-8 P1). Every setting he
 - **Settings PIN.** Five wrong PINs in 15 minutes lock every PIN check on the account (verify, change and removal) with `429 pin_locked` and `Retry-After`; during the lock even the right PIN is refused unread. The filters gate takes only an unlock token now — the raw `X-Settings-Pin` fallback there was a second, unlimited PIN oracle (J-19).
 - **`/api/dev/*`** runs at most two requests at once (`429 dev_busy`).
 - **Push.** A subscription endpoint must be HTTPS on port 443 at a known push service (FCM, Mozilla autopush, WNS, Apple); anything else is `400 push_endpoint_not_allowed`, and the sender retires a stored row that fails the same rule rather than POSTing to it (J-9). An account keeps at most 10 subscriptions; a new browser retires the one heard from least recently.
-- **Gateway.** `server_tokens off`; `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and `Permissions-Policy` on every response; gzip for JSON and static text but never for a stream; `*.map` is 404; `/api/search/ask` has its own location (no gzip, no buffering, an hour to finish). The frontend container serves `/assets/` as `try_files $uri =404` with a year's `immutable` caching, and `index.html`, `sw.js` and the SPA shell as `no-cache`. `deploy/probe-gateway.sh` runs the production copy against stub upstreams. `deploy/probe-ask-stream.sh` runs the same copy in a native nginx (no Docker) against a stub API that streams an Ask turn with the API's 5 s heartbeat, and fails unless every frame reaches the client within 1 s of being written and uncompressed; with the Ask location removed it fails, every frame held back to the end of the turn. The same check through cloudflared needs the live host.
+- **Gateway.** `server_tokens off`; `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and `Permissions-Policy` on every response; gzip for JSON and static text but never for a stream; `*.map` is 404; `/api/search/ask` has its own location (no gzip, no buffering, an hour to finish). The frontend container serves `/assets/` as `try_files $uri =404` with a year's `immutable` caching, and `index.html`, `sw.js` and the SPA shell as `no-cache`. `deploy/probe-gateway.sh` builds the `reel-gateway` image and runs it against stub upstreams (or probes a published image: `deploy/probe-gateway.sh frostaura/reel-gateway:sha-<short>`). `deploy/probe-ask-stream.sh` renders the same `nginx/nginx.conf` with the image's defaults and runs it in a native nginx (no Docker) against a stub API that streams an Ask turn with the API's 5 s heartbeat, and fails unless every frame reaches the client within 1 s of being written and uncompressed; with the Ask location removed it fails, every frame held back to the end of the turn. The same check through cloudflared needs the live host.
 
 ### Founder tier
 
@@ -180,7 +213,7 @@ Every service logs through Docker's `local` driver: 10 files of 100 MB each per 
 **What runs.** A `backup` service in every deployable descriptor:
 
 - **Image.** `pgvector/pgvector:pg16`, the same image as the database, so `pg_dump` always matches the server's major version.
-- **Script.** `deploy/backup/reel-backup.sh`. The dev stack mounts it. The prod and Portainer files carry identical inline copies, pinned by `BackupDescriptorParityTests`.
+- **Script.** `deploy/backup/reel-backup.sh`. The dev stack mounts it. The prod file carries an identical inline copy (a Portainer stack cannot mount a repo file, and an inline `config` works there), pinned by `BackupDescriptorParityTests`.
 - **Nightly dump.** `pg_dump -Fc` at `BACKUP_HOUR_UTC` (default 02:00 UTC) into `daily/`. A host that was asleep at that hour dumps when it wakes, and a stack with no dump for today takes one once it has been up for `BACKUP_FIRST_DUMP_GRACE_SECONDS` (default 120). During that grace period it serves only pre-migration requests, and a pre-migration dump also becomes today's daily dump, so a fresh stack takes one full dump, not two.
 - **Retention.** 14 daily and 8 weekly dumps. The weekly copy is a hard link taken on Sundays, or whenever the newest weekly copy is more than 6 days old.
 - **Verification.** Each dump is written as `.partial`, checked with `pg_restore --list`, and only then renamed. The result goes to `last-success` or `last-failure` in the backup directory.
@@ -220,7 +253,7 @@ docker compose exec backup /bin/sh /usr/local/bin/reel-backup.sh once
 
 4. Check row counts against the dump's source, or against the last known numbers. Check at least `UserRatings`, `ExposureEvents` and `TraktConnections`; `"__EFMigrationsHistory"` must match the image you will run.
 5. Repoint by renaming: `ALTER DATABASE reel RENAME TO reel_before_restore; ALTER DATABASE reel_restore RENAME TO reel;` (run from the `postgres` database, with no connections to either).
-6. Start the backend: `docker compose start backend`. Then `curl -fsS localhost:${GATEWAY_PORT}/health/ready` must return `{"status":"ready"}`.
+6. Start the backend: `docker compose start backend`. Then `/health/ready` must return `{"status":"ready"}` — in production through `https://reel.frostaura.net/health/ready` (nothing is published on the host), or from inside the stack: `docker compose exec gateway curl -fsS http://127.0.0.1/health/ready`.
 7. Keep `reel_before_restore` until the founder has used the restored stack, then drop it.
 
 The Data Protection keys live in the same database, so a restored database still decrypts its own Trakt tokens. A restore onto a different database does not.
@@ -261,7 +294,9 @@ The drill passed. Together with the LAN lockdown, it is a prerequisite for the f
 | `ci-vite-proxy` | The dev server listens on loopback unless `VITE_HOST` opts in, and every proxy entry records its client (`xfwd`), so the API's loopback guard can tell a LAN caller from this machine |
 | `ci-e2e` | Playwright, Chromium and WebKit projects |
 | `ci-trivy` | `trivy fs`: HIGH and CRITICAL vulnerable dependencies and committed secrets. Runs Trivy's image, pinned by digest in the Makefile, on Docker, both on a laptop and in the workflow. A `trivy` on PATH is used only if it is the same version. |
-| `ci-compose` / `ci-docker` | Descriptors parse with their required variables and refuse without them (prod without `BACKUP_HOST_DIR`), then the image build and stack smoke as project `reel-ci` |
+| `ci-compose` / `ci-docker` | Descriptors parse with their required variables and refuse without them (prod without `BACKUP_HOST_DIR` or `CLOUDFLARE_TUNNEL_TOKEN`), then the image build and dev-stack smoke as project `reel-ci` |
+| `ci-gateway` | `deploy/probe-gateway.sh`: the `reel-gateway` image built from `nginx/Dockerfile`, against stub upstreams |
+| `ci-docker-prod` | `docker-compose.prod.yml` itself plus `deploy/ci/docker-compose.prod-smoke.yml`, all three images built from the checkout, as project `reel-ci-prod` on 18091 (`PROD_SMOKE_PROJECT` / `PROD_SMOKE_PORT` override both) |
 
 A missing prerequisite fails its gate with the reason. None of them skip.
 
@@ -270,7 +305,9 @@ A missing prerequisite fails its gate with the reason. None of them skip.
 The same `make` targets CI uses:
 
 ```bash
-make docker-build     # build both images from the repo-root context, as CI does
+make docker-build     # build the backend and frontend images from the repo-root context, as CI does
+make ci-gateway       # build the gateway image (context ./nginx) and probe it against stubs
+make ci-docker-prod   # the production descriptor itself, built from the checkout, gateway on 127.0.0.1:18091
 make docker-ready     # build + up + health-probe the whole stack (the deployability gate)
 make docker-down      # tear down, including volumes
 make release-validation  # lint + build + test + e2e + docker-ready

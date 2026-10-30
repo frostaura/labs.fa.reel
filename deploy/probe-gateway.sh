@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
-# probe-gateway.sh — prove what the PRODUCTION gateway config actually does to a request,
-# without going anywhere near the real stack.
+# probe-gateway.sh — prove what the PRODUCTION gateway actually does to a request, without going
+# anywhere near the real stack.
 #
 # Why this exists
 # ---------------
-# `docker-compose.prod.yml` inlines its nginx config as the compose config `gateway_nginx`, because
-# a Portainer stack cannot mount a file out of a repository it never clones. That inline copy is the
-# one descriptor nobody runs locally, and on 2026-09-10 it (then in a second production file, since
-# removed) was found to be rewriting `/api/…` to
-# `/…` before the request reached the backend — a `proxy_pass` whose URI ends in a slash replaces
-# the matched location prefix. Every API call on the deployed host would have 404'd. Reading the
-# file did not reveal it; running it did.
+# Production runs the reel-gateway image: nginx/Dockerfile with nginx/nginx.conf baked in as an
+# envsubst template. On 2026-09-10 the production gateway config of the day (then an inline copy in
+# a second production file, since removed) was found to be rewriting `/api/…` to `/…` before the
+# request reached the backend — a `proxy_pass` whose URI ends in a slash replaces the matched
+# location prefix. Every API call on the deployed host would have 404'd. Reading the file did not
+# reveal it; running it did. So this runs the IMAGE — template rendering, ENV defaults and all.
 #
-# So: this script extracts the gateway config from the production descriptor VERBATIM, stands it up
-# against a stub upstream that echoes back the path it was actually handed, and prints both the
-# status code and that path.
+# So: this script builds nginx/Dockerfile exactly as the publish jobs do (context ./nginx), stands
+# it up against a stub upstream that echoes back the path it was actually handed, and prints both
+# the status code and that path. Pass an image reference to probe a published image instead
+# (e.g. frostaura/reel-gateway:sha-abc1234) — it is then pulled, not built.
 #
 # What it deliberately does NOT do
 # --------------------------------
@@ -23,10 +23,10 @@
 # database silently claims Train/BuildFeed jobs off the shared `SyncJobs` queue (FOR UPDATE SKIP
 # LOCKED) and writes stale artifacts — this has happened. Everything here runs in a throwaway
 # compose project named `askreel-deploy-probe`, from a generated file in a temp directory, on host
-# ports 8188/8189 only, with three `nginx:alpine` containers and no database at all. It tears the
-# project down on exit, including on failure.
+# ports 8188/8189 only, with two `nginx:alpine` stubs, the gateway image and no database at all. It
+# tears the project down on exit, including on failure.
 #
-# Usage:   deploy/probe-gateway.sh [path/to/docker-compose.prod.yml]
+# Usage:   deploy/probe-gateway.sh [gateway image reference]
 # Exit:    0 when the upstream saw a path starting with /api, 1 otherwise.
 
 set -euo pipefail
@@ -36,9 +36,8 @@ GATEWAY_PORT=8188
 UPSTREAM_PORT=8189
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DESCRIPTOR="${1:-$REPO_ROOT/docker-compose.prod.yml}"
-
-[ -f "$DESCRIPTOR" ] || { echo "No such descriptor: $DESCRIPTOR" >&2; exit 2; }
+IMAGE="${1:-}"
+BUILT=""
 
 for port in "$GATEWAY_PORT" "$UPSTREAM_PORT"; do
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -51,36 +50,17 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/askreel-gateway-probe.XXXXXX")"
 
 teardown() {
   docker compose -f "$WORK/docker-compose.yml" -p "$PROJECT" down -v --remove-orphans >/dev/null 2>&1 || true
+  [ -n "$BUILT" ] && docker image rm "$BUILT" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap teardown EXIT
 
-# --- 1. Lift the nginx config out of the descriptor, verbatim ------------------------------------
-# The block lives under `configs: <name>: content: |`. Compose escapes nginx's runtime variables as
-# `$$` so its own interpolation leaves them alone; compose would un-escape them itself, and so does
-# this, because the config is bind-mounted as a plain file rather than shipped as a compose config.
-python3 - "$DESCRIPTOR" > "$WORK/gateway.conf" <<'PY'
-import re, sys, pathlib
-
-lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
-# The `content: |` block under `gateway_nginx:` — the descriptor carries other inline configs too.
-named = next((i for i, l in enumerate(lines) if re.match(r"^\s*gateway_nginx:\s*$", l)), None)
-start = None if named is None else next(
-    (i for i in range(named + 1, len(lines)) if re.match(r"^\s*content:\s*\|\s*$", lines[i])), None)
-if start is None:
-    sys.exit("No `gateway_nginx: content: |` block found in the descriptor — has the gateway config moved?")
-
-indent = len(lines[start]) - len(lines[start].lstrip())
-body = []
-for line in lines[start + 1:]:
-    if line.strip() and (len(line) - len(line.lstrip())) <= indent:
-        break
-    body.append(line[indent + 2:] if line.strip() else "")
-
-print("\n".join(body).replace("$$", "$"))
-PY
-
-grep -q "listen 80" "$WORK/gateway.conf" || { echo "Extracted config does not look like the gateway's:" >&2; cat "$WORK/gateway.conf" >&2; exit 2; }
+# --- 1. The gateway image, built exactly as CI publishes it ---------------------------------------
+if [ -z "$IMAGE" ]; then
+  IMAGE="reel-gateway:probe-$$"
+  docker build -q -t "$IMAGE" -f "$REPO_ROOT/nginx/Dockerfile" "$REPO_ROOT/nginx" >/dev/null
+  BUILT="$IMAGE"
+fi
 
 # --- 2. A stub upstream that reports the path it was handed ---------------------------------------
 # `$request_uri` is the ORIGINAL path plus query string as this server received it — which is
@@ -111,7 +91,7 @@ http {
 }
 CONF
 
-# Service names must match the ones the descriptor's `proxy_pass` targets (`backend`, `frontend`).
+# Service names must match the ones the config's `proxy_pass` targets (`backend`, `frontend`).
 # The gateway resolves them per request through Docker's DNS, so start order does not matter.
 cat > "$WORK/docker-compose.yml" <<COMPOSE
 services:
@@ -126,9 +106,7 @@ services:
     volumes:
       - $WORK/stub-frontend.conf:/etc/nginx/nginx.conf:ro
   gateway:
-    image: nginx:alpine
-    volumes:
-      - $WORK/gateway.conf:/etc/nginx/nginx.conf:ro
+    image: $IMAGE
     ports:
       - "$GATEWAY_PORT:80"
     depends_on:
@@ -138,7 +116,7 @@ COMPOSE
 
 compose() { docker compose -f "$WORK/docker-compose.yml" -p "$PROJECT" "$@"; }
 
-echo "== probing $(basename "$DESCRIPTOR") in project $PROJECT on :$GATEWAY_PORT (upstream :$UPSTREAM_PORT) =="
+echo "== probing $IMAGE in project $PROJECT on :$GATEWAY_PORT (upstream :$UPSTREAM_PORT) =="
 compose up -d --quiet-pull >/dev/null
 
 for _ in $(seq 1 40); do

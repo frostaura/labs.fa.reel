@@ -17,7 +17,7 @@ to act before an answer existed, it took the conservative side and recorded the 
   either anchor. Deploy and re-anchor at the first external serve, or apply the criterion as written and kill.
   **Nothing technical is left in the way:** CI is green on `main` on all five gates and publishes multi-arch images to
   Docker Hub; the redeploy step is skipped only because the repo carries no `DEPLOY_ENABLED` variable and no
-  `PORTAINER_STACK_ID` secret (`state.md`). Setting those two is the deploy.
+  `PORTAINER_STACK_ID` secret. Creating the tunnel and the stack, then setting those two, is the deploy (`deploy.md`).
 
 ## The M2 bar is written in a metric the harness no longer reads
 - **The research question, milestone 2 and the modelling kill criterion all say "≥20% relative precision@10";
