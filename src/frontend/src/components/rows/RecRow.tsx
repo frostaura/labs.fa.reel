@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { AnchoredSupply, FeedCard, RailSupply } from "../../store/feedTypes";
-import RecCard from "../rec/RecCard";
+import RecCard, { RecCardSkeleton } from "../rec/RecCard";
 import FadeScrollRow from "../FadeScrollRow";
 import RailRetryTile from "./RailRetryTile";
 import PickConditionsButton from "../rec/PickConditionsButton";
@@ -40,13 +40,22 @@ interface Props {
    * re-seeds the page; without one the rail mounts the same dialog itself.
    */
   onSeeWhy?: () => void;
+  /**
+   * An anchored rail ("Because you loved", "More like this"): every card, placeholder and Retry
+   * tile holds the evidence chips' slot, so a page whose chips wrap further never grows the rail.
+   */
+  reserveEvidence?: boolean;
 }
 
-/** A skeleton poster card trailing the rail while the next page resolves. */
-function ShimmerCard() {
+/**
+ * A placeholder card trailing the rail while the next page resolves — the poster AND the text block
+ * a loaded card has, so the card that replaces it is the same height (HREV8-DESK-01). A bare poster
+ * here made every genre rail 52–165 px taller the moment its first page landed.
+ */
+function ShimmerCard({ evidence }: { evidence: boolean }) {
   return (
-    <div className="snap-start w-card shrink-0" aria-hidden data-testid="rail-skeleton">
-      <div className="reel-poster reel-shimmer" />
+    <div className="snap-start shrink-0">
+      <RecCardSkeleton evidence={evidence} />
     </div>
   );
 }
@@ -68,6 +77,7 @@ export default function RecRow({
   anchorName = null,
   hiddenByView = 0,
   onSeeWhy,
+  reserveEvidence = false,
 }: Props) {
   const [editorOpen, setEditorOpen] = useState(false);
   const { data: session } = useGetSessionQuery();
@@ -138,13 +148,13 @@ export default function RecRow({
         >
           {items.map((card) => (
             <div key={card.titleId} className="snap-start">
-              <RecCard card={card} />
+              <RecCard card={card} reserveEvidence={reserveEvidence} />
             </div>
           ))}
           {loading &&
             !failed &&
-            Array.from({ length: items.length === 0 ? skeletonCount : 1 }, (_, i) => <ShimmerCard key={`skeleton-${i}`} />)}
-          {failed && onRetry && <RailRetryTile onRetry={onRetry} />}
+            Array.from({ length: items.length === 0 ? skeletonCount : 1 }, (_, i) => <ShimmerCard key={`skeleton-${i}`} evidence={reserveEvidence} />)}
+          {failed && onRetry && <RailRetryTile onRetry={onRetry} reserveEvidence={reserveEvidence} />}
         </FadeScrollRow>
       )}
 

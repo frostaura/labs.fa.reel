@@ -39,6 +39,8 @@ import { pipelineStageCopy } from "../lib/syncCopy";
 import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
 import { lockedRowsCaption, lockedRowsHeadline } from "../lib/lockedRowsCopy";
 import { Button } from "../components/ui/button";
+import ReadFailedLine from "../components/rows/ReadFailedLine";
+import { useReadRetry } from "../lib/useReadRetry";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -50,12 +52,21 @@ export default function Home() {
     isFetching: feedFetching,
     refetch: refetchFeed,
   } = useGetFeedQuery();
-  const { data: continueWatching } = useGetContinueWatchingQuery();
+  // Every read below says when it failed and retries (HREV8-DESK-02): read alone, a failed query is
+  // an empty list, and an empty list rendered as "nothing here" — no genre rails, no Continue
+  // watching, "no conditions" while the server applied all of them. One `useReadRetry` per read.
+  const continueRead = useGetContinueWatchingQuery();
+  const continueWatching = continueRead.data;
+  const continueRetry = useReadRetry(continueRead);
   const [filter, setFilter] = useBrowseFilter("home");
   const dispatch = useDispatch();
   const removed = useSelector(selectHiddenKeys);
   const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
-  const { data: filters } = useGetFiltersQuery();
+  const filtersRead = useGetFiltersQuery();
+  const filters = filtersRead.data;
+  const filtersRetry = useReadRetry(filtersRead);
+  // Said where the conditions are, and only while there is nothing to show in their place.
+  const filtersFailure = !filters && filtersRetry.phase !== "ok" ? { phase: filtersRetry.phase, onRetry: filtersRetry.retry } : null;
   // One dialog, opened by the Conditions button or by any condition chip (H-9).
   const [conditionsOpen, setConditionsOpen] = useState(false);
   const hasConditions = summaryChips(filters).length > 0;
@@ -113,8 +124,12 @@ export default function Home() {
     }
   }, [adoptedKey, dispatch]);
 
-  const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
-  const { data: digest } = useGetDigestQuery(undefined, { skip: building });
+  const genresRead = useGetFeedGenresQuery(undefined, { skip: building });
+  const genres = genresRead.data;
+  const genresRetry = useReadRetry(genresRead);
+  const digestRead = useGetDigestQuery(undefined, { skip: building });
+  const digest = digestRead.data;
+  const digestRetry = useReadRetry(digestRead);
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
   // The weekly digest rail hides itself entirely until Friday's build lands something.
   const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
@@ -154,7 +169,13 @@ export default function Home() {
         />
       </div>
       {!isMdUp && (
-        <HomeConditionChips className="shrink-0" variant="strip" onOpenEditor={() => setConditionsOpen(true)} limit={2} />
+        <HomeConditionChips
+          className="shrink-0"
+          variant="strip"
+          onOpenEditor={() => setConditionsOpen(true)}
+          limit={2}
+          readFailure={filtersFailure}
+        />
       )}
     </>
   );
@@ -261,6 +282,7 @@ export default function Home() {
               onBrowseChange={setFilter}
               onOpenEditor={() => setConditionsOpen(true)}
               limit={6}
+              readFailure={filtersFailure}
             />
           )}
         </div>
@@ -323,7 +345,11 @@ export default function Home() {
               <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
             </div>
 
-            <ContinueWatchingRow entries={continueFiltered} />
+            {!continueWatching && continueRetry.phase !== "ok" ? (
+              <ReadFailedLine what="Continue watching" phase={continueRetry.phase} onRetry={continueRetry.retry} testId="home-continue-failed" />
+            ) : (
+              <ContinueWatchingRow entries={continueFiltered} />
+            )}
 
             {(feed?.rows ?? []).map((row) => (
               <InfiniteRecRow
@@ -348,6 +374,9 @@ export default function Home() {
 
             {/* "High for you" only when the build met the bar; a relaxed build is retitled and says
                 why, in the build's own words (IR1S-03). */}
+            {!digest && digestRetry.phase !== "ok" && (
+              <ReadFailedLine what="this week's digest" phase={digestRetry.phase} onRetry={digestRetry.retry} testId="home-digest-failed" />
+            )}
             {digestFiltered.length > 0 && (
               <StaticRail
                 title={<span className="text-fa-frost-bright">{digestCopy.title}</span>}
@@ -356,6 +385,9 @@ export default function Home() {
               />
             )}
 
+            {!genres && genresRetry.phase !== "ok" && (
+              <ReadFailedLine what="your genre rows" phase={genresRetry.phase} onRetry={genresRetry.retry} testId="home-genres-failed" />
+            )}
             {(genres ?? []).map((g) => (
               <GenreRow
                 key={`${g.slug}:${filter.media}:${resetKey}`}

@@ -107,6 +107,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // Set the moment a hold matures into the picker; consumed by the click that the same press
   // fires immediately afterwards, which must NOT also dismiss the card.
   const suppressClick = useRef(false);
+  // Set when a HOLD (not a right-click) opens the picker; cleared by the click its release delivers.
+  // Until then the release's own events on this button are not "outside" the picker (HREV8-PH-02).
+  const holdReleasing = useRef(false);
   // The reason picker is ANCHORED, not triggered — the button's own click is the one-tap dismiss —
   // so Radix has no trigger to hand focus back to when it closes, and focus fell to <body>
   // (H3REV-PH-01, WCAG 2.4.3). It is returned by hand, on Radix's own terms for a non-modal popover:
@@ -242,11 +245,16 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // `fromPointer`: a hold or a right-click, whose press may still deliver a click that must not also
   // dismiss. The keyboard openers (ArrowDown, Alt+Enter) produce no click, so a suppression armed by
   // them would swallow the NEXT Enter — the fast path — once focus is back on the button.
-  const openReasons = (fromPointer: boolean) => {
+  const openReasons = (fromPointer: boolean, fromHold = false) => {
     cancelLongPress();
     suppressClick.current = fromPointer;
+    holdReleasing.current = fromHold;
     setReasonsOpen(true);
   };
+
+  /** An event the release of the hold that opened the picker produces, on the button it was held on. */
+  const isHoldRelease = (target: EventTarget | null) =>
+    holdReleasing.current && target instanceof Node && notForMeRef.current?.contains(target) === true;
 
   return (
     <div
@@ -266,16 +274,24 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             variant="ghost"
             onClick={(e) => {
               e.preventDefault();
-              if (suppressClick.current) {
+              holdReleasing.current = false;
+              // Only a POINTER click can be the tail of a hold or a right-click. A keyboard
+              // activation (`detail` 0) is always its own press: a suppression a right-click left
+              // armed (right-click delivers no click to consume it) must not swallow Enter later.
+              if (suppressClick.current && e.detail !== 0) {
                 suppressClick.current = false;
                 return;
               }
+              suppressClick.current = false;
               if (!firstTap(e)) return;
               dismiss(DEFAULT_DISLIKE_REASON, keyboardFocus(e));
             }}
             onPointerDown={() => {
               cancelLongPress();
-              longPressTimer.current = setTimeout(() => openReasons(true), LONG_PRESS_MS);
+              // A fresh press with the picker shut cannot be the release of an earlier hold, so any
+              // suppression still armed (by a right-click, which delivers no click) is stale.
+              if (!reasonsOpen) suppressClick.current = false;
+              longPressTimer.current = setTimeout(() => openReasons(true, true), LONG_PRESS_MS);
             }}
             onPointerUp={cancelLongPress}
             onPointerLeave={cancelLongPress}
@@ -316,7 +332,22 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           // A named dialog (axe aria-dialog-name, PH-04): the overline is decoration under this name.
           aria-label={`Why not ${name}?`}
           data-testid="quick-reason-picker"
-          onInteractOutside={() => {
+          // A touch hold's RELEASE is not an outside interaction (HREV8-PH-02). The picker opens
+          // while the finger is still down and moves focus into itself; lifting the finger then
+          // fires the compatibility mousedown on this button, focus goes back to it, and Radix read
+          // that as focus leaving a non-modal popover — so holding opened the picker and letting go
+          // shut it, and a touch screen could never pick a reason. While the hold's own click is
+          // still pending (`holdReleasing`), anything aimed at the button it was held on keeps the
+          // picker open. Once that click has been swallowed, a press on the button closes it as
+          // before; a right-click arms nothing here, so its picker closes as it always has.
+          onFocusOutside={(e) => {
+            if (isHoldRelease(e.target)) e.preventDefault();
+          }}
+          onPointerDownOutside={(e) => {
+            if (isHoldRelease(e.target)) e.preventDefault();
+          }}
+          onInteractOutside={(e) => {
+            if (e.defaultPrevented) return;
             reasonsDismissedOutside.current = true;
           }}
           onCloseAutoFocus={(e) => {

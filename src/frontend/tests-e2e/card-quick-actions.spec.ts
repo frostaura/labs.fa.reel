@@ -777,3 +777,87 @@ test.describe("card quick actions", () => {
     }
   }
 });
+
+/**
+ * Press-and-hold on a TOUCH screen (HREV8-PH-02). The mouse hold above never exercised this path:
+ * on touch the release fires a compatibility `mousedown` on the button AFTER the picker has opened,
+ * which moved focus back to the anchor, and Radix's non-modal popover closed on that focus-outside —
+ * so the "only affordance a touch device has spare" opened the picker and shut it again on release.
+ *
+ * A real touch through the Chrome DevTools Protocol (Playwright has no touch hold of its own), so
+ * Chromium only: WebKit cannot be driven this way. Varied over the hero card and a rail card, a
+ * short and a long hold, and the reason chosen.
+ */
+test.describe("card quick actions on a touch screen (HREV8-PH-02)", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  async function touchHold(page: Page, x: number, y: number, ms: number) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    await page.waitForTimeout(ms);
+    // The hold has matured: the picker is open while the finger is still down.
+    await expect(page.getByTestId("quick-reason-picker")).toBeVisible();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await cdp.detach();
+  }
+
+  const CASES = [
+    { where: "a rail card", name: "Pick 8", tmdbId: 1008, holdMs: 700, reason: "tone" },
+    { where: "a rail card", name: "Pick 7", tmdbId: 1007, holdMs: 1500, reason: "seen-enough" },
+    { where: "the hero", name: "Pick 1", tmdbId: 1001, holdMs: 700, reason: "genre" },
+  ] as const;
+
+  for (const { where, name, tmdbId, holdMs, reason } of CASES) {
+    test(`a ${holdMs} ms hold on ${where} leaves the picker open after the finger lifts, and the reason tapped is posted`, async ({ page, browserName }) => {
+      test.skip(browserName !== "chromium", "a touch hold is driven through CDP, which only Chromium speaks");
+      await bootHome(page);
+
+      const reactionCalls: unknown[] = [];
+      await page.route(`**/api/titles/movie/${tmdbId}/reactions/not_interested`, (route) => {
+        reactionCalls.push(route.request().postDataJSON());
+        return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      });
+
+      const host = where === "the hero"
+        ? page.getByTestId("hero-card").filter({ hasText: name })
+        : page.getByTestId("rec-card").filter({ hasText: name });
+      const notForMe = host.getByTestId("quick-not-interested");
+      // Wholly on screen, sideways too: a rail's third card is only partly in a 390 px viewport.
+      await host.evaluate((el) => el.scrollIntoView({ block: "center", inline: "center" }));
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const box = await notForMe.boundingBox();
+      if (!box) throw new Error("quick-not-interested has no box");
+
+      await touchHold(page, box.x + box.width / 2, box.y + box.height / 2, holdMs);
+
+      const picker = page.getByTestId("quick-reason-picker");
+      // Past every timer the release could have started (Radix's close runs on a later task).
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 300)));
+      await expect(picker).toBeVisible();
+      // The hold's own tap dismissed nothing.
+      expect(reactionCalls).toHaveLength(0);
+      await expect(host).toHaveCount(1);
+
+      await picker.getByTestId(`quick-reason-${reason}`).tap();
+      await expect(host).toHaveCount(0);
+      expect(reactionCalls).toEqual([{ reason }]);
+    });
+  }
+
+  test("a quick tap on touch is still the one-tap dismiss with the default reason", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "kept beside the CDP hold specs it guards");
+    await bootHome(page);
+
+    const reactionCalls: unknown[] = [];
+    await page.route("**/api/titles/movie/1009/reactions/not_interested", (route) => {
+      reactionCalls.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+
+    const target = page.getByTestId("rec-card").filter({ hasText: "Pick 9" });
+    await target.getByTestId("quick-not-interested").tap();
+    await expect(target).toHaveCount(0);
+    await expect(page.getByTestId("quick-reason-picker")).toHaveCount(0);
+    expect(reactionCalls).toEqual([{ reason: "not-for-me" }]);
+  });
+});

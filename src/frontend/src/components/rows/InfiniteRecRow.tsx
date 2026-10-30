@@ -69,6 +69,8 @@ export default function InfiniteRecRow({ title, context, seed, filter, mood = nu
         anchorName={anchorName}
         hiddenByView={items.length - visible.length}
         onSeeWhy={onSeeWhy}
+        // Anchored rows carry evidence chips (because-you-loved, more-like-this).
+        reserveEvidence={context.anchorTitleId != null}
       />
     </div>
   );
