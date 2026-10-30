@@ -218,13 +218,20 @@ public static class PlanSanitizer
     /// </summary>
     public static Retrieval.MediaScope? UserMedia(Retrieval.MediaScope? planned, string? message)
     {
-        if (planned is Retrieval.MediaScope.Movies or Retrieval.MediaScope.Shows)
-        {
-            return planned;
-        }
-
         // "Show me samurai films": the verb "show" names no medium (AskReelCarry.WithoutShowVerb).
         var words = AskReelIntentSanitizer.ScopedWords(AskReelCarry.WithoutShowVerb(message));
+        if (planned is Retrieval.MediaScope.Movies or Retrieval.MediaScope.Shows)
+        {
+            // A "special" names no medium: TMDB catalogues a stand-up, concert or holiday special as a
+            // film or as a show, and of the 151 stand-up titles in the founder's catalogue 145 are
+            // films. The planner read "stand-up comedy specials" as TV and counted 6 (fix-golden-v2-2,
+            // conflict-standup). A plan's single medium that rests on "special(s)" alone — no medium
+            // word anywhere in the message — is a guess the user never made, so the turn searches both.
+            return words.Any(w => NoMediumWords.Contains(w.Word)) && !words.Any(w => AskReelCarry.MediaIn([w.Word]).Count > 0)
+                ? null
+                : planned;
+        }
+
         if (words.Any(w => AlsoCues.Contains(w.Word))
             || words.Zip(words.Skip(1)).Any(p => p.First.Word == "as" && p.Second.Word == "well"))
         {
@@ -331,6 +338,12 @@ public static class PlanSanitizer
         && named.All(g => genres.Any(planned => string.Equals(planned.Trim(), g, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>Words that ask for a medium on top of what is already asked for: "shows too", "also series" (and "as well").</summary>
+    /// <summary>Words a planner reads as a medium that name none: a special is catalogued as either.</summary>
+    private static readonly IReadOnlySet<string> NoMediumWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "special", "specials",
+    };
+
     private static readonly IReadOnlySet<string> AlsoCues = new HashSet<string>(StringComparer.Ordinal)
     {
         "too", "also", "include", "including", "both", "either", "plus",

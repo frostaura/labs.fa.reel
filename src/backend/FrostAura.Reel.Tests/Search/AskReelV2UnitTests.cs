@@ -862,6 +862,14 @@ public class AskReelV2UnitTests
     [InlineData("a cosy show me and my wife can watch", MediaScope.Any, MediaScope.Shows)]
     [InlineData("show me samurai, no tv shows", MediaScope.Any, MediaScope.Movies)]
     [InlineData("I loved those films, show me more", null, MediaScope.Movies)]
+    // fix-golden-v2-2 (conflict-standup): the planner read "specials" as TV and counted 6 stand-up
+    // shows where the catalogue holds 151 stand-up titles, 145 of them films — TMDB catalogues a
+    // special as either medium. A "special" names no medium, so a plan's single medium resting on it
+    // alone is dropped; a medium word beside it still decides.
+    [InlineData("stand-up comedy specials", MediaScope.Shows, null)]
+    [InlineData("a comedy special", MediaScope.Movies, null)]
+    [InlineData("stand-up specials on tv", MediaScope.Shows, MediaScope.Shows)]
+    [InlineData("stand-up comedy", MediaScope.Shows, MediaScope.Shows)]
     public void The_users_own_media_word_survives_a_plan_that_left_media_unset(string message, MediaScope? planned, MediaScope? expected)
     {
         var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Media = planned });
