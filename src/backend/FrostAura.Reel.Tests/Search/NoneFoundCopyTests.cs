@@ -36,6 +36,31 @@ public class NoneFoundCopyTests
             text);
     }
 
+    /// <summary>
+    /// HREV8-ASK-01: the founder's romcom turn read "Of the 2390 romantic comedies movies". Words that
+    /// already end in a plural noun for what is counted stand as the topic; words that do not still
+    /// take the medium's noun, and a count of one reads in the singular either way.
+    /// </summary>
+    [Theory]
+    [InlineData("romantic comedies", MediaScope.Movies, 2390, "There are no romantic comedies left for you.", "Of the 2390 romantic comedies in the catalogue")]
+    [InlineData("romantic comedies", MediaScope.Movies, 1, "There are no romantic comedies left for you.", "Of the 1 romantic comedy in the catalogue")]
+    [InlineData("comedies", MediaScope.Shows, 40, "There are no comedies left for you.", "Of the 40 comedies in the catalogue")]
+    [InlineData("thrillers", MediaScope.Any, 12, "There are no thrillers left for you.", "Of the 12 thrillers in the catalogue")]
+    [InlineData("horror films", MediaScope.Movies, 9, "There are no horror films left for you.", "Of the 9 horror films in the catalogue")]
+    [InlineData("Documentaries", MediaScope.Movies, 1, "There are no Documentaries left for you.", "Of the 1 documentary in the catalogue")]
+    [InlineData("romantic comedy", MediaScope.Movies, 7, "There are no romantic comedy movies left for you.", "Of the 7 romantic comedy movies in the catalogue")]
+    [InlineData("ninja", MediaScope.Shows, 1, "There are no ninja shows left for you.", "Of the 1 ninja show in the catalogue")]
+    public void A_topic_that_already_ends_in_a_plural_noun_takes_no_media_noun(
+        string words, MediaScope media, int matching, string lead, string partition)
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { MatchingInCatalogue = matching }, words, media, [], 0, 6m));
+
+        Assert.StartsWith(lead, text, StringComparison.Ordinal);
+        Assert.Contains(partition, text, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?i)\b(comedies|thrillers|films|documentaries) (movies|shows|titles)\b", text);
+    }
+
     [Fact]
     public void Matches_under_the_bar_are_named_because_they_are_on_screen_below()
     {

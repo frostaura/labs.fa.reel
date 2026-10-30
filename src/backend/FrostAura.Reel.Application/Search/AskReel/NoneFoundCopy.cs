@@ -364,7 +364,12 @@ public static class NoneFoundCopy
             : $"{head}, {Joined(parts)}.";
     }
 
-    /// <summary>"ninja movies", "ninja shows", "ninja titles"; null when the request named no concept.</summary>
+    /// <summary>
+    /// "ninja movies", "ninja shows", "ninja titles"; null when the request named no concept. Words
+    /// that already end in a plural noun for what is counted — a medium ("horror films") or a genre
+    /// ("romantic comedies") — are the topic as they stand: "romantic comedies movies" read as a
+    /// stutter on the founder's own romcom turn (HREV8-ASK-01).
+    /// </summary>
     private static string? Topic(string? conceptWords, MediaScope media)
     {
         var words = conceptWords?.Trim();
@@ -373,18 +378,56 @@ public static class NoneFoundCopy
             return null;
         }
 
-        return $"{words} {MediaNoun(media, plural: true)}";
+        return EndsInPluralNoun(words) ? words : $"{words} {MediaNoun(media, plural: true)}";
     }
+
+    /// <summary>Plural nouns that already name a kind of title, keyed to their singular.</summary>
+    private static readonly IReadOnlyDictionary<string, string> PluralNouns =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["movies"] = "movie",
+            ["films"] = "film",
+            ["shows"] = "show",
+            ["titles"] = "title",
+            ["series"] = "series",
+            ["miniseries"] = "miniseries",
+            ["sitcoms"] = "sitcom",
+            ["comedies"] = "comedy",
+            ["romcoms"] = "romcom",
+            ["dramas"] = "drama",
+            ["thrillers"] = "thriller",
+            ["westerns"] = "western",
+            ["documentaries"] = "documentary",
+            ["docuseries"] = "docuseries",
+            ["musicals"] = "musical",
+            ["mysteries"] = "mystery",
+            ["romances"] = "romance",
+            ["cartoons"] = "cartoon",
+            ["biopics"] = "biopic",
+            ["slashers"] = "slasher",
+            ["procedurals"] = "procedural",
+        };
+
+    private static string LastWord(string words)
+    {
+        var at = words.LastIndexOf(' ');
+        return at < 0 ? words : words[(at + 1)..];
+    }
+
+    private static bool EndsInPluralNoun(string words) => PluralNouns.ContainsKey(LastWord(words));
 
     private static string Noun(string? topic, int count) =>
         topic is null
             ? count == 1 ? "title" : "titles"
             : count == 1 ? Singular(topic) : topic;
 
-    private static string Singular(string topic) =>
-        topic.EndsWith("movies", StringComparison.Ordinal) ? topic[..^1]
-        : topic.EndsWith("shows", StringComparison.Ordinal) || topic.EndsWith("titles", StringComparison.Ordinal) ? topic[..^1]
-        : topic;
+    private static string Singular(string topic)
+    {
+        var last = LastWord(topic);
+        return PluralNouns.TryGetValue(last, out var one)
+            ? string.Concat(topic.AsSpan(0, topic.Length - last.Length), one)
+            : topic;
+    }
 
     private static string MediaNoun(MediaScope media, bool plural) => media switch
     {

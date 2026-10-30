@@ -446,8 +446,11 @@ public sealed partial class LiveSearchExpansionService(
             // concept (a keyword): a genre-only mood request would put the most-voted titles of that
             // genre ahead of the semantic matches.
             var topic = AskReelTopic.Resolve(intent.Keywords, trimmed, input.History);
+            // The turn as typed reaches the constraints so a genres-only v1 reading of "romantic
+            // comedies" ANDs its genres instead of counting romance OR comedy (HREV8-ASK-01, WS-3
+            // CR-2a); it is read only when the intent has genres and no keywords.
             var hard = Retrieval.IntentConstraints.FromIntent(
-                intent with { Keywords = [.. topic.Keywords] }, input.MediaFilter, topic.Label);
+                intent with { Keywords = [.. topic.Keywords] }, input.MediaFilter, topic.Label, message: trimmed);
             Retrieval.RetrievalResult? facet = null;
             var evidence = new Dictionary<Guid, IReadOnlyList<string>>();
 

@@ -29,13 +29,23 @@ public static class ConversationStateRebuild
         var readings = await db.SearchTurns
             .Where(t => t.ConversationId == conversationId && t.Role == "assistant" && t.IntentJson != null)
             .OrderByDescending(t => t.Sequence)
-            .Select(t => new { t.IntentJson, t.DegradedFlags })
+            .Select(t => new { t.IntentJson, t.DegradedFlags, t.Sequence })
             .Take(10)
             .ToListAsync(ct);
         var reading = readings.FirstOrDefault(r => !SearchTurnDegraded.PlanFailed(r.DegradedFlags));
         var intent = reading is null ? null : AskReelCarry.Parse(reading.IntentJson);
 
-        var hard = intent is null ? HardConstraints.None : IntentConstraints.FromIntent(intent);
+        // The user turn the reading answered, so the rebuilt constraints read a genres-only v1 intent
+        // the same way the live turn did (HREV8-ASK-01, WS-3 CR-2b).
+        var asked = reading is null || intent is null
+            ? null
+            : await db.SearchTurns
+                .Where(t => t.ConversationId == conversationId && t.Role == "user" && t.Sequence < reading.Sequence)
+                .OrderByDescending(t => t.Sequence)
+                .Select(t => t.Text)
+                .FirstOrDefaultAsync(ct);
+
+        var hard = intent is null ? HardConstraints.None : IntentConstraints.FromIntent(intent, message: asked);
         var negations = intent is null
             ? []
             : (intent.ExcludeKeywords ?? []).Concat(intent.ExcludeGenres ?? [])
