@@ -174,6 +174,9 @@ public static class FeedEndpoints
                 .ToHashSet();
             excludedTitleIds = [.. excludedTitleIds, .. ruledOut, .. underBar];
 
+            // One clock for the read: the refill's "new" window and the cards' released flag agree.
+            var nowUtc = DateTime.UtcNow;
+
             // A reason written while the bar still relaxed describes cards this read no longer serves.
             var degradedReason = ForYouBar.IsRetiredRelaxation(snapshot.DegradedReason) ? null : snapshot.DegradedReason;
             if (underBar.Count > 0)
@@ -194,6 +197,10 @@ public static class FeedEndpoints
                     .Where(x => excludedTitleIds.Contains(x.Title.Id))
                     .GroupBy(x => (x.Item.Row, x.Item.AnchorTitleId))
                     .ToDictionary(g => g.Key, g => g.Count());
+                // The deep-cuts row's popularity bound, read off every deep cut the build dealt
+                // (including the ones just dropped) before they leave the list — see FeedRowRules.
+                var deepCutBound = FeedRowRules.DeepCutBoundFromDealt(
+                    items.Where(x => x.Item.Row == FeedRowKind.DeepCuts).Select(x => x.Title));
                 items = items.Where(x => !excludedTitleIds.Contains(x.Title.Id)).ToList();
 
                 var needed = removedByRow.Values.Sum();
@@ -287,6 +294,17 @@ public static class FeedEndpoints
                             db, cache, anchorId, pool.Select(c => c.Title.Id).ToList(), ct);
                     }
 
+                    // A refill into a LABELLED kind row obeys the row's own rule the same way: a
+                    // "New & for you" seat takes only a recent release and a "Deep cuts" seat only a
+                    // title under the radar at the deep-cuts floor, or the seat stays empty — the
+                    // label is a claim about every card under it (HREV6-RET-01).
+                    bool FitsRow(FeedRowKind row, decimal predicted, Title title) => row switch
+                    {
+                        FeedRowKind.DeepCuts => FeedRowRules.IsDeepCut(predicted, title, forYouBar, deepCutBound),
+                        FeedRowKind.NewForYou => FeedRowRules.IsNewForYou(predicted, title, forYouBar, nowUtc),
+                        _ => true,
+                    };
+
                     var placed = new HashSet<Guid>();
                     foreach (var ((row, anchorId), lost) in removedByRow)
                     {
@@ -296,6 +314,7 @@ public static class FeedEndpoints
                         var gate = anchorId is { } gatedAnchor ? admittedByAnchor.GetValueOrDefault(gatedAnchor) : null;
                         var fits = pool
                             .Where(c => !placed.Contains(c.Title.Id)
+                                && FitsRow(row, c.PredictedRating, c.Title)
                                 && (gate is null || (gate.TryGetValue(c.Title.Id, out var admission) && admission.Admitted)))
                             .Take(lost)
                             .ToList();
@@ -367,8 +386,6 @@ public static class FeedEndpoints
                 : (await AnchorRowGate.EvidenceAsync(db, legacyAnchored, ct))
                     .Concat(storedEvidence)
                     .ToDictionary(kv => kv.Key, kv => kv.Value);
-
-            var nowUtc = DateTime.UtcNow;
 
             // Best-effort streaming strips from the shared availability cache (populated as titles
             // are viewed; no extra TMDB calls here). Streaming-now offers only (StreamingNowPolicy:

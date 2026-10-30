@@ -1646,9 +1646,9 @@ public class BuildFeedJobHandler(
         // The discover pool skews popular, so the deep-cuts bar is the lower-popularity 70th
         // percentile + a modest predicted floor. Computed here (not just before the deep-cuts row)
         // so the quota-reservation pass below can see the same threshold.
-        var popThreshold = candidates.Count > 0
-            ? candidates.Select(c => c.Title.TmdbPopularity ?? 0m).OrderBy(p => p).ElementAt(candidates.Count * 7 / 10)
-            : 0m;
+        // The rule itself is FeedRowRules', shared with the Home refill so a backfilled seat is held
+        // to the label the build dealt the row under (HREV6-RET-01).
+        var deepCutBound = FeedRowRules.DeepCutBoundFromPool([.. candidates.Select(c => c.Title)]);
 
         // Diversity / anti-starvation: the Because-you-loved rows greedily consume the best-matching
         // candidates against the SHARED `used` set. On a thin model that drains the pool before Deep
@@ -1656,10 +1656,8 @@ public class BuildFeedJobHandler(
         // reserve each later row's top-few candidates BEFORE the anchor fill so they survive. The
         // shared `used` set still guarantees no title repeats across the feed — reserved titles are
         // only WITHHELD from the greedy loved fill here, never pre-added, and remain free to place.
-        bool IsDeepCut(Candidate c) => ForYouBar.Clears(c.Predicted, Math.Max(6m, effectiveFloor))
-            && (c.Title.TmdbPopularity ?? 0m) < popThreshold;
-        bool IsNewForYou(Candidate c) => ForYouBar.Clears(c.Predicted, effectiveFloor)
-            && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900;
+        bool IsDeepCut(Candidate c) => FeedRowRules.IsDeepCut(c.Predicted, c.Title, effectiveFloor, deepCutBound);
+        bool IsNewForYou(Candidate c) => FeedRowRules.IsNewForYou(c.Predicted, c.Title, effectiveFloor, now);
 
         var reserved = new HashSet<Guid>();
         foreach (var id in candidates
