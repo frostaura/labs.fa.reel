@@ -42,6 +42,7 @@
   "crossRailRepeats": 0,
   "evidenceShare": 0.6031746031746031,
   "anchoredCards": 126,
+  "evidenceRule": "keywords+cosine",
   "hedgingWhyLines": 3,
   "hedgeRate": 0.01060070671378092,
   "nonLatinWhyLines": 0,

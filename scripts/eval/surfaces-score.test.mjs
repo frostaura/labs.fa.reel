@@ -77,6 +77,50 @@ test("evidence: two shared keywords or a cosine above the random-pair bar passes
   assert.equal(m.summary.evidenceShare, 2 / 3);
 });
 
+test("evidence (HREV8-RET-04): a credited person shared in the same capacity is evidence on its own, as AnchorRowGate admits it", () => {
+  // The House -> The Strain card: one shared director, one shared keyword, a cosine under the bar.
+  const people = scoreSurfaces(rec([{ surface: "feed-row", key: "because", anchorTitleId: X, cards: [card(A), card(B)] }], {
+    evidence: { [`${X}|${A}`]: { sharedKeywords: 0, sharedPeople: 1, cosine: 0.2 }, [`${X}|${B}`]: { sharedKeywords: 1, sharedPeople: 0, cosine: 0.3999 } },
+  }));
+  assert.equal(people.summary.evidenceShare, 1 / 2, "the shared director passes; one keyword and a cosine a hair under the bar do not");
+  assert.equal(people.summary.evidenceRule, "people+keywords+cosine");
+  // Vary the fixture: the same card with no shared person fails, whatever else is unchanged.
+  const none = scoreSurfaces(rec([{ surface: "feed-row", key: "because", anchorTitleId: X, cards: [card(A)] }], {
+    evidence: { [`${X}|${A}`]: { sharedKeywords: 0, sharedPeople: 0, cosine: 0.2 } },
+  }));
+  assert.equal(none.summary.evidenceShare, 0);
+  assert.equal(none.summary.evidenceRule, "people+keywords+cosine", "a recording that measured people says so even when none were shared");
+  // A recording made before people were measured (version <= 4) cannot claim people evidence: it scores on
+  // keywords and cosine alone and says which rule it was scored on.
+  const old = scoreSurfaces(rec([{ surface: "feed-row", key: "because", anchorTitleId: X, cards: [card(A)] }], {
+    evidence: { [`${X}|${A}`]: { sharedKeywords: 0, cosine: 0.2 } },
+  }));
+  assert.equal(old.summary.evidenceShare, 0);
+  assert.equal(old.summary.evidenceRule, "keywords+cosine");
+  // No anchored cards at all: no rule was exercised.
+  assert.equal(scoreSurfaces(rec([{ surface: "genre-rail", key: "g", cards: [card(A)] }])).summary.evidenceRule, null);
+});
+
+test("compare (HREV8-RET-04): runs scored on different evidence rules are refused, not scored", () => {
+  const s = (ev) => scoreSurfaces({ ...rec([{ surface: "similar", key: "s", status: 200, anchorTitleId: X, cards: [card(A)] }], { evidence: { [`${X}|${A}`]: ev } }), snapshotId: "s1" });
+  const withPeople = s({ sharedKeywords: 0, sharedPeople: 1, cosine: 0.1 }), without = s({ sharedKeywords: 2, cosine: 0.1 });
+  assert.equal(compareSurfaces(withPeople, withPeople, gates).refused, null);
+  assert.match(compareSurfaces(withPeople, without, gates).refused, /evidence was scored differently \(people\+keywords\+cosine vs keywords\+cosine\)/);
+  // A run with no anchored cards has no rule to disagree on; the volume gate catches the lost cards.
+  const noAnchored = scoreSurfaces({ ...rec([{ surface: "similar", key: "s", status: 200, cards: [card(A)] }]), snapshotId: "s1" });
+  assert.equal(compareSurfaces(noAnchored, withPeople, gates).refused, null);
+});
+
+test("evidence parity (HREV8-RET-04): the recorder counts people over the credits AnchorRowGate reads", () => {
+  const gate = readFileSync(join(repo, "src", "backend", "FrostAura.Reel.Application", "Ranking", "AnchorRowGate.cs"), "utf8");
+  const harness = readFileSync(join(repo, "scripts", "eval", "surfaces.mjs"), "utf8");
+  assert.equal(harness.match(/const MAX_CAST_ORDER = (\d+);/)?.[1], gate.match(/public const int MaxCastOrder = (\d+);/)?.[1], "cast cut-off");
+  assert.match(gate, /c\.Role == CreditRole\.Director \|\| c\.Role == CreditRole\.Writer\s*\|\| \(c\.Role == CreditRole\.Actor && c\.CastOrder != null && c\.CastOrder < MaxCastOrder\)/, "the gate's credit filter changed: update the recorder's");
+  assert.match(harness, /"Role" in \('Director', 'Writer'\) or \("Role" = 'Actor' and "CastOrder" < \$\{MAX_CAST_ORDER\}\)/);
+  assert.match(gate, /a\.PersonId == person\.PersonId && a\.Role == role/, "the gate matches a person in the same capacity");
+  assert.match(harness, /cc\."PersonId" = ca\."PersonId" and cc\."Role" = ca\."Role"/);
+});
+
 test("cross-rail repeats: one title on two feed rows is one repeat", () => {
   const m = scoreSurfaces(rec([
     { surface: "feed-hero", key: "tonight", cards: [card(A)] },

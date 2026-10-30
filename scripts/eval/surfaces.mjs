@@ -20,8 +20,10 @@
 //   stub rate          why-lines in the stub family (the model-failure template, GenericFallback);
 //   exclusion leaks    suggestion cards the independent eligibility truth says may not be shown;
 //   cross-rail repeats one title on more than one feed row;
-//   evidence share     anchored ("Because you loved X") and Similar cards that share ≥ 2 TMDB keywords
-//                      with the anchor or sit closer to it than 90% of random eligible pairs;
+//   evidence share     anchored ("Because you loved X") and Similar cards that share a credited person in
+//                      the same capacity with the anchor (HREV8-RET-04: director, writer or top-billed cast,
+//                      as AnchorRowGate admits them), or ≥ 2 TMDB keywords, or sit closer to it than 90% of
+//                      random eligible pairs;
 //   hedging why-lines  explanations that argue against their own pick, and non-Latin script in copy;
 //   card volume        cards per suggestion surface and anchored cards, gated against the baseline's;
 //   lookup footprint   watched or rated titles still on Saved or pinned as Watch tonight (gated), and on
@@ -89,7 +91,7 @@ function render(rec, m) {
     `| Suggestion cards fetched | ${s.suggestionCards} |`, `| Stub rate (rendered why-lines in the stub family) | ${fmt(s.stubRate)} |`,
     `| Stub why-lines by kind (generic once-per-page / composed tail / aligned template) | ${s.stubKinds ? `${s.stubKinds.generic} / ${s.stubKinds.composed} / ${s.stubKinds.aligned}` : "not recorded"} |`,
     `| Exclusion leaks (suggestion surfaces) | ${s.exclusionLeaks} |`, `| Cross-rail repeats (feed page) | ${s.crossRailRepeats} |`,
-    `| Evidence share (anchored + Similar, n=${s.anchoredCards}) | ${fmt(s.evidenceShare)} |`, `| Random-pair cosine p90 (evidence bar) | ${fmt(s.randomCosineP90)} |`,
+    `| Evidence share (anchored + Similar, n=${s.anchoredCards}; scored on ${s.evidenceRule ?? "—"}) | ${fmt(s.evidenceShare)} |`, `| Random-pair cosine p90 (evidence bar) | ${fmt(s.randomCosineP90)} |`,
     `| Rendered why-lines hedging against their own pick | ${s.hedgingWhyLines} |`, `| Why-lines with non-Latin script | ${s.nonLatinWhyLines} |`,
     `| Watched or rated titles on Saved / Watch tonight | ${s.lookupFootprint} |`,
     `| Why-lines with a clause IsCitable rejects (of whyThis lines checked; unscored) | ${s.uncitableWhyLines === null || s.uncitableWhyLines === undefined ? "not recorded (recording predates contributions)" : `${s.uncitableWhyLines} of ${s.citableChecked}; ${s.citableUnscored} without a stored score`} |`,
@@ -306,16 +308,24 @@ const eligible = sql(db, `with e as (${eligibleSql}) select "Id" from e where "I
 const seen = sql(db, `select distinct "TitleId" from (select "TitleId" from "WatchedTitles" where "AccountId" = :'account' union select "TitleId" from "UserRatings" where "AccountId" = :'account') x where "TitleId" in (${inIds})`, { account: accountId }).map((r) => r[0]);
 const pairs = blocks.filter((bl) => bl.anchorTitleId).flatMap((bl) => bl.cards.map((c) => [bl.anchorTitleId, c.titleId]));
 const evidence = {};
+// People shared in the same capacity (HREV8-RET-04), as AnchorRowGate.LoadFactsAsync reads credits: directors,
+// writers, and cast billed below AnchorRowGate.MaxCastOrder (8). surfaces-score.test.mjs reads both files and
+// fails if the constant or the credited roles drift apart.
+const MAX_CAST_ORDER = 8;
 if (pairs.length) {
   const values = pairs.map(([a, c]) => `('${a}'::uuid,'${c}'::uuid)`).join(",");
-  for (const [a, c, shared, cos] of sql(db, `
+  for (const [a, c, shared, cos, people] of sql(db, `
       with p(a, c) as (values ${values})
+      , credit as (select "TitleId", "PersonId", "Role" from "TitleCredits"
+                    where "Role" in ('Director', 'Writer') or ("Role" = 'Actor' and "CastOrder" < ${MAX_CAST_ORDER}))
       select p.a, p.c,
              (select count(*) from unnest(ta."Keywords") k where k = any (tc."Keywords")),
-             coalesce((1 - (ea."Embedding" <=> ec."Embedding"))::text, '')
+             coalesce((1 - (ea."Embedding" <=> ec."Embedding"))::text, ''),
+             (select count(distinct ca."PersonId") from credit ca join credit cc on cc."PersonId" = ca."PersonId" and cc."Role" = ca."Role"
+               where ca."TitleId" = p.a and cc."TitleId" = p.c)
         from p join "Titles" ta on ta."Id" = p.a join "Titles" tc on tc."Id" = p.c
         left join "TitleEmbeddings" ea on ea."TitleId" = p.a left join "TitleEmbeddings" ec on ec."TitleId" = p.c`)) {
-    evidence[`${a}|${c}`] = { sharedKeywords: Number(shared), cosine: cos === "" ? null : Number(cos) };
+    evidence[`${a}|${c}`] = { sharedKeywords: Number(shared), cosine: cos === "" ? null : Number(cos), sharedPeople: Number(people) };
   }
 }
 // The evidence bar: cosine of 2,000 random eligible pairs on this snapshot, p90. Seeded so it is stable.
@@ -346,7 +356,7 @@ const claims = {
   falseFamilies: audit.falseFamilies.map((f) => ({ id: f.id, owner: f.owner, claims: f.claims })),
 };
 const rec = {
-  kind: "surface-recording", version: 4, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch, digestSeed,
+  kind: "surface-recording", version: 5, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch, digestSeed,
   artifact: { input: artifactInput[0], id: artifactAtStart[0], version: artifactAtStart[1] ? Number(artifactAtStart[1]) : null, changedDuringFetch: artifactAtStart[0] !== artifactAtEnd[0] },
   startedAt: new Date(started).toISOString(), wallSeconds: Math.round((finished - started) / 1000), blocks, names,
   ledger: ledgerDelta, costUsd, exposuresWritten: exposuresAfter - exposuresBefore, jobsDuringRun,

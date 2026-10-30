@@ -78,7 +78,7 @@ node scripts/eval/askreel.mjs check --db reel_eval --api http://127.0.0.1:5180  
 # Surface harness: one Fresh build (API started with --jobs), then every surface; compare against a baseline.
 node scripts/eval/surfaces.mjs --api http://127.0.0.1:5180 --db reel_eval --label <name> --fresh --api-env <eval env> --build-info <...>
 node scripts/eval/surfaces.mjs --replay <recording.json>
-node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/20429ff-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
+node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/6968db5-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
 
 # Zero-footprint audit of the exposure log (exit 1 on any exposure served after its lock started).
 node scripts/eval/footprint-audit.mjs --db reel_eval [--since <ISO time>]
@@ -260,7 +260,8 @@ them, which is the point of the baseline.
 | Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | The pre-program keyless reference, kept for what the re-baseline was measured against. Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
 | Surfaces, keyless (`eval/surfaces/baselines/9f42c9d-keyless/`) | The keyless reference for round 3 (IR2S-04), superseded by `224eea0-keyless` because it seeded no digest arrivals. Same snapshot and input artifact. Its lower anchored and Similar volume is the evidence gate (3 of 99c0761's 126 anchored cards pass it; all 12 of these do). Its stub rate is owned by WS-5, not waived: the absolute stub gate still fails (`provenance.md`) |
 | Surfaces, keyless (`eval/surfaces/baselines/224eea0-keyless/`) | The wave-A reference (IREV3S-02): the first baseline with seeded digest arrivals (`eval/surfaces/seed-arrivals.sql`), so the digest is measured (10 cards) instead of empty. The keyed `99c0761/` seeded nothing, so `--compare` refuses it against a seeded run until the keyed re-run on the eval key |
-| Surfaces, keyless (`eval/surfaces/baselines/20429ff-keyless/`) | **The reference for keyless runs** since wave B: the wave-A merge (API sources = `20429ff`), the first recording (v4) with the uncitable why-line and false-copy-claim metrics. Passes every row against `224eea0-keyless`; uncitable 0 of 59 checked; false copy claims 15 (owned). Reproduced on a second fresh clone (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/20429ff-keyless/`) | The wave-B reference: the wave-A merge (API sources = `20429ff`), the first recording (v4) with the uncitable why-line and false-copy-claim metrics. Superseded by `6968db5-keyless`: it measured no shared people and served 22 anchored cards, so `--compare` refuses it against a v5 run on the evidence rule (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/6968db5-keyless/`) | **The reference for keyless runs** since hardening round 9 (HREV8-RET-04): `build/trust-v1` @ `6968db54`, the first recording (v5) that counts a person credited on both anchor and card as evidence. 50 anchored cards, evidence share 0.98 (Hokum → Factotum, one keyword under the cosine bar, still fails); every absolute gate passes. Reproduced on a second fresh clone (`provenance.md`) |
 
 ## The LLM judge and κ
 
@@ -295,8 +296,10 @@ the 99c0761 runs (open 27.2 min + holdout 10.0 min, $0.47) measured the SQL-trut
 disabled weekly service would enqueue), and only after every chained job has drained; it records the
 active artifact at the start and end of the fetch. Per surface it reports stub rate, exclusion leaks (same
 `_eligible.sql`), cross-rail repeats on the feed page, the share of anchored and Similar cards with evidence
-(≥ 2 shared TMDB keywords with the anchor, or embedding cosine above the p90 of 2,000 seeded random
-eligible pairs on the same snapshot), hedging and non-Latin why-lines, card volume, and the watched-or-rated footprint
+(a person credited on both in the same capacity — director, writer or top-billed cast, as `AnchorRowGate`
+reads credits — or ≥ 2 shared TMDB keywords with the anchor, or embedding cosine above the p90 of 2,000
+seeded random eligible pairs on the same snapshot; recordings before version 5 measured no people, and
+`--compare` refuses to compare runs scored on different evidence rules), hedging and non-Latin why-lines, card volume, and the watched-or-rated footprint
 of Saved and the Watch-tonight pin (gated; typeahead and person pages show what you have seen by design
 and are reported only). Every response's HTTP status is recorded: an error, or an empty suggestion
 surface, is **no data** — listed at the top of the report, and the run exits 1 — never "0 leaks". Ask is

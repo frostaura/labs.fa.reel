@@ -30,7 +30,7 @@
 | Stub why-lines by kind (generic once-per-page / composed tail / aligned template) | 0 / 0 / 0 |
 | Exclusion leaks (suggestion surfaces) | 0 |
 | Cross-rail repeats (feed page) | 0 |
-| Evidence share (anchored + Similar, n=12) | 1 |
+| Evidence share (anchored + Similar, n=12; scored on keywords+cosine) | 1 |
 | Random-pair cosine p90 (evidence bar) | 0.390 |
 | Rendered why-lines hedging against their own pick | 0 |
 | Why-lines with non-Latin script | 0 |

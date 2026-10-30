@@ -95,6 +95,25 @@ export function stubKind(text) {
   return /^strong fit with your taste profile\.?$/iu.test(t) ? "generic" : "composed";
 }
 
+// Anchor evidence (HREV8-RET-04): what makes an anchored or Similar card's link to its anchor checkable.
+// The product admits a card to an anchored row on "a credited person in the same capacity, a TMDB keyword,
+// or an extracted theme" (AnchorRowGate.Between) above a similarity floor; the harness asks the narrower,
+// independent question "is there a verifiable reason at all", and counts any one of:
+//   - a person credited on both titles in the same capacity (director, writer, or top-billed cast below
+//     AnchorRowGate.MaxCastOrder), as the recorder counts it from TitleCredits — a shared director is a
+//     reason a viewer can check ("Deran Sarafian directs, as in House." on The Strain);
+//   - two or more shared TMDB keywords (one is a coincidence);
+//   - a plot-embedding cosine at or above the snapshot's random-pair p90.
+// Recordings before version 5 did not measure people, so they are scored on keywords and cosine alone and
+// say so (evidenceRule); runs scored on different rules are refused by compareSurfaces.
+export const evidenceRuleOf = (e) => (e.sharedPeople === undefined ? "keywords+cosine" : "people+keywords+cosine");
+export function hasEvidence(e, randomCosineP90) {
+  if (!e) return false;
+  if ((e.sharedPeople ?? 0) >= 1) return true;
+  if (e.sharedKeywords >= 2) return true;
+  return e.cosine !== null && randomCosineP90 !== null && e.cosine >= randomCosineP90;
+}
+
 export function scoreSurfaces(rec) {
   const f = rec.facts;
   const eligible = new Set(f.eligible);
@@ -102,6 +121,7 @@ export function scoreSurfaces(rec) {
   const perSurface = {};
   const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, stubKinds: { generic: 0, composed: 0, aligned: 0 }, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [], citableChecked: 0, uncitable: 0, citableUnscored: 0 });
   const hedges = [];
+  const rules = new Set();
   // Recordings before version 4 froze no contributions: the IsCitable check has no data there (null).
   const contributions = f.contributions ?? null;
   const uncitable = [];
@@ -139,7 +159,8 @@ export function scoreSurfaces(rec) {
       if (block.anchorTitleId && c.titleId !== block.anchorTitleId) {
         s.anchored++;
         const e = f.evidence[`${block.anchorTitleId}|${c.titleId}`];
-        if (e && (e.sharedKeywords >= 2 || (e.cosine !== null && f.randomCosineP90 !== null && e.cosine >= f.randomCosineP90))) s.evidencePass++;
+        if (e) rules.add(evidenceRuleOf(e));
+        if (hasEvidence(e, f.randomCosineP90)) s.evidencePass++;
       }
     }
   }
@@ -165,6 +186,7 @@ export function scoreSurfaces(rec) {
       suggestionCards: cards, cardsBySurface: Object.fromEntries(Object.entries(perSurface).map(([k, v]) => [k, v.cards])), stubRate: ratio(total("stubWhy"), cards),
       stubKinds: Object.fromEntries(["generic", "composed", "aligned"].map((k) => [k, sugg.reduce((n, [, v]) => n + (v.stubKinds?.[k] ?? 0), 0)])), exclusionLeaks: total("leaks"), leakRate: ratio(total("leaks"), cards),
       crossRailRepeats: repeats.length, evidenceShare: ratio(total("evidencePass"), anchored), anchoredCards: anchored,
+      evidenceRule: rules.size === 0 ? null : [...rules].sort().join(" | "),
       hedgingWhyLines: total("hedgingWhy"), hedgeRate: ratio(total("hedgingWhy"), cards), nonLatinWhyLines: total("nonLatinWhy"),
       lookupFootprint: Object.entries(perSurface).filter(([s]) => FOOTPRINT_GATED.has(s)).reduce((n, [, v]) => n + v.footprint, 0),
       httpErrors: Object.values(perSurface).reduce((n, v) => n + v.errors, 0), surfacesWithoutData, complete: surfacesWithoutData.length === 0,
@@ -208,6 +230,11 @@ export function compareSurfaces(current, baseline, gates) {
   if ((c.snapshotId ?? null) !== (b.snapshotId ?? null)) return { refused: `snapshots differ (${c.snapshotId} vs ${b.snapshotId})`, rows: [] };
   if ((c.digestSeed ?? "unrecorded") !== (b.digestSeed ?? "unrecorded")) {
     return { refused: `digest arrivals were made differently (${c.digestSeed ?? "unrecorded"} vs ${b.digestSeed ?? "unrecorded"}) — re-baseline with the same seeding`, rows: [] };
+  }
+  // HREV8-RET-04: an evidence share counted with people is not comparable with one counted without them.
+  // A run with no anchored cards (null) has nothing to disagree on; the anchored volume gate catches it.
+  if (c.evidenceRule && b.evidenceRule && c.evidenceRule !== b.evidenceRule) {
+    return { refused: `evidence was scored differently (${c.evidenceRule} vs ${b.evidenceRule}) — re-baseline on the same rule`, rows: [] };
   }
   const ci = inputArtifact(c), bi = inputArtifact(b);
   if (ci && bi && ci !== bi) return { refused: `model artifacts differ (${ci} vs ${bi})`, rows: [] };

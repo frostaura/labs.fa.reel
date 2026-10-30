@@ -1,9 +1,9 @@
 {
   "note": "Surface-harness gates (WS-7 tasks 8 and 10), registered 2026-10-24 after the 99c0761 surface baseline existed (the P0 review found the harness had no gate or compare at all). Absolute targets are task 8's goals and are the G1 bar, not a per-merge bar; the regression tolerances block a merge. Rates are per suggestion card, because the cards a build serves differ run to run. Change them only by a reviewed commit, never to make a run pass.",
   "baselines": {
-    "keyless": "eval/surfaces/baselines/20429ff-keyless",
+    "keyless": "eval/surfaces/baselines/6968db5-keyless",
     "keyed": "eval/surfaces/baselines/99c0761",
-    "note": "--compare runs against these. 224eea0-keyless (wave A), 9f42c9d-keyless and 99c0761-keyless stay in the tree as references (their provenance.md); the last two seeded no digest arrivals, so --compare refuses them against a seeded run. The keyed 99c0761 is in the same position until its re-run on the eval key."
+    "note": "--compare runs against these. 20429ff-keyless (wave B), 224eea0-keyless (wave A), 9f42c9d-keyless and 99c0761-keyless stay in the tree as references (their provenance.md); every one of them predates people evidence (recording version 5), so --compare refuses them against a current run on the evidence rule; the last two seeded no digest arrivals, so --compare refuses them against a seeded run. The keyed 99c0761 is in the same position until its re-run on the eval key."
   },
   "gates": [
     {
@@ -174,6 +174,13 @@
       "dataSeen": "two keyless runs of the wave-A merge (API sources = 20429ff) on fresh clones; both pass every compare row against 224eea0-keyless and each other",
       "change": "the keyless baseline moves from 224eea0-keyless to 20429ff-keyless, the first recording (version 4) that measures uncitableWhyLines, falseCopyClaims and unregisteredCopyClaims",
       "reason": "Without it every run reports 'no baseline data' on the three wave-B metrics, so a regression in them could never block a merge. 224eea0-keyless stays as the wave-A reference."
+    },
+    {
+      "when": "2026-10-30",
+      "commit": "ws7-round9 (HREV8-RET-04)",
+      "dataSeen": "two keyless runs of build/trust-v1 @ 6968db54 on fresh clones (identical cards on every block; 50 anchored cards). Re-scored on the old rule, each gives evidenceShare 0.96 against 20429ff-keyless's 1 (allowed 0.97): House -> The Strain (one shared director, Deran Sarafian; one keyword; cosine 0.370) and Hokum -> Factotum (one keyword; cosine 0.3855 under p90 0.3868)",
+      "change": "(a) recordings from version 5 record sharedPeople per anchor pair (people credited on both titles in the same role: director, writer, or cast below AnchorRowGate.MaxCastOrder), and one shared person counts as evidence beside two shared keywords or a cosine at the random-pair p90; (b) summary.evidenceRule names the rule a run was scored on, and --compare refuses runs scored on different rules; (c) the keyless baseline moves from 20429ff-keyless (22 anchored cards) to 6968db5-keyless (50 anchored, evidenceShare 0.98). The evidenceShare tolerance stays 0.03",
+      "reason": "HREV8-RET-04. The product admits an anchored card on a credited person in the same capacity, a keyword or a theme (AnchorRowGate.Between); the harness ignored people, so a true, checkable why-line ('Deran Sarafian directs, as in House.') failed it and kept the keyless gate red from h4 on. Widening the tolerance was rejected: it would also have passed the thin card (one keyword, cosine under the bar), which still fails and should. Counting themes was not added: a theme is an extracted, model-made fact, not a catalogue one the harness can hold independently. 20429ff-keyless was re-taken rather than re-scored because its recording measured no people and its 22 anchored cards are under half the volume the build now serves"
     }
   ]
 }
