@@ -202,14 +202,83 @@ public sealed partial class ConceptResolver(
         }
 
         var all = named.SelectMany(n => n.Slugs).Distinct(StringComparer.Ordinal).ToList();
-        var labelled = concept.CatalogueLabels.Any(l => ConceptSynonyms.GenresNamedBy(Normalise(l)) is null);
-        if (others.Contains("or") || named.Count == 1 || labelled)
+        if (others.Contains("or") || named.Count == 1 || Labelled(concept))
         {
             return [concept with { Genres = all }];
         }
 
         return [concept with { Genres = [.. named[0].Slugs] }, .. named.Skip(1).Select(n => new ConceptTerm(n.Word, [], [.. n.Slugs], StandInWords: concept.StandInWords))];
     }
+
+    /// <summary>
+    /// The genre phrase in a user's turn that names exactly <paramref name="genres"/>: the words of the
+    /// one run of genre words (and "and"/"&amp;"/"or" between them) whose slugs are that set ("a 90s
+    /// romantic comedy" with romance, comedy → "romantic comedy"). Runs naming other genres ("but no
+    /// horror") are passed over. Null when no run, or more than one, names exactly those genres — the
+    /// turn is then no evidence of how the user joined them (HREV8-ASK-01).
+    /// </summary>
+    public static string? GenrePhraseIn(string? message, IReadOnlyCollection<string> genres)
+    {
+        ArgumentNullException.ThrowIfNull(genres);
+        var tokens = Normalise(message).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var matches = new List<string>(1);
+        var run = new List<string>();
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+
+        void Close()
+        {
+            while (run.Count > 0 && IsConjunction(run[^1]))
+            {
+                run.RemoveAt(run.Count - 1);
+            }
+
+            if (slugs.Count > 0 && slugs.SetEquals(genres))
+            {
+                matches.Add(string.Join(' ', run));
+            }
+
+            run.Clear();
+            slugs.Clear();
+        }
+
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (i + 1 < tokens.Length && ConceptSynonyms.GenreWords.TryGetValue($"{tokens[i]} {tokens[i + 1]}", out var pair))
+            {
+                run.Add(tokens[i]);
+                run.Add(tokens[++i]);
+                slugs.UnionWith(pair);
+            }
+            else if (ConceptSynonyms.GenreSlugsOf(tokens[i]) is { } single)
+            {
+                run.Add(tokens[i]);
+                slugs.UnionWith(single);
+            }
+            else if (run.Count > 0 && IsConjunction(tokens[i]))
+            {
+                run.Add(tokens[i]);
+            }
+            else
+            {
+                Close();
+            }
+        }
+
+        Close();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    /// <summary>
+    /// True when the planner gave <paramref name="concept"/> a label that is not made only of genre words —
+    /// a real topic beside the phrase, which keeps the phrase's genres OR-ed inside the one concept. A
+    /// label that merely restates the genre phrase ("romantic comedies", the v1 keyword the user's own
+    /// words anchored) is no such topic: reading it as one OR-ed the two genres, so v1 counted every
+    /// comedy and every romance as a romantic comedy and offered lifting either exclusion alone as a
+    /// relaxation that unlocked nothing of what was asked (HREV8-ASK-01). The static reading
+    /// (<see cref="GenreReading"/>) and resolution apply the one rule.
+    /// </summary>
+    private static bool Labelled(ConceptTerm concept) =>
+        concept.CatalogueLabels.Any(l => ConceptSynonyms.GenresNamedBy(Normalise(l)) is null);
 
     private static ConceptTerm Mark(ConceptTerm concept)
     {
@@ -286,7 +355,7 @@ public sealed partial class ConceptResolver(
                 if (!givenGenres)
                 {
                     genres.AddRange(named.SelectMany(n => n.Slugs));
-                    if (seed == words && concept.CatalogueLabels.Count == 0 && !others.Contains("or"))
+                    if (seed == words && !Labelled(concept) && !others.Contains("or"))
                     {
                         phraseGenres.AddRange(named);
                     }

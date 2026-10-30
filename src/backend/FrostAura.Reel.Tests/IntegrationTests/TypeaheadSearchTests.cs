@@ -370,8 +370,6 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         var saved = await SeedTitleAsync($"{token} Saved", votes: 400);
         var untouched = await SeedTitleAsync($"{token} Untouched", votes: 300);
         var revokedSave = await SeedTitleAsync($"{token} Revoked", votes: 200);
-        var someoneElses = await SeedTitleAsync($"{token} Elsewhere", votes: 100);
-        var other = await SeedAccountAsync();
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
             var now = DateTime.UtcNow;
@@ -383,13 +381,16 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
                 Watch(accountId, seen, full: true),
                 Rating(accountId, episodeRated, RatingSubjectType.Episode, 9),
                 new UserTitleReaction { Id = Guid.NewGuid(), AccountId = accountId, TitleId = saved, Kind = ReactionKind.SaveForLater, CreatedAt = now },
-                new UserTitleReaction { Id = Guid.NewGuid(), AccountId = accountId, TitleId = revokedSave, Kind = ReactionKind.SaveForLater, CreatedAt = now, RevokedAt = now },
-                Rating(other, someoneElses, RatingSubjectType.Movie, 10),
-                Watch(other, someoneElses, full: true));
+                new UserTitleReaction { Id = Guid.NewGuid(), AccountId = accountId, TitleId = revokedSave, Kind = ReactionKind.SaveForLater, CreatedAt = now, RevokedAt = now });
             await db.SaveChangesAsync();
         }
 
+        // Every seed must come back, or an assertion below never runs (HREV8-RET-02: a ninth seed sat
+        // past TitleLimit and the cross-account check it carried never executed).
+        var seeded = new[] { ratedPartly, ratedOnly, watching, seen, episodeRated, saved, untouched, revokedSave };
+        Assert.True(seeded.Length <= TypeaheadSearch.TitleLimit, "the fixture seeds no more matches than the list returns");
         var rows = (await LocalAsync(accountId, token)).Titles.ToDictionary(t => t.TitleId);
+        Assert.Equal(seeded.ToHashSet(), rows.Keys.ToHashSet());
 
         Assert.Equal((short)7, rows[ratedPartly].UserRating);
         Assert.True(rows[ratedPartly].InProgress);
@@ -406,7 +407,7 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
             Assert.True(rows[id].Footprint, $"{id} carries a footprint");
         }
 
-        foreach (var id in new[] { untouched, revokedSave, someoneElses })
+        foreach (var id in new[] { untouched, revokedSave })
         {
             Assert.False(rows[id].Footprint, $"{id} carries none");
             Assert.Null(rows[id].UserRating);
@@ -415,9 +416,67 @@ public class TypeaheadSearchTests(PostgresFixture fixture)
         }
 
         await using var read = fixture.CreateContext(new AccountContext());
-        var asked = new[] { ratedPartly, untouched, ratedOnly, watching, seen, episodeRated, saved, revokedSave, someoneElses };
+        var asked = new[] { ratedPartly, untouched, ratedOnly, watching, seen, episodeRated, saved, revokedSave };
         var scorable = await new TypeaheadSearch(read, new EligibilityQueryBuilder(read)).ScorableAsync(accountId, asked, default);
-        Assert.Equal([untouched, revokedSave, someoneElses], scorable);
+        Assert.Equal([untouched, revokedSave], scorable);
+    }
+
+    [Fact]
+    public async Task Another_accounts_footprint_never_reaches_this_accounts_rows_or_scoring()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV8-RET-02: split out of the footprint test above, where this title sat ninth against an
+        // eight-row list and its assertions never ran. Another account has every footprint kind on these
+        // titles — rated, fully watched, partly watched, saved, an episode rating — and none of it may
+        // mark this account's row, show a rating, or keep the title from being scored. One title of this
+        // account's own is the control that the same read does carry a footprint.
+        var token = Token();
+        var accountId = await SeedAccountAsync();
+        var other = await SeedAccountAsync();
+        var ratedAndSeen = await SeedTitleAsync($"{token} Elsewhere", votes: 100);
+        var partlyWatched = await SeedTitleAsync($"{token} Halfway", votes: 90);
+        var savedThere = await SeedTitleAsync($"{token} Kept", votes: 80);
+        var episodeThere = await SeedTitleAsync($"{token} Episodic", votes: 70);
+        var mine = await SeedTitleAsync($"{token} Mine", votes: 60);
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            db.AddRange(
+                Rating(other, ratedAndSeen, RatingSubjectType.Movie, 10),
+                Watch(other, ratedAndSeen, full: true),
+                Watch(other, partlyWatched, full: false),
+                new UserTitleReaction { Id = Guid.NewGuid(), AccountId = other, TitleId = savedThere, Kind = ReactionKind.SaveForLater, CreatedAt = DateTime.UtcNow },
+                Rating(other, episodeThere, RatingSubjectType.Episode, 8),
+                Rating(other, mine, RatingSubjectType.Movie, 2),
+                Watch(accountId, mine, full: true));
+            await db.SaveChangesAsync();
+        }
+
+        var theirs = new[] { ratedAndSeen, partlyWatched, savedThere, episodeThere };
+        var seeded = theirs.Append(mine).ToArray();
+        Assert.True(seeded.Length <= TypeaheadSearch.TitleLimit, "the fixture seeds no more matches than the list returns");
+        var rows = (await LocalAsync(accountId, token)).Titles.ToDictionary(t => t.TitleId);
+        Assert.Equal(seeded.ToHashSet(), rows.Keys.ToHashSet());
+
+        foreach (var id in theirs)
+        {
+            Assert.False(rows[id].Footprint, $"{id} carries none");
+            Assert.Null(rows[id].UserRating);
+            Assert.False(rows[id].InProgress);
+            Assert.False(rows[id].IsFullyWatched);
+        }
+
+        // The control: this account's own watch marks the row, and the other account's 2 is not shown as its rating.
+        Assert.True(rows[mine].Footprint);
+        Assert.True(rows[mine].IsFullyWatched);
+        Assert.Null(rows[mine].UserRating);
+
+        await using var read = fixture.CreateContext(new AccountContext());
+        var scorable = await new TypeaheadSearch(read, new EligibilityQueryBuilder(read)).ScorableAsync(accountId, seeded, default);
+        Assert.Equal(theirs, scorable);
     }
 
     private static UserRating Rating(Guid accountId, Guid titleId, RatingSubjectType subject, short rating) => new()
