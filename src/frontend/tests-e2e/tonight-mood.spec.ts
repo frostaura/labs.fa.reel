@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * The tonight-mood chips.
@@ -52,6 +53,7 @@ async function bootHome(page: Page, hero: unknown[]) {
   await mockJson(page, "**/api/feed/continue-watching", []);
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,

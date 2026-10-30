@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * How Home's rails ask for cards (I-2, F-13, O-7, O-22, F+3).
@@ -202,6 +203,7 @@ async function bootHome(page: Page, more: "ok" | "fail", options: BootOptions = 
     generatedAt: options.digest ? new Date().toISOString() : null,
     items: options.digest ?? [],
   });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: HERO, rows, lockedRowCount: 0 });
   let page_ = 0;
   let release: () => void = () => undefined;

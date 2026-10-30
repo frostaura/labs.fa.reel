@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * Title-detail reactions: the one-tap rate popover ("Seen it — you rated N"), the clear-rating
@@ -262,6 +263,7 @@ test.describe("title detail states", () => {
     await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
     await mockJson(page, "**/api/feed/continue-watching", []);
     await mockJson(page, "**/api/feed/genres", { genres: [] });
+    await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
     await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
   }
 

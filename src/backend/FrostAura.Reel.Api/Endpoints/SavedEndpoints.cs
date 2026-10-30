@@ -456,7 +456,7 @@ public static class SavedEndpoints
     }
 
     /// <summary>Predicted ratings for these titles under the account's Active artifact only.</summary>
-    private static async Task<Dictionary<Guid, decimal>> ActiveArtifactScoresAsync(
+    internal static async Task<Dictionary<Guid, decimal>> ActiveArtifactScoresAsync(
         IReelDbContext db, Guid accountId, IReadOnlyList<Guid> titleIds, CancellationToken ct)
     {
         if (titleIds.Count == 0)

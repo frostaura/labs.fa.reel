@@ -235,3 +235,46 @@ export interface BlendPicksPayload {
   ownerName: string;
   items: BlendCard[];
 }
+
+/**
+ * One card on Home's "Trakt recommends" rail (`GET /api/feed/trakt-recommendations`). The list is
+ * Trakt's, so `predictedRating` is honestly nullable — Reel's "for you" number where its model has
+ * one, nothing where it does not — and `whyThis` is empty: Reel did not choose these titles.
+ * `traktRank` is the card's position in Trakt's list for its media type.
+ */
+export interface TraktRecommendationCard {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  runtimeMinutes: number | null;
+  posterPath: string | null;
+  backdropPath: string | null;
+  genres: string[];
+  predictedRating: number | null;
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  whyThis: string;
+  isReleased: boolean;
+  providers: { name: string; logoPath: string | null }[];
+  traktRank: number;
+}
+
+/** What the rail can honestly claim: Trakt's list now, its last list, or why there is none. */
+export type TraktRecommendationsState = "Ok" | "Stale" | "NotLinked" | "RelinkRequired" | "Unavailable";
+
+/** The rail's payload: the state, what Trakt sent, and what Reel took out and why. */
+export interface TraktRecommendations {
+  state: TraktRecommendationsState;
+  fetchedAt: string | null;
+  returnedByTrakt: number;
+  unresolved: number;
+  hiddenAsSeen: number;
+  hiddenAsSetAside: number;
+  hiddenByConditions: number;
+  heldBelowBar: number;
+  bar: number | null;
+  unscoredRemaining: number;
+  items: TraktRecommendationCard[];
+}

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * The hero fits its card at every width (F-4, O-1, I-10) and its title reads over any art (O-2).
@@ -134,6 +135,7 @@ async function bootHome(
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: null, items: [] });
   await mockJson(page, "**/api/settings/filters", chrome.filters ?? REAL_FILTERS);
   await mockJson(page, "**/api/accuracy", chrome.accuracy ?? NO_ACCURACY);

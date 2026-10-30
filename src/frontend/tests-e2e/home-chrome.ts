@@ -3,6 +3,24 @@ import { mockJson } from "./helpers";
 import { mockFilterChips } from "./filterChips.fixture";
 
 /**
+ * The "Trakt recommends" rail's "nothing to say" answer: Trakt answered and had nothing. Exported so
+ * a spec that boots Home with its own mocks can answer the rail the same way.
+ */
+export const TRAKT_RECS_NONE = {
+  state: "Ok",
+  fetchedAt: "2026-10-30T10:00:00Z",
+  returnedByTrakt: 0,
+  unresolved: 0,
+  hiddenAsSeen: 0,
+  hiddenAsSetAside: 0,
+  hiddenByConditions: 0,
+  heldBelowBar: 0,
+  bar: null,
+  unscoredRemaining: 0,
+  items: [],
+};
+
+/**
  * Every call Home makes around its picks, answered with the account's "nothing to say" shape, so a
  * WS-10A spec that boots Home makes no unmocked call (R1-21) and states only what it is about.
  *
@@ -17,6 +35,7 @@ export async function mockHomeChrome(
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [], degradedReason: null });
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/saved/recently-watched", overrides.recentlyWatched ?? { expectedAbsoluteError: null, items: [] });
   await mockJson(page, "**/api/settings/filters", overrides.filters ?? { languages: ["*"] });
   // The conditions editor (opened from the Home chips) builds its genre chips from the catalogue.

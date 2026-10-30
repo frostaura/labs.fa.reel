@@ -1,18 +1,19 @@
 import { useState, type ReactNode } from "react";
-import type { AnchoredSupply, FeedCard, RailSupply } from "../../store/feedTypes";
-import RecCard, { RecCardSkeleton } from "../rec/RecCard";
+import type { AnchoredSupply, RailSupply } from "../../store/feedTypes";
+import RecCard, { RecCardSkeleton, type RecCardData } from "../rec/RecCard";
 import FadeScrollRow from "../FadeScrollRow";
 import RailRetryTile from "./RailRetryTile";
 import PickConditionsButton from "../rec/PickConditionsButton";
 import { Button } from "../ui/button";
 import { railSupplyLine } from "../../lib/railSupplyCopy";
+import { railScrollerClass, type RailRows } from "./railLayout";
 import { useGetFiltersQuery, useGetSessionQuery } from "../../store/api";
 
 interface Props {
   title: ReactNode;
   /** One line under the heading, for a rail that has to qualify its own title (the relaxed digest). */
   caption?: ReactNode;
-  items: FeedCard[];
+  items: RecCardData[];
   /** Visual lane: "default" = personalised rows; "genre" = the distinct genre rails. */
   variant?: "default" | "genre";
   /** Infinite scroll — fired as the rail nears its end; the hook guards against re-entry. */
@@ -45,6 +46,18 @@ interface Props {
    * tile holds the evidence chips' slot, so a page whose chips wrap further never grows the rail.
    */
   reserveEvidence?: boolean;
+  /**
+   * How many rows of cards scroll together (default 1). Two rows are one scroller laid out as a
+   * column-flowed grid (`railLayout.ts`), so placeholders, cards and the Retry tile all land as
+   * grid cells and both rows move as one.
+   */
+  rows?: RailRows;
+  /**
+   * What the rail has to say INSTEAD of cards when it has none — a state, not a gap: "Trakt isn't
+   * answering", "nothing left after what you've seen". An empty rail with a notice keeps its heading
+   * and says it; an empty rail without one still renders nothing (or its supply line).
+   */
+  notice?: ReactNode;
 }
 
 /**
@@ -78,6 +91,8 @@ export default function RecRow({
   hiddenByView = 0,
   onSeeWhy,
   reserveEvidence = false,
+  rows = 1,
+  notice,
 }: Props) {
   const [editorOpen, setEditorOpen] = useState(false);
   const { data: session } = useGetSessionQuery();
@@ -104,7 +119,7 @@ export default function RecRow({
   // And a rail the server has said is dry says THAT, with what its conditions hide, instead of
   // vanishing (RET-07): "nothing here" and "your conditions hide 5,386" are different news too. A
   // dry rail with nothing true to say about why (a Free account's) still vanishes.
-  if (empty && !loading && !failed && (!exhausted || !supplyLine)) {
+  if (empty && !loading && !failed && !notice && (!exhausted || !supplyLine)) {
     return null;
   }
 
@@ -140,11 +155,11 @@ export default function RecRow({
 
       {/* Bleeds through the gutter to the edge of whatever it sits in (WS-9, O-9): the first card
           lines up with the heading, the row scrolls out to the edge, the fades sit in the gutter. */}
-      {!(empty && supplyLine) && (
+      {!(empty && (supplyLine || (notice && !loading && !failed))) && (
         <FadeScrollRow
           bleed
           onNearEnd={loadMore}
-          className="flex gap-4 overflow-x-auto snap-x pb-2 [scrollbar-width:thin]"
+          className={railScrollerClass(rows)}
         >
           {items.map((card) => (
             <div key={card.titleId} className="snap-start">
@@ -157,6 +172,8 @@ export default function RecRow({
           {failed && onRetry && <RailRetryTile onRetry={onRetry} reserveEvidence={reserveEvidence} />}
         </FadeScrollRow>
       )}
+
+      {empty && notice && !loading && !failed && notice}
 
       {supplyLine && (
         <p className="fa-caption flex flex-wrap items-center gap-x-1.5 text-3" data-testid="rail-supply" data-empty={empty}>

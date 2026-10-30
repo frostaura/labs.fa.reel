@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { TRAKT_RECS_NONE } from "./home-chrome";
 
 /**
  * The search box's lookup (WS-3 task 10):
@@ -71,6 +72,7 @@ async function bootHome(page: Page) {
     minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
   });
   await mockJson(page, "**/api/feed/genres", []);
+  await mockJson(page, "**/api/feed/trakt-recommendations", TRAKT_RECS_NONE);
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
 
   // The local leg is sparse (one strong match); the global leg carries the beyond-catalogue rows.

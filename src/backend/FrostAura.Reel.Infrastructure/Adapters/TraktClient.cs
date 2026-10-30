@@ -300,6 +300,34 @@ public class TraktClient(
         return new TraktCatalogRating(traktId, subject.Ids.Slug, subject.Ids.Imdb, subject.Rating, subject.Votes ?? 0);
     }
 
+    /// <summary>Trakt's ceiling on <c>/recommendations/*</c> — one page, no pagination headers.</summary>
+    public const int RecommendationsMaxLimit = 100;
+
+    // /recommendations/{type} answers a bare array of movie or show objects, already in Trakt's own
+    // order and not paginated: `limit` (capped at 100 server-side) is the whole answer. extended=full
+    // is what carries overview, genres, certification and the community rating on each subject, so a
+    // title Reel has never seen can be created with real metadata before TMDB hydration reaches it.
+    // ignore_collected and ignore_watchlisted ask Trakt to spend its 100 slots on titles that are not
+    // already in the user's collection or on their watchlist — a watchlisted title is a Saved title
+    // in Reel, which no suggestion surface shows, so a slot spent on one is a slot wasted.
+    public async Task<IReadOnlyList<TraktRecommendation>> GetRecommendationsAsync(
+        string accessToken, bool movies, int limit, RatePriority priority, CancellationToken ct = default)
+    {
+        var type = movies ? "movies" : "shows";
+        var capped = Math.Clamp(limit, 1, RecommendationsMaxLimit);
+        var path = string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"recommendations/{type}?limit={capped}&ignore_collected=true&ignore_watchlisted=true&extended=full");
+        if (movies)
+        {
+            var found = await GetApiAsync<List<TraktMovie>>(path, accessToken, priority, ct) ?? [];
+            return found.Select((m, i) => new TraktRecommendation(i + 1, m, null)).ToList();
+        }
+
+        var shows = await GetApiAsync<List<TraktShow>>(path, accessToken, priority, ct) ?? [];
+        return shows.Select((s, i) => new TraktRecommendation(i + 1, null, s)).ToList();
+    }
+
     private sealed record RatedSearchResultDto(
         [property: JsonPropertyName("movie")] RatedSubjectDto? Movie,
         [property: JsonPropertyName("show")] RatedSubjectDto? Show);

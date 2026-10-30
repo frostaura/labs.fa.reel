@@ -123,6 +123,7 @@ app.MapAccountEndpoints();
 app.MapSettingsEndpoints();
 app.MapSyncEndpoints();
 app.MapFeedEndpoints();
+app.MapTraktRecommendationEndpoints();
 app.MapTitleEndpoints();
 app.MapLensEndpoints();
 app.MapReactionEndpoints();

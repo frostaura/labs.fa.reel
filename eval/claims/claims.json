@@ -1498,6 +1498,37 @@
           "text": "Your conditions hold out every unseen title that matches (…). You can change that under Conditions."
         }
       ]
+    },
+    {
+      "id": "trakt-recs-rail",
+      "owner": "WS-4",
+      "verdict": "true",
+      "assertion": "Home's \"Trakt recommends\" rail shows Trakt's own recommendations in Trakt's order, minus every title the account has watched, rated, saved, declined or dropped and every title a standing condition rules out, counts what it removed, holds back a card whose Reel prediction is under the account's \"for you\" bar, and says in words when Trakt has nothing, is unreachable or the link is gone.",
+      "evidence": "TraktRecommendationsService filters Trakt's cached answer through EligibilityQueryBuilder.EligibleTitles and the maturity gate on every read and keeps Trakt's per-media order; TraktRecommendationEndpoints applies ForYouBar to scored cards; traktRecsCopy builds every line from the response's counts and state.",
+      "tests": [
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TraktRecommendationsEndpointTests.cs::Keeps_Trakts_order_and_removes_and_counts_everything_seen_set_aside_or_ruled_out",
+        "src/backend/FrostAura.Reel.Tests/IntegrationTests/TraktRecommendationsEndpointTests.cs::A_reaction_after_the_fetch_removes_the_card_on_the_next_read_without_asking_Trakt_again",
+        "src/frontend/src/lib/traktRecsCopy.test.ts::tells the four empty states apart instead of rendering nothing",
+        "src/frontend/tests-e2e/trakt-recs-rail.spec.ts::Not for me takes the card off the rail"
+      ],
+      "claims": [
+        {
+          "file": "src/frontend/src/lib/traktRecsCopy.ts",
+          "text": "Trakt's own picks for you, in Trakt's order."
+        },
+        {
+          "file": "src/frontend/src/lib/traktRecsCopy.ts",
+          "text": "… under your… \"for you\" bar"
+        },
+        {
+          "file": "src/frontend/src/lib/traktRecsCopy.ts",
+          "text": "Trakt has no recommendations for you right now."
+        },
+        {
+          "file": "src/frontend/src/components/rows/TraktRecsRail.tsx",
+          "text": "You've acted on every one of Trakt's recommendations shown here."
+        }
+      ]
     }
   ],
   "notClaims": [

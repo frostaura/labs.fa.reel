@@ -18,6 +18,7 @@ import StaticRail from "../components/rows/StaticRail";
 import GenreRow from "../components/rows/GenreRow";
 import RailPageProvider from "../components/rows/RailPageProvider";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
+import TraktRecsRail from "../components/rows/TraktRecsRail";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import FadeScrollRow from "../components/FadeScrollRow";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
@@ -397,6 +398,13 @@ export default function Home() {
                 onSeeWhy={() => setConditionsOpen(true)}
               />
             ))}
+
+            {/* Trakt's own recommendations, two rows deep, LAST: it is a second opinion, it loads as
+                the user scrolls toward it, and it is the one rail whose answer can be a single line
+                ("Trakt isn't answering") where its two-row placeholder stood. Last, that collapse
+                moves nothing below it; anywhere above the genre rails it shoved every one of them up
+                mid-scroll (home-scroll-cls.spec). Not keyed on the view: it filters the view itself. */}
+            <TraktRecsRail filter={filter} />
             </RailPageProvider>
 
             {(feed?.lockedRowCount ?? 0) > 0 && (
