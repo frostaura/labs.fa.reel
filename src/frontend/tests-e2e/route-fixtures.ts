@@ -163,6 +163,7 @@ export const NARRATIVE: NarrativePayload = {
   ratingsCount: 2044,
   generatedAt: "2026-10-20T06:00:00Z",
   isStale: false,
+  staleReason: null,
   regenerating: false,
   writerAvailable: true,
 };

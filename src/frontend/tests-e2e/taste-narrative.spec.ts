@@ -21,6 +21,7 @@ const NARRATIVE = {
   ratingsCount: 2044,
   generatedAt: "2026-09-08T03:00:00Z",
   isStale: false,
+  staleReason: null,
   regenerating: false,
   writerAvailable: true,
 };
@@ -103,11 +104,32 @@ test.describe("taste narrative", () => {
   });
 
   test("a stale narrative says so rather than quietly describing someone you have stopped being", async ({ page }) => {
-    await bootDna(page, { ...NARRATIVE, isStale: true });
+    await bootDna(page, { ...NARRATIVE, isStale: true, staleReason: "taste-moved" });
 
     await expect(page.getByTestId("narrative-provenance")).toContainText("your taste has moved since");
     // Still shown — old prose beats no prose, and it is still the best description Reel has.
     await expect(page.getByTestId("narrative-text")).toBeVisible();
+    await expect(page.getByTestId("narrative-text")).toHaveAttribute("data-current", "true");
+  });
+
+  test("a narrative written by an earlier prompt is marked not current, and never claims the taste moved", async ({ page }) => {
+    // HREV6-DESK-01: stale for the prompt, not the taste. Same text, so only staleReason differs.
+    await bootDna(page, { ...NARRATIVE, isStale: true, staleReason: "outdated-prompt" });
+
+    const provenance = page.getByTestId("narrative-provenance");
+    await expect(provenance).toContainText("written by an earlier version of Reel");
+    await expect(provenance).not.toContainText("your taste has moved since");
+    await expect(page.getByTestId("narrative-text")).toBeVisible();
+    await expect(page.getByTestId("narrative-text")).toHaveAttribute("data-current", "false");
+  });
+
+  test("a current narrative carries no stale note", async ({ page }) => {
+    await bootDna(page, { ...NARRATIVE, staleReason: null });
+
+    const provenance = page.getByTestId("narrative-provenance");
+    await expect(provenance).not.toContainText("your taste has moved since");
+    await expect(provenance).not.toContainText("earlier version of Reel");
+    await expect(page.getByTestId("narrative-text")).toHaveAttribute("data-current", "true");
   });
 
   test("an edit round-trips and the saved text is what renders afterwards", async ({ page }) => {

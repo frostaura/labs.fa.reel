@@ -83,8 +83,17 @@ export interface NarrativePayload {
   version: number | null;
   ratingsCount: number;
   generatedAt: string | null;
-  /** True when your taste has moved since this was written. It is still shown; it is just owed a rewrite. */
+  /**
+   * True when this is owed a rewrite: your taste has moved since it was written, or it was written by
+   * an earlier version of Reel's prompt. Your own edit is never owed a rewrite for the prompt — the
+   * words are yours, not the prompt's. It is still shown either way.
+   */
   isStale: boolean;
+  /**
+   * Why it is stale (HREV6-DESK-01): `taste-moved` wins when both apply. Optional and nullable: an older
+   * server never sends it, and its `isStale` only ever meant the taste had moved.
+   */
+  staleReason?: "taste-moved" | "outdated-prompt" | null;
   regenerating: boolean;
   writerAvailable: boolean;
 }

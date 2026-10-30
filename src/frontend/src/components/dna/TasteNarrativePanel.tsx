@@ -10,6 +10,7 @@ import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
 import { Button } from "../ui/button";
 import { COARSE_TAP } from "../../lib/tapTarget";
+import { narrativeStaleNote, narrativeStaleReason } from "../../lib/narrativeStale";
 
 /**
  * What Reel believes about your taste, in words — and your correction to it.
@@ -114,6 +115,11 @@ export default function TasteNarrativePanel() {
     );
   }
 
+  const staleReason = narrativeStaleReason(data);
+  // Written by an earlier prompt: the whole text is marked not current, so a sentence it no longer
+  // supports (the crowd stance, say) cannot sit unflagged beside the tile that contradicts it.
+  const outdated = staleReason === "outdated-prompt";
+
   const written = data.generatedAt
     ? new Date(data.generatedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })
     : null;
@@ -129,7 +135,7 @@ export default function TasteNarrativePanel() {
             {written ? ` on ${written}` : ""}
             {/* Stale is stated, not hidden. It is still the best description Reel has, and saying
                 so is cheaper than quietly showing something that no longer fits. */}
-            {data.isStale ? " · your taste has moved since" : ""}
+            {narrativeStaleNote(staleReason)}
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -207,7 +213,11 @@ export default function TasteNarrativePanel() {
           <SaveStatus message={saveFailure?.message ?? null} onRetry={saveFailure?.retry} retrying={saving} testId="narrative-save-status" />
         </div>
       ) : (
-        <p className="fa-body text-fa-frost leading-relaxed max-w-3xl" data-testid="narrative-text">
+        <p
+          className={`fa-body leading-relaxed max-w-3xl ${outdated ? "text-fa-frost-dim" : "text-fa-frost"}`}
+          data-testid="narrative-text"
+          data-current={outdated ? "false" : "true"}
+        >
           {data.text}
         </p>
       )}
