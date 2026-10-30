@@ -7,6 +7,7 @@ import { recentListing } from "../../lib/askReel/paging";
 import UndoToast from "./UndoToast";
 import PillButton from "../askReel/PillButton";
 import { Button } from "../ui/button";
+import LoadFailed from "../ui/load-failed";
 
 /**
  * `Recent ▾` — the way back into a thread you left.
@@ -73,7 +74,7 @@ export default function ConversationSwitcher({
   // Nothing is fetched until the menu is opened. This list is a control almost nobody touches on a
   // given visit, and a query on mount would put a request on the critical path of every single
   // /search load for it.
-  const { data: conversations, isFetching } = useListConversationsQuery(listing.limit, { skip: !open });
+  const { data: conversations, isFetching, isError, refetch } = useListConversationsQuery(listing.limit, { skip: !open });
   const [deleteConversation] = useDeleteConversationMutation();
 
   // A turn starting while the menu is open closes it, rather than leaving a live-looking list of
@@ -152,6 +153,12 @@ export default function ConversationSwitcher({
   // short one is the whole list. `listing.limit` above is keyed on the toggle alone, which is what
   // the request needs; this is what the footer needs.
   const { canShowOlder, atCeiling } = recentListing(showOlder, rows.length);
+  // REV7-PH-02: a read that failed is a third state, never the empty one. A 500 or 503 rendered
+  // "Nothing here yet — ask something." — an account with fifty threads told it had none, and no
+  // way to ask again. While the retry is in flight the failure gives way to "Loading…" as any read
+  // does. Rows already on screen from a shorter, successful read stay: they are still true, and
+  // what failed is the longer list ("Show older").
+  const failed = isError && !isFetching;
 
   return (
     <div ref={boxRef} className="relative">
@@ -202,9 +209,20 @@ export default function ConversationSwitcher({
            */
           className="fixed inset-x-2 bottom-2 z-50 max-h-[55vh] overflow-y-auto rounded-lg border border-fa-edge bg-fa-ink-2/95 backdrop-blur-md shadow-2xl reel-rise md:absolute md:inset-x-auto md:bottom-auto md:right-0 md:top-12 md:w-72 md:max-h-[60vh]"
         >
+          {failed && (
+            <div className="p-2">
+              <LoadFailed
+                what={rows.length > 0 ? "your older threads" : "your conversations"}
+                onRetry={() => void refetch()}
+                retrying={isFetching}
+                variant="inline"
+                testId="askreel-recent-error"
+              />
+            </div>
+          )}
           {isFetching && rows.length === 0 ? (
             <p className="px-3 py-3 fa-caption text-fa-frost-dim">Loading…</p>
-          ) : rows.length === 0 ? (
+          ) : failed && rows.length === 0 ? null : rows.length === 0 ? (
             <p className="px-3 py-3 fa-caption text-fa-frost-dim" data-testid="askreel-recent-empty">
               Nothing here yet — ask something.
             </p>
