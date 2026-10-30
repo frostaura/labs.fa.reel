@@ -1,5 +1,5 @@
 import type { TasteDnaPayload } from "../store/api";
-import { genreBarGeometry, meanMarkerPct } from "./tasteDna";
+import { contrarianTile, genreBarGeometry, meanMarkerPct } from "./tasteDna";
 
 /**
  * The Taste DNA share card's content, computed pure so the export template stays a dumb
@@ -32,7 +32,9 @@ export const SHARE_GENRE_COUNT = 6;
 export const SHARE_CREATOR_COUNT = 3;
 
 export function shareCardModel(data: TasteDnaPayload, now: Date = new Date()): ShareCardModel {
-  const contrarian = `${data.contrarianScore > 0 ? "+" : ""}${data.contrarianScore.toFixed(1)}`;
+  // The page tile's value, not a second rounding: raw toFixed printed -0.35 as -0.3 beside the
+  // page's -0.4, and -0.04 as "-0.0" (HREV5-DESK-07).
+  const contrarian = contrarianTile(data.contrarianScore).value;
   return {
     stats: [
       { label: "hours watched", value: Math.round(data.hoursWatched).toLocaleString("en-US") },

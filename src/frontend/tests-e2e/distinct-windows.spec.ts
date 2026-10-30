@@ -9,8 +9,10 @@ import { LAB_CROSS_REFERENCE, LAB_MODEL_METRICS } from "./labPopulated.fixture";
  * days" and "all time" with the same figures on both pages, while the accuracy windows above it were
  * already de-duplicated. A matching wider window now prints once under the widest name.
  *
- * HREV5-DESK-07: /dna captioned a contrarian score of -0.2 "with the crowd" a few hundred pixels
- * below a narrative saying "You rate below the crowd overall". The caption now follows the sign.
+ * HREV5-DESK-07: the /dna contrarian tile reads the shared crowd band (ContrarianFact.Band), the
+ * same band the current narrative prompt, the keyless stub narrative and the Home why-lines read:
+ * inside ±0.3 it is "with the crowd" beside "Overall you rate much as the crowd does.", and a score
+ * that rounds to nothing prints "0.0", never "-0.0".
  */
 
 const YEAR = {
@@ -117,7 +119,7 @@ async function dna(page: Page, contrarianScore: number) {
   await shell(page);
   await mockJson(page, "**/api/taste", { ...DNA, contrarianScore });
   await mockJson(page, "**/api/taste/narrative", {
-    text: "You rate below the crowd overall, with the clearest gaps in drama and mystery.", isEdited: false, version: 2,
+    text: "Overall you rate much as the crowd does. Your clearest gaps are in drama and mystery.", isEdited: false, version: 2,
     ratingsCount: 2044, generatedAt: "2026-10-20T08:00:00Z", isStale: false, regenerating: false, writerAvailable: true,
   });
   await mockJson(page, "**/api/taste/dislikes", {
@@ -128,10 +130,11 @@ async function dna(page: Page, contrarianScore: number) {
   return page.getByTestId("contrarian-tile");
 }
 
-test.describe("the contrarian tile agrees with the sign it prints (HREV5-DESK-07)", () => {
+test.describe("the contrarian tile reads the shared crowd band (HREV5-DESK-07)", () => {
   const cases: [number, string, string][] = [
-    [-0.2, "-0.2", "slightly harsher than the crowd"],
-    [0.2, "+0.2", "slightly kinder than the crowd"],
+    [-0.2, "-0.2", "with the crowd"],
+    [0.2, "+0.2", "with the crowd"],
+    [-0.35, "-0.4", "harsher than the crowd"],
     [-0.04, "0.0", "with the crowd"],
     [-0.6, "-0.6", "harsher than the crowd"],
   ];
