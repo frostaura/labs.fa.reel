@@ -3,7 +3,8 @@ import { Bookmark, EyeOff, Star } from "lucide-react";
 import { useMarkNotInterestedMutation, useRateTitleMutation, useSaveForLaterMutation } from "../../store/api";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { DEFAULT_DISLIKE_REASON, DISLIKE_REASONS } from "../../lib/dislikeReasons";
-import { focusReturnTarget, useCardUndo, type CardUndoFocus } from "../../lib/cardUndo";
+import { focusMayReturn, focusReturnTarget, useCardUndo, type CardUndoFocus } from "../../lib/cardUndo";
+import { createRepeatTapGuard } from "../../lib/repeatTapGuard";
 import { Button } from "../ui/button";
 
 interface Props {
@@ -26,6 +27,19 @@ interface Props {
 
 /** How long a press must hold before it means "let me pick a reason" instead of "dismiss it". */
 const LONG_PRESS_MS = 450;
+
+/**
+ * ONE guard for every card on the page, not one per card (HREV7-DESK-01): the card that took the
+ * first tap of a double tap has already left the rail, and the second tap lands on the NEXT card's
+ * same control, which has never been pressed. See `lib/repeatTapGuard.ts`.
+ */
+const repeatTap = createRepeatTapGuard();
+
+/** The three things a card can be doing while its request is out. */
+type Busy = "save" | "dismiss" | "rate";
+
+/** Each action's control, for handing focus back to it on the card a failure returns. */
+const TEST_IDS: Record<Busy, string> = { save: "quick-save", dismiss: "quick-not-interested", rate: "quick-rate" };
 
 
 /**
@@ -61,9 +75,10 @@ const KEYBOARD_REACHABLE = 0;
  * pointer from `md` up reverts those classes, so the desktop overlay is unchanged.
  *
  * Both actions remove the card from every suggestion surface through the existing
- * `removedTitlesSlice` flow — the mutations dispatch `titleRemoved` on success — so there is no
- * toggle here: an acted-on card is gone from the rail by design. The way back is the undo toast
- * the page raises through `CardUndoProvider` once the action has succeeded (F-19).
+ * `removedTitlesSlice` flow — the mutations hide the card as they start and release it again if
+ * they fail (HREV7-DESK-01) — so there is no toggle here: an acted-on card is gone from the rail by
+ * design, on the tap rather than a round trip later. The way back is the undo toast the page raises
+ * through `CardUndoProvider` once the server has confirmed the action (F-19).
  *
  * REASONS. This surface used to hardcode `not-for-me`, so the app's busiest dismissal path fed
  * `DislikeSignal` its flattest possible signal while the four-way picker existed only in the modal.
@@ -79,7 +94,7 @@ const KEYBOARD_REACHABLE = 0;
  * ratings are made in the app and most arrive from Trakt hours later. Rating from a suggestion
  * surface also means "I have seen this", so the play is logged (`markWatched`) exactly as the /rate
  * grid does, and the title leaves every suggestion surface through the same removedTitlesSlice flow
- * as the other two actions — `rateTitle` dispatches `titleRemoved` on success.
+ * as the other two actions.
  */
 export default function CardQuickActions({ titleId, mediaType, tmdbId, name, size = "sm" }: Props) {
   const [markNotInterested] = useMarkNotInterestedMutation();
@@ -100,6 +115,12 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   const notForMeRef = useRef<HTMLButtonElement | null>(null);
   const reasonsDismissedOutside = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // IN FLIGHT (HREV7-DESK-01). Where the card leaves on the tap (every rail) this instance unmounts
+  // with it and the flag is never seen; where it stays until the server answers (Ask Reel's grid,
+  // which hides only confirmed removals) the flag is what stops a second tap posting the same write
+  // twice, and what shows the tap was taken. The ref answers synchronously, before any re-render.
+  const [busy, setBusy] = useState<Busy | null>(null);
+  const busyRef = useRef<Busy | null>(null);
 
   const cancelLongPress = () => {
     if (longPressTimer.current !== null) {
@@ -151,30 +172,72 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   const keyboardFocus = (e: MouseEvent): CardUndoFocus | undefined =>
     e.detail === 0 && rootRef.current ? { returnTo: focusReturnTarget(rootRef.current) } : undefined;
 
+  /**
+   * Runs one action's write, at most one at a time per card. The mutation takes the card off the
+   * rails as it starts and puts it back if it fails (store/api/titles.ts); the undo is raised only
+   * on success. A keyboard action whose write fails puts focus back on the same control of the card
+   * that came back — if focus is still unclaimed, so nobody who has moved on is pulled back.
+   */
+  const run = (kind: Busy, write: () => Promise<unknown>, focus: CardUndoFocus | undefined, done: () => void) => {
+    if (busyRef.current) return;
+    busyRef.current = kind;
+    setBusy(kind);
+    write()
+      .then(done)
+      .catch(() => {
+        if (focus) refocusAfterFailure(TEST_IDS[kind]);
+      })
+      .finally(() => {
+        busyRef.current = null;
+        setBusy(null);
+      });
+  };
+
+  /** The control's twin on the card that came back (a new instance: the old one left with its card). */
+  const refocusAfterFailure = (testId: string) =>
+    requestAnimationFrame(() => {
+      if (!focusMayReturn(document.activeElement, null)) return;
+      Array.from(document.querySelectorAll('[data-testid="card-quick-actions"]'))
+        .find((actions) => actions.getAttribute("data-title-id") === titleId)
+        ?.querySelector<HTMLElement>(`[data-testid="${testId}"]`)
+        ?.focus();
+    });
+
+  /**
+   * A pointer press that is the second half of a double tap (anywhere on the page's cards) does
+   * nothing; a keyboard activation (`detail` 0) has no position and always acts.
+   */
+  const firstTap = (e: MouseEvent) => e.detail === 0 || repeatTap({ at: e.timeStamp, x: e.clientX, y: e.clientY });
+
   const rate = (rating: number, focus?: CardUndoFocus) => {
     setRateOpen(false);
     // A pick you are rating from a suggestion surface is one you have seen — the eligibility rule
     // guarantees it carried no footprint until now — so the play is logged, as on the /rate grid.
-    rateTitle({ ...ref, rating, markWatched: true })
-      .unwrap()
-      .then(() => announce?.({ kind: "rate", ...undoable, rating }, focus))
-      .catch(() => undefined);
+    run("rate", () => rateTitle({ ...ref, rating, markWatched: true }).unwrap(), focus, () =>
+      announce?.({ kind: "rate", ...undoable, rating }, focus)
+    );
   };
 
   const dismiss = (reason: string, focus?: CardUndoFocus) => {
     setReasonsOpen(false);
-    markNotInterested({ ...ref, reason })
-      .unwrap()
-      .then(() => announce?.({ kind: "dismiss", ...undoable }, focus))
-      .catch(() => undefined);
+    run("dismiss", () => markNotInterested({ ...ref, reason }).unwrap(), focus, () =>
+      announce?.({ kind: "dismiss", ...undoable }, focus)
+    );
   };
 
   const save = (focus?: CardUndoFocus) => {
-    saveForLater(ref)
-      .unwrap()
-      .then(() => announce?.({ kind: "save", ...undoable }, focus))
-      .catch(() => undefined);
+    run("save", () => saveForLater(ref).unwrap(), focus, () => announce?.({ kind: "save", ...undoable }, focus));
   };
+
+  // While a write is out, the control that sent it says so (aria-busy, and its pill pulses where
+  // motion is welcome), and all three refuse a second action (aria-disabled — not `disabled`, which
+  // would throw focus off the button that holds it).
+  const busyProps = (kind: Busy) => ({
+    "aria-busy": busy === kind ? true : undefined,
+    "aria-disabled": busy !== null ? true : undefined,
+  });
+  const pillFor = (kind: Busy) => (busy === kind ? `${pillClass} motion-safe:animate-pulse` : pillClass);
+  const shownWhileBusy = (kind: Busy) => (busy === kind ? " opacity-100 lg:opacity-100" : "");
 
   // `fromPointer`: a hold or a right-click, whose press may still deliver a click that must not also
   // dismiss. The keyboard openers (ArrowDown, Alt+Enter) produce no click, so a suppression armed by
@@ -193,6 +256,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           : "absolute z-10 flex flex-col left-0 top-0 gap-0 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:gap-1.5"
       }
       data-testid="card-quick-actions"
+      data-title-id={titleId}
+      aria-busy={busy !== null ? true : undefined}
       ref={rootRef}
     >
       <Popover open={reasonsOpen} onOpenChange={setReasonsOpen}>
@@ -205,6 +270,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
                 suppressClick.current = false;
                 return;
               }
+              if (!firstTap(e)) return;
               dismiss(DEFAULT_DISLIKE_REASON, keyboardFocus(e));
             }}
             onPointerDown={() => {
@@ -230,13 +296,14 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-haspopup="dialog"
             aria-expanded={reasonsOpen}
             title="Not for me — hold or right-click to say why"
-            className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100 lg:opacity-100" : ""}`}
+            className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100 lg:opacity-100" : ""}${shownWhileBusy("dismiss")}`}
+            {...busyProps("dismiss")}
             // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
             tabIndex={KEYBOARD_REACHABLE}
             data-testid="quick-not-interested"
             ref={notForMeRef}
           >
-            <span className={pillClass}>
+            <span className={pillFor("dismiss")}>
               <EyeOff className={iconClass} aria-hidden />
             </span>
           </Button>
@@ -281,16 +348,18 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
         variant="ghost"
         onClick={(e) => {
           e.preventDefault();
+          if (!firstTap(e)) return;
           save(keyboardFocus(e));
         }}
         aria-label={`Save for later — ${name}`}
         title="Save for later"
-        className={`${buttonClass} hover:text-fa-frost-bright`}
+        className={`${buttonClass} hover:text-fa-frost-bright${shownWhileBusy("save")}`}
+        {...busyProps("save")}
         // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
         tabIndex={KEYBOARD_REACHABLE}
         data-testid="quick-save"
       >
-        <span className={pillClass}>
+        <span className={pillFor("save")}>
           <Bookmark className={iconClass} aria-hidden />
         </span>
       </Button>
@@ -305,6 +374,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             variant="ghost"
             onClick={(e) => {
               e.preventDefault();
+              if (busyRef.current) return;
               setRateOpen((open) => !open);
             }}
             aria-label={`Rate ${name}`}
@@ -312,12 +382,13 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-haspopup="dialog"
             aria-expanded={rateOpen}
             title="Rate it — you have seen this one"
-            className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100 lg:opacity-100" : ""}`}
+            className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100 lg:opacity-100" : ""}${shownWhileBusy("rate")}`}
+            {...busyProps("rate")}
             // Explicit, so WebKit puts it in the plain-Tab order (R1-42; see KEYBOARD_REACHABLE).
             tabIndex={KEYBOARD_REACHABLE}
             data-testid="quick-rate"
           >
-            <span className={pillClass}>
+            <span className={pillFor("rate")}>
               <Star className={iconClass} aria-hidden />
             </span>
           </Button>

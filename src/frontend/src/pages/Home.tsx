@@ -10,7 +10,7 @@ import {
   useGetFiltersQuery,
   useGetSessionQuery,
 } from "../store/api";
-import { removalsCleared, selectRemovedKeys } from "../store/removedTitlesSlice";
+import { removalsCleared, selectHiddenKeys } from "../store/removedTitlesSlice";
 import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
@@ -53,7 +53,7 @@ export default function Home() {
   const { data: continueWatching } = useGetContinueWatchingQuery();
   const [filter, setFilter] = useBrowseFilter("home");
   const dispatch = useDispatch();
-  const removed = useSelector(selectRemovedKeys);
+  const removed = useSelector(selectHiddenKeys);
   const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
   const { data: filters } = useGetFiltersQuery();
   // One dialog, opened by the Conditions button or by any condition chip (H-9).
