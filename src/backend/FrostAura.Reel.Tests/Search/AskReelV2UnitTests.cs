@@ -252,6 +252,17 @@ public class AskReelV2UnitTests
     [InlineData("chick flicks", "romance", "romance")]
     [InlineData("a chick flick please", "romance", "romance")]
     [InlineData("rom coms", "romance,comedy", "romance,comedy")]
+    // Round 7: the long tail the table lacked, each stripped silently before.
+    [InlineData("a doco", "documentary", "documentary")]
+    [InlineData("a chickflick", "romance", "romance")]
+    [InlineData("a mockumentary", "comedy", "comedy")]
+    [InlineData("stand-up specials", "comedy", "comedy")]
+    [InlineData("something to make me laugh", "comedy", "comedy")]
+    [InlineData("a laugh-out-loud show", "comedy", "comedy")]
+    [InlineData("a love film", "romance", "romance")]
+    // The words alone that only sometimes name the genre do not when they do not.
+    [InlineData("I love films about space", "romance", "")]
+    [InlineData("people who stand up to bullies", "comedy", "")]
     // The genre's own word still works, and a copy is still a copy.
     [InlineData("comedy shows", "comedy", "comedy")]
     [InlineData("samurai films", "comedy,documentary,romance", "")]

@@ -88,6 +88,23 @@ public static class SearchVocabulary
             ["docuseries"] = ["documentary"],
             ["docu"] = ["documentary"],
             ["docus"] = ["documentary"],
+            // HREV5-ASK-02 round 7: the same silent strip for every synonym the table lacked — "a doco",
+            // "a chickflick", "a mockumentary", "stand-up specials", "something to make me laugh".
+            ["doco"] = ["documentary"],
+            ["chickflick"] = ["romance"],
+            ["chickflicks"] = ["romance"],
+            ["mockumentary"] = ["comedy"],
+            ["mockumentaries"] = ["comedy"],
+            ["standup"] = ["comedy"],
+            ["standups"] = ["comedy"],
+            ["laugh"] = ["comedy"],
+            ["laughs"] = ["comedy"],
+            ["whodunit"] = ["mystery"],
+            ["whodunits"] = ["mystery"],
+            ["whodunnit"] = ["mystery"],
+            ["whodunnits"] = ["mystery"],
+            ["tearjerker"] = ["drama"],
+            ["tearjerkers"] = ["drama"],
 
             ["animated"] = ["animation"],
             ["animations"] = ["animation"],
@@ -109,7 +126,45 @@ public static class SearchVocabulary
             ["chick flicks"] = ["romance"],
             ["rom com"] = ["romance", "comedy"],
             ["rom coms"] = ["romance", "comedy"],
+            ["space opera"] = ["science-fiction"],
+            ["space operas"] = ["science-fiction"],
         };
+
+    /// <summary>
+    /// Three-word phrases that name a genre: "stand-up specials" (the tokenizer splits the hyphen).
+    /// Two words alone would misread "stand up to the bullies".
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> GenreTriples =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["stand up special"] = ["comedy"],
+            ["stand up specials"] = ["comedy"],
+            ["stand up comedian"] = ["comedy"],
+            ["stand up comedians"] = ["comedy"],
+            ["stand up comedy"] = ["comedy"],
+            ["stand up show"] = ["comedy"],
+            ["stand up shows"] = ["comedy"],
+        };
+
+    /// <summary>
+    /// Two-word phrases that name a genre only after a word that makes them a noun phrase: "a love
+    /// film" is romance, "I love films about space" is not.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> DeterminedGenrePhrases =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["love film"] = ["romance"],
+            ["love films"] = ["romance"],
+            ["love movie"] = ["romance"],
+            ["love movies"] = ["romance"],
+        };
+
+    /// <summary>The words that make a <see cref="DeterminedGenrePhrases"/> entry a noun phrase.</summary>
+    private static readonly IReadOnlySet<string> PhraseDeterminers = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "a", "an", "some", "any", "good", "great", "old", "classic", "sweet", "nice", "cute", "proper", "cheesy",
+        "little", "new", "few", "real", "decent", "romantic", "soppy", "sappy",
+    };
 
     /// <summary>
     /// The genre slugs <paramref name="words"/> (lower-cased, in order) name by a two-word
@@ -119,11 +174,22 @@ public static class SearchVocabulary
     {
         ArgumentNullException.ThrowIfNull(words);
         var genres = new List<string>();
+        void Add(string[] slugs) => genres.AddRange(slugs.Where(g => !genres.Contains(g, StringComparer.Ordinal)));
         for (var i = 0; i + 1 < words.Count; i++)
         {
-            if (GenrePhrases.TryGetValue($"{words[i]} {words[i + 1]}", out var slugs))
+            var pair = $"{words[i]} {words[i + 1]}";
+            if (GenrePhrases.TryGetValue(pair, out var slugs))
             {
-                genres.AddRange(slugs.Where(g => !genres.Contains(g, StringComparer.Ordinal)));
+                Add(slugs);
+            }
+            else if (i > 0 && PhraseDeterminers.Contains(words[i - 1]) && DeterminedGenrePhrases.TryGetValue(pair, out var determined))
+            {
+                Add(determined);
+            }
+
+            if (i + 2 < words.Count && GenreTriples.TryGetValue($"{pair} {words[i + 2]}", out var triple))
+            {
+                Add(triple);
             }
         }
 

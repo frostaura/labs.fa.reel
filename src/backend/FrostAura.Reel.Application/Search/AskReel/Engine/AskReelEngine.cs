@@ -551,7 +551,8 @@ public sealed class AskReelEngine(
                 }
 
                 var rest = words.Take(found.Start).Concat(words.Skip(found.Start + found.Length))
-                    .Where(w => !AskReelIntentSanitizer.IsFiller(w))
+                    // "starring", "directed": the role is read from the message, never kept as a topic.
+                    .Where(w => !AskReelIntentSanitizer.IsFiller(w) && !FallbackReader.IsRoleWord(w))
                     .ToList();
                 if (rest.Count > 0)
                 {
@@ -577,6 +578,37 @@ public sealed class AskReelEngine(
                 : PersonRole.Any;
     }
 
+    /// <summary>How many stored names one pattern may bring back before the exact-words check picks one.</summary>
+    internal const int MaxPersonNameCandidates = 25;
+
+    /// <summary>The suffixes a stored name may carry beyond the words a user typed ("Robert Downey" is "Robert Downey Jr.").</summary>
+    private static readonly IReadOnlySet<string> PersonNameSuffixes = new HashSet<string>(StringComparer.Ordinal) { "jr", "sr" };
+
+    /// <summary>
+    /// The ILIKE pattern that finds a stored name made of <paramref name="words"/> however it is
+    /// punctuated: "samuel%l%jackson%" finds "Samuel L. Jackson". The exact, case-insensitive pattern
+    /// it replaces never matched a name with a full stop in it, so "Samuel L. Jackson" and "Robert
+    /// Downey Jr." could not ground (HREV5-RET-02, round 7). <see cref="PersonNameMatches"/> decides.
+    /// </summary>
+    internal static string PersonNamePattern(IReadOnlyList<string> words) => string.Join('%', words) + "%";
+
+    /// <summary>
+    /// True when <paramref name="stored"/> is the name <paramref name="words"/> spell: the same words in
+    /// the same order, punctuation aside, or those words and a "Jr."/"Sr." the user left off.
+    /// </summary>
+    internal static bool PersonNameMatches(string stored, IReadOnlyList<string> words)
+    {
+        var storedWords = AskReelIntentSanitizer.Words(stored);
+        if (storedWords.SequenceEqual(words, StringComparer.Ordinal))
+        {
+            return true;
+        }
+
+        return storedWords.Count == words.Count + 1
+            && PersonNameSuffixes.Contains(storedWords[^1])
+            && storedWords.Take(words.Count).SequenceEqual(words, StringComparer.Ordinal);
+    }
+
     /// <summary>The words of a concept that name a person, longest run first, with where the run sits.</summary>
     /// <param name="single">Whether one word may name a person the account has rated.</param>
     private async Task<(Guid Id, string Name, int Start, int Length)?> PersonNamedAsync(
@@ -600,15 +632,20 @@ public sealed class AskReelEngine(
                 }
 
                 // The words are letters, digits and apostrophes only (the tokenizer's), so the
-                // pattern carries no wildcard: an exact, case-insensitive name on the trigram index.
-                var rated = await db.PersonAffinities.AsNoTracking()
+                // pattern's only wildcards are the ones placed here: it finds the stored name however
+                // it is punctuated ("Samuel L. Jackson", "Robert Downey Jr."), on the trigram index, and
+                // PersonNameMatches then keeps only the name whose words are exactly these.
+                var pattern = PersonNamePattern(span);
+                var rated = (await db.PersonAffinities.AsNoTracking()
                     .Where(a => a.AccountId == accountId)
                     .Join(db.Persons, a => a.PersonId, p => p.Id, (a, p) => new { p.Id, p.Name, a.RatedTitleCount })
-                    .Where(p => EF.Functions.ILike(p.Name, name))
+                    .Where(p => EF.Functions.ILike(p.Name, pattern))
                     .OrderByDescending(p => p.RatedTitleCount)
                     .ThenBy(p => p.Id)
                     .Select(p => new { p.Id, p.Name })
-                    .FirstOrDefaultAsync(ct);
+                    .Take(MaxPersonNameCandidates)
+                    .ToListAsync(ct))
+                    .FirstOrDefault(p => PersonNameMatches(p.Name, span));
                 if (rated is not null)
                 {
                     return (rated.Id, rated.Name, start, length);
@@ -619,15 +656,17 @@ public sealed class AskReelEngine(
                     continue;
                 }
 
-                var credited = await db.Persons.AsNoTracking()
-                    .Where(p => EF.Functions.ILike(p.Name, name))
+                var credited = (await db.Persons.AsNoTracking()
+                    .Where(p => EF.Functions.ILike(p.Name, pattern))
                     .Select(p => new { p.Id, p.Name, Credits = db.TitleCredits.Count(c => c.PersonId == p.Id) })
                     // A name borne by someone with a credit or two is more likely a phrase the user
                     // meant as a topic than the person; the people a request names have a filmography.
                     .Where(p => p.Credits >= MinFallbackPersonCredits)
                     .OrderByDescending(p => p.Credits)
                     .ThenBy(p => p.Id)
-                    .FirstOrDefaultAsync(ct);
+                    .Take(MaxPersonNameCandidates)
+                    .ToListAsync(ct))
+                    .FirstOrDefault(p => PersonNameMatches(p.Name, span));
                 if (credited is not null)
                 {
                     return (credited.Id, credited.Name, start, length);

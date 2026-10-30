@@ -72,6 +72,8 @@ public static class AskReelIntentSanitizer
         // When the user means to watch, never what: "something funny tonight" searched the topic
         // "tonight" and replied "There are no tonight titles left for you" (HREV5 keyless e2e).
         "tonight", "tonite", "today", "tomorrow", "evening", "afternoon",
+        // What a request is FOR, never what it is about: "something to make me laugh" (round 7).
+        "make", "makes", "made",
     };
 
     /// <summary>
@@ -484,6 +486,12 @@ public static class AskReelIntentSanitizer
         ["few"] = 3,
     };
 
+    /// <summary>True when <paramref name="words"/> (one word or two) is a mood the keyless reader reads as a mood.</summary>
+    internal static bool IsMoodPhrase(string words) => IsMood(words);
+
+    /// <summary>True when <paramref name="word"/> praises without describing ("good", "great"): never a topic, never a mood.</summary>
+    internal static bool IsPraise(string word) => FillerAdjectives.Contains(word);
+
     /// <summary>True when <paramref name="words"/> is a mood the lexicon reads and not a genre word ("romantic").</summary>
     private static bool IsMood(string words) =>
         (Retrieval.Concepts.MoodLexicon.Words.Contains(words) || Retrieval.Concepts.MoodLexicon.KnownTones.Contains(words))
@@ -699,14 +707,32 @@ public static class AskReelIntentSanitizer
                 suppressing = false;
                 yield return (null, false);
             }
-            else if (NegationCues.Contains(words[i].Word))
+            else if (NegationCues.Contains(words[i].Word) || ExceptingBut(words, i))
             {
                 suppressing = true;
                 scopeNamed = false;
                 yield return (null, false);
             }
+            else if (OtherThan(words, i))
+            {
+                // "other than": the cue is two words, and neither is content.
+                suppressing = true;
+                scopeNamed = false;
+                i++;
+                closes = words[i].Closes;
+                yield return (null, false);
+            }
             else if (words[i].Word == "with" && suppressing && !scopeNamed)
             {
+                yield return (null, false);
+            }
+            else if (words[i].Word is "and" or "or" && suppressing && scopeNamed && !words[i - 1].Closes && ListsAnotherObject(words, i + 1))
+            {
+                // "nothing with superheroes AND aliens", "no zombies or vampires": a list of what is
+                // ruled out stays ruled out. "and" closed the scope, so "aliens" became a requirement
+                // beside the negated "superheroes" (HREV5-ASK-01, round 7). The scope's next object
+                // may again follow a "with" ("…and with aliens").
+                scopeNamed = false;
                 yield return (null, false);
             }
             else if (words[i].Word is "but" or "and" or "with")
@@ -726,6 +752,55 @@ public static class AskReelIntentSanitizer
                 yield return (null, false);
             }
         }
+    }
+
+    /// <summary>Words "but" follows when it means "except": "anything but superheroes", "any film but a western".</summary>
+    private static readonly IReadOnlySet<string> ExceptingHeads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "anything", "everything", "whatever",
+    };
+
+    /// <summary>
+    /// True when the "but" at <paramref name="index"/> means "except" — after "anything" or
+    /// "everything", or after "any" and a media or genre noun ("any film but a western"). Read as the
+    /// conjunction, "anything but superheroes" made superheroes the one hard requirement (HREV5-ASK-01).
+    /// </summary>
+    private static bool ExceptingBut(IReadOnlyList<(string Word, bool Closes)> words, int index)
+    {
+        if (words[index].Word != "but" || index == 0 || words[index - 1].Closes)
+        {
+            return false;
+        }
+
+        var previous = words[index - 1].Word;
+        return ExceptingHeads.Contains(previous)
+            || (index >= 2 && words[index - 2].Word == "any" && !words[index - 2].Closes
+                && (PointerWords.Contains(previous) || previous is "genre" or "kind" or "type" or "sort"));
+    }
+
+    /// <summary>True when "other than" starts at <paramref name="index"/>: "comedies other than romcoms".</summary>
+    private static bool OtherThan(IReadOnlyList<(string Word, bool Closes)> words, int index) =>
+        words[index].Word == "other" && !words[index].Closes && index + 1 < words.Count && words[index + 1].Word == "than";
+
+    /// <summary>
+    /// True when the words from <paramref name="start"/> name another thing to rule out, past an
+    /// article or a "with": a content word, not a mood, praise, a pointer, a cue or filler. "no gore
+    /// and something funny" asks for something funny; "nothing with zombies and vampires" rules out both.
+    /// </summary>
+    private static bool ListsAnotherObject(IReadOnlyList<(string Word, bool Closes)> words, int start)
+    {
+        for (var j = start; j < words.Count; j++)
+        {
+            var word = words[j].Word;
+            if (word is "the" or "a" or "an" or "with" && !words[j].Closes)
+            {
+                continue;
+            }
+
+            return !IsFiller(word) && !IsMood(word) && !FillerAdjectives.Contains(word) && !ExceptingHeads.Contains(word);
+        }
+
+        return false;
     }
 
     /// <summary>

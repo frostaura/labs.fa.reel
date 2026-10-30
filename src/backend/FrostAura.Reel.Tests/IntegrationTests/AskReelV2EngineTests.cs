@@ -2212,6 +2212,9 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     [InlineData(false, "{0} films", true)]
     [InlineData(true, "movies with {0}", false)]
     [InlineData(false, "movies with {0}", false)]
+    // Round 7: a role word before the name is the role, never a topic left beside the person.
+    [InlineData(true, "movies starring {0}", true)]
+    [InlineData(false, "movies starring {0}", true)]
     public async Task A_model_less_person_request_searches_the_persons_credits(bool keyless, string shape, bool known)
     {
         if (!Fixture.Available)
@@ -2263,6 +2266,65 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(credited.Order(), outcome.Cards.Select(c => c.TitleId).Order());
         Assert.Contains($"with {name}", outcome.AssistantText, StringComparison.Ordinal);
         Assert.Equal(0, judge.Batches);
+    }
+
+    /// <summary>
+    /// HREV5-RET-02 (round 7): names with a stop word, a word of two letters or fewer, or punctuation in
+    /// them never reached the grounder whole — "Will Smith" was the topic "smith", "Al Pacino" "pacino",
+    /// "Samuel L. Jackson" "samuel" and "jackson", and "Robert Downey Jr." "robert downey", which the
+    /// exact pattern could not match against the stored "Robert Downey Jr.". Each is now the person.
+    /// Varied over the keyless and failed-plan paths, over an initial, a suffix typed and left off, a
+    /// stop-word first name, a two-letter first name and a capitalised particle.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "{0} L. {1}", "movies with {0} L. {1}")]
+    [InlineData(false, "{0} L. {1}", "{0} L. {1} films")]
+    [InlineData(true, "{0} {1} Jr.", "anything with {0} {1} Jr. please")]
+    [InlineData(false, "{0} {1} Jr.", "movies with {0} {1}")]
+    [InlineData(true, "Will {1}", "movies starring Will {1}")]
+    [InlineData(false, "Al {1}", "something with Al {1}")]
+    [InlineData(true, "{0} De {1}", "movies with {0} De {1}")]
+    public async Task A_model_less_person_name_with_short_or_punctuated_words_grounds_whole(bool keyless, string stored, string typed)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var first = $"Samq{Guid.NewGuid():N}"[..12];
+        var last = $"Jacksonq{Guid.NewGuid():N}"[..14];
+        var name = string.Format(CultureInfo.InvariantCulture, stored, first, last);
+        var accountId = await SeedAccountAsync();
+        var credited = new List<Guid>();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var person = new Person { Id = Guid.NewGuid(), TmdbId = Random.Shared.NextInt64(1_000_000_000, long.MaxValue), Name = name };
+            db.Persons.Add(person);
+            for (var i = 0; i < 3; i++)
+            {
+                var title = NewTitle($"Acted {i} {Guid.NewGuid():N}"[..16], 4_000 - i);
+                db.Titles.Add(title);
+                db.TitleCredits.Add(new TitleCredit { Id = Guid.NewGuid(), TitleId = title.Id, PersonId = person.Id, Role = CreditRole.Actor, CastOrder = 0 });
+                credited.Add(title.Id);
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        IAskReelPlanner planner = keyless
+            ? new KeylessPlanner()
+            : new ScriptedPlanner(_ => PlanResult.Failed(
+                new PlanFailure(AgentFailureKind.MalformedAnswer, null, Refusal: false), new LlmCallMeta("m", "none", false, 2, 10)));
+        var (engine, events, emit) = Build(accountId, planner, new NameJudge());
+
+        var outcome = await engine.StreamAsync(
+            Input(string.Format(CultureInfo.InvariantCulture, typed, first, last)), accountId, emit, CancellationToken.None);
+
+        var plan = Assert.Single(events, e => e.Event == "plan").Data;
+        Assert.Equal([name], plan.GetProperty("people").EnumerateArray().Select(p => p.GetProperty("name").GetString()));
+        Assert.Empty(plan.GetProperty("concepts").EnumerateArray());
+        Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        Assert.Equal(credited.Order(), outcome.Cards.Select(c => c.TitleId).Order());
     }
 
     /// <summary>

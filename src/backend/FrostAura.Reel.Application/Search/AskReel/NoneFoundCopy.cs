@@ -169,9 +169,21 @@ public static class NoneFoundCopy
             // back as if they named a shelf that came up empty. With nothing judged, "nothing
             // matches" would be a verdict nobody reached; with no model having read the request
             // either, the reading is what failed (HREV5-RET-02).
+            //
+            // With a card on screen that may be what was asked for, no lead may say nothing was found
+            // or that the reading failed: "I couldn't read that well enough to find anything for it"
+            // sat above "Taken has no score from your model yet … — shown below" (HREV5-RET-02/RET-03,
+            // round 7). A judged match the bar holds back was found and matched; a card nobody judged
+            // was found and not checked.
+            var heldMatches = facts.UnderBar.Count + (facts.UnscoredHeld?.Count ?? 0);
             sentences.Add(facts.JudgedAny
-                ? "Nothing I found matches what you asked closely enough to show."
-                : uncheckedTray + heldBack > 0
+                ? heldMatches > 0 && facts.Floor > 0m
+                    ? FormattableString.Invariant(
+                        $"Nothing I found both matches what you asked and clears your {AskReelReason.FormatFloor(facts.Floor)} bar.")
+                    : possible > 0
+                        ? "Nothing I checked matches what you asked closely enough to show."
+                        : "Nothing I found matches what you asked closely enough to show."
+                : possible > 0
                     ? "I couldn't check what I found against what you asked this time."
                     : facts.Unread && facts.NearMisses == 0 ? facts.UnreadLed ? UnreadNothingLed : UnreadNothing
                     : NothingFoundUnchecked);

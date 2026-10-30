@@ -129,7 +129,19 @@ public static class FallbackReader
         "different", "another", "similar", "otherwise", "story", "stories", "tale", "tales", "flick", "flicks",
         "picture", "pictures", "options", "ideas", "recommendations", "suggestions", "content", "watching",
         "actually", "honestly",
+        // The credit a person is named for ("starring", "directed by") — read as the role
+        // (AskReelEngine.FallbackRole), never as a topic beside the person (HREV5-RET-02, round 7).
+        "starring", "starred", "featuring", "featured", "directed", "director", "directors", "directing",
+        "acting", "actor", "actors", "actress", "actresses",
     };
+
+    /// <summary>
+    /// True when <paramref name="word"/> names the credit a person is asked for by ("starring",
+    /// "directed") — never a topic, and never a word left beside a person grounded from the same phrase.
+    /// </summary>
+    internal static bool IsRoleWord(string word) =>
+        word is "starring" or "starred" or "featuring" or "featured" or "directed" or "director" or "directors"
+            or "directing" or "acting" or "actor" or "actors" or "actress" or "actresses";
 
     /// <summary>Words before "like" that make it "something like &lt;title&gt;" rather than the verb ("I'd like").</summary>
     private static readonly IReadOnlySet<string> LikeHeads = new HashSet<string>(StringComparer.Ordinal)
@@ -194,20 +206,25 @@ public static class FallbackReader
             return FallbackReading.Talk;
         }
 
-        if (AboutQuestion(text) is { } about)
+        if (TitleQuestion(text) is { } about)
         {
             return FallbackReading.Question(about.Length == 0 ? null : about);
         }
 
-        var request = AskReelIntentSanitizer.ReadKeylessRequest(text, currentYear);
-        var negations = AskReelIntentSanitizer.KeylessNegatedPhrases(text)
-            .Select(n => string.Join(' ', n.Split(' ').Select(w => compounds.TryGetValue(w, out var c) ? c.Written : w)))
-            .ToList();
+        // A capitalised name is read whole from here on ("Will Smith", "Samuel L. Jackson"): split
+        // into words, its stop words, initials and short words were dropped one by one.
+        var (joinedText, names) = JoinProperNames(text);
+        string Spoken(string phrase) => string.Join(' ', phrase.Split(' ').Select(w =>
+            names.TryGetValue(w, out var name) ? name : compounds.TryGetValue(w, out var c) ? c.Written : w));
+
+        var request = AskReelIntentSanitizer.ReadKeylessRequest(joinedText, currentYear);
+        var negations = AskReelIntentSanitizer.KeylessNegatedPhrases(joinedText).Select(Spoken).ToList();
         var media = PlanSanitizer.UserMedia(null, text);
 
         var words = AskReelIntentSanitizer.Words(text);
-        var reference = ReferenceName(text);
-        var referenceWords = reference is null ? [] : AskReelIntentSanitizer.Words(reference);
+        var joinedReference = ReferenceName(joinedText);
+        var reference = joinedReference is null ? null : Spoken(joinedReference);
+        var referenceWords = joinedReference is null ? [] : AskReelIntentSanitizer.Words(joinedReference);
 
         var genres = GenresOfPhrases(words).ToList();
         void AddGenres(IEnumerable<string> slugs)
@@ -242,9 +259,9 @@ public static class FallbackReader
                     continue;
                 }
 
-                var (topic, runGenres) = SplitGenres(run, compounds);
+                var (joinedTopic, runGenres) = SplitGenres(run, compounds);
                 AddGenres(runGenres);
-                if (topic is { Length: > 0 } t && !concepts.Contains(t, StringComparer.Ordinal))
+                if (joinedTopic is { Length: > 0 } && Spoken(joinedTopic) is var t && !concepts.Contains(t, StringComparer.Ordinal))
                 {
                     concepts.Add(t);
                 }
@@ -358,33 +375,168 @@ public static class FallbackReader
         "reel", "please", "so", "ok", "okay", "um", "hmm", "exactly", "actually",
     };
 
+    /// <summary>
+    /// The words a question about Ask Reel itself is made of — what it is, does or can be asked —
+    /// and nothing that could name a topic. A message made only of these, asking about Ask Reel
+    /// (<see cref="TalkSubjects"/>) by one of <see cref="TalkAnchors"/>, is small talk however it is
+    /// phrased: the exact-phrase list alone left "what can you help me with?" searching "help" and
+    /// "what can you do for me?" searching the whole catalogue (HREV5-ASK-01, round 7).
+    /// </summary>
+    private static readonly IReadOnlySet<string> TalkWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "what", "what's", "whats", "how", "who", "can", "could", "would", "should", "do", "does", "are", "is",
+        "you", "your", "yourself", "i", "me", "we", "us", "this", "it", "for", "with", "of", "to", "about", "the",
+        "a", "an", "all", "else", "exactly", "kind", "kinds", "sort", "sorts", "type", "types", "thing", "things",
+        "help", "capable", "able", "ask", "work", "works", "use", "features", "feature", "abilities", "ability",
+        "offer", "tell", "questions", "question", "good", "at", "really",
+    };
+
+    /// <summary>The words that make a message made of <see cref="TalkWords"/> a question about what Ask Reel does.</summary>
+    private static readonly IReadOnlySet<string> TalkAnchors = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "help", "capable", "able", "ask", "do", "work", "works", "use", "features", "feature", "abilities",
+        "ability", "offer", "yourself",
+    };
+
+    /// <summary>The words that make it about Ask Reel or about using it.</summary>
+    private static readonly IReadOnlySet<string> TalkSubjects = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "you", "your", "yourself", "i", "we", "this", "it",
+    };
+
     /// <summary>True when the whole message is small talk about Ask Reel or a greeting.</summary>
     internal static bool IsChitchat(string? message)
     {
         var words = AskReelIntentSanitizer.Words(message).Where(w => !TalkPadding.Contains(w)).ToList();
         if (words.Count > 1 && words[0] is "hi" or "hey" or "hello" or "hiya")
         {
-            var rest = string.Join(' ', words.Skip(1));
-            return TalkPhrases.Contains(rest);
+            words = words.Skip(1).ToList();
         }
 
-        return words.Count > 0 && TalkPhrases.Contains(string.Join(' ', words));
+        if (words.Count == 0)
+        {
+            return false;
+        }
+
+        return TalkPhrases.Contains(string.Join(' ', words))
+            || (words.All(TalkWords.Contains) && words.Any(TalkAnchors.Contains) && words.Any(TalkSubjects.Contains));
     }
 
     /// <summary>
-    /// The title a "what is &lt;title&gt; about?" question names — "what's Heat about", "what was The
-    /// Wire about" — or the empty string when the words between name nothing ("what is that about?"),
-    /// or null when the message is not that question. Searched, "what is Better Call Saul about?"
-    /// counted "9 unseen call saul titles" (HREV5-ASK-01).
+    /// The title a question about one title names — "what is Better Call Saul about?", "tell me about
+    /// Heat", "is The Wire any good?", "what's the plot of Dune?", "who's in Heat?" — or the empty
+    /// string when it points at what is on screen instead ("what is that about?", "is it any good?"),
+    /// or null when the message is not such a question. Searched, "what is Better Call Saul about?"
+    /// counted "9 unseen call saul titles" (HREV5-ASK-01), and in round 6 only that one phrasing was
+    /// read: "tell me about…", "is … any good?" and "what's the plot of…" still searched "call saul".
     /// </summary>
-    internal static string? AboutQuestion(string? message)
+    internal static string? TitleQuestion(string? message)
     {
-        var words = AskReelIntentSanitizer.Words(message);
-        if (words.Count < 3 || words[^1] != "about")
+        var words = AskReelIntentSanitizer.Words(message).ToList();
+        while (words.Count > 0 && words[^1] is "please" or "then" or "again")
+        {
+            words.RemoveAt(words.Count - 1);
+        }
+
+        if (words.Count >= 3 && words[^1] == "about" && AboutQuestion(words) is { } about)
+        {
+            return about;
+        }
+
+        foreach (var (lead, tail) in TitleQuestionShapes)
+        {
+            if (words.Count > lead.Length + tail.Length
+                && words.Take(lead.Length).SequenceEqual(lead, StringComparer.Ordinal)
+                && words.Skip(words.Count - tail.Length).SequenceEqual(tail, StringComparer.Ordinal))
+            {
+                return QuestionTitle(words.Skip(lead.Length).Take(words.Count - lead.Length - tail.Length).ToList());
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The shapes of a question about one title, as the words before and after its name. The first
+    /// shape that fits decides; a name that cannot be a title (<see cref="QuestionTitle"/>) leaves the
+    /// message a search.
+    /// </summary>
+    private static readonly IReadOnlyList<(string[] Lead, string[] Tail)> TitleQuestionShapes =
+    [
+        (["tell", "me", "more", "about"], []),
+        (["tell", "me", "about"], []),
+        (["tell", "us", "about"], []),
+        (["what's", "the", "plot", "of"], []),
+        (["whats", "the", "plot", "of"], []),
+        (["what", "is", "the", "plot", "of"], []),
+        (["what's", "the", "story", "of"], []),
+        (["what", "is", "the", "story", "of"], []),
+        (["what's", "the", "premise", "of"], []),
+        (["what", "is", "the", "premise", "of"], []),
+        (["what", "happens", "in"], []),
+        (["who's", "in"], []),
+        (["who", "is", "in"], []),
+        (["who", "stars", "in"], []),
+        (["who", "starred", "in"], []),
+        (["who", "directed"], []),
+        (["how", "long", "is"], []),
+        (["is"], ["any", "good"]),
+        (["was"], ["any", "good"]),
+        (["are"], ["any", "good"]),
+        (["is"], ["good"]),
+        (["is"], ["worth", "watching"]),
+        (["is"], ["worth", "it"]),
+        (["is"], ["worth", "a", "watch"]),
+        (["is"], ["worth", "seeing"]),
+        (["is"], ["worth", "my", "time"]),
+        (["should", "i", "watch"], []),
+    ];
+
+    /// <summary>Words that, as the whole of a question's subject, point at what is on screen.</summary>
+    private static readonly IReadOnlySet<string> OnScreenSubjects = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "it", "that", "this", "one", "them", "those", "these",
+    };
+
+    /// <summary>Words a title in a question never starts with: a request ("a comedy", "something") or "there".</summary>
+    private static readonly IReadOnlySet<string> NotATitleStart = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "a", "an", "some", "any", "something", "anything", "more", "other", "another", "there", "you", "your", "my",
+        "good", "great",
+    };
+
+    /// <summary>
+    /// The subject of a question about one title as that title's name; the empty string when it only
+    /// points at what is on screen; null when it reads as a request ("tell me about some heist movies",
+    /// "is there anything good") — a media word, a genre, a negation or a comparison makes it one.
+    /// </summary>
+    private static string? QuestionTitle(IReadOnlyList<string> subject)
+    {
+        if (subject.Count == 0 || subject.Count > 6)
         {
             return null;
         }
 
+        if (subject.All(OnScreenSubjects.Contains))
+        {
+            return string.Empty;
+        }
+
+        if (NotATitleStart.Contains(subject[0])
+            || subject.All(AskReelIntentSanitizer.IsFiller)
+            || subject.Any(w => MediaWords.Contains(w) || SearchCues.Contains(w) || Comparisons.ContainsKey(w)
+                || w is "no" or "not" or "without" or "nothing" or "except")
+            || subject.All(w => ConceptSynonyms.GenreSlugsOf(w) is not null || SearchVocabulary.ResolveGenres(w).Count > 0))
+        {
+            return null;
+        }
+
+        return string.Join(' ', subject);
+    }
+
+    /// <summary>"what is &lt;title&gt; about" read off its words (the last is "about"), as <see cref="TitleQuestion"/> returns it.</summary>
+    private static string? AboutQuestion(IReadOnlyList<string> words)
+    {
         int start;
         if (words[0] is "what's" or "whats")
         {
@@ -406,6 +558,220 @@ public static class FallbackReader
         }
 
         return name.All(AskReelIntentSanitizer.IsFiller) ? string.Empty : string.Join(' ', name);
+    }
+
+    /// <summary>Lower-case words that join two capitalised parts of one name ("Robert de Niro", "Ludwig van Beethoven").</summary>
+    private static readonly IReadOnlySet<string> NameParticles = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "de", "da", "di", "del", "della", "van", "von", "der", "den", "le", "la", "du", "dos", "das", "bin", "ben",
+    };
+
+    /// <summary>The suffixes that may end a name ("Robert Downey Jr.").</summary>
+    private static readonly IReadOnlySet<string> NameSuffixes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "jr", "sr", "ii", "iii", "iv",
+    };
+
+    /// <summary>Stop words that are also common first names, so a capitalised one may open a name even at the start ("Will Smith movies").</summary>
+    private static readonly IReadOnlySet<string> FirstNameStopWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "will", "may",
+    };
+
+    /// <summary>
+    /// The message with each capitalised name of two or more words joined into one word ("Will
+    /// Smith" → "willsmith", "Samuel L. Jackson" → "samuelljackson"), and the words each joined word
+    /// stands for ("will smith", "samuel l jackson"). The reader split a name into words and then
+    /// dropped the ones that are stop words, two letters or shorter, or punctuated, so "Will Smith"
+    /// was the topic "smith", "Al Pacino" "pacino", "Robert De Niro" the two topics "robert" and
+    /// "niro", and "Robert Downey Jr." "robert downey" — none of which grounds as the person
+    /// (HREV5-RET-02, round 7). Whole, the grounder finds them.
+    ///
+    /// <para>Only the user's capitals mark a name, so a message in one case throughout (all lower or
+    /// all upper) is left as it was; and a capital that only starts a sentence, or a word that is a
+    /// genre, a medium, a mood, praise, a comparison or a negation, never starts one: "Tense Heist
+    /// Movies" is still a mood and a topic.</para>
+    /// </summary>
+    internal static (string Text, IReadOnlyDictionary<string, string> Names) JoinProperNames(string text)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(text) || !text.Any(char.IsLower) || !text.Any(char.IsUpper))
+        {
+            return (text, names);
+        }
+
+        var tokens = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(NameToken.Of).ToList();
+        var output = new List<string>(tokens.Count);
+        var i = 0;
+        while (i < tokens.Count)
+        {
+            var run = NameRunAt(tokens, i);
+            if (run is not { } r)
+            {
+                output.Add(tokens[i].Raw);
+                i++;
+                continue;
+            }
+
+            for (var k = i; k < r.Start; k++)
+            {
+                output.Add(tokens[k].Raw);
+            }
+
+            var parts = tokens.Skip(r.Start).Take(r.Length).SelectMany(t => AskReelIntentSanitizer.Words(t.Core)).ToList();
+            var joined = string.Concat(parts);
+            names[joined] = string.Join(' ', parts);
+            var last = tokens[r.Start + r.Length - 1];
+            output.Add(string.Concat(tokens[r.Start].Lead, joined, last.Abbreviated ? last.Trail.TrimStart('.') : last.Trail));
+            i = r.Start + r.Length;
+        }
+
+        return (string.Join(' ', output), names);
+    }
+
+    /// <summary>The name that starts at or just after <paramref name="start"/> (after a dropped lead), or null.</summary>
+    private static (int Start, int Length)? NameRunAt(IReadOnlyList<NameToken> tokens, int start)
+    {
+        if (!IsNameWord(tokens, start))
+        {
+            return null;
+        }
+
+        var end = start;
+        while (true)
+        {
+            if (tokens[end].Breaks || end + 1 >= tokens.Count)
+            {
+                break;
+            }
+
+            var next = end + 1;
+            if (IsNameWord(tokens, next) || (NameSuffixes.Contains(tokens[next].Lower) && tokens[next].Capitalised))
+            {
+                end = next;
+                continue;
+            }
+
+            // A particle joins two capitalised parts: "Robert de Niro".
+            if (NameParticles.Contains(tokens[next].Lower) && !tokens[next].Breaks && next + 1 < tokens.Count && IsNameWord(tokens, next + 1))
+            {
+                end = next + 1;
+                continue;
+            }
+
+            break;
+        }
+
+        // A stop word neither opens a name ("With Will Smith", "Like The Dark Knight") nor ends one —
+        // except "the", which opens a title, and a stop word that is also a first name ("Will").
+        var first = start;
+        var lastIndex = end;
+        while (first < lastIndex && AskReelIntentSanitizer.IsFiller(tokens[first].Lower)
+               && tokens[first].Lower != "the" && !FirstNameStopWords.Contains(tokens[first].Lower))
+        {
+            first++;
+        }
+
+        while (lastIndex > first && AskReelIntentSanitizer.IsFiller(tokens[lastIndex].Lower) && !NameSuffixes.Contains(tokens[lastIndex].Lower))
+        {
+            lastIndex--;
+        }
+
+        var length = lastIndex - first + 1;
+        var proper = Enumerable.Range(first, length).Count(k =>
+            !AskReelIntentSanitizer.IsFiller(tokens[k].Lower) && !NameParticles.Contains(tokens[k].Lower)
+            && !NameSuffixes.Contains(tokens[k].Lower) && !tokens[k].Initial);
+        if (length < 2 || proper < 1)
+        {
+            return null;
+        }
+
+        // A run that holds a two-word mood ("Slow Burn") is the mood, not a name.
+        for (var k = first; k < first + length - 1; k++)
+        {
+            if (AskReelIntentSanitizer.IsMoodPhrase($"{tokens[k].Lower} {tokens[k + 1].Lower}"))
+            {
+                return null;
+            }
+        }
+
+        return (first, length);
+    }
+
+    /// <summary>
+    /// True when the token at <paramref name="index"/> can be part of a capitalised name: capitalised
+    /// (or an initial), not "I", and not a word that only starts the sentence or names something
+    /// else (a genre, a medium, a mood, praise, a comparison, a negation, a greeting).
+    /// </summary>
+    private static bool IsNameWord(IReadOnlyList<NameToken> tokens, int index)
+    {
+        var token = tokens[index];
+        if (!token.Capitalised || token.Lower.Length == 0)
+        {
+            return false;
+        }
+
+        var lower = token.Lower;
+        if (lower is "i" or "a" || lower.StartsWith("i'", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (token.Initial)
+        {
+            return index > 0 && !tokens[index - 1].EndsSentence;
+        }
+
+        if (MediaWords.Contains(lower) || NeverATopic.Contains(lower) || Comparisons.ContainsKey(lower)
+            || TalkPadding.Contains(lower) || lower is "hi" or "hey" or "hello" or "hiya" or "no" or "not" or "nothing" or "without"
+            || AskReelIntentSanitizer.IsMoodPhrase(lower) || AskReelIntentSanitizer.IsPraise(lower)
+            || ConceptSynonyms.GenreSlugsOf(lower) is not null || SearchVocabulary.ResolveGenres(lower).Count > 0)
+        {
+            return false;
+        }
+
+        var sentenceStart = index == 0 || (tokens[index - 1].EndsSentence && !tokens[index - 1].Abbreviated);
+        return !sentenceStart
+            || FirstNameStopWords.Contains(lower)
+            || !(AskReelIntentSanitizer.IsFiller(lower) || QuestionLeads.Contains(lower) || LikeHeads.Contains(lower));
+    }
+
+    /// <summary>One space-separated token of a message, read for <see cref="JoinProperNames"/>.</summary>
+    private sealed record NameToken(string Raw, string Lead, string Core, string Trail)
+    {
+        public string Lower { get; } = Core.ToLowerInvariant();
+
+        /// <summary>Starts with a capital letter.</summary>
+        public bool Capitalised => Core.Length > 0 && char.IsUpper(Core[0]);
+
+        /// <summary>One capital letter, as in "Samuel L. Jackson".</summary>
+        public bool Initial => Core.Length == 1 && char.IsUpper(Core[0]);
+
+        /// <summary>A full stop that abbreviates ("L.", "Jr.") rather than ends a sentence.</summary>
+        public bool Abbreviated => Trail.StartsWith('.') && (Initial || NameSuffixes.Contains(Lower));
+
+        /// <summary>Ends its sentence: ".", "?" or "!" that is not an abbreviation's.</summary>
+        public bool EndsSentence => Trail.Length > 0 && Trail[0] is '.' or '?' or '!';
+
+        /// <summary>Ends a name: any punctuation after it but an abbreviation's full stop.</summary>
+        public bool Breaks => Trail.Length > 0 && !Abbreviated;
+
+        public static NameToken Of(string raw)
+        {
+            var start = 0;
+            var end = raw.Length;
+            while (start < end && !char.IsLetterOrDigit(raw[start]))
+            {
+                start++;
+            }
+
+            while (end > start && !char.IsLetterOrDigit(raw[end - 1]))
+            {
+                end--;
+            }
+
+            return new NameToken(raw, raw[..start], raw[start..end], raw[end..]);
+        }
     }
 
     /// <summary>
