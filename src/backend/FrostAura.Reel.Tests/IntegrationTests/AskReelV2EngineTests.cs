@@ -91,7 +91,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal("Picks", done.GetProperty("mode").GetString());
         Assert.Equal("v2", done.GetProperty("engine").GetString());
         Assert.Equal(4, done.GetProperty("results").GetArrayLength());
-        Assert.Equal(2, judge.Batches);
+        // Ten titles judged as RequestJudge.Batches cuts them: a first batch of three, then six, then one.
+        Assert.Equal(3, judge.Batches);
 
         // Written as emitted, and the turn record carries the v2 fields and the new state.
         Assert.Equal(7, persisted.Count);
