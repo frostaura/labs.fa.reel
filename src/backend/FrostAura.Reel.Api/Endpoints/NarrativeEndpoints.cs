@@ -28,7 +28,12 @@ public static class NarrativeEndpoints
     /// <summary>The trigger of a rewrite the read queued because the writer has moved on from the stored text.</summary>
     public const string OutdatedNarrativeReason = "narrative-outdated";
 
-    /// <summary>The narrative as the client sees it. <c>text</c> is already the effective one.</summary>
+    /// <summary>
+    /// The narrative as the client sees it. <c>text</c> is already the effective one.
+    /// <c>staleReason</c> says why <c>isStale</c> is true —
+    /// <see cref="TasteNarrativeService.StaleTasteMoved"/> or
+    /// <see cref="TasteNarrativeService.StaleOutdatedPrompt"/> — and is null when it is current.
+    /// </summary>
     public sealed record NarrativeResponse(
         string? Text,
         bool IsEdited,
@@ -37,7 +42,8 @@ public static class NarrativeEndpoints
         DateTime? GeneratedAt,
         bool IsStale,
         bool Regenerating,
-        bool WriterAvailable);
+        bool WriterAvailable,
+        string? StaleReason = null);
 
     public sealed record NarrativeEdit(string? Text);
 
@@ -68,11 +74,13 @@ public static class NarrativeEndpoints
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
             var built = await factsBuilder.BuildAsync(accountId, taste, DateTime.UtcNow, ct);
 
-            // Stale when the fingerprint moved OR the account crossed a crowd band the fingerprint's
-            // coarser bands miss — the narrative's crowd claim would otherwise sit beside a tile that
-            // contradicts it (IREV3S-07).
+            // Stale when the fingerprint moved, the account crossed a crowd band the fingerprint's
+            // coarser bands miss (IREV3S-07), or the generated text predates the current prompt
+            // (HREV6-DESK-01). Decided before, and independently of, whether a rewrite can be queued:
+            // with no key or an open breaker the old text still stands, and it must stand flagged.
             var crowdMoved = TasteNarrativeService.CrowdStanceMoved(narrative.FactsJson, built.Facts);
-            var stale = !string.Equals(narrative.ProfileHash, built.ProfileHash, StringComparison.Ordinal) || crowdMoved;
+            var staleReason = TasteNarrativeService.StaleReason(
+                narrative, built.ProfileHash, built.Facts, writer.NarrativePromptVersion);
 
             // Nothing else queues a rewrite for a narrative whose fingerprint has NOT moved but
             // which the writer would no longer stand behind: one written under an older prompt (a
@@ -103,9 +111,10 @@ public static class NarrativeEndpoints
                 narrative.Version,
                 narrative.RatingsCount,
                 narrative.GeneratedAt,
-                stale,
+                staleReason is not null,
                 regenerating,
-                writer.IsAvailable));
+                writer.IsAvailable,
+                staleReason));
         });
 
         // The user's own words. Saved against the CURRENT version rather than minting a new one —

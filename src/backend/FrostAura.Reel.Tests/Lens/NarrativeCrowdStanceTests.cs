@@ -6,7 +6,8 @@ namespace FrostAura.Reel.Tests.Lens;
 
 /// <summary>
 /// A stored narrative's crowd claim is stale once the account crosses a crowd band, even when the
-/// profile fingerprint (banded at 0.5) has not moved (IREV3S-07).
+/// profile fingerprint (banded at 0.5) has not moved (IREV3S-07) — and generated text from an older
+/// prompt is stale whether or not a rewrite can be queued (HREV6-DESK-01).
 /// </summary>
 public class NarrativeCrowdStanceTests
 {
@@ -37,6 +38,50 @@ public class NarrativeCrowdStanceTests
     public void An_unreadable_stored_sheet_is_never_shown_as_current(string? storedJson)
     {
         Assert.True(TasteNarrativeService.CrowdStanceMoved(storedJson, Facts(0m)));
+    }
+
+    private static AccountTasteNarrative Stored(int promptVersion, decimal overall, string hash = "h", string? edited = null) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = Guid.NewGuid(),
+        Version = 1,
+        ProfileHash = hash,
+        ProfileFingerprint = "{}",
+        Text = "You rate below the crowd overall.",
+        FactsJson = JsonSerializer.Serialize(Facts(overall), Web),
+        ModelId = "stub/deterministic-v1",
+        PromptVersion = promptVersion,
+        GeneratedAt = DateTime.UtcNow,
+        EditedText = edited,
+    };
+
+    // HREV6-DESK-01: an older prompt is stale on its own — the fingerprint and crowd band unchanged —
+    // so a read that cannot queue a rewrite (no key, open breaker) still flags it.
+    [Theory]
+    [InlineData(2, 3, -0.18, null, TasteNarrativeService.StaleOutdatedPrompt)]
+    [InlineData(1, 3, 0.10, null, TasteNarrativeService.StaleOutdatedPrompt)]
+    [InlineData(2, 3, -0.18, "   ", TasteNarrativeService.StaleOutdatedPrompt)] // a blank edit is no edit
+    [InlineData(3, 3, -0.18, null, null)]
+    [InlineData(2, 3, -0.18, "I rate with the crowd.", null)] // the user's words, which no prompt wrote
+    public void An_older_prompt_is_stale_unless_the_user_rewrote_it(
+        int stored, int current, double overall, string? edited, string? expected)
+    {
+        var narrative = Stored(stored, (decimal)overall, edited: edited);
+
+        Assert.Equal(expected, TasteNarrativeService.StaleReason(narrative, "h", Facts((decimal)overall), current));
+    }
+
+    [Theory]
+    [InlineData("moved", -0.18, null)]
+    [InlineData("h", -0.35, null)]                     // crowd band crossed, fingerprint not
+    [InlineData("moved", -0.18, "My own words.")]    // holds for an edited narrative too
+    public void A_taste_move_outranks_an_older_prompt(string currentHash, double now, string? edited)
+    {
+        var narrative = Stored(promptVersion: 2, overall: -0.18m, edited: edited);
+
+        Assert.Equal(
+            TasteNarrativeService.StaleTasteMoved,
+            TasteNarrativeService.StaleReason(narrative, currentHash, Facts((decimal)now), currentPromptVersion: 3));
     }
 
     [Theory]
