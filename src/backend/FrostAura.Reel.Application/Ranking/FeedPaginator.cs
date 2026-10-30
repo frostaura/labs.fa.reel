@@ -283,6 +283,12 @@ public sealed class FeedPaginator(
         var windowExclude = req.PageExcludeTitleIds is { Count: > 0 } pageExclude
             ? exclude.Concat(pageExclude).Distinct().ToList()
             : exclude;
+        // The deep-cuts rail's popularity bound, read off the deep cuts the active snapshot dealt
+        // (HREV8-RET-01): page 2 sits under the same "under the radar" title as page 1, so it is held
+        // to the refill's rule rather than a fresh percentile of a window drawn from the popular head.
+        var deepCutBound = req.Context == FeedRowContext.DeepCuts
+            ? await DealtDeepCutBoundAsync(account.Id, ct)
+            : (FeedRowRules.PopularityBound?)null;
         var setupMs = clock.ElapsedMilliseconds;
 
         // The scored window, reused for a minute (WS-5, the /feed/more p95). A Home load fires every
@@ -292,7 +298,7 @@ public sealed class FeedPaginator(
         // A minute keeps the numbers as fresh as the two-minute taste cache already allows; the
         // claim-time eligibility re-check covers a title rated inside it. A deep page whose
         // exclusions leave the cached window thin reads the lane live, exactly as before.
-        var windowKey = $"feedwindow:{account.Id:N}:{artifact.Id:N}:{RowKey(req)}:{req.MediaType}";
+        var windowKey = $"feedwindow:{account.Id:N}:{artifact.Id:N}:{RowKey(req)}:{req.MediaType}:{deepCutBound}";
         List<Scored> all;
         if (cache.TryGetValue(windowKey, out List<Scored>? cachedWindow) && cachedWindow is not null
             && WithoutExcluded(cachedWindow, windowExclude) is { Count: >= DeepenThreshold } fromCache)
@@ -302,14 +308,14 @@ public sealed class FeedPaginator(
         else
         {
             var unexcluded = await ScoreWindowAsync(
-                artifact, taste, await FetchWindowAsync(account, req, [], taste, ct), residual, calibrator, now, ct);
+                artifact, taste, await FetchWindowAsync(account, req, [], taste, deepCutBound, ct), residual, calibrator, now, ct);
             cache.Set(windowKey, unexcluded, WindowTtl);
             all = WithoutExcluded(unexcluded, windowExclude);
             if (all.Count < DeepenThreshold && windowExclude.Count > 0)
             {
                 // Deep in the lane: the exclusions ate the unexcluded window, so read past them.
                 all = await ScoreWindowAsync(
-                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
+                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, deepCutBound, ct), residual, calibrator, now, ct);
             }
         }
 
@@ -353,7 +359,7 @@ public sealed class FeedPaginator(
             {
                 cache.Remove(windowKey);
                 all = await ScoreWindowAsync(
-                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, ct), residual, calibrator, now, ct);
+                    artifact, taste, await FetchWindowAsync(account, req, windowExclude, taste, deepCutBound, ct), residual, calibrator, now, ct);
                 scored = all.Where(s => ForYouBar.Clears(s.Predicted, minPredicted)).ToList();
             }
         }
@@ -376,7 +382,7 @@ public sealed class FeedPaginator(
         // straight back in on scroll is not a rule, it is a delay. Ranking only — the card's
         // PredictedRating below is untouched by it.
         var prior = TastePrior.From(taste);
-        var ranked = await RankAsync(req, taste, scored, boosts, prior, now, ct);
+        var ranked = await RankAsync(req, taste, scored, boosts, prior, now, minPredicted, deepCutBound, ct);
 
         // ── The anchored-row gate ───────────────────────────────────────────────────────
         // A because-you-loved or more-like-this page admits a card only when it sits inside the
@@ -918,7 +924,8 @@ public sealed class FeedPaginator(
     /// other surface — the ANN arm just lifts personalized titles the popularity sort would bury.
     /// </summary>
     private async Task<IReadOnlyList<Title>> FetchWindowAsync(
-        Account account, MoreFeedRequest req, List<Guid> exclude, FeatureVectorBuilder.TasteState taste, CancellationToken ct)
+        Account account, MoreFeedRequest req, List<Guid> exclude, FeatureVectorBuilder.TasteState taste,
+        FeedRowRules.PopularityBound? deepCutBound, CancellationToken ct)
     {
         var media = ParseMedia(req.MediaType);
 
@@ -960,9 +967,21 @@ public sealed class FeedPaginator(
                     q = q.Where(FilterBreaches.ExcludedGenre(GenreRailSlug(req.Genre)));
                 }
 
+                if (deepCutBound is { } bound)
+                {
+                    // Retrieve from under the bound, not from the quality-first head: the head is
+                    // tonight's picks' window, and filtering it afterwards left a deep-cuts page with
+                    // whatever few under-the-radar titles happened to rank there. RankAsync applies
+                    // the full rule (FeedRowRules.IsDeepCut); this only aims the window at its supply.
+                    var ceiling = bound.Value;
+                    q = bound.Inclusive
+                        ? q.Where(t => (t.TmdbPopularity ?? 0m) <= ceiling)
+                        : q.Where(t => (t.TmdbPopularity ?? 0m) < ceiling);
+                }
+
                 if (req.Context == FeedRowContext.NewForYou)
                 {
-                    var cutoff = DateTime.UtcNow.AddDays(-900);
+                    var cutoff = DateTime.UtcNow.AddDays(-FeedRowRules.NewForYouWindowDays);
                     q = q.Where(t => (t.ReleasedAt ?? t.FirstAiredAt) != null && (t.ReleasedAt ?? t.FirstAiredAt) >= cutoff);
                 }
 
@@ -1271,7 +1290,8 @@ public sealed class FeedPaginator(
 
     private async Task<List<Scored>> RankAsync(
         MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> scored,
-        IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, DateTime now, CancellationToken ct)
+        IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, DateTime now,
+        decimal forYouBar, FeedRowRules.PopularityBound? deepCutBound, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
         double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t) * CrowdPrior.FactorFor(t);
@@ -1289,11 +1309,13 @@ public sealed class FeedPaginator(
 
             case FeedRowContext.DeepCuts:
                 {
-                    var ordered = scored.OrderBy(s => s.Title.TmdbPopularity ?? 0m).ToList();
-                    var threshold = ordered.Count > 0
-                        ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
+                    // The build's rule, with the refill's bound (HREV8-RET-01): a fresh 70th
+                    // percentile of this window let page 2 serve titles four times as popular as any
+                    // deep cut the build dealt. Nothing inside the bound is an exhausted rail, never
+                    // a fall-back to the rest of the window.
+                    var bound = deepCutBound ?? FeedRowRules.PopularityBound.Below(0m);
                     return scored
-                        .Where(s => ForYouBar.Clears(s.Predicted, 6m) && (s.Title.TmdbPopularity ?? 0m) <= threshold)
+                        .Where(s => FeedRowRules.IsDeepCut(s.Predicted, s.Title, forYouBar, bound))
                         .OrderByDescending(s => (double)s.Predicted * Weight(s.Title))
                         .ToList();
                 }
@@ -1305,6 +1327,23 @@ public sealed class FeedPaginator(
             default:
                 return scored.OrderByDescending(s => (double)s.Predicted * Weight(s.Title)).ToList();
         }
+    }
+
+    /// <summary>
+    /// The deep-cuts bound for a paged rail: <see cref="FeedRowRules.DeepCutBoundFromDealt"/> over every
+    /// deep cut the account's active snapshot dealt — the bound the Home refill holds the row's seats
+    /// to. No active snapshot, or one that dealt no deep cuts, admits nothing.
+    /// </summary>
+    private async Task<FeedRowRules.PopularityBound> DealtDeepCutBoundAsync(Guid accountId, CancellationToken ct)
+    {
+        var dealt = await db.FeedSnapshots
+            .Where(s => s.AccountId == accountId && s.Status == Domain.Feed.SnapshotStatus.Active)
+            .Join(db.FeedItems.Where(i => i.AccountId == accountId && i.Row == Domain.Feed.FeedRowKind.DeepCuts),
+                s => s.Id, i => i.FeedSnapshotId, (s, i) => i.TitleId)
+            .Join(db.Titles, id => id, t => t.Id, (id, t) => t)
+            .AsNoTracking()
+            .ToListAsync(ct);
+        return FeedRowRules.DeepCutBoundFromDealt(dealt);
     }
 
     /// <summary>
