@@ -130,6 +130,53 @@ describe("providerLink and providerBrand", () => {
   });
 });
 
+// HREV5-DESK-08: Trafficked's Watch tonight at 834 px listed "Amazon Prime Video · Stream",
+// "Amazon Prime Video Free with Ads · Free (ads)" and "Amazon Prime Video with Ads · Stream" as three
+// chips, and "Plex" beside "Plex Channel" — 17 chips burying "can I watch it tonight?".
+describe("ad tiers and a brand's own channel fold into the brand", () => {
+  it("folds the three Amazon Prime Video tiers into one chip carrying every kind", () => {
+    const ladder = providerLadder(
+      [
+        entry("Amazon Prime Video", ["Flatrate"]),
+        entry("Amazon Prime Video Free with Ads", ["Ads"]),
+        entry("Amazon Prime Video with Ads", ["Flatrate"], "direct", "https://www.amazon.com/s?k=Trafficked"),
+        entry("Plex", ["Free"]),
+        entry("Plex Channel", ["Ads"]),
+      ],
+      TMDB
+    );
+    expect(ladder.chips.map((c) => c.provider)).toEqual(["Amazon Prime Video", "Plex"]);
+    expect(ladder.chips[0]).toMatchObject({ kinds: ["Stream", "Free (ads)"], link: "search", logoPath: "/Amazon Prime Video.jpg" });
+    expect(ladder.chips[1]).toMatchObject({ kinds: ["Free", "Free (ads)"] });
+  });
+
+  it("names the brand even when only an ad tier is listed, or it is listed first", () => {
+    const ladder = providerLadder([entry("Netflix basic with Ads", ["Ads"]), entry("Netflix", ["Flatrate"])], TMDB);
+    expect(ladder.chips.map((c) => c.provider)).toEqual(["Netflix"]);
+    expect(ladder.chips[0].logoPath).toBe("/Netflix.jpg");
+    expect(providerLadder([entry("Peacock Premium Standard with Ads", ["Ads"])], TMDB).chips[0].provider).toBe("Peacock Premium");
+  });
+
+  it("keeps a channel that is a brand of its own: no base brand listed beside it", () => {
+    const ladder = providerLadder([entry("The Roku Channel", ["Ads"]), entry("Hallmark Channel", ["Flatrate"]), entry("Plex Channel", ["Ads"])], TMDB);
+    expect(ladder.chips.map((c) => c.provider)).toEqual(["The Roku Channel", "Hallmark Channel", "Plex Channel"]);
+    expect(providerBrand("Plex Channel")).toBe("Plex Channel");
+    expect(providerBrand("Plex Channel", new Set(["Plex"]))).toBe("Plex");
+    expect(providerBrand("Amazon Prime Video with Ads")).toBe("Amazon Prime Video");
+  });
+
+  it("gives a card one logo per brand across ad tiers and channels", () => {
+    const strip = cardProviders([
+      { name: "Amazon Prime Video with Ads", logoPath: "/a.png" },
+      { name: "Amazon Prime Video", logoPath: "/b.png" },
+      { name: "Plex", logoPath: "/c.png" },
+      { name: "Plex Channel", logoPath: "/d.png" },
+      { name: "Tubi TV", logoPath: "/e.png" },
+    ]);
+    expect(strip.map((p) => p.name)).toEqual(["Amazon Prime Video with Ads", "Plex", "Tubi TV"]);
+  });
+});
+
 describe("cardProviders", () => {
   it("keeps one logo per brand, in the server's order, up to three", () => {
     const providers = [

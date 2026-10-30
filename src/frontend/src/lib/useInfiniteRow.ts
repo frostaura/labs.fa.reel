@@ -11,7 +11,7 @@ import { useRailPage } from "../components/rows/railPage";
 import { useLoadMoreFeedMutation } from "../store/api";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import type { FeedCard, MoreFeedRequest, MoreFeedResponse, RailSupply } from "../store/feedTypes";
+import type { AnchoredSupply, FeedCard, MoreFeedRequest, MoreFeedResponse, RailSupply } from "../store/feedTypes";
 
 export interface RowContext {
   row: string;
@@ -71,6 +71,9 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
   // What the server counted behind the latest page, when that page came up short (RET-07). A full
   // page carries none, so this is always about the row's current end.
   const [supply, setSupply] = useState<RailSupply | null>(null);
+  // Its anchored sibling (HREV5-RET-01): what an anchored rail's window lost to the shared-evidence
+  // gate and to the bar. Kept beside `supply`, from the same page, so the two never disagree.
+  const [anchoredSupply, setAnchoredSupply] = useState<AnchoredSupply | null>(null);
   const [paging, setPaging] = useState<RailPaging>(INITIAL_RAIL_PAGING);
   const [loadMoreFeed, { isLoading }] = useLoadMoreFeedMutation();
   const seenRef = useRef<Set<string>>(new Set(seed.map((c) => c.titleId)));
@@ -177,6 +180,7 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
     }
     transition({ type: "success" });
     setSupply(next.supply ?? null);
+    setAnchoredSupply(next.anchoredSupply ?? null);
     const fresh = next.items.filter((c) => !seenRef.current.has(c.titleId));
     if (fresh.length > 0) {
       fresh.forEach((c) => seenRef.current.add(c.titleId));
@@ -235,5 +239,6 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
     idle,
     exhausted,
     supply,
+    anchoredSupply,
   };
 }

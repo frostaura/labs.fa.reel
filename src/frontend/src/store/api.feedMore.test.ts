@@ -34,12 +34,26 @@ describe("loadMoreFeed", () => {
   it("keeps the supply the server counted behind a short page", async () => {
     answer({ items: [], exhausted: true, supply: { hiddenByConditions: 251, alreadySeen: 48, clearingFloor: 44 } });
     const page = await makeStore().dispatch(api.endpoints.loadMoreFeed.initiate({ row: "genre", genre: "thriller", excludeTitleIds: [] })).unwrap();
-    expect(page).toEqual({ items: [], exhausted: true, supply: { hiddenByConditions: 251, alreadySeen: 48, clearingFloor: 44 } });
+    expect(page).toEqual({
+      items: [],
+      exhausted: true,
+      supply: { hiddenByConditions: 251, alreadySeen: 48, clearingFloor: 44 },
+      anchoredSupply: null,
+    });
+  });
+
+  it("keeps what an anchored page lost to the gate and the bar (HREV5-RET-01)", async () => {
+    answer({ items: [], exhausted: true, supply: null, anchoredSupply: { gateHeldBack: 146, belowBar: 78 } });
+    const page = await makeStore()
+      .dispatch(api.endpoints.loadMoreFeed.initiate({ row: "similar", anchorTitleId: "a", excludeTitleIds: [] }))
+      .unwrap();
+    expect(page.anchoredSupply).toEqual({ gateHeldBack: 146, belowBar: 78 });
+    expect(page.supply).toBeNull();
   });
 
   it("reads an absent supply (every non-genre row today) as null, and an absent exhausted as dry", async () => {
     answer({ items: [] });
     const page = await makeStore().dispatch(api.endpoints.loadMoreFeed.initiate({ row: "similar", excludeTitleIds: [] })).unwrap();
-    expect(page).toEqual({ items: [], exhausted: true, supply: null });
+    expect(page).toEqual({ items: [], exhausted: true, supply: null, anchoredSupply: null });
   });
 });

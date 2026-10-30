@@ -1,12 +1,12 @@
 import { useState, type ReactNode } from "react";
-import type { FeedCard, RailSupply } from "../../store/feedTypes";
+import type { AnchoredSupply, FeedCard, RailSupply } from "../../store/feedTypes";
 import RecCard from "../rec/RecCard";
 import FadeScrollRow from "../FadeScrollRow";
 import RailRetryTile from "./RailRetryTile";
 import PickConditionsButton from "../rec/PickConditionsButton";
 import { Button } from "../ui/button";
 import { railSupplyLine } from "../../lib/railSupplyCopy";
-import { useGetSessionQuery } from "../../store/api";
+import { useGetFiltersQuery, useGetSessionQuery } from "../../store/api";
 
 interface Props {
   title: ReactNode;
@@ -29,6 +29,10 @@ interface Props {
   skeletonCount?: number;
   /** What the server counted behind a short last page (RET-07); see `railSupplyLine`. */
   supply?: RailSupply | null;
+  /** What an anchored rail's short last page lost to the gate and the bar (HREV5-RET-01). */
+  anchoredSupply?: AnchoredSupply | null;
+  /** The anchored rail's anchor, named in its empty line. */
+  anchorName?: string | null;
   /** Cards this rail loaded that the per-device browse toggles hide. */
   hiddenByView?: number;
   /**
@@ -60,16 +64,28 @@ export default function RecRow({
   skeletonCount = 1,
   exhausted = false,
   supply,
+  anchoredSupply = null,
+  anchorName = null,
   hiddenByView = 0,
   onSeeWhy,
 }: Props) {
   const [editorOpen, setEditorOpen] = useState(false);
   const { data: session } = useGetSessionQuery();
   const empty = items.length === 0;
+  // The bar is named in an anchored rail's line only when the bar emptied part of its window; no
+  // other rail asks for the filters.
+  const { data: filters } = useGetFiltersQuery(undefined, { skip: !(anchoredSupply && anchoredSupply.belowBar > 0) });
   // Free pages no rails: its /more is always empty and exhausted, and the tier is the only reason.
   const supplyLine =
     exhausted && !loading && !failed
-      ? railSupplyLine(supply, { empty, hiddenByView, tierCapped: session?.tier === "Free" })
+      ? railSupplyLine(supply, {
+          empty,
+          hiddenByView,
+          tierCapped: session?.tier === "Free",
+          anchored: anchoredSupply,
+          anchorName,
+          bar: filters?.minPredictedRating ?? null,
+        })
       : null;
 
   // Nothing to show and nothing asked for yet — render nothing. While a first page is in flight

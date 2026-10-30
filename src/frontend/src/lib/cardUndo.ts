@@ -31,8 +31,72 @@ export function cardUndoCopy(action: CardAction, undoFailed = false): { message:
   return { message, undoLabel: "Undo" };
 }
 
+/**
+ * Where keyboard focus goes around the toast, for an action taken from the keyboard (HREV4-PH-02).
+ * The card that held focus leaves the rail, so focus is moved to the toast's Undo, and when the
+ * toast closes it goes to `returnTo()` — a neighbouring card, else the rail or the page — never to
+ * <body>.
+ */
+export interface CardUndoFocus {
+  returnTo: () => HTMLElement | null;
+}
+
 /** Raises the undo toast for one completed card action. */
-export type CardUndoAnnounce = (action: CardAction) => void;
+export type CardUndoAnnounce = (action: CardAction, focus?: CardUndoFocus) => void;
+
+/** The cards an action's focus can return to, in the order a rail or the hero renders them. */
+const CARD_SELECTOR = '[data-testid="rec-card"], [data-testid="hero-card"]';
+
+/** A card's own way in: its first link or button, which is what Tab reaches first on it. */
+function entryOf(card: Element): HTMLElement | null {
+  return card.querySelector<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])');
+}
+
+/** Makes a region a focus target of last resort, without putting it in the Tab order. */
+function asTarget(region: Element | null): HTMLElement | null {
+  if (!(region instanceof HTMLElement) || !region.isConnected) return null;
+  if (!region.hasAttribute("tabindex")) region.setAttribute("tabindex", "-1");
+  return region;
+}
+
+/**
+ * Where focus should land once `from`'s card has left: the next card in its rail, else the previous
+ * one, else the nearest card on the page after the rail, else before it, else the rail itself, else
+ * the page's <main> — each region made focusable for the purpose. A rail can leave with its last
+ * card (the hero does), which is why the page's other cards come before the rail. The candidates
+ * are captured now, while the card is still among them, and resolved when called, so anything that
+ * has left since is skipped. Pure DOM, so it is unit-tested without a page.
+ */
+export function focusReturnTarget(from: Element): () => HTMLElement | null {
+  const card = from.closest(CARD_SELECTOR);
+  const rail = from.closest("section") ?? card?.parentElement ?? null;
+  const main = from.closest("main");
+  const inRail = rail ? Array.from(rail.querySelectorAll(CARD_SELECTOR)) : [];
+  const onPage = Array.from(from.ownerDocument.querySelectorAll(CARD_SELECTOR)).filter((c) => !inRail.includes(c));
+  const at = card ? inRail.indexOf(card) : -1;
+  // Where the rail sits among the page's other cards, in document order.
+  const split = rail ? onPage.findIndex((c) => rail.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) : -1;
+  const later = split < 0 ? [] : onPage.slice(split);
+  const earlier = (split < 0 ? onPage : onPage.slice(0, split)).reverse();
+  const candidates = [...inRail.slice(at + 1), ...inRail.slice(0, Math.max(at, 0)).reverse(), ...later, ...earlier];
+  return () => {
+    for (const candidate of candidates) {
+      if (candidate === card || !candidate.isConnected) continue;
+      const entry = entryOf(candidate);
+      if (entry) return entry;
+    }
+    return asTarget(rail) ?? asTarget(main);
+  };
+}
+
+/**
+ * Whether closing the toast may move focus: only while focus is still on the toast or has already
+ * fallen to <body>. Someone who has tabbed on to something else is left where they went.
+ */
+export function focusMayReturn(active: Element | null, toast: Element | null): boolean {
+  if (!active || active === active.ownerDocument.body || active === active.ownerDocument.documentElement) return true;
+  return !!toast && toast.contains(active);
+}
 
 /** Provided by `components/rec/CardUndo.tsx`'s `CardUndoProvider`. */
 export const CardUndoContext = createContext<CardUndoAnnounce | null>(null);

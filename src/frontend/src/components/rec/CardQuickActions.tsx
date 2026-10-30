@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { Bookmark, EyeOff, Star } from "lucide-react";
 import { useMarkNotInterestedMutation, useRateTitleMutation, useSaveForLaterMutation } from "../../store/api";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { DEFAULT_DISLIKE_REASON, DISLIKE_REASONS } from "../../lib/dislikeReasons";
-import { useCardUndo } from "../../lib/cardUndo";
+import { focusReturnTarget, useCardUndo, type CardUndoFocus } from "../../lib/cardUndo";
 import { Button } from "../ui/button";
 
 interface Props {
@@ -99,6 +99,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // whatever was clicked.
   const notForMeRef = useRef<HTMLButtonElement | null>(null);
   const reasonsDismissedOutside = useRef(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   const cancelLongPress = () => {
     if (longPressTimer.current !== null) {
@@ -142,28 +143,36 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // card stays on the rail — so it needs no toast of its own.
   const undoable = { titleId, mediaType: ref.mediaType, tmdbId, name };
 
-  const rate = (rating: number) => {
+  // KEYBOARD FOCUS (HREV4-PH-02). An action taken from the keyboard takes this card — and the focus
+  // on it — off the rail, so it hands the toast where focus should go: onto Undo, then back to the
+  // card beside this one when the toast closes. The neighbours are read NOW, while this card is still
+  // among them. A keyboard (or assistive-tech) activation is a click with `detail` 0; a pointer's is
+  // at least 1, and a pointer action leaves focus where the pointer put it.
+  const keyboardFocus = (e: MouseEvent): CardUndoFocus | undefined =>
+    e.detail === 0 && rootRef.current ? { returnTo: focusReturnTarget(rootRef.current) } : undefined;
+
+  const rate = (rating: number, focus?: CardUndoFocus) => {
     setRateOpen(false);
     // A pick you are rating from a suggestion surface is one you have seen — the eligibility rule
     // guarantees it carried no footprint until now — so the play is logged, as on the /rate grid.
     rateTitle({ ...ref, rating, markWatched: true })
       .unwrap()
-      .then(() => announce?.({ kind: "rate", ...undoable, rating }))
+      .then(() => announce?.({ kind: "rate", ...undoable, rating }, focus))
       .catch(() => undefined);
   };
 
-  const dismiss = (reason: string) => {
+  const dismiss = (reason: string, focus?: CardUndoFocus) => {
     setReasonsOpen(false);
     markNotInterested({ ...ref, reason })
       .unwrap()
-      .then(() => announce?.({ kind: "dismiss", ...undoable }))
+      .then(() => announce?.({ kind: "dismiss", ...undoable }, focus))
       .catch(() => undefined);
   };
 
-  const save = () => {
+  const save = (focus?: CardUndoFocus) => {
     saveForLater(ref)
       .unwrap()
-      .then(() => announce?.({ kind: "save", ...undoable }))
+      .then(() => announce?.({ kind: "save", ...undoable }, focus))
       .catch(() => undefined);
   };
 
@@ -184,6 +193,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           : "absolute z-10 flex flex-col left-0 top-0 gap-0 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:gap-1.5"
       }
       data-testid="card-quick-actions"
+      ref={rootRef}
     >
       <Popover open={reasonsOpen} onOpenChange={setReasonsOpen}>
         <PopoverAnchor asChild>
@@ -195,7 +205,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
                 suppressClick.current = false;
                 return;
               }
-              dismiss(DEFAULT_DISLIKE_REASON);
+              dismiss(DEFAULT_DISLIKE_REASON, keyboardFocus(e));
             }}
             onPointerDown={() => {
               cancelLongPress();
@@ -256,7 +266,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
                 variant="ghost"
                 onClick={(e) => {
                   e.preventDefault();
-                  dismiss(reason.value);
+                  dismiss(reason.value, keyboardFocus(e));
                 }}
                 className="h-auto min-h-11 justify-start rounded-md px-2 py-1.5 text-left font-normal text-fa-frost hover:bg-fa-frost/10 hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
                 data-testid={`quick-reason-${reason.value}`}
@@ -271,7 +281,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
         variant="ghost"
         onClick={(e) => {
           e.preventDefault();
-          save();
+          save(keyboardFocus(e));
         }}
         aria-label={`Save for later — ${name}`}
         title="Save for later"
@@ -330,7 +340,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
                 key={value}
                 onClick={(e) => {
                   e.preventDefault();
-                  rate(value);
+                  rate(value, keyboardFocus(e));
                 }}
                 aria-label={`${value} out of 10`}
                 className="h-11 w-11 p-0 font-normal [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-9 rounded-md bg-fa-glass tabular-nums text-fa-frost hover:border-fa-frost/40 hover:bg-fa-glass hover:text-fa-frost-bright"

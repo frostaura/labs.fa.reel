@@ -50,7 +50,9 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
             variant="link"
             onClick={() => void refetch()}
             disabled={isFetching}
-            className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11"
+            // 44 × 44 on a touch screen, both ways: min-h alone left the word "Retry" a 29 px-wide
+            // target (HREV5-PH-03).
+            className="h-auto p-0 text-xs font-normal text-fa-frost underline underline-offset-2 coarse:min-h-11 coarse:min-w-11"
             data-testid="where-to-watch-retry"
           >
             {isFetching ? "retrying…" : "Retry"}
@@ -110,21 +112,28 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
             <div className="flex flex-wrap items-center gap-2" data-testid="provider-list">
               {ladder.chips.map((p) => {
                 const kinds = p.kinds.join(" · ") || "watch";
+                // The chip's visible words are the start of its accessible name (WCAG 2.5.3, axe
+                // label-content-name-mismatch): "Plex Free search", then what the link does. The
+                // spaces between the parts are real text, or the words run together for a speech
+                // user saying them ("PlexFreesearch"), and the stand-in initials are drawn by CSS so
+                // they are not words on the chip at all (HREV5-DESK-03).
                 const body = (
                   <>
                     <div className="h-8 w-8 rounded-md overflow-hidden bg-fa-ink-3 shrink-0">
                       {logoUrl(p.logoPath) ? (
                         <img src={logoUrl(p.logoPath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="h-full w-full flex items-center justify-center fa-caption text-3" aria-hidden>
-                          {p.provider.slice(0, 2)}
-                        </div>
+                        <div
+                          className="h-full w-full flex items-center justify-center fa-caption text-3 before:content-[attr(data-initials)]"
+                          data-initials={p.provider.slice(0, 2)}
+                          aria-hidden
+                        />
                       )}
                     </div>
                     <div className="pr-1 min-w-0" aria-hidden>
-                      <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>
+                      <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>{" "}
                       <p className="fa-caption leading-tight flex flex-wrap items-center gap-x-1 gap-y-0.5">
-                        <span className="text-3">{kinds}</span>
+                        <span className="text-3">{kinds}</span>{" "}
                         <LinkKindPill link={p.link} />
                       </p>
                     </div>
@@ -155,7 +164,7 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                     target="_blank"
                     rel="noopener noreferrer"
                     title={`${p.provider} · ${kinds} · ${LINK_DESCRIPTION[p.link]}`}
-                    aria-label={`${p.provider} — ${kinds} — ${LINK_DESCRIPTION[p.link]}`}
+                    aria-label={`${p.provider} ${kinds} ${LINK_LABEL[p.link]} — ${LINK_DESCRIPTION[p.link]}`}
                     className={`${chipClass} transition hover:border-fa-frost/40`}
                     data-testid="provider-chip"
                     data-tier={p.tier}
@@ -165,18 +174,23 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                   </a>
                 );
               })}
-              {ladder.tmdbOnlyCount > 0 && ladder.tmdbUrl && (
-                <a
-                  href={ladder.tmdbUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label={`Rent or buy from ${ladder.tmdbOnlyCount} more store${ladder.tmdbOnlyCount === 1 ? "" : "s"} on the TMDB watch page`}
-                  className="fa-caption inline-flex min-h-11 items-center gap-1 rounded-lg border border-fa-edge bg-fa-glass px-3 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
-                  data-testid="tmdb-more-link"
-                >
-                  {ladder.chips.length > 0 ? "More stores" : `Rent or buy from ${ladder.tmdbOnlyCount} store${ladder.tmdbOnlyCount === 1 ? "" : "s"}`} via TMDB →
-                </a>
-              )}
+              {ladder.tmdbOnlyCount > 0 && ladder.tmdbUrl && (() => {
+                const stores = `${ladder.tmdbOnlyCount} ${ladder.chips.length > 0 ? "more " : ""}store${ladder.tmdbOnlyCount === 1 ? "" : "s"}`;
+                const visible = `${ladder.chips.length > 0 ? "More stores" : `Rent or buy from ${stores}`} via TMDB`;
+                return (
+                  <a
+                    href={ladder.tmdbUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    // Starts with its visible words, as the chips do (HREV5-DESK-03).
+                    aria-label={ladder.chips.length > 0 ? `${visible} — rent or buy from ${stores} on the TMDB watch page` : `${visible} — opens the TMDB watch page`}
+                    className="fa-caption inline-flex min-h-11 items-center gap-1 rounded-lg border border-fa-edge bg-fa-glass px-3 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
+                    data-testid="tmdb-more-link"
+                  >
+                    {visible} <span aria-hidden>→</span>
+                  </a>
+                );
+              })()}
             </div>
           );
         })()

@@ -18,7 +18,9 @@ import type { ProviderEntry } from "../store/titleTypes";
  *    deep link to the title, "via TMDB" for the TMDB watch page.
  * 3. **One brand, one chip.** "Starz", "Starz Amazon Channel", "Starz Apple TV Channel" and "Starz
  *    Roku Premium Channel" are one subscription sold through four storefronts; listed separately
- *    they are four chips saying the same thing.
+ *    they are four chips saying the same thing. So are a brand's ad tiers ("Amazon Prime Video with
+ *    Ads", "… Free with Ads") and its own channel ("Plex Channel" beside "Plex"): Trafficked's Watch
+ *    tonight listed three Amazon chips and two Plex ones in a 17-chip wall (HREV5-DESK-08).
  */
 
 /** What tapping the chip actually does. */
@@ -88,9 +90,31 @@ export const LINK_DESCRIPTION: Record<ProviderLink, string> = {
 /** Storefront suffixes that resell another brand's subscription ("Starz Amazon Channel" → "Starz"). */
 const CHANNEL_SUFFIX = / (Amazon|Apple TV|Roku Premium) Channel$/;
 
-/** The subscription brand a provider name sells. Only storefront channels are folded. */
-export function providerBrand(name: string): string {
-  return name.replace(CHANNEL_SUFFIX, "");
+/**
+ * A brand's ad-supported tiers ("Amazon Prime Video with Ads", "Amazon Prime Video Free with Ads",
+ * "Netflix basic with Ads"): the same service at a lower price, never a different one (HREV5-DESK-08).
+ */
+const AD_TIER_SUFFIX = / (?:Free |basic |Standard )?with Ads$/i;
+
+/** A bare "<Brand> Channel" ("Plex Channel"): folded only beside its brand's own listing. */
+const BARE_CHANNEL = /^(.+) Channel$/;
+
+/**
+ * The subscription brand a provider name sells. Storefront channels and ad tiers always fold. A
+ * bare " Channel" folds only when `listed` (the other brands in the same list) holds its base name:
+ * "Plex Channel" is Plex beside Plex, but "The Roku Channel" and "Hallmark Channel" are brands of
+ * their own and keep their names.
+ */
+export function providerBrand(name: string, listed?: ReadonlySet<string>): string {
+  const base = name.replace(AD_TIER_SUFFIX, "").replace(CHANNEL_SUFFIX, "");
+  const bare = listed ? BARE_CHANNEL.exec(base) : null;
+  return bare && listed!.has(bare[1]) ? bare[1] : base;
+}
+
+/** Each name's brand, with the bare-channel fold decided against the whole list. */
+function brandsOf(names: readonly string[]): (name: string) => string {
+  const listed = new Set(names.map((n) => providerBrand(n)));
+  return (name) => providerBrand(name, listed);
 }
 
 const LINK_RANK: Record<ProviderLink, number> = { deep: 0, search: 1, tmdb: 2 };
@@ -100,8 +124,9 @@ export function providerLadder(providers: ProviderEntry[], tmdbWatchPage: string
   // Fold storefront channels into their brand, keeping the earliest (highest-priority) entry's
   // name and logo, the union of the kinds and the strongest link any of them has.
   const byBrand = new Map<string, { entry: ProviderEntry; order: number; kinds: Set<string>; link: ProviderLink; url: string }>();
+  const brandOf = brandsOf(providers.map((p) => p.provider));
   providers.forEach((p, order) => {
-    const brand = providerBrand(p.provider);
+    const brand = brandOf(p.provider);
     const link = providerLink(p.linkKind);
     const existing = byBrand.get(brand);
     if (!existing) {
@@ -156,8 +181,9 @@ export function providerLadder(providers: ProviderEntry[], tmdbWatchPage: string
 export function cardProviders<T extends { name: string }>(providers: readonly T[] | null | undefined, max = 3): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
+  const brandOf = brandsOf((providers ?? []).map((p) => p.name));
   for (const p of providers ?? []) {
-    const brand = providerBrand(p.name);
+    const brand = brandOf(p.name);
     if (seen.has(brand)) continue;
     seen.add(brand);
     out.push(p);

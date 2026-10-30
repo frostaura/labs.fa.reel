@@ -571,6 +571,7 @@ export default function TitleDetail() {
                         key={`similar:${title.titleId}`}
                         title={<span className="text-fa-frost-bright">More like this</span>}
                         context={{ row: "similar", anchorTitleId: title.titleId, genre: null }}
+                        anchorName={title.name}
                         seed={[]}
                         filter={DEFAULT_BROWSE_FILTER}
                         // A row of skeletons while the first page is out, and a time limit on it:

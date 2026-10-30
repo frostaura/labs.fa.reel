@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
 
@@ -386,4 +387,58 @@ test.describe("person page", () => {
     await expect(page.getByText("Credit 1")).toBeVisible();
     await expect(page.getByTestId("person-hidden")).toHaveCount(0);
   });
+});
+
+/**
+ * HREV5-DESK-03: on real data axe found 16 label-content-name-mismatch nodes on /saved, every one a
+ * provider chip or the "More stores via TMDB" link: "Plex Free search" on screen, "Plex — Free —
+ * opens a search on the provider" to a speech user, who says what they see and gets no match. Each
+ * fixture varies what a chip shows — a logo or the stand-in initials, one kind or several, each link
+ * kind — and the trailing link in both its forms.
+ */
+test.describe("where-to-watch names start with what they show (HREV5-DESK-03)", () => {
+  const providers = (withChips: boolean) => ({
+    region: "US", attribution: "Data from JustWatch via TMDB", tmdbWatchPage: "https://www.themoviedb.org/movie/2001/watch",
+    providers: [
+      ...(withChips
+        ? [
+            { provider: "Plex", logoPath: null, kinds: ["Free"], linkKind: "direct", url: "https://watch.plex.tv/search?q=x", displayPriority: 1 },
+            { provider: "Amazon Prime Video", logoPath: "/pvske1MyAoymrs5bguRfVqYiM9a.jpg", kinds: ["Flatrate"], linkKind: "direct", url: "https://www.amazon.com/s?k=x", displayPriority: 2 },
+            { provider: "Amazon Prime Video Free with Ads", logoPath: null, kinds: ["Ads"], linkKind: "tmdb", url: "https://www.themoviedb.org/movie/2001/watch", displayPriority: 3 },
+            { provider: "Criterion Channel", logoPath: null, kinds: ["Flatrate"], linkKind: "deep", url: "https://www.criterionchannel.com/x", displayPriority: 4 },
+            { provider: "Philo", logoPath: null, kinds: ["Flatrate"], linkKind: "tmdb", url: "", displayPriority: 5 },
+          ]
+        : []),
+      { provider: "Vudu", logoPath: null, kinds: ["Rent", "Buy"], linkKind: "tmdb", url: "https://www.themoviedb.org/movie/2001/watch", displayPriority: 6 },
+      { provider: "Microsoft Store", logoPath: null, kinds: ["Buy"], linkKind: "tmdb", url: "https://www.themoviedb.org/movie/2001/watch", displayPriority: 7 },
+    ],
+  });
+
+  for (const withChips of [true, false]) {
+    test(`axe finds no name/content mismatch ${withChips ? "across every chip form" : "on a stores-only list"}`, async ({ page }) => {
+      await page.route("**/images.tmdb.org/**", (route) => route.fulfill({ status: 200, contentType: "image/gif", body: Buffer.from("R0lGODlhAQABAAAAACw=", "base64") }));
+      await bootTitle(page, {}, {
+        beforeGoto: (p) => mockJson(p, "**/api/titles/movie/2001/providers", providers(withChips)),
+      });
+      const block = page.getByTestId("where-to-watch");
+      await block.scrollIntoViewIfNeeded();
+      await expect(page.getByTestId("tmdb-more-link")).toBeVisible();
+      if (withChips) {
+        await expect(page.getByTestId("provider-chip")).toHaveCount(4);
+        await expect(page.getByRole("link", { name: "Plex Free search — opens a search on the provider" })).toBeVisible();
+        await expect(page.getByRole("link", { name: /^Amazon Prime Video Stream · Free \(ads\) search — / })).toBeVisible();
+        await expect(page.getByTestId("tmdb-more-link")).toHaveAccessibleName("More stores via TMDB — rent or buy from 2 more stores on the TMDB watch page");
+        // The stand-in initials are drawn, not written: no stray "Pl" in the chip's words.
+        await expect(page.getByRole("link", { name: /^Plex/ })).toHaveText("Plex Free search");
+        // …and still drawn: the ::before that carries them exists (Tailwind emitted the rule).
+        const before = await page.locator('[data-initials="Pl"]').evaluate((el) => getComputedStyle(el, "::before").content);
+        expect(before).not.toMatch(/^(none|normal)$/);
+      } else {
+        await expect(page.getByTestId("provider-chip")).toHaveCount(0);
+        await expect(page.getByTestId("tmdb-more-link")).toHaveAccessibleName("Rent or buy from 2 stores via TMDB — opens the TMDB watch page");
+      }
+      const found = await new AxeBuilder({ page }).include('[data-testid="where-to-watch"]').withRules(["label-content-name-mismatch"]).analyze();
+      expect(found.violations.flatMap((v) => v.nodes.map((n) => `${v.id}: ${n.target.join(" ")}`))).toEqual([]);
+    });
+  }
 });

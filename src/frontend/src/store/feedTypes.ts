@@ -152,11 +152,25 @@ export interface RailSupply {
   clearingFloor: number;
 }
 
+/**
+ * What a short anchored rail's window lost (FeedEndpoints' `AnchoredSupply`, HREV2-RET-05): sent for
+ * "more like this" and "because you loved" pages that came up short, null elsewhere. Neither count is
+ * the account's conditions, which the window had already applied.
+ */
+export interface AnchoredSupply {
+  /** Unseen titles above the for-you bar that the anchored gate refused: too little shared with the anchor. */
+  gateHeldBack: number;
+  /** Titles in the anchor's window under the account's for-you bar. */
+  belowBar: number;
+}
+
 export interface MoreFeedResponse {
   items: FeedCard[];
   exhausted: boolean;
   /** Present when the page came up short and the server counted why (see {@link RailSupply}). */
   supply?: RailSupply | null;
+  /** Present when an anchored page came up short (see {@link AnchoredSupply}). */
+  anchoredSupply?: AnchoredSupply | null;
 }
 
 export interface ContinueEntry {

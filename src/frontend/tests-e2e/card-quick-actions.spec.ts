@@ -511,4 +511,89 @@ test.describe("card quick actions", () => {
     expect(reasonScan.violations.map((v) => v.id)).toEqual([]);
     await context.close();
   });
+
+  // HREV4-PH-02 (WCAG 2.4.3, 2.1.1): a keyboard action takes the focused card off the rail, and focus
+  // used to fall to <body> with nothing to take it — Undo was 161 Tabs away on real data. Now a
+  // keyboard action moves focus to the toast's Undo (0 Tabs), and closing the toast hands it to the
+  // next card, else the previous one, else the rail — never to <body>. A pointer action leaves focus
+  // where the pointer put it. Varied: every action, first/middle/last card, the hero's only card.
+  test("a keyboard action puts focus on Undo, and the closed toast hands it to the next card, never <body> (HREV4-PH-02)", async ({ page }) => {
+    await bootHome(page);
+    await page.route(/\/api\/titles\/movie\/\d+\/(reactions\/\w+|rating)$/, (route) => {
+      const rated = route.request().url().endsWith("/rating") && route.request().method() === "POST";
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rated ? { userRating: 7 } : {}) });
+    });
+    const toast = page.getByTestId("card-undo-toast");
+    const undo = page.getByTestId("card-undo-toast-undo");
+    const pick = (n: number) => page.getByTestId("rec-card").filter({ hasText: `Pick ${n}` });
+    const focusedTestId = () => page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return el === document.body || !el ? "<body>" : (el.dataset.testid ?? el.closest("[data-testid]")?.getAttribute("data-testid") ?? el.tagName);
+    });
+    /**
+     * Undo holds focus with no Tab at all (the acceptance allows one), and still holds it a few
+     * frames later: under the dev server's StrictMode the toast's column was detached and re-attached
+     * just after Undo took focus, which dropped it to <body>. Chromium's Tab then happened to land
+     * on Undo; WebKit's Tab skips buttons, so it never did.
+     */
+    const expectUndoFocused = async () => {
+      await expect(toast).toBeVisible();
+      await expect(undo).toBeFocused();
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50)))));
+      await expect(undo).toBeFocused();
+    };
+
+    // Save from the first rail card, Enter on the button: Undo has focus; Undo hands focus to the
+    // card that was next (Pick 7), and the saved card comes back.
+    await pick(6).getByTestId("quick-save").focus();
+    await page.keyboard.press("Enter");
+    await expect(pick(6)).toHaveCount(0);
+    await expectUndoFocused();
+    await page.keyboard.press("Enter");
+    await expect(toast).toHaveCount(0);
+    await expect(pick(6)).toHaveCount(1);
+    await expect(pick(7).getByTestId("rec-card-link")).toBeFocused();
+
+    // Not for me from a middle card, then the toast's Dismiss: focus goes to the next card (Pick 8).
+    await pick(7).getByTestId("quick-not-interested").focus();
+    await page.keyboard.press("Enter");
+    await expect(pick(7)).toHaveCount(0);
+    await expectUndoFocused();
+    await page.getByTestId("card-undo-toast-dismiss").focus();
+    await page.keyboard.press("Enter");
+    await expect(toast).toHaveCount(0);
+    await expect(pick(8).getByTestId("rec-card-link")).toBeFocused();
+
+    // Rate the LAST card through its picker: Undo has focus, and with no card after it, Dismiss
+    // hands focus back to the one before (Pick 8).
+    await pick(9).getByTestId("quick-rate").focus();
+    await page.keyboard.press("Enter");
+    await page.getByTestId("quick-rate-7").focus();
+    await page.keyboard.press("Enter");
+    await expect(pick(9)).toHaveCount(0);
+    await expectUndoFocused();
+    await page.getByTestId("card-undo-toast-dismiss").focus();
+    await page.keyboard.press("Enter");
+    await expect(pick(8).getByTestId("rec-card-link")).toBeFocused();
+
+    // The hero's only card, from the reason picker: its rail leaves with it, so focus goes on to the
+    // next card on the page — the first rail card, Pick 6 — rather than to <body>.
+    const hero = page.getByTestId("hero-card");
+    await hero.getByTestId("quick-not-interested").focus();
+    await page.keyboard.press("ArrowDown");
+    await page.getByTestId("quick-reason-genre").focus();
+    await page.keyboard.press("Enter");
+    await expect(hero).toHaveCount(0);
+    await expectUndoFocused();
+    await page.getByTestId("card-undo-toast-dismiss").focus();
+    await page.keyboard.press("Enter");
+    await expect(pick(6).getByTestId("rec-card-link")).toBeFocused();
+    expect(await focusedTestId()).not.toBe("<body>");
+
+    // A pointer action does not move focus to the toast.
+    await pick(8).hover();
+    await pick(8).getByTestId("quick-save").click();
+    await expect(toast).toBeVisible();
+    await expect(undo).not.toBeFocused();
+  });
 });

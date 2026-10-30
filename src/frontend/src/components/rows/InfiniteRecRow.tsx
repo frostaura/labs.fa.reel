@@ -20,6 +20,8 @@ interface Props {
   skeletonCount?: number;
   /** Opens the page's conditions editor from the rail's "See why" (RET-07); else the rail mounts one. */
   onSeeWhy?: () => void;
+  /** The anchor's name, for an anchored rail's empty line (HREV5-RET-01). */
+  anchorName?: string | null;
 }
 
 /**
@@ -29,13 +31,13 @@ interface Props {
  * has no seed (the detail page's "more like this"), a top-up when its seed is thin — only once it
  * nears the viewport; a seeded row renders its snapshot slice immediately either way.
  */
-export default function InfiniteRecRow({ title, context, seed, filter, mood = null, timeoutMs, skeletonCount, onSeeWhy }: Props) {
+export default function InfiniteRecRow({ title, context, seed, filter, mood = null, timeoutMs, skeletonCount, onSeeWhy, anchorName = null }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const near = useNearViewport(ref);
   // Thread the browse-filter medium to the server so the paged window + TMDB deepen are media-specific;
   // the parent re-keys this row on filter.media, so a switch remounts it with the correct-medium seed.
   const mediaType = filter.media === "all" ? undefined : filter.media;
-  const { items, loadMore, retry, loading, failed, idle, exhausted, supply } = useInfiniteRow(
+  const { items, loadMore, retry, loading, failed, idle, exhausted, supply, anchoredSupply } = useInfiniteRow(
     { ...context, mediaType },
     seed,
     { active: near, timeoutMs }
@@ -63,6 +65,8 @@ export default function InfiniteRecRow({ title, context, seed, filter, mood = nu
         exhausted={exhausted}
         skeletonCount={skeletonCount}
         supply={supply}
+        anchoredSupply={anchoredSupply}
+        anchorName={anchorName}
         hiddenByView={items.length - visible.length}
         onSeeWhy={onSeeWhy}
       />
