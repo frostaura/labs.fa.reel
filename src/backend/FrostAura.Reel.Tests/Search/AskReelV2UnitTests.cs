@@ -1123,10 +1123,8 @@ public class AskReelV2UnitTests
         {
             "chitchat" => ConversationStateReducer.Apply(empty, Plan(TurnAct.Chitchat), MediaScope.Any),
             "item" => ConversationStateReducer.Apply(empty, Plan(TurnAct.ItemQuestion), MediaScope.Any),
-            "clarify" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Any)
-                with { ClarifiedOnce = true },
-            "clarify-media" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Shows)
-                with { ClarifiedOnce = true },
+            "clarify" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Any) with { ClarifiedOnce = true },
+            "clarify-media" => ConversationStateReducer.Apply(empty, Plan(TurnAct.NewRequest) with { ClarifyQuestion = "Film or series?" }, MediaScope.Shows) with { ClarifiedOnce = true },
             "topic" => empty with { Version = 1, Hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])] } },
             "person" => empty with { Version = 1, Hard = HardConstraints.None with { People = [new PersonConstraint("Liam Neeson", null, PersonRole.Cast)] } },
             "years" => empty with { Version = 1, Hard = HardConstraints.None with { Years = new YearRange(2015, null) } },
