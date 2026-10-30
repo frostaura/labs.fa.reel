@@ -149,6 +149,45 @@ public sealed class TasteNarrativeService(
         return current;
     }
 
+    /// <summary>The stale reason a read reports when the account's taste moved under the narrative.</summary>
+    public const string StaleTasteMoved = "taste-moved";
+
+    /// <summary>The stale reason a read reports when the narrative was written under an older prompt.</summary>
+    public const string StaleOutdatedPrompt = "outdated-prompt";
+
+    /// <summary>
+    /// Why the stored narrative is no longer current, or null when it is. Computed on every read
+    /// and independent of whether a rewrite can be queued: a narrative the writer would no longer
+    /// stand behind is stale whether or not the writer is configured or its breaker is open.
+    ///
+    /// <para><b>Taste moved</b> — the fingerprint moved, or the account crossed a crowd band the
+    /// fingerprint's coarser bands miss (IREV3S-07). Reported first: it is the claim about the
+    /// person, and it holds for an edited narrative too.</para>
+    ///
+    /// <para><b>Outdated prompt</b> — generated text from an older prompt generation, which the
+    /// current writer would not produce (a v2 narrative read a -0.18 offset as "below the crowd"
+    /// beside a "with the crowd" tile; HREV5-DESK-07 / HREV6-DESK-01). It used to queue a rewrite
+    /// and report stale=false, so with no key or an open breaker the old text stood unflagged. Not
+    /// reported for a user-edited narrative: the shown text is then the user's own words, which no
+    /// prompt generation wrote, and the edit wins everywhere.</para>
+    /// </summary>
+    public static string? StaleReason(
+        AccountTasteNarrative narrative, string currentProfileHash, TasteFacts currentFacts, int currentPromptVersion)
+    {
+        if (!string.Equals(narrative.ProfileHash, currentProfileHash, StringComparison.Ordinal)
+            || CrowdStanceMoved(narrative.FactsJson, currentFacts))
+        {
+            return StaleTasteMoved;
+        }
+
+        if (narrative.PromptVersion != currentPromptVersion && string.IsNullOrWhiteSpace(narrative.EditedText))
+        {
+            return StaleOutdatedPrompt;
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// True when the account has crossed a crowd band (with / kinder than / harsher than, at
     /// ±<see cref="ContrarianFact.Band"/>) since the stored narrative's facts were taken.
