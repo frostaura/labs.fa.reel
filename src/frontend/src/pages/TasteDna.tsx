@@ -34,7 +34,7 @@ import LoadFailed from "../components/ui/load-failed";
 import { CHART_CHROME, CHART_SERIES, seriesColour } from "../design/chartPalette";
 import { Button } from "../components/ui/button";
 import { COARSE_TAP } from "../lib/tapTarget";
-import { driftChartLabel, histogramChartLabel } from "../lib/tasteDna";
+import { contrarianTile, driftChartLabel, histogramChartLabel } from "../lib/tasteDna";
 
 // From the chart palette (WS-9): every series holds 3:1 on every ink surface, and the axis colour is
 // the AA tertiary text the rest of the page uses.
@@ -120,6 +120,7 @@ export default function TasteDna() {
 
   const driftData = data.drift.map((d) => ({ year: d.year, ...d.shares }));
   const driftGenres = data.topGenres.slice(0, 5).map((g) => g.genre);
+  const contrarian = contrarianTile(data.contrarianScore);
 
   // Export the dedicated offscreen template (components/dna/ShareCard), never this page.
   // Screenshotting the live dashboard is what produced the half-blank card: its Recharts
@@ -201,13 +202,12 @@ export default function TasteDna() {
             <p className="fa-stat-label">show completion</p>
             <p className="fa-stat-value">{Math.round(data.showCompletionRate * 100)}%</p>
           </div>
-          <div className="fa-card px-4 py-3">
+          <div className="fa-card px-4 py-3" data-testid="contrarian-tile">
             <p className="fa-stat-label">contrarian score</p>
-            <p className="fa-stat-value">
-              {data.contrarianScore > 0 ? "+" : ""}
-              {data.contrarianScore.toFixed(1)}
+            <p className="fa-stat-value" data-testid="contrarian-value">
+              {contrarian.value}
             </p>
-            <p className="fa-caption text-fa-frost-dim">{data.contrarianScore > 0.3 ? "kinder than the crowd" : data.contrarianScore < -0.3 ? "harsher than the crowd" : "with the crowd"}</p>
+            <p className="fa-caption text-fa-frost-dim" data-testid="contrarian-caption">{contrarian.caption}</p>
           </div>
         </section>
 

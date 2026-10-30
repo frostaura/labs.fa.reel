@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   counterfactualMatchLine,
+  counterfactualWindowLabel,
+  distinctCounterfactualWindows,
   calibrationChartLabel,
   offeredWindows,
   singleWindowNote,
@@ -15,7 +17,7 @@ import {
   sourceNote,
   PROVENANCE_NOTE,
 } from "./trackRecordCopy";
-import type { AccuracyPayload } from "../store/api";
+import type { AccuracyPayload, CounterfactualWindow } from "../store/api";
 
 const payload = (overrides: Partial<AccuracyPayload> = {}): AccuracyPayload => ({
   window: "90d",
@@ -251,5 +253,69 @@ describe("counterfactualMatchLine", () => {
     expect(counterfactualMatchLine({ matchDays: 14, viaReelUnmatchedCount: 0 })).toBe("matched within 14 days");
     expect(counterfactualMatchLine({ matchDays: 14, viaReelUnmatchedCount: 3 })).toBe("matched within 14 days · 3 unmatched");
     expect(counterfactualMatchLine({ matchDays: 1, viaReelUnmatchedCount: 1 })).toBe("matched within 1 day · 1 unmatched");
+  });
+});
+
+/**
+ * HREV5-DESK-04 (G-9): "last 365 days" and "all time" printed identical figures twice. A wider
+ * window that matches a narrower one prints once, under the widest name; any one number that
+ * differs keeps both rows.
+ */
+describe("distinctCounterfactualWindows", () => {
+  const year: CounterfactualWindow = {
+    window: "last365Days", days: 365, viaReelCount: 120, viaReelMeanRating: 6.07, otherCount: 152,
+    otherMeanRating: 6.48, delta: -0.41, viaReelUnmatchedCount: 0, matchDays: 14,
+  };
+  const all: CounterfactualWindow = { ...year, window: "allTime", days: null };
+
+  it("prints identical windows once, under the widest window's name", () => {
+    const rows = distinctCounterfactualWindows([year, all]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].window.window).toBe("allTime");
+    expect(rows[0].label).toBe("all time (the same ratings as the last 365 days)");
+  });
+
+  it("collapses whatever order the windows arrive in", () => {
+    const rows = distinctCounterfactualWindows([all, year]);
+    expect(rows.map((r) => r.window.window)).toEqual(["allTime"]);
+  });
+
+  // One field at a time: each is enough to make the windows hold different ratings.
+  const differing: [string, Partial<CounterfactualWindow>][] = [
+    ["found-yourself count", { otherCount: 2022 }],
+    ["via-Reel count", { viaReelCount: 121 }],
+    ["via-Reel mean", { viaReelMeanRating: 6.08 }],
+    ["found-yourself mean", { otherMeanRating: 6.77 }],
+    ["gap", { delta: -0.42 }],
+    ["unmatched count", { viaReelUnmatchedCount: 1 }],
+    ["matching band", { matchDays: 7 }],
+    ["a missing mean", { otherMeanRating: null }],
+  ];
+  for (const [field, change] of differing) {
+    it(`keeps both rows, narrowest first, when only the ${field} differs`, () => {
+      const rows = distinctCounterfactualWindows([{ ...all, ...change }, year]);
+      expect(rows.map((r) => r.label)).toEqual(["last 365 days", "all time"]);
+    });
+  }
+
+  it("folds a run of matching windows into the widest, and keeps a different one apart", () => {
+    const quarter: CounterfactualWindow = { ...year, window: "last90Days", days: 90, otherCount: 40 };
+    const rows = distinctCounterfactualWindows([all, quarter, year]);
+    expect(rows.map((r) => r.label)).toEqual(["last 90 days", "all time (the same ratings as the last 365 days)"]);
+  });
+
+  it("matches two empty windows, whose means are both missing", () => {
+    const empty = { ...year, viaReelCount: 0, otherCount: 0, viaReelMeanRating: null, otherMeanRating: null, delta: null };
+    expect(distinctCounterfactualWindows([empty, { ...empty, window: "allTime", days: null }])).toHaveLength(1);
+  });
+
+  it("passes a single window through under its own name, and nothing for nothing", () => {
+    expect(distinctCounterfactualWindows([year]).map((r) => r.label)).toEqual(["last 365 days"]);
+    expect(distinctCounterfactualWindows([])).toEqual([]);
+  });
+
+  it("names a window by its days, and the open window as all time", () => {
+    expect(counterfactualWindowLabel({ days: 365 })).toBe("last 365 days");
+    expect(counterfactualWindowLabel({ days: null })).toBe("all time");
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TasteDnaPayload } from "../store/api";
 import { SHARE_CREATOR_COUNT, SHARE_GENRE_COUNT, shareCardModel } from "./shareCard";
-import { genreBarGeometry, meanMarkerPct } from "./tasteDna";
+import { contrarianTile, genreBarGeometry, meanMarkerPct } from "./tasteDna";
 
 const payload = (overrides: Partial<TasteDnaPayload> = {}): TasteDnaPayload => ({
   userMean: 6.8,
@@ -47,6 +47,20 @@ describe("shareCardModel", () => {
   it("keeps the negative sign on a harsher-than-the-crowd contrarian score", () => {
     const model = shareCardModel(payload({ contrarianScore: -1.25 }));
     expect(model.stats[3].value).toBe("-1.3");
+  });
+
+  // HREV5-DESK-07 follow-on: the card rounded with raw toFixed while the page tile rounds half away
+  // from zero, so the exported card disagreed with the page it was shared from.
+  it.each([
+    [-0.35, "-0.4"],
+    [0.35, "+0.4"],
+    [0.15, "+0.2"],
+    [-0.04, "0.0"],
+    [-0.2, "-0.2"],
+  ])("prints contrarian %s as %s, the page tile's value", (score, value) => {
+    const model = shareCardModel(payload({ contrarianScore: score }));
+    expect(model.stats[3].value).toBe(value);
+    expect(model.stats[3].value).toBe(contrarianTile(score).value);
   });
 
   it("caps the fingerprint at the template's row budget and humanises genre slugs", () => {

@@ -33,6 +33,7 @@ import {
   biasNote,
   calibrationChartLabel,
   counterfactualMatchLine,
+  distinctCounterfactualWindows,
   headlineSentence,
   learnedSentence,
   num,
@@ -364,11 +365,9 @@ export default function TrackRecord() {
           <Population note={data.populations?.counterfactual} testId="counterfactual-population" />
           <div className="mb-3" />
           <div className="space-y-1">
-            {data.counterfactual.map((w) => (
-              <p key={w.window} className="fa-body">
-                <span className="text-3">
-                  {w.days == null ? "all time" : `last ${w.days} days`}:
-                </span>{" "}
+            {distinctCounterfactualWindows(data.counterfactual).map(({ window: w, label }) => (
+              <p key={w.window} className="fa-body" data-testid="counterfactual-row">
+                <span className="text-3">{label}:</span>{" "}
                 via Reel {num(w.viaReelMeanRating)} ({w.viaReelCount}) · found yourself{" "}
                 {num(w.otherMeanRating)} ({w.otherCount}) ·{" "}
                 <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>

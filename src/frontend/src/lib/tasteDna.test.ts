@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  contrarianTile,
+  CROWD_BAND,
   divergingBars,
   driftChartLabel,
   genreBarGeometry,
@@ -188,5 +190,45 @@ describe("histogramChartLabel", () => {
 
   it("says when there is nothing to read", () => {
     expect(histogramChartLabel([], 0)).toBe("How you rate: no ratings yet.");
+  });
+});
+
+/**
+ * HREV5-DESK-07: the tile, the narrative and the Home why-lines read one crowd band, the backend's
+ * ContrarianFact.Band. Inside ±0.3 (edge included) all three say "with the crowd" — the current
+ * narrative prompt forbids "above/below the crowd" there and the keyless stub writes "Overall you
+ * rate much as the crowd does." — so the tile may not invent a "slightly harsher" band of its own.
+ */
+describe("contrarianTile", () => {
+  it.each([
+    [-0.2, "-0.2", "with the crowd"],
+    [0.2, "+0.2", "with the crowd"],
+    [-0.3, "-0.3", "with the crowd"],
+    [0.3, "+0.3", "with the crowd"],
+    [-0.31, "-0.3", "harsher than the crowd"],
+    [0.31, "+0.3", "kinder than the crowd"],
+    [-0.35, "-0.4", "harsher than the crowd"],
+    [0.35, "+0.4", "kinder than the crowd"],
+    [0.15, "+0.2", "with the crowd"],
+    [-1.25, "-1.3", "harsher than the crowd"],
+    [0.06, "+0.1", "with the crowd"],
+    [-0.04, "0.0", "with the crowd"],
+    [0.04, "0.0", "with the crowd"],
+    [0, "0.0", "with the crowd"],
+  ])("%s reads %s, %s", (score, value, caption) => {
+    expect(contrarianTile(score)).toEqual({ value, caption });
+  });
+
+  it("never prints a minus on a score that rounds to nothing", () => {
+    expect(contrarianTile(-0.049).value).toBe("0.0");
+  });
+
+  it("captions only the three stances the narrative and why-lines can state", () => {
+    const captions = new Set([-2, -0.31, -0.3, -0.2, -0.04, 0, 0.04, 0.2, 0.3, 0.31, 2].map((s) => contrarianTile(s).caption));
+    expect([...captions].sort()).toEqual(["harsher than the crowd", "kinder than the crowd", "with the crowd"]);
+  });
+
+  it("draws the band edge where the backend's crowd stance does", () => {
+    expect(CROWD_BAND).toBe(0.3);
   });
 });

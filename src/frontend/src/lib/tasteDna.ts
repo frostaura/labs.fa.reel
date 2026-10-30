@@ -173,3 +173,30 @@ export function histogramChartLabel(histogram: { rating: number; count: number }
     .map((bar) => `${bar.rating}, ${bar.count} ${bar.count === 1 ? "rating" : "ratings"}`);
   return `How you rate, ratings given at each score: ${bars.join("; ")}. Your mean is ${userMean.toFixed(1)}.`;
 }
+
+/**
+ * Where the crowd band ends: beyond ±0.3 rating points the account is kinder or harsher than the
+ * crowd, and inside it (the edge included) it is "with the crowd". The same band as the backend's
+ * ContrarianFact.Band / StanceOf, which the narrative prompt, the keyless stub narrative ("Overall you
+ * rate much as the crowd does.") and the Home why-line clause (ExplanationTemplater.
+ * HarsherThanCrowdBelow) all read, so the tile, the narrative and the why-lines say one thing.
+ */
+export const CROWD_BAND = 0.3;
+
+/**
+ * The contrarian tile's value and caption. The caption is the shared crowd band read on the
+ * unrounded score — the same 2-dp number the backend bands — never a band of the tile's own: a
+ * "-0.2 · slightly harsher than the crowd" caption contradicts the narrative the current prompt and
+ * the stub write for that account ("Overall you rate much as the crowd does.") and the why-lines on
+ * Home (HREV5-DESK-07). A narrative that still says "below the crowd" at -0.2 predates the band and
+ * is stale; regenerating it is the fix, not bending the tile to it. The value rounds half away from
+ * zero with no stray minus on a score that rounds to nothing; the share card prints this same value.
+ */
+export function contrarianTile(score: number): { value: string; caption: string } {
+  // Half away from zero: Math.round would read -0.35 as -0.3 and 0.35's float as +0.3.
+  const shown = (Math.sign(score) * Math.round(Math.abs(score) * 10)) / 10;
+  const value = shown === 0 ? "0.0" : `${shown > 0 ? "+" : ""}${shown.toFixed(1)}`;
+  const caption =
+    score > CROWD_BAND ? "kinder than the crowd" : score < -CROWD_BAND ? "harsher than the crowd" : "with the crowd";
+  return { value, caption };
+}
