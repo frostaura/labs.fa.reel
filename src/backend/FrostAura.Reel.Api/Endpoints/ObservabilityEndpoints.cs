@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
@@ -19,8 +21,15 @@ public static class ObservabilityEndpoints
     /// <summary>The longest window the metrics report will read, so one request cannot scan the whole history.</summary>
     public const int MaxWindowHours = 24 * 7;
 
-    /// <summary>When this process started counting client errors (the report's honest "since").</summary>
-    private static readonly DateTime ProcessStartedAt = DateTime.UtcNow;
+    /// <summary>
+    /// When this process started — the report's honest "since" for both in-process tallies (the
+    /// client-error sink and the model-call counters). Each is a DI singleton that every report and
+    /// every model call resolves before it is counted, so the counts cover exactly the process's life.
+    /// Read from the operating system's record, not from a clock at first access: this class's static
+    /// initialiser runs on the first metrics read, which once stamped a "since" later than the events
+    /// it counted and later than the report's own <c>generatedAt</c> (HREV5-PLAT-01).
+    /// </summary>
+    internal static readonly DateTime ProcessStartedAt = ReadProcessStart();
 
     public static void MapObservabilityEndpoints(this IEndpointRouteBuilder app)
     {
@@ -76,5 +85,22 @@ public static class ObservabilityEndpoints
         })
         .Produces<MetricsReport>()
         .Produces(StatusCodes.Status401Unauthorized);
+    }
+
+    /// <summary>
+    /// The process's start, in UTC. Where the platform will not say, the machine's boot instant: an
+    /// earlier "since" than the truth still covers every counted event, where a later one would not.
+    /// </summary>
+    private static DateTime ReadProcessStart()
+    {
+        try
+        {
+            using var self = Process.GetCurrentProcess();
+            return self.StartTime.ToUniversalTime();
+        }
+        catch (Exception e) when (e is InvalidOperationException or NotSupportedException or Win32Exception)
+        {
+            return DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
+        }
     }
 }

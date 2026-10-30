@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -255,6 +256,60 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
             // The tier is read on every request, not remembered: a demoted Founder sees nothing.
             await SetTierAsync(founderId, AccountTier.Free);
             Assert.Equal(0, (await GetMetricsAsync(founder)).GetProperty("llm").GetArrayLength());
+        }
+    }
+
+    [Fact]
+    public async Task The_in_process_tallies_are_dated_from_this_process_start_not_from_the_first_metrics_read()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // HREV5-PLAT-01: a "since" taken on the first read of the report came after the events it
+        // counted and after the report's own generatedAt. A fresh host, with a report counted before
+        // the first metrics read, is the shape that exposed it.
+        DateTime processStartedAt;
+        using (var self = Process.GetCurrentProcess())
+        {
+            processStartedAt = self.StartTime.ToUniversalTime();
+        }
+
+        await using var fresh = new ReelApiFactory();
+        using var anonymous = fresh.CreateClient();
+        var beforeFirstReport = DateTime.UtcNow;
+        using (var accepted = await anonymous.PostAsJsonAsync("/api/client-errors", BrowserReport()))
+        {
+            Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+        }
+
+        // A Free account and a Founder read the same stamps: the tier hides the tally, not its date.
+        var (_, member) = await fresh.CreateSignedInAccountAsync($"since-member-{Guid.NewGuid():N}");
+        var (founderId, founder) = await fresh.CreateSignedInAccountAsync($"since-founder-{Guid.NewGuid():N}");
+        using (member)
+        using (founder)
+        {
+            using (var scope = fresh.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+                await db.Accounts.Where(a => a.Id == founderId).ExecuteUpdateAsync(s => s.SetProperty(a => a.Tier, AccountTier.Founder));
+            }
+
+            foreach (var client in new[] { member, founder, member })
+            {
+                var metrics = await GetMetricsAsync(client);
+                var generatedAt = metrics.GetProperty("generatedAt").GetDateTime().ToUniversalTime();
+                var clientErrorsSince = metrics.GetProperty("clientErrors").GetProperty("since").GetDateTime().ToUniversalTime();
+                var llmSince = metrics.GetProperty("llmSince").GetDateTime().ToUniversalTime();
+
+                Assert.True(clientErrorsSince <= generatedAt, $"since {clientErrorsSince:O} is after generatedAt {generatedAt:O}");
+                Assert.True(clientErrorsSince <= beforeFirstReport, $"since {clientErrorsSince:O} is after a report it counts ({beforeFirstReport:O})");
+                Assert.Equal(clientErrorsSince, llmSince);
+                Assert.True(
+                    (clientErrorsSince - processStartedAt).Duration() < TimeSpan.FromSeconds(1),
+                    $"since {clientErrorsSince:O} is not this process's start {processStartedAt:O}");
+            }
         }
     }
 
