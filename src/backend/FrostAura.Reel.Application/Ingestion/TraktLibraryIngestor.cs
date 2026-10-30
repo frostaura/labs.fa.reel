@@ -482,6 +482,57 @@ public class TraktLibraryIngestor(
         return new WatchlistIngestResult(items.Count, saved, alreadySaved, reelsOwn, consumed, declined);
     }
 
+    /// <summary>
+    /// The catalogue rows for Trakt's recommendations, in the order given, matched by Trakt id and
+    /// then TMDB id exactly as every other ingest path matches. A subject Reel has never seen is
+    /// added from Trakt's own metadata (the caller saves, then hydrates from TMDB within budget). A
+    /// title Reel ALREADY holds is left exactly as it is: this runs on a read path, and rewriting a
+    /// shared, TMDB-hydrated row from a recommendation payload every few hours would let Trakt's
+    /// spelling and genres overwrite TMDB's for every tenant. Ingest owns refreshing known titles.
+    /// Duplicates resolve to one entry, at the position of their first appearance.
+    /// </summary>
+    public async Task<IReadOnlyList<Title>> ResolveRecommendedTitlesAsync(
+        IReadOnlyList<TraktRecommendation> recommendations, CancellationToken ct)
+    {
+        var items = recommendations.Where(r => r.Movie is not null || r.Show is not null).ToList();
+        var movieMap = await LoadTitleMapAsync(MediaType.Movie, items.Where(i => i.Movie is not null).Select(i => i.Movie!.Ids.Trakt), ct);
+        var showMap = await LoadTitleMapAsync(MediaType.Show, items.Where(i => i.Show is not null).Select(i => i.Show!.Ids.Trakt), ct);
+        var movieMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Movie, items.Where(i => i.Movie is not null).Select(i => i.Movie!.Ids.Tmdb), ct);
+        var showMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Show, items.Where(i => i.Show is not null).Select(i => i.Show!.Ids.Tmdb), ct);
+
+        var known = movieMap.Values.Concat(showMap.Values).Concat(movieMapByTmdb.Values).Concat(showMapByTmdb.Values)
+            .Select(t => t.Id)
+            .ToHashSet();
+        var now = DateTime.UtcNow;
+        var resolved = new List<Title>(items.Count);
+        foreach (var item in items)
+        {
+            if (item.Movie is { } movie)
+            {
+                var title = ResolveOrAddTitle(movieMap, movieMapByTmdb, MediaType.Movie, movie.Ids.Trakt, movie.Ids.Tmdb, now);
+                if (!known.Contains(title.Id))
+                {
+                    IngestMapper.ApplyMovie(title, movie);
+                }
+
+                resolved.Add(title);
+            }
+            else
+            {
+                var show = item.Show!;
+                var title = ResolveOrAddTitle(showMap, showMapByTmdb, MediaType.Show, show.Ids.Trakt, show.Ids.Tmdb, now);
+                if (!known.Contains(title.Id))
+                {
+                    IngestMapper.ApplyShow(title, show);
+                }
+
+                resolved.Add(title);
+            }
+        }
+
+        return resolved.DistinctBy(t => t.Id).ToList();
+    }
+
     /// <summary>The Trakt hidden-item sections Reel records (FD-17).</summary>
     public static readonly IReadOnlyList<string> HiddenSections = ["progress_watched", "recommendations", "dropped"];
 

@@ -48,6 +48,13 @@ public enum ExposureSurface
 
     /// <summary>Reserved: the Saved queue, once it renders predictions of its own.</summary>
     Saved,
+
+    /// <summary>
+    /// A card on Home's "Trakt recommends" rail (<c>GET /api/feed/trakt-recommendations</c>). The
+    /// list is Trakt's, but the "for you" number on the card is Reel's promise, so it is logged like
+    /// any other served card — and only when the card carries one.
+    /// </summary>
+    TraktRecommendations,
 }
 
 /// <summary>

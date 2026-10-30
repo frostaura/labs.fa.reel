@@ -77,6 +77,9 @@ public sealed class OfflineTraktClient(ILogger<OfflineTraktClient> logger) : ITr
     public Task<TraktCatalogRating?> GetCatalogRatingAsync(long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) =>
         Task.FromException<TraktCatalogRating?>(Refuse("search/tmdb (catalogue rating)"));
 
+    public Task<IReadOnlyList<TraktRecommendation>> GetRecommendationsAsync(string accessToken, bool movies, int limit, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktRecommendation>>(Refuse(movies ? "recommendations/movies" : "recommendations/shows"));
+
     private HttpRequestException Refuse(string call)
     {
         var count = Interlocked.Increment(ref _refused);

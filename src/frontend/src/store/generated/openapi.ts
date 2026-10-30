@@ -574,6 +574,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/feed/trakt-recommendations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    retry?: boolean;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TraktRecommendationsResponse"];
+                    };
+                };
+                /** @description Unauthorized */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/titles/rate-suggestions": {
         parameters: {
             query?: never;
@@ -2631,6 +2675,10 @@ export interface components {
             code: string;
             state: string;
         };
+        CardProvider: {
+            name: string;
+            logoPath: null | string;
+        };
         ClientErrorMetrics: {
             /** Format: int64 */
             accepted: number | string;
@@ -2915,6 +2963,56 @@ export interface components {
             alerts: components["schemas"]["OperatorAlert"][];
             llmHealth: components["schemas"]["LlmPurposeHealth"][];
         };
+        TraktRecommendationCard: {
+            /** Format: uuid */
+            titleId: string;
+            mediaType: string;
+            /** Format: int64 */
+            tmdbId: null | number | string;
+            name: string;
+            /** Format: int32 */
+            year: null | number | string;
+            /** Format: int32 */
+            runtimeMinutes: null | number | string;
+            posterPath: null | string;
+            backdropPath: null | string;
+            genres: string[];
+            /** Format: double */
+            predictedRating: null | number | string;
+            /** Format: double */
+            crowdRating: null | number | string;
+            /** Format: int32 */
+            crowdVotes: null | number | string;
+            whyThis: string;
+            isReleased: boolean;
+            providers: components["schemas"]["CardProvider"][];
+            /** Format: int32 */
+            traktRank: number | string;
+        };
+        TraktRecommendationsResponse: {
+            state: components["schemas"]["TraktRecommendationsState"];
+            /** Format: date-time */
+            fetchedAt: null | string;
+            /** Format: int32 */
+            returnedByTrakt: number | string;
+            /** Format: int32 */
+            unresolved: number | string;
+            /** Format: int32 */
+            hiddenAsSeen: number | string;
+            /** Format: int32 */
+            hiddenAsSetAside: number | string;
+            /** Format: int32 */
+            hiddenByConditions: number | string;
+            /** Format: int32 */
+            heldBelowBar: number | string;
+            /** Format: double */
+            bar: null | number | string;
+            /** Format: int32 */
+            unscoredRemaining: number | string;
+            items: components["schemas"]["TraktRecommendationCard"][];
+        };
+        /** @enum {unknown} */
+        TraktRecommendationsState: "Ok" | "Stale" | "NotLinked" | "RelinkRequired" | "Unavailable";
         UnsubscribeRequest: {
             endpoint: string;
         };

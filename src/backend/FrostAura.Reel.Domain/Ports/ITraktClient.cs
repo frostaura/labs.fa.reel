@@ -83,6 +83,16 @@ public interface ITraktClient
     Task<TraktCatalogRating?> GetCatalogRatingAsync(long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) =>
         Task.FromException<TraktCatalogRating?>(NotImplementedHere(nameof(GetCatalogRatingAsync)));
 
+    /// <summary>
+    /// Trakt's own personalised recommendations for the token's user, one media type per call
+    /// (<c>/recommendations/movies</c> or <c>/recommendations/shows</c>), in Trakt's order, at most
+    /// <paramref name="limit"/> (Trakt caps it at 100). Collected and watchlisted items are left out
+    /// by Trakt itself. Default body for the same reason as the reads above: an older fake fails the
+    /// call exactly as an unreachable Trakt does.
+    /// </summary>
+    Task<IReadOnlyList<TraktRecommendation>> GetRecommendationsAsync(string accessToken, bool movies, int limit, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktRecommendation>>(NotImplementedHere(nameof(GetRecommendationsAsync)));
+
     private static HttpRequestException NotImplementedHere(string call) =>
         new($"This Trakt client does not implement {call}; treated as Trakt being unreachable.");
 }

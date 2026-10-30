@@ -121,3 +121,11 @@ public record TraktHiddenItem(
 /// <paramref name="Rating"/> means Trakt knows the title but has no rating for it yet.
 /// </summary>
 public record TraktCatalogRating(long TraktId, string? Slug, string? ImdbId, decimal? Rating, int Votes);
+
+/// <summary>
+/// One entry of Trakt's own personalised recommendations (<c>/recommendations/movies|shows</c>).
+/// Exactly one of movie/show is set. <paramref name="Rank"/> is the item's 1-based position in
+/// Trakt's answer for its media type — Trakt's order is the rail's order, so it is kept explicitly
+/// rather than trusted to survive a dictionary or a query.
+/// </summary>
+public record TraktRecommendation(int Rank, TraktMovie? Movie, TraktShow? Show);

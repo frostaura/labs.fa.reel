@@ -44,6 +44,8 @@ public static partial class DependencyInjection
         services.AddScoped<Application.Sync.OutboxDispatcher>();
         services.AddScoped<Application.Sync.ManagedListReconciler>();
         services.AddScoped<Application.Ingestion.TraktLibraryIngestor>();
+        // Trakt's own recommendations for the Home rail; caches Trakt's answer, never the filter.
+        services.AddScoped<Application.Recommendations.TraktRecommendationsService>();
         services.AddScoped<Application.Ingestion.TraktRatingsBackfill>();
         services.AddScoped<IJobHandler, FullIngestJobHandler>();
         services.AddScoped<IJobHandler, DeltaSyncJobHandler>();

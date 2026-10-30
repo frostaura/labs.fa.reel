@@ -257,6 +257,37 @@
         }
       }
     },
+    "/api/feed/trakt-recommendations": {
+      "get": {
+        "tags": [
+          "FrostAura.Reel.Api"
+        ],
+        "parameters": [
+          {
+            "name": "retry",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraktRecommendationsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
     "/api/titles/rate-suggestions": {
       "get": {
         "tags": [
@@ -1654,6 +1685,24 @@
           }
         }
       },
+      "CardProvider": {
+        "required": [
+          "name",
+          "logoPath"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "logoPath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "ClientErrorMetrics": {
         "required": [
           "accepted",
@@ -2926,6 +2975,239 @@
             }
           }
         }
+      },
+      "TraktRecommendationCard": {
+        "required": [
+          "titleId",
+          "mediaType",
+          "tmdbId",
+          "name",
+          "year",
+          "runtimeMinutes",
+          "posterPath",
+          "backdropPath",
+          "genres",
+          "predictedRating",
+          "crowdRating",
+          "crowdVotes",
+          "whyThis",
+          "isReleased",
+          "providers",
+          "traktRank"
+        ],
+        "type": "object",
+        "properties": {
+          "titleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mediaType": {
+            "type": "string"
+          },
+          "tmdbId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "year": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "runtimeMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "posterPath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "backdropPath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "predictedRating": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "crowdRating": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "crowdVotes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "whyThis": {
+            "type": "string"
+          },
+          "isReleased": {
+            "type": "boolean"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardProvider"
+            }
+          },
+          "traktRank": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "TraktRecommendationsResponse": {
+        "required": [
+          "state",
+          "fetchedAt",
+          "returnedByTrakt",
+          "unresolved",
+          "hiddenAsSeen",
+          "hiddenAsSetAside",
+          "hiddenByConditions",
+          "heldBelowBar",
+          "bar",
+          "unscoredRemaining",
+          "items"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/TraktRecommendationsState"
+          },
+          "fetchedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "returnedByTrakt": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "unresolved": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hiddenAsSeen": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hiddenAsSetAside": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hiddenByConditions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "heldBelowBar": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "bar": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "unscoredRemaining": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraktRecommendationCard"
+            }
+          }
+        }
+      },
+      "TraktRecommendationsState": {
+        "enum": [
+          "Ok",
+          "Stale",
+          "NotLinked",
+          "RelinkRequired",
+          "Unavailable"
+        ]
       },
       "UnsubscribeRequest": {
         "required": [
