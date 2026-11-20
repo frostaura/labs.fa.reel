@@ -7,6 +7,11 @@ last_verified: 2026-11-20
 
 # Current state
 
+**Update 2026-11-21:** the founder re-enabled every CI workflow. The push that carries this line is
+the first since, so its run is the first chance to publish under the new image names. Sentences
+below that call CI paused or disabled describe the night of 2026-11-20 and are superseded once that
+run's result is recorded here.
+
 **The product** works end to end for exactly one account — the founder's (local `reel` database, inspected
 2026-10-22; last Ask Reel turns that day; unreachable 2026-11-20 to re-check). **Not deployed, zero external users**,
 so milestone 4's gate and the kill criterion on it have never been evaluable (`questions.md`).
