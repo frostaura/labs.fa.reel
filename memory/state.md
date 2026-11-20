@@ -31,8 +31,8 @@ frontend package, solution `labs.fa.reel.slnx` and the eval scripts' paths — `
 branch (late 2026-11-20). Compose pins `name: fareel` (`gotchas-build.md`); `FrostAura.Reel.*` namespaces stay.
 
 **Repo topology (re-probed late 2026-11-20: `git fetch` in both clones, `git ls-remote origin`).** One repo, two
-clones, both level with the remote, no stash.
-- **The remote holds two branches:** `main` (`3cf9db7`) and **`build/trust-v1`** (`d63de74`), the integration
+clones, no stash; the dev clone trails `origin/main` only by context commits pushed from this one — `git pull` there.
+- **The remote holds two branches:** `main` (last product commit `3cf9db7`) and **`build/trust-v1`** (`d63de74`), the integration
   branch of an Ask Reel v2 build: several hundred commits dated 2026-10-22 to 2026-10-31 (answer quality, a golden
   eval, hardening rounds labelled up to `HREV8`, gateway image and cloudflared in the stack), plus the 2026-11-20
   rename commits. It is diverged from `main`; **the open call is merge or retire.**
