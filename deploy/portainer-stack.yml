@@ -1,4 +1,4 @@
-# Portainer stack for fa.reel — the FrostAura standard deploy chain.
+# Portainer stack for labs.fa.reel — the FrostAura standard deploy chain.
 # CI pushes multi-arch images to Docker Hub; this stack pulls them.
 # Create the stack in Portainer with this file, set the env vars below in the
 # Portainer stack editor, then set repo variable DEPLOY_ENABLED=true and the
@@ -27,7 +27,7 @@ services:
       retries: 5
 
   backend:
-    image: ${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is required}/reel-backend:latest
+    image: ${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is required}/labs.fa.reel-backend:latest
     restart: unless-stopped
     environment:
       ASPNETCORE_ENVIRONMENT: Production
@@ -80,7 +80,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: ${DOCKERHUB_USERNAME}/reel-frontend:latest
+    image: ${DOCKERHUB_USERNAME}/labs.fa.reel-frontend:latest
     restart: unless-stopped
     depends_on:
       - backend

@@ -1,4 +1,4 @@
-# fa.reel — Concept Brief
+# labs.fa.reel — Concept Brief
 
 **One-liner:** Link your Trakt profile; get live, explainable movie & TV recommendations you haven't seen yet — with where to watch.
 

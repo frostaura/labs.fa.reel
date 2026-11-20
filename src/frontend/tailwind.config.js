@@ -3,7 +3,7 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
-      // ── FrostAura brand tokens (canonical system, mirrored from fa.foresight) ─────────────
+      // ── FrostAura brand tokens (canonical system) ─────────────────────────────────
       colors: {
         "fa-ink": "#06121F",
         "fa-ink-2": "#0B1B30",

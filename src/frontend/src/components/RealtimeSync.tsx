@@ -7,8 +7,8 @@ import { jobKindToSseKind, isBackgroundKind } from "../lib/syncCopy";
 import type { AppDispatch } from "../store";
 
 /**
- * Headless steady-state SSE consumer mounted once in the app shell (fa.foresight's
- * realtimeSync pattern). Two inputs keep the header pill honest:
+ * Headless steady-state SSE consumer mounted once in the app shell (the
+ * realtime-sync pattern). Two inputs keep the header pill honest:
  *   1. Seed — /api/sync/status (polled every 5s, and on tag invalidation), so a reload
  *      mid-job shows the pill immediately and it self-corrects to the authoritative
  *      active job — the endpoint prefers a primary pipeline job over a background poll.

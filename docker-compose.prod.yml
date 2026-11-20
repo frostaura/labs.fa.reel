@@ -19,7 +19,7 @@ services:
       retries: 5
 
   backend:
-    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-backend:latest
+    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-backend:latest
     restart: unless-stopped
     environment:
       ASPNETCORE_ENVIRONMENT: Production
@@ -86,7 +86,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-frontend:latest
+    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-frontend:latest
     restart: unless-stopped
     depends_on:
       - backend

@@ -7,7 +7,7 @@ using FrostAura.Reel.Application.Pipeline;
 namespace FrostAura.Reel.Infrastructure.Sse;
 
 /// <summary>
-/// In-process per-account event fan-out (foresight event-hub pattern). Subscriber channels
+/// In-process per-account event fan-out. Subscriber channels
 /// are bounded and drop-oldest — a stalled browser can never wedge a pipeline job.
 /// </summary>
 public sealed class PipelineEventHub : IPipelineEventHub

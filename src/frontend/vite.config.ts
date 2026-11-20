@@ -2,7 +2,7 @@ import { defineConfig, type PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-// Dev-only kill switch for a stale production service worker (fa.foresight precedent). In dev the
+// Dev-only kill switch for a stale production service worker. In dev the
 // PWA SW is disabled, so a browser that once registered the prod `sw.js` (Safari especially) keeps
 // serving its old Workbox precache forever. Serving a self-destroying SW at /sw.js means that
 // browser's next update check fetches this tombstone, unregisters, purges caches, and reloads.

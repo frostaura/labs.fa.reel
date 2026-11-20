@@ -1,6 +1,6 @@
 # Deployment
 
-Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**, same shape as `fa.lifeos`.
+Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**.
 
 ## Pipeline
 
@@ -23,8 +23,8 @@ Publish jobs are push-only, so a scheduled run verifies without ever deploying.
 
 The publish jobs build per-architecture on native runners (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64) and then join them into a single multi-arch manifest — no QEMU emulation. Published tags:
 
-- `${DOCKERHUB_USERNAME}/reel-backend:latest` (+ `:latest-amd64`, `:latest-arm64`)
-- `${DOCKERHUB_USERNAME}/reel-frontend:latest` (+ `:latest-amd64`, `:latest-arm64`)
+- `${DOCKERHUB_USERNAME}/labs.fa.reel-backend:latest` (+ `:latest-amd64`, `:latest-arm64`)
+- `${DOCKERHUB_USERNAME}/labs.fa.reel-frontend:latest` (+ `:latest-amd64`, `:latest-arm64`)
 
 ### The stack smoke gate
 

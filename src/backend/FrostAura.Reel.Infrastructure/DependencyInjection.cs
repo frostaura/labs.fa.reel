@@ -60,7 +60,7 @@ public static class DependencyInjection
         // ── External adapters ──────────────────────────────────────────────────────────────
         // Trakt/TMDB both front with Cloudflare, which rejects UA-less requests — HttpClient
         // sends no User-Agent by default, so an explicit one is load-bearing, not cosmetic.
-        const string userAgent = "fa.reel/0.1 (+https://github.com/frostaura/fa.reel)";
+        const string userAgent = "labs.fa.reel/0.1 (+https://github.com/frostaura/labs.fa.reel)";
 
         services.AddHttpClient<ITraktClient, TraktClient>(client =>
         {

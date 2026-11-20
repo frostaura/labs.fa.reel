@@ -11,19 +11,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <!--
-      Direct pin to override a vulnerable transitive. Microsoft.AspNetCore.OpenApi 10.0.10 still
-      depends on Microsoft.OpenApi 2.0.0, which carries GHSA-v5pm-xwqc-g5wc (high — circular
-      schema references terminate parsing), fixed in 2.7.5. With TreatWarningsAsErrors the
-      NU1903 audit warning fails `dotnet restore` outright, so bumping the ASP.NET package
-      alone does not unblock the build — unlike the other 10.0.9 advisories, this one survives
-      the version bump. Stays on the 2.x line AspNetCore.OpenApi expects. Drop this line once
-      the framework package moves past 2.7.5 on its own.
-    -->
-    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.13" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

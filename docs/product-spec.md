@@ -1,4 +1,4 @@
-# fa.reel — Product Spec (v1)
+# labs.fa.reel — Product Spec (v1)
 
 All decisions below founder-locked 2026-06-12 in a structured refinement session. This is the UX/product layer on top of `concept.md` (engine, data plane, risks) — read both before building.
 

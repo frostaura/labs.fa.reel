@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FrostAura.Reel.Api.Endpoints;
 
 /// <summary>
-/// QA helpers — Development environment + QA_HELPERS_ENABLED=true only (fa.startup precedent).
+/// QA helpers — Development environment + QA_HELPERS_ENABLED=true only.
 /// Never mapped in production builds of the compose stack.
 /// </summary>
 public static class DevEndpoints

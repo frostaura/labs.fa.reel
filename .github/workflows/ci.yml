@@ -16,7 +16,7 @@ jobs:
   # ============================================================================
   backend:
     name: Backend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -78,7 +78,7 @@ jobs:
   # ============================================================================
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -129,7 +129,7 @@ jobs:
   # ============================================================================
   frontend-e2e:
     name: Frontend E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [frontend]
     defaults:
@@ -174,7 +174,7 @@ jobs:
   # ============================================================================
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [frontend, backend]
     timeout-minutes: 10
     steps:
@@ -244,7 +244,7 @@ jobs:
   # ============================================================================
   backend-integration:
     name: Backend Integration (Postgres + pgvector)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [backend]
     services:
@@ -288,7 +288,7 @@ jobs:
         run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
 
   # ============================================================================
-  # Docker — build both images and smoke the composed stack (lifeos qa-compose parity)
+  # Docker — build both images and smoke the composed stack
   # ============================================================================
   # Runs on pull requests too, deliberately: until this job existed the Dockerfiles and the
   # compose wiring were only exercised by the publish jobs, which are push-to-main only. A
@@ -296,7 +296,7 @@ jobs:
   # merge — after a bad :latest had already been pushed. This gate moves that failure left.
   docker:
     name: Docker Build & Stack Smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [backend, frontend]
     steps:
@@ -329,7 +329,7 @@ jobs:
   # ============================================================================
   build-backend-amd64:
     name: Build Backend (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -353,7 +353,7 @@ jobs:
           file: ./src/backend/Dockerfile
           push: true
           platforms: linux/amd64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-amd64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-amd64
 
   build-backend-arm64:
     name: Build Backend (arm64)
@@ -381,11 +381,11 @@ jobs:
           file: ./src/backend/Dockerfile
           push: true
           platforms: linux/arm64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-arm64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-arm64
 
   merge-backend-manifests:
     name: Create Backend Multi-arch Manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [build-backend-amd64, build-backend-arm64]
     steps:
@@ -400,13 +400,13 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest \
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-amd64 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-arm64
+          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-arm64
 
   build-frontend-amd64:
     name: Build Frontend (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -430,7 +430,7 @@ jobs:
           file: ./src/frontend/Dockerfile
           push: true
           platforms: linux/amd64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-amd64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-amd64
 
   build-frontend-arm64:
     name: Build Frontend (arm64)
@@ -458,11 +458,11 @@ jobs:
           file: ./src/frontend/Dockerfile
           push: true
           platforms: linux/arm64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-arm64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-arm64
 
   merge-frontend-manifests:
     name: Create Frontend Multi-arch Manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [build-frontend-amd64, build-frontend-arm64]
     steps:
@@ -477,12 +477,12 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest \
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-amd64 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-arm64
+          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-arm64
 
   # ============================================================================
-  # Portainer deploy — re-pull image and redeploy the live stack (fa.startup pattern)
+  # Portainer deploy — re-pull image and redeploy the live stack
   # ============================================================================
   # DISABLED until the reel Portainer stack exists. Re-enable by setting the
   # repository variable DEPLOY_ENABLED=true (Settings → Secrets and variables →
@@ -490,7 +490,7 @@ jobs:
   # the variable is unset the job is skipped (not failed), so CI stays green.
   deploy-portainer:
     name: Re-pull image and redeploy on Portainer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [merge-backend-manifests, merge-frontend-manifests]
     if: vars.DEPLOY_ENABLED == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
