@@ -19,13 +19,13 @@ down:
 lint: lint-backend lint-frontend
 
 lint-backend:
-	dotnet format fa.reel.slnx --verify-no-changes --verbosity minimal
+	dotnet format labs.fa.reel.slnx --verify-no-changes --verbosity minimal
 
 lint-frontend:
 	cd src/frontend && npm run lint
 
 build:
-	dotnet build fa.reel.slnx --nologo
+	dotnet build labs.fa.reel.slnx --nologo
 
 test:
 	dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo

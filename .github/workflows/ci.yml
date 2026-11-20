@@ -38,13 +38,13 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
 
       - name: Restore
-        run: dotnet restore ../../fa.reel.slnx
+        run: dotnet restore ../../labs.fa.reel.slnx
 
       - name: Lint (format check)
-        run: dotnet format ../../fa.reel.slnx --verify-no-changes --no-restore
+        run: dotnet format ../../labs.fa.reel.slnx --verify-no-changes --no-restore
 
       - name: Build
-        run: dotnet build ../../fa.reel.slnx --nologo -v q --no-restore
+        run: dotnet build ../../labs.fa.reel.slnx --nologo -v q --no-restore
 
       - name: Test with coverage
         run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --settings coverlet.runsettings --results-directory ./TestResults
@@ -206,13 +206,13 @@ jobs:
 
       - name: Restore backend packages
         working-directory: ./src/backend
-        run: dotnet restore ../../fa.reel.slnx
+        run: dotnet restore ../../labs.fa.reel.slnx
 
       - name: Check vulnerable NuGet packages
         working-directory: ./src/backend
         run: |
           set -euo pipefail
-          dotnet list ../../fa.reel.slnx package --vulnerable --include-transitive --format json > vulnerable-packages.json
+          dotnet list ../../labs.fa.reel.slnx package --vulnerable --include-transitive --format json > vulnerable-packages.json
           node -e "
             const fs = require('fs');
             const report = JSON.parse(fs.readFileSync('vulnerable-packages.json', 'utf8'));
