@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-ask-v2
+name: labs-fa-reel-decisions-ask-v2
 description: "Ask v2 answer-quality rules from the golden-eval fix passes, each with its why: relaxation ladder, language and named-genre requirements, unengaged genres, scheduled judge resends, first batch of three, specials."
 type: decision
 last_verified: 2026-10-30

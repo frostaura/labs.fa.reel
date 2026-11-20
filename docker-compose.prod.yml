@@ -32,7 +32,7 @@ x-logging: &default-logging
 # cloudflared are the only two hops that ever set those headers, and both live here. It sits in 10/8
 # on purpose, outside Docker's default address pools (172.17.0.0/12 and 192.168.0.0/16), so Docker
 # can never hand it to another network and the stack can never fail to deploy with "Pool overlaps".
-# One /24 away from crusaders.mainframe's 10.83.29.0/24, so both stacks can share a host. If the
+# One /24 away from technologies.crusaders.squash-control-system's 10.83.29.0/24, so both stacks can share a host. If the
 # host's LAN is 10.83.30.x, pick another free /24 and change it HERE AND in TRUSTED_PROXY_NETWORKS;
 # ComposeHardeningTests holds the two equal.
 networks:
@@ -59,7 +59,7 @@ services:
       retries: 5
 
   backend:
-    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-backend:${REEL_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-backend:${REEL_TAG:-latest}
     restart: unless-stopped
     # SIGTERM → 45 s for in-flight requests (an Ask turn streams for up to a minute) and the job
     # runner's current claim to finish before SIGKILL; Docker's default is 10 s (K-12).
@@ -247,7 +247,7 @@ services:
     logging: *default-logging
 
   frontend:
-    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-frontend:${REEL_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-frontend:${REEL_TAG:-latest}
     restart: unless-stopped
     depends_on:
       - backend
@@ -257,7 +257,7 @@ services:
   # REEL_TAG with the backend and frontend, so a gateway change ships by the same redeploy as the code
   # behind it. Deliberately NO `ports:` — cloudflared reaches it as http://gateway:80 on the bridge.
   gateway:
-    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-gateway:${REEL_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-gateway:${REEL_TAG:-latest}
     restart: unless-stopped
     depends_on:
       backend:
@@ -283,7 +283,7 @@ services:
     logging: *default-logging
 
 # The backup script ships inline because a Portainer stack cannot mount a repo file; the gateway's
-# nginx config no longer does — it is baked into the reel-gateway image (nginx/Dockerfile).
+# nginx config no longer does — it is baked into the labs.fa.reel-gateway image (nginx/Dockerfile).
 configs:
   reel_backup_script:
     content: |

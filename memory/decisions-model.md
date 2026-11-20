@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-model
+name: labs-fa-reel-decisions-model
 description: "The ledger rule was pre-registered and honoured: schema v6 reverted on no lift, so 6 is burned and the next bump is 7. The instrument, not the idea, failed. The calibrator is applied last; the exposure log is append-only."
 type: decision
 last_verified: 2026-09-11

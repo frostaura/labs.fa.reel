@@ -9,7 +9,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence;
 
 /// <summary>
 /// Applies pending EF migrations on boot when Database:AutoMigrateOnStartup is true
-/// (foresight pattern — first boot of a fresh compose stack provisions itself).
+/// (first boot of a fresh compose stack provisions itself).
 /// </summary>
 public static class DatabaseInitializer
 {

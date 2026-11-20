@@ -1,5 +1,5 @@
 ---
-name: fa-reel-state
+name: labs-fa-reel-state
 description: "Works end to end for one account. CI green end to end and images published, but NOT deployed and zero external users — the 5-user kill clock was never evaluable. The model still loses to the popularity baseline."
 type: state
 last_verified: 2026-09-16
@@ -14,9 +14,9 @@ users" gate and the kill criterion built on it have never been evaluable. Deploy
 task: `questions.md`.
 
 **Repo topology — re-inspected 2026-09-16, after the push.** One private repo, two clones. The copy
-under `FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**, and on 2026-09-16 the
+under `FrostAura Global/Labs/projects/labs.fa.reel` is the **context-file home only**, and on 2026-09-16 the
 founder authorised a tree-wide commit and push: **this clone is what went up**, and it re-read locally
-afterwards as `main`, upstream `origin/main`, **zero ahead and zero behind**, clean tree. `~/src/fa.reel`
+afterwards as `main`, upstream `origin/main`, **zero ahead and zero behind**, clean tree. `~/src/labs.fa.reel`
 is the dev clone where code, builds and the dev loop live, and it is now **behind published `main` and
 does not know it** — its `origin/main` ref predates the push, so `rev-list --left-right --count` there
 reports 0/0 while the published tip is not even an object it holds (confirmed read-only 2026-09-16).
@@ -63,4 +63,4 @@ cross-reference verdicts serving keep-only).** Each closed with a headed QA walk
 those walks raised was fixed before they ended — but the follow-ups the QA walks raised are mostly still unstarted, so
 the walks are closed and the surface is not (`decisions-*` for what was decided, `watch.md` for what is owed).
 
-**The dev loop** runs from `~/src/fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.
+**The dev loop** runs from `~/src/labs.fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.

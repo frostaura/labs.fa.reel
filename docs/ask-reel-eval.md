@@ -14,7 +14,7 @@ integrator, which no build lane passes.
 | Postgres | `fareel-eval-postgres`, `127.0.0.1:5434`, volume `fareel_eval_pgdata` | A separate container and volume; adopted (not recreated) by `docker-compose.eval.yml` behind the `db` profile |
 | Snapshot | `reel_eval_template` → `reel_eval` / lane slots | `scripts/eval/snapshot.sh` blanks every Trakt token (`''`: the app reads a non-empty token as a live connection, which armed the ratings back-fill on every clone), truncates the outbox, deletes pending jobs, push subscriptions, `AppSecrets` (the VAPID private key), `DataProtectionKeys` and `RefreshSessions`, archives the ledger of any database it is about to drop, and stamps the snapshot id (`COMMENT ON DATABASE`) |
 | API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances (every Ask turn limit — 4 at once, 120 a minute, 5,000 an hour and a day on every tier — the same on both, set only by the `EVAL_ASK_TURNS_*` twins, never by a live `ASK_TURNS_*` in the env file or the caller's shell); refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), exports every credential the env file leaves unset as empty, and refuses an env file with no `JWT_SECRET`. It boots the copy the way the merged code needs: from the dll's own folder (the content root, so `appsettings.json` loads), with `Database__AutoMigrateOnStartup=true` and no dump handshake, `Background__DataRepairs` and `Background__TrustPurge` off, Trakt tokens empty and `TRAKT_CLIENT_ID=eval-no-trakt`; it never runs on a `*_template` database (`--dry-run` lists the names the API would get, and the values of the switches it sets) |
-| Model key | `EVAL_OPENROUTER_API_KEY` (its own $10/day cap) | **Not supplied yet.** The shared lane key in `~/src/fa.reel-ws/lane.env` **is the founder's own OpenRouter key** (SHA-256 match with the live clone's `.env`, compared without printing either). Every paid call WS-7 has made — the three 99c0761 baselines, the surface baseline and the aborted attempts — went on it. `run-api.sh`, `askreel.mjs live` and `surfaces.mjs` now refuse that key unless the founder's sign-off is passed (`EVAL_FOUNDER_KEY_SIGNOFF` / `--founder-key-signoff`) and recorded in the recording |
+| Model key | `EVAL_OPENROUTER_API_KEY` (its own $10/day cap) | **Not supplied yet.** The shared lane key in `~/src/labs.fa.reel-ws/lane.env` **is the founder's own OpenRouter key** (SHA-256 match with the live clone's `.env`, compared without printing either). Every paid call WS-7 has made — the three 99c0761 baselines, the surface baseline and the aborted attempts — went on it. `run-api.sh`, `askreel.mjs live` and `surfaces.mjs` now refuse that key unless the founder's sign-off is passed (`EVAL_FOUNDER_KEY_SIGNOFF` / `--founder-key-signoff`) and recorded in the recording |
 
 **Trakt isolation, three layers.** (1) Inside the eval container Trakt's hosts resolve to `0.0.0.0`; for a
 process slot, all outbound HTTPS goes through a dead loopback proxy except `openrouter.ai` and the TMDB
@@ -44,7 +44,7 @@ Docker's host aliases, a unix socket, the machine's own names and its interface 
 scripts/eval/snapshot.sh clone reel_eval_template reel_eval
 
 # 2. An API on it, built at the commit under test OUTSIDE any checkout (DotEnv would load a parent .env).
-scripts/eval/build-at.sh 99c0761 ~/src/fa.reel-ws/ws7/.tmp/base        # prints the dll; writes BUILD_INFO.json
+scripts/eval/build-at.sh 99c0761 ~/src/labs.fa.reel-ws/ws7/.tmp/base        # prints the dll; writes BUILD_INFO.json
 scripts/eval/run-api.sh --dll <dll> --db reel_eval --port 5180 --env-file <eval env: the eval key + TMDB>
 #    or: docker compose -p fareel-eval -f docker-compose.eval.yml --env-file <eval env> up -d eval-api
 
@@ -98,7 +98,7 @@ Reports land in `.tmp/eval/<date>/<label>/` (`recording.json`, `metrics.json`, `
 transport, and still reads the ledger from the day its first attempt started). A turn with no byte for
 120 s or longer than 300 s is aborted and scored as failed (`client_timeout`), as a user giving up would.
 Baselines that gate merges are promoted into `eval/askreel/baselines/` and `eval/surfaces/baselines/`; the
-holdout's baseline lives with the holdout in `~/src/fa.reel-eval-sealed/`.
+holdout's baseline lives with the holdout in `~/src/labs.fa.reel-eval-sealed/`.
 
 **Replay has two halves.** The scorer replay (`node --test 'scripts/eval/*.test.mjs'`, `askreel.mjs
 replay`) re-scores a frozen recording with no API, database or paid call, which proves the committed
@@ -121,7 +121,7 @@ authored (`provenance` says so) until the eval key exists. It runs in the integr
 
 - `eval/askreel/scenarios/open.json` — the open set every workstream may read and run (120 scenarios,
   34 multi-turn, 167 turns).
-- `~/src/fa.reel-eval-sealed/askreel/holdout/holdout.json` — 30% held out (51 scenarios, 64 turns),
+- `~/src/labs.fa.reel-eval-sealed/askreel/holdout/holdout.json` — 30% held out (51 scenarios, 64 turns),
   outside every worktree, for the integrator only until the release gate (G2). Its own truth queries live
   in `…/holdout/truth/` and are passed with `--truth-dir`; no holdout turn repeats an open query, and
   `check` fails on any open truth file no open scenario uses, so the open tree cannot name a holdout topic.
@@ -312,7 +312,7 @@ labels are not in, and no judge call has been made (no eval key).
   never anchor each other) and one per reply ("is the reply grounded in its cards"). The card is described
   by the catalogue's own facts, never by the system's why-line. It refuses the founder's key without his
   recorded sign-off, stops at the first 401/402/403 (§7 rule 4), and records usage and length stops.
-- **The prompt is sealed** in `~/src/fa.reel-eval-sealed/askreel/judge/prompt.md` (two sections,
+- **The prompt is sealed** in `~/src/labs.fa.reel-eval-sealed/askreel/judge/prompt.md` (two sections,
   `## satisfies` and `## grounded`); the runner refuses a prompt inside a worktree and records only its
   SHA-256, so the engine under test cannot be tuned to the judge's wording.
 - **The labels.** `eval/askreel/labels/founder-100.csv`: 100 cards from 100 different turns of the 99c0761
@@ -526,7 +526,7 @@ at or above the model's prediction, and from day 4 every build said nothing clea
 At the 99c0761 baseline a v1 turn cost about $0.002. The $5 / $8 lines are per key per day, and every lane
 database shares one key today, so check the day with `ledger.mjs --all` (all eval and lane databases on
 :5434, net of the snapshot template, plus the archives `snapshot.sh` writes before any DROP to
-`~/src/fa.reel-ws/ledger-archive/`) and `ledger.mjs --openrouter-key <env file>` (the provider's own
+`~/src/labs.fa.reel-ws/ledger-archive/`) and `ledger.mjs --openrouter-key <env file>` (the provider's own
 figure, which also covers the live stack). On 2026-10-24 the shared key reported no spending limit set.
 Paid calls outside a recording are listed in the lane report with their cause; on 2026-10-24 a smoke run
 meant to make none paid 19 `rerank-page` calls ($0.011) because the API inherited an `OPENROUTER_API_KEY`

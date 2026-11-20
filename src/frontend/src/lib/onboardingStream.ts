@@ -20,7 +20,7 @@ const STALL_AFTER_MS = 20_000;
 /**
  * Opens the per-account pipeline SSE stream and pumps named events into onboardingSlice.
  *
- * Mirrors fa.foresight's trainingStream contract: `onerror` is a no-op — EventSource
+ * Stream contract: `onerror` is a no-op — EventSource
  * auto-reconnects, replays are made idempotent by seq-dedupe in the reducer, and the
  * caller's sync/status poll remains the authoritative fallback. A 20s client-side stall
  * timer (reset on any event, heartbeats included) flips UI copy to "still working" mode.

@@ -1,4 +1,4 @@
-# The gateway, as an image the release chain actually delivers: ${DOCKERHUB_USERNAME}/reel-gateway.
+# The gateway, as an image the release chain actually delivers: ${DOCKERHUB_USERNAME}/labs.fa.reel-gateway.
 #
 # It used to be stock `nginx:alpine` with this directory's nginx.conf pasted INLINE into
 # docker-compose.prod.yml as a compose `configs:` block, held byte-equal to the canonical file by a
@@ -7,7 +7,7 @@
 # stores, so a gateway edit reached production only if someone re-pasted the whole stack file by
 # hand. Baking the config gives it the same delivery guarantee as the code it fronts — the deploy
 # job pins backend, frontend and gateway to one `sha-<short>` together (same chain as the founder's
-# crusaders-mainframe-gateway).
+# technologies.crusaders.squash-control-system-gateway).
 #
 # Build context is THIS directory (CI: `context: ./nginx`), so nothing else in the repo is sent.
 FROM nginx:alpine

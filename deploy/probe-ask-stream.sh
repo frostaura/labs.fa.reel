@@ -14,7 +14,7 @@
 #
 # What it runs
 # ------------
-# The gateway config is nginx/nginx.conf — the file the reel-gateway image bakes — rendered the way
+# The gateway config is nginx/nginx.conf — the file the labs.fa.reel-gateway image bakes — rendered the way
 # that image renders it at start (its ${NGINX_*} placeholders filled from nginx/Dockerfile's ENV
 # defaults), and run by a NATIVE nginx on loopback, against a stub upstream that
 # writes one frame, then stays silent for 5 s and writes a heartbeat, twice, then `done`. No Docker,

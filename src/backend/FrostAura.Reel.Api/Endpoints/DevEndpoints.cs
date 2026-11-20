@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FrostAura.Reel.Api.Endpoints;
 
 /// <summary>
-/// QA helpers — Development environment + QA_HELPERS_ENABLED=true only (fa.startup precedent).
+/// QA helpers — Development environment + QA_HELPERS_ENABLED=true only.
 /// Never mapped in production builds of the compose stack.
 ///
 /// <para><b>Three locks, not one.</b> Mapping them at all needs Development plus the flag. Then

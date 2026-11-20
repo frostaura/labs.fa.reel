@@ -7,7 +7,7 @@ namespace FrostAura.Reel.Tests.Harness;
 ///
 /// <para>
 /// <c>nginx/nginx.conf</c> is the ONLY copy. <c>nginx/Dockerfile</c> bakes it into the
-/// <c>reel-gateway</c> image CI publishes beside the backend and frontend, the production stack runs
+/// <c>labs.fa.reel-gateway</c> image CI publishes beside the backend and frontend, the production stack runs
 /// that image, and the dev compose stack mounts the same file as its template. Until 2026-10-30
 /// production carried a second, inline copy as a compose <c>configs:</c> block held byte-equal to
 /// this one; that copy is gone, and <see cref="The_gateway_image_bakes_the_canonical_file"/> and
@@ -241,7 +241,7 @@ public partial class NginxDescriptorParityTests
         var prod = ComposeDescriptor.Load("docker-compose.prod.yml");
         var gateway = prod.ServiceBlock("gateway");
 
-        Assert.Contains("    image: ${DOCKERHUB_USERNAME:-frostaura}/reel-gateway:${REEL_TAG:-latest}", gateway);
+        Assert.Contains("    image: ${DOCKERHUB_USERNAME:-frostaura}/labs.fa.reel-gateway:${REEL_TAG:-latest}", gateway);
         Assert.DoesNotContain(gateway, l => l.Trim() == "configs:" || l.Contains("nginx.conf", StringComparison.Ordinal));
         Assert.Null(prod.InlineConfig("gateway_nginx"));
         Assert.DoesNotMatch(@"(?m)^\s*(listen|proxy_pass|server_tokens)\b", prod.Text);
@@ -260,11 +260,11 @@ public partial class NginxDescriptorParityTests
         foreach (var arch in new[] { "amd64", "arm64" })
         {
             Assert.Contains($"  build-gateway-{arch}:", workflow, StringComparison.Ordinal);
-            Assert.Contains($"${{{{ secrets.DOCKERHUB_USERNAME }}}}/reel-gateway:${{{{ steps.tag.outputs.tag }}}}-{arch}", workflow, StringComparison.Ordinal);
+            Assert.Contains($"${{{{ secrets.DOCKERHUB_USERNAME }}}}/labs.fa.reel-gateway:${{{{ steps.tag.outputs.tag }}}}-{arch}", workflow, StringComparison.Ordinal);
         }
 
         Assert.Contains("          context: ./nginx\n          file: ./nginx/Dockerfile\n", workflow.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
-        Assert.Contains("IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway", workflow, StringComparison.Ordinal);
+        Assert.Contains("IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway", workflow, StringComparison.Ordinal);
         Assert.Matches(@"needs: \[merge-backend-manifests, merge-frontend-manifests, merge-gateway-manifests\]", workflow);
     }
 

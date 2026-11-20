@@ -1,6 +1,6 @@
 # Deployment
 
-Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**, the same shape as `crusaders.mainframe`: three published images (backend, frontend, gateway) and a Portainer stack whose Cloudflare tunnel runs inside it.
+Reel follows the standard FrostAura deploy pattern: **GitHub Actions → Docker Hub (multi-arch) → Portainer → Cloudflared**, the same shape as `technologies.crusaders.squash-control-system`: three published images (backend, frontend, gateway) and a Portainer stack whose Cloudflare tunnel runs inside it.
 
 ## Production topology — one way in
 
@@ -30,9 +30,9 @@ Every quality and deployability step is a `make ci-*` target; the workflow holds
 
 The publish jobs build per-architecture on native runners (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64) and then join them into a single multi-arch manifest — no QEMU emulation. Published tags:
 
-- `${DOCKERHUB_USERNAME}/reel-backend:sha-<short>` and `:latest` — one manifest, two names (+ `:sha-<short>-amd64`, `:sha-<short>-arm64`, `:latest-amd64`, `:latest-arm64`)
-- `${DOCKERHUB_USERNAME}/reel-frontend:sha-<short>` and `:latest`, likewise
-- `${DOCKERHUB_USERNAME}/reel-gateway:sha-<short>` and `:latest`, likewise — `nginx/Dockerfile` (build context `./nginx`), which bakes `nginx/nginx.conf` in as an envsubst template with `NGINX_*` defaults. The gateway config therefore ships by the same redeploy as the code it fronts; a stack-file paste is never how an nginx change reaches production.
+- `${DOCKERHUB_USERNAME}/labs.fa.reel-backend:sha-<short>` and `:latest` — one manifest, two names (+ `:sha-<short>-amd64`, `:sha-<short>-arm64`, `:latest-amd64`, `:latest-arm64`)
+- `${DOCKERHUB_USERNAME}/labs.fa.reel-frontend:sha-<short>` and `:latest`, likewise
+- `${DOCKERHUB_USERNAME}/labs.fa.reel-gateway:sha-<short>` and `:latest`, likewise — `nginx/Dockerfile` (build context `./nginx`), which bakes `nginx/nginx.conf` in as an envsubst template with `NGINX_*` defaults. The gateway config therefore ships by the same redeploy as the code it fronts; a stack-file paste is never how an nginx change reaches production.
 
 `sha-<short>` is the first seven characters of the commit. It is what a deploy pins and what a rollback names; `latest` only serves a stack that pins nothing. Both Dockerfiles run their build stage on the build machine's own architecture (`--platform=$BUILDPLATFORM`) and the backend cross-publishes `linux-$TARGETARCH`, with restore in its own cached layer. The backend image runs as the unprivileged `app` user (`USER $APP_UID`) and stamps the commit into the assembly from the `GIT_SHA` build argument, so `/health` answers `{"status":"ok","commit":"<sha>"}`.
 
@@ -43,7 +43,7 @@ The publish jobs build per-architecture on native runners (`ubuntu-latest` for a
 1. `make ci-compose` parses every descriptor with only its required variables supplied, and proves the prod file refuses to parse without `BACKUP_HOST_DIR` or `CLOUDFLARE_TUNNEL_TOKEN` — the prod file is the literal content behind a stack and nothing else parses it.
 2. `make ci-docker` builds the backend and frontend images from the repo-root context exactly as the publish jobs do, brings the dev compose stack up as project `reel-ci` (ports 18090/15433), and probes through its gateway.
 3. `make ci-gateway` runs `deploy/probe-gateway.sh`: it builds `nginx/Dockerfile` exactly as the publish jobs do and runs that image against stub upstreams — `/api` and `/api/search/ask` reach the backend unrewritten, `*.map` is 404, the security headers are set.
-4. `make ci-docker-prod` brings up **`docker-compose.prod.yml` itself** with the overlay `deploy/ci/docker-compose.prod-smoke.yml`, which builds all three images from this checkout under a throwaway namespace (`reel-smoke-local/*:smoke`), publishes the gateway on loopback for the probe only, and parks `cloudflared` behind a profile (it needs a real tunnel token). Project `reel-ci-prod`, port 18091. Same probes as step 2, through the `reel-gateway` image.
+4. `make ci-docker-prod` brings up **`docker-compose.prod.yml` itself** with the overlay `deploy/ci/docker-compose.prod-smoke.yml`, which builds all three images from this checkout under a throwaway namespace (`reel-smoke-local/*:smoke`), publishes the gateway on loopback for the probe only, and parks `cloudflared` behind a profile (it needs a real tunnel token). Project `reel-ci-prod`, port 18091. Same probes as step 2, through the `labs.fa.reel-gateway` image.
 
 The probes, in both smokes:
 
@@ -82,7 +82,7 @@ Repository → Settings → Secrets and variables → Actions.
 The founder's one-time steps. Nothing in the repository or in CI does these; the deploy job stays skipped until the last one.
 
 1. **Create the tunnel.** Cloudflare Zero Trust → Networks → Tunnels → create a `cloudflared` tunnel (e.g. `reel`), and copy its token. Add one public hostname: `reel.frostaura.net` → service **`http://gateway:80`**. (If `reel.frostaura.net` already routes through an older tunnel, move the hostname to this one, or point that tunnel's ingress at `http://gateway:80` and use its token.)
-2. **Create the stack** in Portainer, named `reel`, on the endpoint whose id is `PORTAINER_ENDPOINT_ID`. Paste the contents of `docker-compose.prod.yml` as the stack file — the only production descriptor (K-14). It pulls published images rather than building; the gateway's nginx config is inside the `reel-gateway` image and only the backup script ships inline as a compose `config`, because a Portainer stack cannot mount a repo file.
+2. **Create the stack** in Portainer, named `reel`, on the endpoint whose id is `PORTAINER_ENDPOINT_ID`. Paste the contents of `docker-compose.prod.yml` as the stack file — the only production descriptor (K-14). It pulls published images rather than building; the gateway's nginx config is inside the `labs.fa.reel-gateway` image and only the backup script ships inline as a compose `config`, because a Portainer stack cannot mount a repo file.
 3. **Set the stack environment variables** (names only here; values from their sources, never from this repo):
 
    | Key | Required | Notes |
@@ -103,11 +103,11 @@ The founder's one-time steps. Nothing in the repository or in CI does these; the
 5. **Set `PORTAINER_STACK_ID`** — the numeric id in the stack's Portainer URL — as a repository secret.
 6. **Set the repository variable `DEPLOY_ENABLED=true`.** The next push to `main` publishes, pins `REEL_TAG`, redeploys and waits for `/health` to report that commit.
 
-**An existing stack must be re-pasted once** whenever the stack file's shape changes: the deploy job re-submits the *stored* file, and refuses one that does not read `REEL_TAG` or does not run `reel-gateway:${REEL_TAG…}` (a pre-gateway-image file would redeploy a new backend behind the old inline nginx config and report success).
+**An existing stack must be re-pasted once** whenever the stack file's shape changes: the deploy job re-submits the *stored* file, and refuses one that does not read `REEL_TAG` or does not run `labs.fa.reel-gateway:${REEL_TAG…}` (a pre-gateway-image file would redeploy a new backend behind the old inline nginx config and report success).
 
 ## Deploys and rollback
 
-The deploy job re-submits the stack's *existing* file content and env with `pullImage=true`, so a redeploy never overwrites what an operator configured in Portainer — with one change: it sets the stack variable `REEL_TAG` to `sha-<short>` of the commit it just published. The prod file pulls `reel-backend:${REEL_TAG:-latest}` and `reel-frontend:${REEL_TAG:-latest}`, so the stack always names the exact images it runs (K-9).
+The deploy job re-submits the stack's *existing* file content and env with `pullImage=true`, so a redeploy never overwrites what an operator configured in Portainer — with one change: it sets the stack variable `REEL_TAG` to `sha-<short>` of the commit it just published. The prod file pulls `labs.fa.reel-backend:${REEL_TAG:-latest}` and `labs.fa.reel-frontend:${REEL_TAG:-latest}`, so the stack always names the exact images it runs (K-9).
 
 It then polls `DEPLOY_HEALTH_URL` every 20 s until `/health` reports the commit it shipped, and **fails the job** if that has not happened within 45 minutes (J-22). Portainer accepting a redeploy is not the stack serving it: a backend that crash-loops on a migration, or a gateway still answering from the old container, both look like success to the PUT. The window covers the pre-migration dump and the migrations; the backend healthcheck's `start_period` is 40 minutes for the same reason.
 
@@ -151,7 +151,7 @@ What the API and the gateway do about who is calling (WS-8 P1). Every setting he
 - **Settings PIN.** Five wrong PINs in 15 minutes lock every PIN check on the account (verify, change and removal) with `429 pin_locked` and `Retry-After`; during the lock even the right PIN is refused unread. The filters gate takes only an unlock token now — the raw `X-Settings-Pin` fallback there was a second, unlimited PIN oracle (J-19).
 - **`/api/dev/*`** runs at most two requests at once (`429 dev_busy`).
 - **Push.** A subscription endpoint must be HTTPS on port 443 at a known push service (FCM, Mozilla autopush, WNS, Apple); anything else is `400 push_endpoint_not_allowed`, and the sender retires a stored row that fails the same rule rather than POSTing to it (J-9). An account keeps at most 10 subscriptions; a new browser retires the one heard from least recently.
-- **Gateway.** `server_tokens off`; `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and `Permissions-Policy` on every response; gzip for JSON and static text but never for a stream; `*.map` is 404; `/api/search/ask` has its own location (no gzip, no buffering, an hour to finish). The frontend container serves `/assets/` as `try_files $uri =404` with a year's `immutable` caching, and `index.html`, `sw.js` and the SPA shell as `no-cache`. `deploy/probe-gateway.sh` builds the `reel-gateway` image and runs it against stub upstreams (or probes a published image: `deploy/probe-gateway.sh frostaura/reel-gateway:sha-<short>`). `deploy/probe-ask-stream.sh` renders the same `nginx/nginx.conf` with the image's defaults and runs it in a native nginx (no Docker) against a stub API that streams an Ask turn with the API's 5 s heartbeat, and fails unless every frame reaches the client within 1 s of being written and uncompressed; with the Ask location removed it fails, every frame held back to the end of the turn. The same check through cloudflared needs the live host.
+- **Gateway.** `server_tokens off`; `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and `Permissions-Policy` on every response; gzip for JSON and static text but never for a stream; `*.map` is 404; `/api/search/ask` has its own location (no gzip, no buffering, an hour to finish). The frontend container serves `/assets/` as `try_files $uri =404` with a year's `immutable` caching, and `index.html`, `sw.js` and the SPA shell as `no-cache`. `deploy/probe-gateway.sh` builds the `labs.fa.reel-gateway` image and runs it against stub upstreams (or probes a published image: `deploy/probe-gateway.sh frostaura/labs.fa.reel-gateway:sha-<short>`). `deploy/probe-ask-stream.sh` renders the same `nginx/nginx.conf` with the image's defaults and runs it in a native nginx (no Docker) against a stub API that streams an Ask turn with the API's 5 s heartbeat, and fails unless every frame reaches the client within 1 s of being written and uncompressed; with the Ask location removed it fails, every frame held back to the end of the turn. The same check through cloudflared needs the live host.
 
 ### Founder tier
 
@@ -295,7 +295,7 @@ The drill passed. Together with the LAN lockdown, it is a prerequisite for the f
 | `ci-e2e` | Playwright, Chromium and WebKit projects |
 | `ci-trivy` | `trivy fs`: HIGH and CRITICAL vulnerable dependencies and committed secrets. Runs Trivy's image, pinned by digest in the Makefile, on Docker, both on a laptop and in the workflow. A `trivy` on PATH is used only if it is the same version. |
 | `ci-compose` / `ci-docker` | Descriptors parse with their required variables and refuse without them (prod without `BACKUP_HOST_DIR` or `CLOUDFLARE_TUNNEL_TOKEN`), then the image build and dev-stack smoke as project `reel-ci` |
-| `ci-gateway` | `deploy/probe-gateway.sh`: the `reel-gateway` image built from `nginx/Dockerfile`, against stub upstreams |
+| `ci-gateway` | `deploy/probe-gateway.sh`: the `labs.fa.reel-gateway` image built from `nginx/Dockerfile`, against stub upstreams |
 | `ci-docker-prod` | `docker-compose.prod.yml` itself plus `deploy/ci/docker-compose.prod-smoke.yml`, all three images built from the checkout, as project `reel-ci-prod` on 18091 (`PROD_SMOKE_PROJECT` / `PROD_SMOKE_PORT` override both) |
 
 A missing prerequisite fails its gate with the reason. None of them skip.

@@ -5,7 +5,7 @@
 #
 # Why this exists
 # ---------------
-# Production runs the reel-gateway image: nginx/Dockerfile with nginx/nginx.conf baked in as an
+# Production runs the labs.fa.reel-gateway image: nginx/Dockerfile with nginx/nginx.conf baked in as an
 # envsubst template. On 2026-09-10 the production gateway config of the day (then an inline copy in
 # a second production file, since removed) was found to be rewriting `/api/…` to `/…` before the
 # request reached the backend — a `proxy_pass` whose URI ends in a slash replaces the matched
@@ -15,7 +15,7 @@
 # So: this script builds nginx/Dockerfile exactly as the publish jobs do (context ./nginx), stands
 # it up against a stub upstream that echoes back the path it was actually handed, and prints both
 # the status code and that path. Pass an image reference to probe a published image instead
-# (e.g. frostaura/reel-gateway:sha-abc1234) — it is then pulled, not built.
+# (e.g. frostaura/labs.fa.reel-gateway:sha-abc1234) — it is then pulled, not built.
 #
 # What it deliberately does NOT do
 # --------------------------------
@@ -57,7 +57,7 @@ trap teardown EXIT
 
 # --- 1. The gateway image, built exactly as CI publishes it ---------------------------------------
 if [ -z "$IMAGE" ]; then
-  IMAGE="reel-gateway:probe-$$"
+  IMAGE="labs.fa.reel-gateway:probe-$$"
   docker build -q -t "$IMAGE" -f "$REPO_ROOT/nginx/Dockerfile" "$REPO_ROOT/nginx" >/dev/null
   BUILT="$IMAGE"
 fi

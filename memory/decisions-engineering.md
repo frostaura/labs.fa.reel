@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-engineering
+name: labs-fa-reel-decisions-engineering
 description: "Invariant formatting is guarded at source because a comma decimal is a wrong answer TMDB silently accepts. The npm audit gate carries one expiring react-router waiver — reviewing it at expiry is a parent-level call, never a silent renewal."
 type: decision
 last_verified: 2026-09-11
@@ -53,6 +53,6 @@ last_verified: 2026-09-11
 - **`proxy_pass` in the gateway's nginx config must never carry a URI, and a test guards it.** *Why:* a URI on
   `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed stack
   would have 404'd every call. The deploy itself is still a founder action (`decisions-product.md`).
-- **The gateway ships as the `reel-gateway` image, and production exposes only the in-stack tunnel (2026-10-30).**
+- **The gateway ships as the `labs.fa.reel-gateway` image, and production exposes only the in-stack tunnel (2026-10-30).**
   *Why:* the deploy job re-submits the stored stack file, so an inline nginx config never moved with a redeploy;
-  and one exposed surface is the house pattern (crusaders.mainframe). Rationale and state: `deploy.md`.
+  and one exposed surface is the house pattern (technologies.crusaders.squash-control-system). Rationale and state: `deploy.md`.

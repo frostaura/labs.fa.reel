@@ -1,5 +1,5 @@
 ---
-name: fa-reel-questions
+name: labs-fa-reel-questions
 description: "Every one of these is Dean's, and the deploy decision blocks the rest — until Reel is deployed the external-user kill criterion cannot be evaluated at all. Trakt commercial terms remain the one question that can end the product."
 type: question
 last_verified: 2026-09-11

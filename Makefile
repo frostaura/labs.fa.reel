@@ -268,7 +268,7 @@ ci-docker:
 ci-gateway:
 	deploy/probe-gateway.sh
 
-# docker-compose.prod.yml itself, through the reel-gateway image built from this checkout: the same
+# docker-compose.prod.yml itself, through the labs.fa.reel-gateway image built from this checkout: the same
 # /health, /health/ready, / and commit probes as ci-docker. cloudflared is the one service not run.
 ci-docker-prod:
 	$(MAKE) docker-ready COMPOSE_ENV="$(CI_PROD_COMPOSE_ENV)" COMPOSE_FILES="$(PROD_SMOKE_FILES)" GATEWAY_PORT=$(PROD_SMOKE_PORT); status=$$?; \

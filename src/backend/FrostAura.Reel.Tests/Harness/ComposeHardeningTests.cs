@@ -208,7 +208,7 @@ public partial class ComposeHardeningTests
         // K-9: `:latest` names whatever was pushed last, so neither a rollback nor "what is running"
         // had an answer. The deploy job sets REEL_TAG=sha-<short>; a rollback sets it back.
         Assert.Contains(
-            $"    image: ${{DOCKERHUB_USERNAME:-frostaura}}/reel-{service}:${{REEL_TAG:-latest}}",
+            $"    image: ${{DOCKERHUB_USERNAME:-frostaura}}/labs.fa.reel-{service}:${{REEL_TAG:-latest}}",
             ComposeDescriptor.Load("docker-compose.prod.yml").ServiceBlock(service));
     }
 

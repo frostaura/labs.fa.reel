@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-ask-eval
+name: labs-fa-reel-decisions-ask-eval
 description: "How the Ask Reel golden eval's truth may change: only as a correctness fix of what the request means, equal to the app's count where the app is right, with a parity test, no bar moved. Never-repeat supply, meant truths, media from words."
 type: decision
 last_verified: 2026-10-30

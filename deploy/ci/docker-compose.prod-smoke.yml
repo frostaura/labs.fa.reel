@@ -1,11 +1,11 @@
 # Overlay for `make ci-docker-prod`: runs docker-compose.prod.yml ITSELF, built from this checkout,
-# so the production descriptor and the reel-gateway image are smoked before anything is published.
+# so the production descriptor and the labs.fa.reel-gateway image are smoked before anything is published.
 # Never a deployment file — Portainer never sees it.
 #
 # What it changes, and nothing else:
 #   - backend, frontend and gateway gain a `build:` so compose builds this commit's images and tags
 #     them with the prod file's own image names (make passes a throwaway DOCKERHUB_USERNAME and
-#     REEL_TAG, so no real frostaura/reel-* tag on the machine is ever overwritten);
+#     REEL_TAG, so no real frostaura/labs.fa.reel-* tag on the machine is ever overwritten);
 #   - the gateway is published on loopback for the probe ONLY HERE — the prod file publishes nothing;
 #   - cloudflared is parked behind a profile nobody enables: it needs a real tunnel token, and a smoke
 #     must never open a public edge.

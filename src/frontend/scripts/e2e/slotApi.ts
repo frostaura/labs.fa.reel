@@ -23,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
  * the env file is ever printed; refusals name variables only.
  *
  * Usage (from src/frontend):
- *   node scripts/e2e/slotApi.ts --env-file ~/src/fa.reel-ws/lane.env --db reel_ws9 --port 5189 \
+ *   node scripts/e2e/slotApi.ts --env-file ~/src/labs.fa.reel-ws/lane.env --db reel_ws9 --port 5189 \
  *     --log ../../.tmp/api.log --pid ../../.tmp/api.pid
  * The API runs detached in its own process group (`dotnet run --no-build`), so build first, and stop
  * it with `kill -- -$(cat <pid>)` (the group: `dotnet run` and the API process it starts).

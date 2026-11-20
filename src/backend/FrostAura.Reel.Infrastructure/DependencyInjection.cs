@@ -11,7 +11,7 @@ public static partial class DependencyInjection
 {
     // Trakt/TMDB both front with Cloudflare, which rejects UA-less requests — HttpClient
     // sends no User-Agent by default, so an explicit one is load-bearing, not cosmetic.
-    private const string UserAgent = "fa.reel/0.1 (+https://github.com/frostaura/fa.reel)";
+    private const string UserAgent = "labs.fa.reel/0.1 (+https://github.com/frostaura/labs.fa.reel)";
 
     /// <summary>Wires persistence, tenancy scope, secret protection, external API adapters, and shared rate gates.</summary>
     public static IServiceCollection AddReelInfrastructure(this IServiceCollection services, IConfiguration configuration)

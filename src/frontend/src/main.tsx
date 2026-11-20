@@ -16,7 +16,7 @@ import "@fontsource-variable/figtree/wght.css";
 import "./index.css";
 
 // Dev-only: unregister any stale service worker from previous sessions so cached app shells or
-// API responses never shadow the dev server (fa.foresight precedent — Safari is the offender).
+// API responses never shadow the dev server (Safari is the offender).
 if (import.meta.env.DEV && "serviceWorker" in navigator) {
   navigator.serviceWorker.getRegistrations().then((regs) => {
     if (regs.length > 0) {

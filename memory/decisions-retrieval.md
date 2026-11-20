@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-retrieval
+name: labs-fa-reel-decisions-retrieval
 description: "Cross-reference LLM verdicts nudge UP on Keep only — the OUT arm still hides a sixth of future loves, so nothing is demoted and the second verdict round stays gated. Retrieval is multi-centroid; a Preserve rebuild may never grow a rail."
 type: decision
 last_verified: 2026-09-11

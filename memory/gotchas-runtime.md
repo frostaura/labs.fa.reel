@@ -1,5 +1,5 @@
 ---
-name: fa-reel-gotchas-runtime
+name: labs-fa-reel-gotchas-runtime
 description: "A filtered HNSW search silently returns a fraction of the rows it asks for and the LINQ cannot save you; StrictMode remounts hang the search at Thinking…; a dead backend still renders the app because the frontend is a PWA."
 type: gotcha
 last_verified: 2026-09-11

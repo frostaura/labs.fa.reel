@@ -15,7 +15,7 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 
 /// <summary>
 /// Extracts taste attributes via OpenRouter chat completions (model from OPENROUTER_MODEL,
-/// founder-locked <c>openai/gpt-6-luna</c>). Mirrors fa.startup's OpenRouter conventions.
+/// founder-locked <c>openai/gpt-6-luna</c>).
 ///
 /// Two modes, picked at availability time:
 ///  • <b>live</b> — OPENROUTER_API_KEY present: one structured-JSON request per title.

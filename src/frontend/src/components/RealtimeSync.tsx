@@ -13,8 +13,8 @@ const selectSyncStatus = api.endpoints.getSyncStatus.select();
 type Tag = Parameters<typeof api.util.invalidateTags>[0][number];
 
 /**
- * Headless steady-state SSE consumer mounted once in the app shell (fa.foresight's
- * realtimeSync pattern). Two inputs keep the header pill honest:
+ * Headless steady-state SSE consumer mounted once in the app shell (the
+ * realtime-sync pattern). Two inputs keep the header pill honest:
  *   1. Authority — /api/sync/status. Whether anything is running, and what, is read from every
  *      poll answer; a live frame can never keep the pill "active" after the poll says idle (H-17).
  *      Polled every 5 s only while work the user started is in flight, otherwise every 60 s, and

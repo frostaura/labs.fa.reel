@@ -5,7 +5,7 @@
       <stop offset="100%" stop-color="#60A5FA" />
     </linearGradient>
   </defs>
-  <!-- reel sweep: an open lens-ring unspooling toward the taste-spark (Foresight's arc language) -->
+  <!-- reel sweep: an open lens-ring unspooling toward the taste-spark -->
   <path d="M32.6 15.16 A 13.5 13.5 0 1 1 24.84 7.4" stroke="url(#fa-reel-grad)" stroke-width="2.25" stroke-linecap="round" opacity="0.8" />
   <!-- play triangle: watch — the cinema focal, corners softened by a round-join stroke -->
   <path d="M16 13.7 L 27.2 20 L 16 26.3 Z" fill="url(#fa-reel-grad)"

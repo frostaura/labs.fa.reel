@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-chat
+name: labs-fa-reel-decisions-chat
 description: "Ask Reel was delegated 'as you see fit' and every founder lock was kept: no filter override, delete but no erasure, tier rungs designed not built. The turn is server-owned because a client transcript is a fabrication vector."
 type: decision
 last_verified: 2026-09-11

@@ -20,7 +20,7 @@ jobs:
   # ============================================================================
   backend:
     name: Backend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -60,7 +60,7 @@ jobs:
   # ============================================================================
   contract:
     name: OpenAPI contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -90,7 +90,7 @@ jobs:
   # ============================================================================
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -133,7 +133,7 @@ jobs:
   # ============================================================================
   frontend-e2e:
     name: Frontend E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [frontend]
     steps:
@@ -177,7 +177,7 @@ jobs:
   # ============================================================================
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [frontend, backend]
     timeout-minutes: 10
     steps:
@@ -216,7 +216,7 @@ jobs:
   # ============================================================================
   backend-integration:
     name: Backend Integration (Postgres + pgvector)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [backend]
     services:
@@ -260,7 +260,7 @@ jobs:
   # merge — after a bad :latest had already been pushed. This gate moves that failure left.
   docker:
     name: Docker Build & Stack Smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: [backend, frontend]
     steps:
@@ -282,7 +282,7 @@ jobs:
 
       - name: Smoke the PRODUCTION descriptor through the built gateway image
         # docker-compose.prod.yml itself (minus cloudflared, which needs a real tunnel token), with
-        # all three images built from this commit: the same probes, through reel-gateway.
+        # all three images built from this commit: the same probes, through labs.fa.reel-gateway.
         run: make ci-docker-prod
 
   # ============================================================================
@@ -290,7 +290,7 @@ jobs:
   # ============================================================================
   build-backend-amd64:
     name: Build Backend (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -321,8 +321,8 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-amd64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:${{ steps.tag.outputs.tag }}-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:${{ steps.tag.outputs.tag }}-amd64
 
   build-backend-arm64:
     name: Build Backend (arm64)
@@ -357,12 +357,12 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:latest-arm64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend:${{ steps.tag.outputs.tag }}-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:latest-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend:${{ steps.tag.outputs.tag }}-arm64
 
   merge-backend-manifests:
     name: Create Backend Multi-arch Manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [build-backend-amd64, build-backend-arm64]
     steps:
@@ -379,7 +379,7 @@ jobs:
       # rollback names; `latest` is only a convenience for a stack that pins nothing (K-9).
       - name: Create and push manifest
         env:
-          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-backend
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-backend
         run: |
           set -euo pipefail
           tag="sha-${GITHUB_SHA::7}"
@@ -389,7 +389,7 @@ jobs:
 
   build-frontend-amd64:
     name: Build Frontend (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -418,8 +418,8 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-amd64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:${{ steps.tag.outputs.tag }}-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:${{ steps.tag.outputs.tag }}-amd64
 
   build-frontend-arm64:
     name: Build Frontend (arm64)
@@ -452,12 +452,12 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:latest-arm64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend:${{ steps.tag.outputs.tag }}-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:latest-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend:${{ steps.tag.outputs.tag }}-arm64
 
   merge-frontend-manifests:
     name: Create Frontend Multi-arch Manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [build-frontend-amd64, build-frontend-arm64]
     steps:
@@ -474,7 +474,7 @@ jobs:
       # rollback names; `latest` is only a convenience for a stack that pins nothing (K-9).
       - name: Create and push manifest
         env:
-          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-frontend
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-frontend
         run: |
           set -euo pipefail
           tag="sha-${GITHUB_SHA::7}"
@@ -484,7 +484,7 @@ jobs:
 
   build-gateway-amd64:
     name: Build Gateway (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -515,8 +515,8 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:latest-amd64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:${{ steps.tag.outputs.tag }}-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway:latest-amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway:${{ steps.tag.outputs.tag }}-amd64
 
   build-gateway-arm64:
     name: Build Gateway (arm64)
@@ -549,12 +549,12 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:latest-arm64
-            ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway:${{ steps.tag.outputs.tag }}-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway:latest-arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway:${{ steps.tag.outputs.tag }}-arm64
 
   merge-gateway-manifests:
     name: Create Gateway Multi-arch Manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [build-gateway-amd64, build-gateway-arm64]
     steps:
@@ -570,7 +570,7 @@ jobs:
       # Two names for one manifest, exactly as for the backend and frontend (K-9).
       - name: Create and push manifest
         env:
-          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/reel-gateway
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/labs.fa.reel-gateway
         run: |
           set -euo pipefail
           tag="sha-${GITHUB_SHA::7}"
@@ -587,13 +587,13 @@ jobs:
   # the variable is unset the job is skipped (not failed), so CI stays green.
   #
   # The job sets the stack's REEL_TAG to `sha-<short>` (docker-compose.prod.yml pulls
-  # reel-backend, reel-frontend and reel-gateway at ${REEL_TAG}), so the stack names the exact images it runs and a rollback is one REEL_TAG
+  # labs.fa.reel-backend, labs.fa.reel-frontend and labs.fa.reel-gateway at ${REEL_TAG}), so the stack names the exact images it runs and a rollback is one REEL_TAG
   # edit. It then polls the public /health until the commit it reports is this one, and FAILS if
   # that never happens: a redeploy Portainer accepted is not a deploy that is serving. The window
   # covers the backend's pre-migration dump and migrations (its healthcheck start_period is 40 min).
   deploy-portainer:
     name: Pin, redeploy on Portainer and verify /health
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     needs: [merge-backend-manifests, merge-frontend-manifests, merge-gateway-manifests]
     if: vars.DEPLOY_ENABLED == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -625,8 +625,8 @@ jobs:
           # A stored file from before the gateway image existed would redeploy the new backend behind
           # the OLD inline nginx config and report success. Same remedy: re-paste the stack file once.
           # shellcheck disable=SC2016 # the literal compose text, not a shell expansion
-          if ! grep -qF 'reel-gateway:${REEL_TAG' <<< "${stack_file_content}"; then
-            echo "The Portainer stack file does not run reel-gateway:\${REEL_TAG...}; paste docker-compose.prod.yml into it first (docs/deployment.md#standing-up-the-portainer-stack)." >&2
+          if ! grep -qF 'labs.fa.reel-gateway:${REEL_TAG' <<< "${stack_file_content}"; then
+            echo "The Portainer stack file does not run labs.fa.reel-gateway:\${REEL_TAG...}; paste docker-compose.prod.yml into it first (docs/deployment.md#standing-up-the-portainer-stack)." >&2
             exit 1
           fi
 

@@ -1,5 +1,5 @@
 ---
-name: fa-reel-watch
+name: labs-fa-reel-watch
 description: "The chat surface still has NO ceilings — no rate limiter, no tier check, no budget — and the provider-side spend cap is one unclicked founder action. Every in-app reaction re-judges the whole cross-reference pool at LLM cost."
 type: watch
 last_verified: 2026-09-11

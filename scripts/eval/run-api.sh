@@ -17,7 +17,7 @@
 #     the live clone's, never printed) unless EVAL_FOUNDER_KEY_SIGNOFF="<who, when>" records his sign-off;
 #   - it never loads the founder's credentials: the API's DotEnv walks UP from the dll's folder to the
 #     first .env it finds and fills every variable still unset, so a dll with a .env in any parent
-#     folder (e.g. one built inside ~/src/fa.reel) is refused, and every credential the env file does not
+#     folder (e.g. one built inside ~/src/labs.fa.reel) is refused, and every credential the env file does not
 #     set is exported empty (DotEnv never overrides a variable that is set, even to "");
 #   - the API starts from an EMPTY environment (env -i) holding only the env file's variables, the
 #     switches below and HOME/PATH/TMPDIR — never a key inherited from the caller's shell profile (a

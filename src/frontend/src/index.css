@@ -4,7 +4,7 @@
 
 /* ── shadcn/ui CSS variable layer ─────────────────────────────────────────────────────────────
    Mapped onto FrostAura's frosty-glass palette so every shadcn primitive inherits the brand.
-   Canonical values mirrored from fa.foresight (the FrostAura frontend token source of truth).
+   Canonical FrostAura frontend token values.
 
    Color reference (FrostAura palette):
      --fa-ink     #06121F  → hsl(211 62% 8%)
@@ -286,7 +286,7 @@ body {
   animation: fa-shimmer-sweep 1.1s ease-out 1;
 }
 
-/* On-brand range slider (foresight pattern): dim base track + frost fill via --fa-range-fill. */
+/* On-brand range slider: dim base track + frost fill via --fa-range-fill. */
 .fa-range {
   -webkit-appearance: none;
   appearance: none;

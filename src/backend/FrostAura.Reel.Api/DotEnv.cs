@@ -1,7 +1,7 @@
 namespace FrostAura.Reel.Api;
 
 /// <summary>
-/// Dev convenience (foresight pattern): loads KEY=VALUE pairs from a .env at the repo root
+/// Dev convenience: loads KEY=VALUE pairs from a .env at the repo root
 /// into process env vars before configuration builds. Never overrides already-set variables,
 /// so it is a no-op inside containers where compose injects the real environment.
 /// </summary>

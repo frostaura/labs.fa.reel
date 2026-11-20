@@ -5,7 +5,7 @@
 //    refused when that file's OPENROUTER_API_KEY is the founder's key (compared by SHA-256; no value is
 //    ever printed or stored) unless the founder's sign-off is passed and recorded in the recording.
 // 2. Build slots. §5.0 rule 1 and §7 rule 5: no build may run during a latency run. A latency run takes
-//    every machine build slot (~/src/fa.reel-ws/.locks/slot1..3, the same locks bin/build-slot uses) and
+//    every machine build slot (~/src/labs.fa.reel-ws/.locks/slot1..3, the same locks bin/build-slot uses) and
 //    holds them until it ends; the recording says so, and the scorer gates latency only when it does.
 //
 //   node scripts/eval/guards.mjs key <env-file>     exit 0 separate key · 3 founder key · 4 no key
@@ -31,7 +31,7 @@ export function envKeyHash(file, name = "OPENROUTER_API_KEY") {
 // (by key name only) from the live clone's .env.
 export function founderKeyHash(env = process.env) {
   if (env.EVAL_FOUNDER_KEY_SHA256) return env.EVAL_FOUNDER_KEY_SHA256.toLowerCase();
-  return envKeyHash(env.EVAL_FOUNDER_ENV ?? join(homedir(), "src", "fa.reel", ".env"));
+  return envKeyHash(env.EVAL_FOUNDER_ENV ?? join(homedir(), "src", "labs.fa.reel", ".env"));
 }
 
 // "separate" | "founder" | "none" | "unknown" (the founder's hash could not be established).
@@ -55,7 +55,7 @@ export function modelKeyFor(apiEnvFile, signoff, env = process.env) {
   return { recorded: "separate key (not the founder's)" };
 }
 
-export const LOCKS_DIR = process.env.EVAL_LOCKS_DIR ?? join(homedir(), "src", "fa.reel-ws", ".locks");
+export const LOCKS_DIR = process.env.EVAL_LOCKS_DIR ?? join(homedir(), "src", "labs.fa.reel-ws", ".locks");
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 // Takes every build slot, waiting for builds in flight to finish; returns { release, heldFrom, waitedMs }.

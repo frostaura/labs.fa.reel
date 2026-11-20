@@ -9,6 +9,14 @@
 # a guess. Sized for at least 72 h per container (R1-37): 10 x 100 MB uncompressed holds 85 h at the
 # 200 KB/min idle-volume ceiling (72 h needs 844 MB); the `local` driver also compresses rotated files.
 # ComposeHardeningTests asserts the arithmetic, not the literal.
+
+# The compose project name is pinned to its pre-rename value. Unpinned, compose derives it from
+# the clone folder, so renaming fa.reel to labs.fa.reel would silently switch every `docker compose`
+# run to a fresh, empty `labsfareel_postgres_data` volume while the local database stays in
+# `fareel_postgres_data`. COMPOSE_PROJECT_NAME (the Makefile's CI targets) still overrides it.
+# Change it only together with a deliberate volume migration.
+name: fareel
+
 x-logging: &default-logging
   driver: local
   options:
@@ -56,7 +64,7 @@ services:
       ASPNETCORE_URLS: http://+:5000
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-reel};Username=${POSTGRES_USER:-reel};Password=${POSTGRES_PASSWORD}
       Database__AutoMigrateOnStartup: ${Database__AutoMigrateOnStartup:-true}
-      # App session JWTs (fa.startup naming)
+      # App session JWTs
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_ISSUER: ${JWT_ISSUER:-frostaura-reel}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-frostaura-reel-app}
@@ -84,7 +92,7 @@ services:
       # TMDB
       TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
       TMDB_RATE_PER_SEC: ${TMDB_RATE_PER_SEC:-40}
-      # OpenRouter (fa.startup naming) — all LLM calls route through this gateway
+      # OpenRouter — all LLM calls route through this gateway
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-luna}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}

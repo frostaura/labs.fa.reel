@@ -3,7 +3,7 @@
 //
 //   node scripts/eval/judge.mjs items --recording <recording.json> --db <eval db> --out <labels.csv> [--n 100] [--seed 42] [--confirm <ids file>]
 //   node scripts/eval/judge.mjs run   --recording <recording.json> --db <eval db> --judge-env <env file> --out <judge.json>
-//                                     [--prompt ~/src/fa.reel-eval-sealed/askreel/judge/prompt.md] [--concurrency 4] [--founder-key-signoff "<who, when>"]
+//                                     [--prompt ~/src/labs.fa.reel-eval-sealed/askreel/judge/prompt.md] [--concurrency 4] [--founder-key-signoff "<who, when>"]
 //   node scripts/eval/judge.mjs kappa --labels <labels.csv> --judge <judge.json> [--out <kappa.json>]
 //   node scripts/eval/judge.mjs score --judge <judge.json>
 //   node scripts/eval/judge.mjs compare --judge <judge.json> --baseline <judge.json> [--kappa <kappa.json>]
@@ -40,7 +40,7 @@ export const JUDGE_MODEL = "openai/gpt-6-luna";
 export const JUDGE_EFFORT = "none";
 /** The cards per turn the judge reads: the top of the grid, where precision@8 is measured too. */
 export const JUDGE_DEPTH = 8;
-export const SEALED_PROMPT = join(homedir(), "src", "fa.reel-eval-sealed", "askreel", "judge", "prompt.md");
+export const SEALED_PROMPT = join(homedir(), "src", "labs.fa.reel-eval-sealed", "askreel", "judge", "prompt.md");
 
 // ── sampling ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -250,7 +250,7 @@ export function groundedMessage(turn, request) {
 export async function callJudge({ fetchImpl = fetch, apiKey, model = JUDGE_MODEL, system, user, schema }) {
   const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-Title": "fa.reel eval judge" },
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-Title": "labs.fa.reel eval judge" },
     body: JSON.stringify({
       model, temperature: 0, reasoning: { effort: JUDGE_EFFORT },
       messages: [{ role: "system", content: system }, { role: "user", content: user }],

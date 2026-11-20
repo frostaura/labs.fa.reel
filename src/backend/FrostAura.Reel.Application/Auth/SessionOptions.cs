@@ -3,7 +3,7 @@ using FrostAura.Reel.Application.Configuration;
 namespace FrostAura.Reel.Application.Auth;
 
 /// <summary>
-/// App-session settings (fa.startup naming), validated at startup. The first
+/// App-session settings, validated at startup. The first
 /// <see cref="ValidatedOptions"/> class and the worked example of the pattern.
 ///
 /// <para>A missing <c>JWT_SECRET</c> used to surface as a 500 on the first sign-in, and an

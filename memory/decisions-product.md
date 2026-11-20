@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-product
+name: labs-fa-reel-decisions-product
 description: "Founder calls with their why: repo flipped PRIVATE, deploy decided 2026-07-24 and still not executed (a trip-by-timer kill is void), model-first then product, honest from day one, filters as a cost meter the founder sets himself."
 type: decision
 last_verified: 2026-09-11
@@ -8,7 +8,7 @@ last_verified: 2026-09-11
 # Live decisions — product and founder calls
 
 ## Programme and repo
-- **The repo is PRIVATE (founder, 2026-08-07).** *Why:* `frostaura/fa.reel` had been public while Labs is
+- **The repo is PRIVATE (founder, 2026-08-07).** *Why:* `frostaura/labs.fa.reel` (then `frostaura/fa.reel`) had been public while Labs is
   stealth-by-default, and the exception was never recorded. Asked and answered at the first push in a month: flip
   private, then push. **Consequence — two residues still assert the opposite, and neither is an agent's to change:** the
   `LICENSE` file still says MIT, and `README.md`'s licence line reads "Open by default, per FrostAura

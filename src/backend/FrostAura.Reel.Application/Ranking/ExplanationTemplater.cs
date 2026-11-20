@@ -7,7 +7,7 @@ namespace FrostAura.Reel.Application.Ranking;
 
 /// <summary>
 /// Deterministic why-this sentences from the model's actual top contributions — the honest
-/// explainability layer behind every card (foresight DescriptionTemplater precedent; optional
+/// explainability layer behind every card (optional
 /// LLM polish stays behind a flag, off by default). Never claims a reason the model didn't use.
 /// </summary>
 public static partial class ExplanationTemplater
