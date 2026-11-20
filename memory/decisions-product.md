@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-product
+name: labs-fa-reel-decisions-product
 description: "Founder calls with their why: repo flipped PRIVATE, deploy decided 2026-07-24 and still not executed (a trip-by-timer kill is void), model-first then product, honest from day one, filters as a cost meter the founder sets himself."
 type: decision
 last_verified: 2026-11-20

@@ -1,8 +1,8 @@
 ---
-name: fa-reel-decisions-chat
+name: labs-fa-reel-decisions-chat
 description: "Ask Reel was delegated 'as you see fit' and every founder lock was kept: no filter override, delete but no erasure, tier rungs designed not built. The turn is server-owned because a client transcript is a fabrication vector."
 type: decision
-last_verified: 2026-09-11
+last_verified: 2026-11-20
 ---
 
 # Live decisions — the Ask Reel chat programme
@@ -21,7 +21,8 @@ these is still open as a question — `questions.md`.
 - **Tier rungs and a chat budget were proposed as config, not built.** Free still gets the whole pipeline. This is the
   single largest unpaid debt on the surface — `watch.md`.
 - **The programme left `REEL_SEARCH_MODEL` untouched**, because whether the founder's extraction-model lock reaches the
-  rerank model was never stated. The 2026-10-22 `gpt-6-luna` commit changed its default anyway — open in `questions.md`.
+  rerank model was never stated. The `gpt-6-luna` commits on the unmerged `build/trust-v1` change its default anyway; `main` still defaults to
+  `openai/gpt-5.4-mini` (`OpenRouterSearchAgent.cs`, 2026-11-20) — open in `questions.md`.
 - **No MCP surface** (it collides with "Sign in with Trakt only") and **no ad-hoc lists** (the spec defines one list
   per profile with an auto-removal contract; extra lists need one written).
 - **Probe conversations are deleted through the endpoint, never SQL.**

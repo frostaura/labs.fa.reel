@@ -1,5 +1,5 @@
 ---
-name: fa-reel-questions
+name: labs-fa-reel-questions
 description: "Dean's, bar one. The 3-iteration modelling kill criterion is blown with no recorded call; deploy blocks the user criterion; the pushed, unmerged build/trust-v1 needs a merge-or-retire call. Trakt terms can still end it."
 type: question
 last_verified: 2026-11-20

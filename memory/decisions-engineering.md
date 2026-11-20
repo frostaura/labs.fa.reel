@@ -1,5 +1,5 @@
 ---
-name: fa-reel-decisions-engineering
+name: labs-fa-reel-decisions-engineering
 description: "Invariant formatting is guarded at source because TMDB silently accepts a comma decimal. The npm-audit waiver list is empty since react-router 8.3; a stack-smoke job gates every image publish; CI has no cron, by founder rule."
 type: decision
 last_verified: 2026-11-20

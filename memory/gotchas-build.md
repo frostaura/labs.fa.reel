@@ -1,19 +1,20 @@
 ---
-name: fa-reel-gotchas-build
-description: "Build only in ~/src/fa.reel — the iCloud clone is context files only and hangs the toolchain. Every dotnet command needs MSBuildEnableWorkloadResolver=false, and stale dotnet watch processes from an earlier session race every build."
+name: labs-fa-reel-gotchas-build
+description: "Build only in ~/src/labs.fa.reel — the iCloud clone is context files only and hangs the toolchain. Every dotnet command needs MSBuildEnableWorkloadResolver=false, and stale dotnet watch processes from an earlier session race every build."
 type: gotcha
-last_verified: 2026-09-11
+last_verified: 2026-11-20
 ---
 
 # Gotchas — environment, build and the dev loop
 
 - **Two clones, one repo, and only one of them builds.** Code, builds, tests and the dev loop happen in
-  `~/src/fa.reel`; the copy under `FrostAura Global/` is the context-file home. On 2026-09-09 fileproviderd took `git
+  `~/src/labs.fa.reel`; the copy under `FrostAura Global/` is the context-file home. On 2026-09-09 fileproviderd took `git
   status` on the iCloud tree past two minutes, a 40 MB Docker context to 16 minutes, and Vite to 137 s before it hung
-  on a file close — the clone starts Vite in under a second. The two clones exchange commits by pulling from each
-  other's local path, so **after committing in one, pull in the other or they drift**.
+  on a file close — the clone starts Vite in under a second. Both clones' only remote is `origin` on GitHub
+  (re-checked 2026-11-20), so **after committing and pushing from one, pull in the other or they drift**.
 - **Every `dotnet` command in `~/src` needs `MSBuildEnableWorkloadResolver=false`** — the installed workload set has
-  missing manifests and fails the restore otherwise. `dotnet format` takes `fa.reel.slnx` at the repo root.
+  missing manifests and fails the restore otherwise. `dotnet format` takes `fa.reel.slnx` at the repo root. (Workload claim not
+  re-run 2026-11-20; the `.slnx`, the 5054 launch profile and the compose restart policies below were re-read on `main`.)
 - **`dotnet watch` processes from an EARLIER session survive and keep rebuilding.** Three outlived their session and
   raced every test build for the API's `obj` directory (MSB4018 on static web assets); plain `kill` did not end them,
   `kill -9` did. Run `pgrep -fl 'dotnet watch'` before any build.

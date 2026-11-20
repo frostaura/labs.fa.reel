@@ -1,8 +1,8 @@
 ---
-name: fa-reel-gotchas-layout
+name: labs-fa-reel-gotchas-layout
 description: "A results grid scores CLS three ways and only one shows on a fast machine — a placeholder keyed by its position shuffles, animating left/top bills every frame, and a transient block above the grid cannot just unmount."
 type: gotcha
-last_verified: 2026-09-11
+last_verified: 2026-11-20
 ---
 
 # Gotchas — layout shift

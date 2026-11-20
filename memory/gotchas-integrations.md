@@ -1,8 +1,8 @@
 ---
-name: fa-reel-gotchas-integrations
+name: labs-fa-reel-gotchas-integrations
 description: "TMDB's TV taxonomy has NO horror genre, Trakt paginated the watched endpoints and broke ingest with a 200 OK, and the API-usage ledger is day-grained with one purpose written by four callers — so per-turn cost cannot be divided out."
 type: gotcha
-last_verified: 2026-09-11
+last_verified: 2026-11-20
 ---
 
 # Gotchas — external data and cost accounting
