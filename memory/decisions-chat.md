@@ -38,17 +38,16 @@ these is still open as a question — `questions.md`.
 - **Every `/ask` refusal is a coded `{error, code}`, and the progressive floor compares at badge precision.** *Why:* a
   refusal the client has to parse from prose is a refusal it will eventually mis-handle, and a floor that compares at
   a different precision than the badge shows the user a card the copy says is excluded.
-- **One mount guard per hook instance, held in a ref, with every deliberate abort named.** *Why:* StrictMode's remount
-  built two guards, and the first one's abort cancelled the page's own request while the reducer stayed in "streaming"
-  — the search hung at "Thinking…" forever. Anything aborted and unclaimed is now an error, not silence.
+- **One mount guard per hook instance, held in a ref, with every deliberate abort named; anything aborted and
+  unclaimed is an error, not silence.** *Why:* the StrictMode double-guard hang — mechanism in
+  [`gotchas-runtime.md`](gotchas-runtime.md), rule in [`../CLAUDE.md`](../CLAUDE.md).
 - **A handed-off question is minted into a document-scoped registry and spent exactly once, with the router state
   cleared *before* the send.** *Why:* `history.state` survives a reload, so a re-sent question was being derived by
   the server into a *page* of an answer nobody asked for.
 - **The interpretation cache key digests the whole transcript and the shown set.** *Why:* keyed on the question alone,
   it served one thread's history-shaped intent — byte-identical reply included — to a fresh thread. A whole-history
   digest can only cost a cache miss; guessing which slice the adapter sends would couple two layers.
-- **Pending turns are closed by boot reconciliation and by a three-minute stale rule.** *Why:* only the request
-  pipeline could ever close a turn, so an API death mid-stream left it Pending forever and every retry answered 409.
-  Reconciliation runs as a startup step *before* the listener opens, because a hosted service starts after it; the
-  stale row gives up its idempotency key so the partial unique index cannot turn a wedged thread into a 500 on the
+- **Pending turns are closed by boot reconciliation and by a three-minute stale rule** (mechanism in
+  [`../CLAUDE.md`](../CLAUDE.md)). *Why:* only the request pipeline could ever close a turn, so an API death
+  mid-stream left it Pending forever and every retry answered 409. The stale row gives up its idempotency key so the partial unique index cannot turn a wedged thread into a 500 on the
   retry's insert. A live Pending inside the threshold still gets its 409.

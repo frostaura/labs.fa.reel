@@ -2,19 +2,16 @@
 name: fa-reel-decisions-engineering
 description: "Invariant formatting is guarded at source because TMDB silently accepts a comma decimal. The npm-audit waiver list is empty since react-router 8.3; a stack-smoke job gates every image publish; CI has no cron, by founder rule."
 type: decision
-last_verified: 2026-10-14
+last_verified: 2026-11-20
 ---
 
 # Live decisions — engineering and infrastructure
 
 ## Correctness guards
-- **Every number the backend formats is invariant, and a source-level guard enforces it.** *Why:* nothing here is
-  localised — prompts, outbound query strings, cache keys, stored filter values, SSE payloads and job messages are
-  machine-read or compared as exact strings, so a comma decimal separator is a wrong answer rather than a different
-  rendering, **and a silent one, because TMDB ignores a malformed parameter and returns a valid, unfiltered page**.
-  Three defences, all load-bearing: the host-start culture pin, an explicit invariant contract at each formatting
-  site, and a test that greps the sources for the shapes the analyzer cannot see. The rule is in
-  [`../CLAUDE.md`](../CLAUDE.md). **One deliberate exception:** the `Convert.ToDecimal`/`ToInt32` calls in
+- **Every number the backend formats is invariant, guarded at source rather than by convention.** *Why:* a comma
+  decimal is a silent wrong answer — TMDB ignores a malformed parameter and returns a valid, unfiltered page — so
+  review cannot be trusted to catch it. The rule and its three defences are in [`../CLAUDE.md`](../CLAUDE.md).
+  **One deliberate exception:** the `Convert.ToDecimal`/`ToInt32` calls in
   `EligibilityQueryBuilder` stay provider-less, because EF translates only the single-argument overloads and a
   provider makes the predicate untranslatable — dozens of integration tests go red.
 - **`hnsw.iterative_scan = 'strict_order'` is issued on every connection by `HnswFilteredSearchInterceptor`,
@@ -32,7 +29,7 @@ last_verified: 2026-10-14
 - **"It only fails locally" is a hypothesis, not a diagnosis.** *Why:* every test ever put in the local-flaky
   quarantine turned out to be a real defect — a fake client returning a null language, an assertion for a contract
   that had been deliberately deleted. The quarantine is pinned by name so adding a row stays a deliberate act; it held
-  no tests at the 2026-10-14 inspection.
+  no tests at the 2026-11-20 inspection of `main`.
 - **Backtest tests seed per test instead of caching a static account.** *Why:* per-test embedding cleanup and a
   class-lifetime seed cannot both be true, and the static was already wrong in a quieter way — the class's scope genre
   is per-instance, so every test after the first ran against an account configured for a different scope.
@@ -56,8 +53,6 @@ last_verified: 2026-10-14
   the literal Portainer stack file, which nothing else in CI read.
 - **No scheduled CI run.** A weekly "rot check" was proposed and dropped before merge under the founder's no-cron
   rule. The idle-repo blind spot is accepted: the first push after a quiet month may fail on a new advisory.
-- **`DEPLOY_ENABLED` is a repo *variable*, not a secret,** so the redeploy job skips rather than fails while no
-  stack exists. Whether it is set is `state.md`'s business.
 - **`proxy_pass` in the Portainer stack's nginx config must never carry a URI, and a parity test guards it.** *Why:*
   a URI on `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed
   stack would have 404'd every call. The deploy itself is a founder action (`decisions-product.md`).

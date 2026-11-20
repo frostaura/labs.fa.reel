@@ -2,7 +2,7 @@
 name: fa-reel-gotchas-tests
 description: "A bare WebApplicationFactory boots with live credentials and bills real money — ReelApiFactory exists for that. The integration fixture DROPS the database it is pointed at. A vector flake that looks order-dependent is a VACUUM problem."
 type: gotcha
-last_verified: 2026-09-11
+last_verified: 2026-11-20
 ---
 
 # Gotchas — tests and fixtures

@@ -11,11 +11,7 @@ last_verified: 2026-09-11
   `~/src/fa.reel`; the copy under `FrostAura Global/` is the context-file home. On 2026-09-09 fileproviderd took `git
   status` on the iCloud tree past two minutes, a 40 MB Docker context to 16 minutes, and Vite to 137 s before it hung
   on a file close — the clone starts Vite in under a second. The two clones exchange commits by pulling from each
-  other's local path, so **after committing in one, pull in the other or they drift**, and a clone that has not fetched
-  reads 0/0 against a stale `origin/main` — fetch before believing any count.
-- **iCloud can delay another session's file writes by MINUTES.** A subagent looked stalled with its files "missing",
-  then the whole batch landed mid-way through the salvage agent's run. On this volume, absence on disk is not evidence
-  of absence — wait and re-list before declaring another session's work lost.
+  other's local path, so **after committing in one, pull in the other or they drift**.
 - **Every `dotnet` command in `~/src` needs `MSBuildEnableWorkloadResolver=false`** — the installed workload set has
   missing manifests and fails the restore otherwise. `dotnet format` takes `fa.reel.slnx` at the repo root.
 - **`dotnet watch` processes from an EARLIER session survive and keep rebuilding.** Three outlived their session and
@@ -47,9 +43,6 @@ last_verified: 2026-09-11
   falls to the landing page. Re-POST `/api/auth/dev/link` from the page origin and reload. Trakt's bot protection also
   blocks the Electron browser pane on the *authorize* page, so a real OAuth sign-in must happen in a normal browser;
   the pane works once a session cookie exists.
-- **`.env` holds live credentials** — Trakt secret and real tokens, TMDB, OpenRouter, the JWT signing key. Correctly
-  gitignored, but the iCloud copy of the tree is continuously synced to Apple's cloud. Rotate before any public
-  launch.
 - **Never leave the compose `backend` container running beside the dev loop.** Both connect to the same Postgres and
   share the job queue, so a month-old image silently claimed training and feed builds: it kept writing artifacts at an
   old schema while the new binary's sweep kept superseding them, and the stats tables stayed at zero while snapshots
