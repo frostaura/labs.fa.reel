@@ -16,7 +16,9 @@ slot="${BUILD_SLOT-}"
 [ -z "$slot" ] && [ -x "$HOME/src/labs.fa.reel-ws/bin/build-slot" ] && slot="$HOME/src/labs.fa.reel-ws/bin/build-slot"
 full="$(git -C "$repo" rev-parse --verify "$commit^{commit}")"
 rm -rf "$out"; mkdir -p "$out"
-git -C "$repo" archive "$full" src/backend fa.reel.slnx | tar -x -C "$out"
+# Commits before the 2026-11-20 rename carry the solution as fa.reel.slnx; archive whichever one exists.
+sln="labs.fa.reel.slnx"; git -C "$repo" cat-file -e "$full:$sln" 2>/dev/null || sln="fa.reel.slnx"
+git -C "$repo" archive "$full" src/backend "$sln" | tar -x -C "$out"
 (cd "$out" && MSBuildEnableWorkloadResolver=false $slot "${DOTNET:-$HOME/.dotnet/dotnet}" build \
   src/backend/FrostAura.Reel.Api/FrostAura.Reel.Api.csproj -c Release -nologo -v q \
   -p:SourceRevisionId="$full" >&2)

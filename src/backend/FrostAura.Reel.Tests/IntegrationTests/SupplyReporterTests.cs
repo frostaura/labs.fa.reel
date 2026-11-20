@@ -1085,12 +1085,12 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
     private static string RomanticComedyTruth()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "fa.reel.slnx")))
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "labs.fa.reel.slnx")))
         {
             dir = dir.Parent;
         }
 
-        var path = Path.Combine(dir?.FullName ?? throw new InvalidOperationException("fa.reel.slnx not found above the test assembly."), "eval", "askreel", "truth", "romantic-comedy.sql");
+        var path = Path.Combine(dir?.FullName ?? throw new InvalidOperationException("labs.fa.reel.slnx not found above the test assembly."), "eval", "askreel", "truth", "romantic-comedy.sql");
         return string.Join('\n', File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal))).TrimEnd().TrimEnd(';');
     }
 

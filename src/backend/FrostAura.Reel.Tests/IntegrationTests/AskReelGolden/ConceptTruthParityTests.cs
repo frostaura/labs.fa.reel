@@ -352,11 +352,11 @@ public class ConceptTruthParityTests(PostgresFixture fixture)
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "fa.reel.slnx")))
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "labs.fa.reel.slnx")))
         {
             dir = dir.Parent;
         }
 
-        return dir?.FullName ?? throw new InvalidOperationException("fa.reel.slnx not found above the test assembly.");
+        return dir?.FullName ?? throw new InvalidOperationException("labs.fa.reel.slnx not found above the test assembly.");
     }
 }

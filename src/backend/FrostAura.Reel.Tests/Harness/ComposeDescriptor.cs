@@ -177,11 +177,11 @@ internal sealed partial class ComposeDescriptor
         }
     }
 
-    /// <summary>Walks up from the test binary to the repository root (the directory holding <c>fa.reel.slnx</c>).</summary>
+    /// <summary>Walks up from the test binary to the repository root (the directory holding <c>labs.fa.reel.slnx</c>).</summary>
     public static string RepositoryRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "fa.reel.slnx")))
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "labs.fa.reel.slnx")))
         {
             dir = dir.Parent;
         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail on any vulnerable NuGet package, top-level or transitive.
 
-  dotnet list fa.reel.slnx package --vulnerable --include-transitive --format json | nuget-vulnerable-gate.py
+  dotnet list labs.fa.reel.slnx package --vulnerable --include-transitive --format json | nuget-vulnerable-gate.py
 """
 import json
 import sys

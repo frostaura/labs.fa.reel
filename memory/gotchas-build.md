@@ -17,7 +17,7 @@ last_verified: 2026-09-11
   then the whole batch landed mid-way through the salvage agent's run. On this volume, absence on disk is not evidence
   of absence — wait and re-list before declaring another session's work lost.
 - **Every `dotnet` command in `~/src` needs `MSBuildEnableWorkloadResolver=false`** — the installed workload set has
-  missing manifests and fails the restore otherwise. `dotnet format` takes `fa.reel.slnx` at the repo root.
+  missing manifests and fails the restore otherwise. `dotnet format` takes `labs.fa.reel.slnx` at the repo root.
 - **`dotnet watch` processes from an EARLIER session survive and keep rebuilding.** Three outlived their session and
   raced every test build for the API's `obj` directory (MSB4018 on static web assets); plain `kill` did not end them,
   `kill -9` did. Run `pgrep -fl 'dotnet watch'` before any build.

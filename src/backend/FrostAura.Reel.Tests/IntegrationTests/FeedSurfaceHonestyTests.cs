@@ -398,7 +398,7 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
     private static string RepairScriptPath()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "fa.reel.slnx")))
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "labs.fa.reel.slnx")))
         {
             directory = directory.Parent;
         }

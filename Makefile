@@ -27,13 +27,13 @@ down:
 lint: lint-backend lint-frontend
 
 lint-backend:
-	dotnet format fa.reel.slnx --verify-no-changes --verbosity minimal
+	dotnet format labs.fa.reel.slnx --verify-no-changes --verbosity minimal
 
 lint-frontend:
 	cd src/frontend && npm run lint
 
 build:
-	dotnet build fa.reel.slnx --nologo
+	dotnet build labs.fa.reel.slnx --nologo
 
 test:
 	dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo
@@ -96,7 +96,7 @@ qa: release-validation
 # A missing prerequisite FAILS its gate with the reason — a gate that skips is a gate that lies.
 
 DOTNET ?= dotnet
-SLN := fa.reel.slnx
+SLN := labs.fa.reel.slnx
 TEST_PROJECT := src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj
 CI_OUT ?= $(CURDIR)/.tmp/ci
 # Ratchets, not targets (regression guards; raise them as the suites grow).
