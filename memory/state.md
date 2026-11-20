@@ -27,8 +27,8 @@ variables at all** (`DEPLOY_ENABLED` unset); the Docker Hub and Portainer URL/to
 
 **Repo topology (re-probed late 2026-11-20: `git fetch` here, `git ls-remote` from the dev clone).** One private repo,
 two clones, diverged.
-- **iCloud clone** (this directory) — `main` level with `origin/main` at `39452d8` (pushed 2026-11-20, not by an
-  agent); clean tree. The remote holds `main` only.
+- **iCloud clone** (this directory) — `main` ahead-only of `origin/main` (`39452d8`, pushed 2026-11-20, not by an
+  agent) by context commits; clean tree. The remote holds `main` only.
 - **Dev clone** `~/src/fa.reel` — now checked out on its own `main` (`8c85224`, 2026-09-16, behind this clone's), and its
   only other branch is **`build/trust-v1`** (`22df526`, 2026-10-31), the integration branch of an Ask Reel v2 build
   carrying several hundred commits dated 2026-10-22 to 2026-10-31: answer quality, a golden eval, hardening rounds
