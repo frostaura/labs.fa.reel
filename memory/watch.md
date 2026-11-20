@@ -1,6 +1,6 @@
 ---
 name: fa-reel-watch
-description: "Chat still has NO ceilings — no tier check, no budget, and no rate limiter on main or the unpushed branch. Main's fallback search interpreter sends no max_tokens. Every in-app reaction re-judges the cross-reference pool."
+description: "Chat still has NO ceilings — no tier check, no budget, and no rate limiter on main or the unmerged branch. Main's fallback search interpreter sends no max_tokens. Every in-app reaction re-judges the cross-reference pool."
 type: watch
 last_verified: 2026-11-20
 ---
@@ -17,7 +17,7 @@ last_verified: 2026-11-20
   centroid and loved anchors by design (a lens note must not survive a dismissal), so each reaction turns the scored
   pool unjudged — budget-bounded, but the dominant LLM cost. **Next call:** a coarser verdict key or a daily cap.
 - **`main` breaks its own `max_tokens` rule.** The standalone `OpenRouterSearchInterpreter` (Ask Reel's fallback
-  interpreter) sends no `max_tokens` and never checks `finish_reason` (source, 2026-11-20). The unpushed
+  interpreter) sends no `max_tokens` and never checks `finish_reason` (source, 2026-11-20). The unmerged
   `build/trust-v1` routes it through a shared client its comment says bounds the completion (client not inspected);
   the fix lands with that branch, or not at all.
 

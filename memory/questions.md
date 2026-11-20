@@ -1,6 +1,6 @@
 ---
 name: fa-reel-questions
-description: "Dean's, bar one. The 3-iteration modelling kill criterion is blown with no recorded call; deploy blocks the user criterion; an unpushed one-disk build needs a merge-or-retire call. Trakt terms can still end it."
+description: "Dean's, bar one. The 3-iteration modelling kill criterion is blown with no recorded call; deploy blocks the user criterion; the pushed, unmerged build/trust-v1 needs a merge-or-retire call. Trakt terms can still end it."
 type: question
 last_verified: 2026-11-20
 ---
@@ -11,7 +11,7 @@ last_verified: 2026-11-20
 spends money or touches a founder lock. Where the 2026-09-11 Ask Reel programme had to act first, it took the
 conservative side and recorded the alternative — `decisions-chat.md`.
 
-## The two kill criteria, and the unpushed build
+## The two kill criteria, and the unmerged build
 - **The modelling criterion is blown, and nothing records a decision to continue.** It reads "cannot beat the
   popularity baseline by a meaningful margin after **3** modelling iterations"; the ledger has run to iteration 17
   (`decisions-model.md`) with no lift, and `MetricsEndpoints.cs` was changed to state the breach after rendering "iteration 12 of 3".
@@ -20,9 +20,10 @@ conservative side and recorded the alternative — `decisions-chat.md`.
   evaluable at all. External users are zero and the 60-day clock has passed on either anchor: deploy and re-anchor at
   the first external serve, or apply the criterion as written and kill. **On `main` only the advisory-red restore
   (`state.md`) is technical** — beyond it, the redeploy job skips because `DEPLOY_ENABLED` and `PORTAINER_STACK_ID` are unset (re-checked with
-  `gh`, 2026-11-20). The deploy-chain work on unpushed `build/trust-v1` changes the production shape (`state.md`).
-- **Merge, push or retire `build/trust-v1`?** Several hundred commits and their own context store exist only in
-  `~/src` (`state.md`); until decided, no store is authoritative for Ask Reel v2.
+  `gh`, 2026-11-20). The deploy-chain work on unmerged `build/trust-v1` changes the production shape (`state.md`).
+- **Merge or retire `build/trust-v1`?** Several hundred commits and their own context store, on the remote since
+  2026-11-20 but not on `main` (`state.md`); until decided, no store is authoritative for Ask Reel v2. A merge
+  reconciles the forked context store topic by topic.
 
 ## The M2 bar is written in a metric the harness no longer reads
 - **The research question and milestone 2 say "≥20% relative precision@10"** (the kill criterion names no metric);
