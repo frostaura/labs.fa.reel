@@ -1,6 +1,6 @@
 ---
 name: labs-fa-reel-watch
-description: "Chat still has NO ceilings — no tier, budget or rate limiter on main or the branch. build/trust-v1's eval scripts read the side folders by pre-rename paths: never run an eval until fixed. Reactions re-judge the whole pool."
+description: "Chat still has NO ceilings — no tier, budget or rate limiter on main or the branch. Eval paths fixed on trust-v1, but Docker is down; CI paused, never green on the fixed main, no image published. Reactions re-judge the whole pool."
 type: watch
 last_verified: 2026-11-20
 ---
@@ -21,13 +21,11 @@ last_verified: 2026-11-20
   bounds the completion (not inspected); the fix lands with that branch, or not at all.
 
 ## Owed work
-- **`build/trust-v1`'s eval tooling reads the renamed side folders by their OLD paths — never run an eval until fixed.**
-  `scripts/eval/judge.mjs` hard-codes `~/src/fa.reel-eval-sealed/askreel/judge/prompt.md` with no override, so the judge
-  cannot find its sealed prompt; `ledger.mjs` and `guards.mjs` default to `~/src/fa.reel-ws/…` (`EVAL_LEDGER_ARCHIVE`,
-  `EVAL_LOCKS_DIR` override); `build-at.sh` silently drops the build-slot semaphore; `docs/ask-reel-eval.md` and
-  `slotApi.ts` cite them too. Outside git, `labs.fa.reel-ws/bin/build-slot` `mkdir -p`s the old `.locks` path, re-creating a
-  ghost `~/src/fa.reel-ws`, and `lane.env` names it. On `main`: `fa.reel.slnx` (CI, `Makefile`), the `fa.reel-frontend`
-  package and the Trakt/TMDB User-Agent `fa.reel/0.1 (+…/frostaura/fa.reel)`. All product changes (`git grep`, 2026-11-20).
+- **Eval paths are fixed on `build/trust-v1`; what blocks a run is Docker, which is down.** Scripts read
+  `~/src/labs.fa.reel{,-ws,-eval-sealed}`; `build-at.sh` falls back to `fa.reel.slnx` for pre-rename baselines by
+  design (re-read late 2026-11-20). Confirm the judge finds its sealed prompt before trusting a first result.
+- **CI is paused, never green on the fixed `main`, and nothing is published** (`state.md`). Its first re-enabled run
+  is the first evidence the advisory and runner fixes hold; until then a deploy has nothing to pull.
 - **The cross-reference pool is shortlist-only** — verdicts need a persisted score, so coverage grows one build at a
   time. **Next change: persist first-pass scores for the whole retrieved set.** Round 2 (the code's PR4) stays gated
   on the OUT arm's Wilson-upper threshold (`decisions-retrieval.md`).

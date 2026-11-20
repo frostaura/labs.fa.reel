@@ -13,8 +13,13 @@ last_verified: 2026-11-20
   on a file close — the clone starts Vite in under a second. Both clones' only remote is `origin` on GitHub
   (re-checked 2026-11-20), so **after committing and pushing from one, pull in the other or they drift**.
 - **Every `dotnet` command in `~/src` needs `MSBuildEnableWorkloadResolver=false`** — the installed workload set has
-  missing manifests and fails the restore otherwise. `dotnet format` takes `fa.reel.slnx` at the repo root. (Workload claim not
-  re-run 2026-11-20; the `.slnx`, the 5054 launch profile and the compose restart policies below were re-read on `main`.)
+  missing manifests and fails the restore otherwise. `dotnet format` takes `labs.fa.reel.slnx` at the repo root (renamed
+  2026-11-20; checkouts before that commit carry `fa.reel.slnx`). (Workload claim not re-run 2026-11-20; the `.slnx`,
+  the 5054 launch profile and the compose restart policies below were re-read on `main`.)
+- **Never drop `name: fareel` from `docker-compose.yml`.** Compose derives the project name from the folder, so the
+  renamed `labs.fa.reel` clone would otherwise start on a fresh, empty Postgres volume beside the real
+  `fareel_postgres_data`. Change it only with a deliberate volume migration. On `build/trust-v1` the CI `make`
+  targets override it with `COMPOSE_PROJECT_NAME`; `main` sets none (both re-read late 2026-11-20).
 - **`dotnet watch` processes from an EARLIER session survive and keep rebuilding.** Three outlived their session and
   raced every test build for the API's `obj` directory (MSB4018 on static web assets); plain `kill` did not end them,
   `kill -9` did. Run `pgrep -fl 'dotnet watch'` before any build.

@@ -1,6 +1,6 @@
 ---
 name: labs-fa-reel-decisions-product
-description: "Founder calls with their why: repo flipped PRIVATE, deploy decided 2026-07-24 and still not executed (a trip-by-timer kill is void), model-first then product, honest from day one, filters as a cost meter the founder sets himself."
+description: "Founder calls with their why: repo PUBLIC again 2026-11-20 after a private spell, deploy decided 2026-07-24 and still not executed (a trip-by-timer kill is void), model-first then product, honest from day one, filters as a cost meter."
 type: decision
 last_verified: 2026-11-20
 ---
@@ -8,10 +8,12 @@ last_verified: 2026-11-20
 # Live decisions — product and founder calls
 
 ## Programme and repo
-- **The repo is PRIVATE (founder, 2026-08-07).** *Why:* Labs is stealth-by-default and the public exception was
-  never recorded. Two residues still say otherwise and neither is an agent's to change: `LICENSE` is MIT and the
-  README's licence line claims "open by default" as doctrine (both verified 2026-11-20; `gh` shows the repo PRIVATE the same day). Going public again, or
-  correcting that line, is a fresh founder call needing a recorded stealth exception.
+- **The repo is PUBLIC again (founder, 2026-11-20), reversing his 2026-08-07 flip to private.** *Why then:* Labs
+  is stealth-by-default and the earlier public exception had never been recorded. *Why now:* not stated beyond a
+  credential scan of the history, which found none — the division's record and the open "why" are in
+  [`../../../memory/decisions.md`](../../../memory/decisions.md). `LICENSE` (MIT) and the README's "open by default"
+  line now match reality (re-read late 2026-11-20). The tests and `CLAUDE.md` publish the founder's Trakt handle;
+  that exposure is a root founder question.
 - **Deploy was decided 2026-07-24 and has never been executed.** *Why it matters:* the external-user kill criterion is
   evaluated against a *deployed* product, so a kill tripped by a timer on an undeployed product is void. What is left is
   a founder action, not an engineering one, and **what specifically is left moves — `state.md` holds it, this file does

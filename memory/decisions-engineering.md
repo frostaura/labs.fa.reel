@@ -1,6 +1,6 @@
 ---
 name: labs-fa-reel-decisions-engineering
-description: "Invariant formatting is guarded at source because TMDB silently accepts a comma decimal. The npm-audit waiver list is empty since react-router 8.3; a stack-smoke job gates every image publish; CI has no cron, by founder rule."
+description: "Invariant formatting is guarded at source because TMDB silently accepts a comma decimal. npm-audit waivers empty; advisories met by whole-set moves, never suppression; x64 runners pinned to ubuntu-24.04; no cron, by founder rule."
 type: decision
 last_verified: 2026-11-20
 ---
@@ -43,8 +43,10 @@ last_verified: 2026-11-20
   the gate. **Adding a waiver is a cybersecurity decision, which root policy places at parent level.**
 - **Vulnerable transitives get an explicit pin, or a whole-set version move — never a suppression.** *Why:* NU1903
   under `TreatWarningsAsErrors` fails `dotnet restore` outright, so an advisory published while the repo sits idle
-  makes it unbuildable; that is exactly how `main` stopped building between 2026-06-18 and 2026-08-01. Each pin is
-  commented to be dropped once the framework package carries the patched transitive.
+  makes it unbuildable; that is exactly how `main` stopped building between 2026-06-18 and 2026-08-01, and again in
+  November (NU1902/NU1903 on the `System.Security.Cryptography` transitives), cleared on 2026-11-20 by moving the
+  whole Microsoft set to 10.0.13 and dropping a pin its own comment had retired (`b6f8e2f7`). Each pin is commented
+  to be dropped once the framework package carries the patched transitive.
 
 ## CI and deploy
 - **A `Docker Build & Stack Smoke` job gates every publish job and runs on PRs** (PR #1, 2026-09-19). *Why:* the
@@ -52,7 +54,9 @@ last_verified: 2026-11-20
   route passed the PR and was found only after a bad `:latest` shipped. It also parses `docker-compose.prod.yml`,
   the literal Portainer stack file, which nothing else in CI read.
 - **No scheduled CI run.** A weekly "rot check" was proposed and dropped before merge under the founder's no-cron
-  rule. The idle-repo blind spot is accepted: the first push after a quiet month may fail on a new advisory.
+  rule. The idle-repo blind spot is accepted: the first push after a quiet month may fail on a new advisory — it did
+  in 2026-11. The same goes for a floating runner image: `ubuntu-latest` moved to 26.04, where Playwright cannot
+  install Chromium, so **x64 jobs pin `ubuntu-24.04`** (`b6f8e2f7`); unpin only when Playwright supports the newer one.
 - **`proxy_pass` in the Portainer stack's nginx config must never carry a URI, and a parity test guards it.** *Why:*
   a URI on `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed
   stack would have 404'd every call. The deploy itself is a founder action (`decisions-product.md`).

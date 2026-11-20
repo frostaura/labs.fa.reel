@@ -1,6 +1,6 @@
 ---
 name: labs-fa-reel-questions
-description: "Dean's, bar one. The 3-iteration modelling kill criterion is blown with no recorded call; deploy blocks the user criterion; the pushed, unmerged build/trust-v1 needs a merge-or-retire call. Trakt terms can still end it."
+description: "Dean's, bar one. The 3-iteration modelling kill criterion is blown with no recorded call; deploy (CI back on first) blocks the user criterion; the unmerged build/trust-v1 needs a merge-or-retire call. Trakt terms can still end it."
 type: question
 last_verified: 2026-11-20
 ---
@@ -18,9 +18,11 @@ conservative side and recorded the alternative — `decisions-chat.md`.
   Apply it, or record the override with its why.
 - **Deploy date.** Decided 2026-07-24, never executed, and it is what makes the "≥5 external users" criterion
   evaluable at all. External users are zero and the 60-day clock has passed on either anchor: deploy and re-anchor at
-  the first external serve, or apply the criterion as written and kill. **On `main` only the advisory-red restore
-  (`state.md`) is technical** — beyond it, the redeploy job skips because `DEPLOY_ENABLED` and `PORTAINER_STACK_ID` are unset (re-checked with
-  `gh`, 2026-11-20). The deploy-chain work on unmerged `build/trust-v1` changes the production shape (`state.md`).
+  the first external serve, or apply the criterion as written and kill. **What stands between `main` and a deploy is
+  now all founder action** (`state.md`): re-enable the paused CI so a first run proves the advisory fix and publishes
+  the new-name images (none exist on Docker Hub), then create the stack and set `PORTAINER_STACK_ID` and
+  `DEPLOY_ENABLED` (both unset, `gh`, late 2026-11-20). The deploy-chain work on unmerged `build/trust-v1` changes
+  the production shape.
 - **Merge or retire `build/trust-v1`?** Several hundred commits and their own context store, on the remote since
   2026-11-20 but not on `main` (`state.md`); until decided, no store is authoritative for Ask Reel v2. A merge
   reconciles the forked context store topic by topic.
