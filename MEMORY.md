@@ -1,6 +1,6 @@
 # MEMORY — Labs/projects/fa.reel
 
-- [Current state](memory/state.md) — Not deployed, zero external users, model loses to popularity; nothing serves locally. The work since 2026-10-22 — Ask Reel v2, deploy chain, its own context store — sits on build/trust-v1 in ~/src, unpushed, one disk.
+- [Current state](memory/state.md) — Not deployed, zero external users, model loses to popularity. main is red since the 2026-11-20 push (NU1903 advisories). Ask Reel v2, deploy chain and its own context store sit on build/trust-v1 in ~/src, one disk.
 - [Live decisions — the Ask Reel chat programme](memory/decisions-chat.md) — Ask Reel was delegated 'as you see fit' and every founder lock was kept: no filter override, delete but no erasure, tier rungs designed not built. The turn is server-owned because a client transcript is a fabrication vector.
 - [Live decisions — engineering and infrastructure](memory/decisions-engineering.md) — Invariant formatting is guarded at source because TMDB silently accepts a comma decimal. The npm-audit waiver list is empty since react-router 8.3; a stack-smoke job gates every image publish; CI has no cron, by founder rule.
 - [Live decisions — the model and the eval ledger](memory/decisions-model.md) — The ledger rule was pre-registered and honoured: schema v6 reverted on no lift, so 6 is burned and the next bump is 7. The instrument, not the idea, failed. The calibrator is applied last; the exposure log is append-only.

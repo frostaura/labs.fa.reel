@@ -18,9 +18,9 @@ conservative side and recorded the alternative — `decisions-chat.md`.
   Apply it, or record the override with its why.
 - **Deploy date.** Decided 2026-07-24, never executed, and it is what makes the "≥5 external users" criterion
   evaluable at all. External users are zero and the 60-day clock has passed on either anchor: deploy and re-anchor at
-  the first external serve, or apply the criterion as written and kill. **Nothing technical is in the way on
-  `main`** — the redeploy job skips because `DEPLOY_ENABLED` and `PORTAINER_STACK_ID` are unset (re-checked with
-  `gh`, 2026-11-20). The unpushed `ws/deploy-chain` branch changes the production shape (`state.md`).
+  the first external serve, or apply the criterion as written and kill. **On `main` only the advisory-red restore
+  (`state.md`) is technical** — beyond it, the redeploy job skips because `DEPLOY_ENABLED` and `PORTAINER_STACK_ID` are unset (re-checked with
+  `gh`, 2026-11-20). The deploy-chain work on unpushed `build/trust-v1` changes the production shape (`state.md`).
 - **Merge, push or retire `build/trust-v1`?** Several hundred commits and their own context store exist only in
   `~/src` (`state.md`); until decided, no store is authoritative for Ask Reel v2.
 

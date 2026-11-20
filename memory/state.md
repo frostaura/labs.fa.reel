@@ -1,6 +1,6 @@
 ---
 name: fa-reel-state
-description: "Not deployed, zero external users, model loses to popularity; nothing serves locally. The work since 2026-10-22 — Ask Reel v2, deploy chain, its own context store — sits on build/trust-v1 in ~/src, unpushed, one disk."
+description: "Not deployed, zero external users, model loses to popularity. main is red since the 2026-11-20 push (NU1903 advisories). Ask Reel v2, deploy chain and its own context store sit on build/trust-v1 in ~/src, one disk."
 type: state
 last_verified: 2026-11-20
 ---
@@ -17,27 +17,30 @@ Reel turns in the local database through 2026-10-22; the database was unreachabl
 `:5054/health` answer nothing (`000`), and no Reel API or Vite process exists. On 2026-10-22 the whole compose stack
 was up, its backend running `openai/gpt-6-luna` — billed through that day, last `gpt-5.4-mini` bill 2026-10-03.
 
-**CI and deploy (`gh`, 2026-11-20).** Repo PRIVATE; last push and last CI run 2026-09-19, PR #1's squash-merge to
-`main`, green on every quality, smoke and publish job. The redeploy job skips, not fails: the repo has **no
+**CI and deploy (`gh`, 2026-11-20).** Repo PRIVATE. **`main` is red:** the 2026-11-20 push of context commit `39452d8`
+(the first push since PR #1's 2026-09-19 squash-merge, the last green run) failed CI — Backend `Restore` on NU1902/NU1903
+advisories against `System.Security.Cryptography.Pkcs`/`.Xml` under `TreatWarningsAsErrors`, and Frontend E2E at its
+Playwright-browser install. This is the accepted idle-repo blind spot in `decisions-engineering.md` arriving; the
+remedy is the explicit-pin rule there, a product-repo change. The redeploy job skips, not fails: the repo has **no
 variables at all** (`DEPLOY_ENABLED` unset); the Docker Hub and Portainer URL/token/endpoint secrets exist,
 `PORTAINER_STACK_ID` does not. Published `main` carries Microsoft 10.0.10 and the `gpt-5.4-mini` defaults. Setup: `docs/deployment.md`.
 
-**Repo topology (inspected 2026-11-20, after `git fetch` in both clones).** One private repo, two clones, diverged.
-- **iCloud clone** (this directory) — `main` tracking `origin/main`, ahead-only by the 2026-10-14 and 2026-10-22
-  sweeps' context commits; clean tree.
-- **Dev clone** `~/src/fa.reel` — checked out on `merge-pr1` (the 2026-10-22 gpt-6-luna / 10.0.13 / startup-retry
-  commit, merged with `origin/main`). **That branch is contained in `build/trust-v1`**, the integration branch
-  of an Ask Reel v2 build carrying several hundred commits dated 2026-10-22 to 2026-10-31: answer quality, a golden
-  eval, hardening rounds (commits labelled up to `HREV8`), a deploy-chain branch (`ws/deploy-chain`: gateway image, cloudflared in the stack).
-  Worktrees for it sit in `~/src/fa.reel-ws/` and `~/src/fa.reel-live`; several `ws/*` branches hold commits the
-  integrator does not. **None of it is pushed — one disk only**; pushing is Dean's call.
+**Repo topology (re-probed late 2026-11-20: `git fetch` here, `git ls-remote` from the dev clone).** One private repo,
+two clones, diverged.
+- **iCloud clone** (this directory) — `main` level with `origin/main` at `39452d8` (pushed 2026-11-20, not by an
+  agent); clean tree. The remote holds `main` only.
+- **Dev clone** `~/src/fa.reel` — now checked out on its own `main` (`8c85224`, 2026-09-16, behind this clone's), and its
+  only other branch is **`build/trust-v1`** (`22df526`, 2026-10-31), the integration branch of an Ask Reel v2 build
+  carrying several hundred commits dated 2026-10-22 to 2026-10-31: answer quality, a golden eval, hardening rounds
+  (commits labelled up to `HREV8`), deploy-chain work (gateway image, cloudflared in the stack). **Not on the remote —
+  one disk only**; pushing is Dean's call. `merge-pr1`, `fix-cron` and the `ws/*` branches that existed earlier that
+  day are gone (whether every `ws/*` commit was inside `build/trust-v1` was not verified); one worktree remains,
+  `~/src/fa.reel-live`, detached at `22df526`.
 - **`build/trust-v1` carries its own context store**, edited on that branch: a rewritten `CLAUDE.md` (gateway as an
   image, gpt-6-luna lock) and four topics this store lacks (`deploy`, `state-ask-eval`, `decisions-ask-v2`,
   `decisions-ask-eval`), forked from an older copy of this one. **Merging it into `main` conflicts on every context
   file**; reconcile topic by topic, never by taking one side. This store records `main`; that branch's own topics
   are the record of its build and were not imported here (unverified, and copying them makes the conflict worse).
-- `fix-cron` is a squash leftover that reads as "not merged": **never merge it into `main`** — it predates months
-  of `main` and would delete most of it. Deleting it is Dean's call.
 
 ## Where it stands, by half
 
